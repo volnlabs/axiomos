@@ -99,6 +99,18 @@ pub struct RegState {
 
     /// For map pointers: map ID
     pub map_id: Option<u32>,
+
+    /// For dereferenceable pointer types (map value, ctx, packet): the size in
+    /// bytes of the region the pointer's base addresses. A load/store is valid
+    /// only when `ptr_offset + insn.offset + access_size <= mem_range`. `None`
+    /// means the size is unknown — `verify_memory` rejects dereferences through
+    /// a non-stack pointer with no known range (sound: no blind deref).
+    pub mem_range: Option<u32>,
+
+    /// True if this pointer may be null (e.g. a `bpf_map_lookup_elem` result).
+    /// Dereferencing a maybe-null pointer is rejected until a null check
+    /// (`if r != 0`) proves it non-null on that branch.
+    pub maybe_null: bool,
 }
 
 impl RegState {
@@ -109,6 +121,8 @@ impl RegState {
             scalar_value: None,
             ptr_offset: 0,
             map_id: None,
+            mem_range: None,
+            maybe_null: false,
         }
     }
 
@@ -119,6 +133,8 @@ impl RegState {
             scalar_value: value,
             ptr_offset: 0,
             map_id: None,
+            mem_range: None,
+            maybe_null: false,
         }
     }
 
@@ -129,6 +145,8 @@ impl RegState {
             scalar_value: None,
             ptr_offset: offset,
             map_id: None,
+            mem_range: None,
+            maybe_null: false,
         }
     }
 
@@ -139,16 +157,38 @@ impl RegState {
             scalar_value: None,
             ptr_offset: 0,
             map_id: None,
+            mem_range: None,
+            maybe_null: false,
         }
     }
 
     /// Create a context pointer state (R1 at entry).
+    ///
+    /// `mem_range` is left `None` here; the verifier sets it from the
+    /// program's context size (`VerifyConfig::ctx_size`) at entry.
     pub const fn ctx_ptr() -> Self {
         Self {
             reg_type: RegType::PtrToCtx,
             scalar_value: None,
             ptr_offset: 0,
             map_id: None,
+            mem_range: None,
+            maybe_null: false,
+        }
+    }
+
+    /// Create a map-value pointer state with a known accessible size.
+    ///
+    /// `maybe_null` reflects that `bpf_map_lookup_elem` can return NULL; the
+    /// verifier rejects dereferences until a null check clears it.
+    pub fn map_value(size: u32, maybe_null: bool) -> Self {
+        Self {
+            reg_type: RegType::PtrToMapValue,
+            scalar_value: None,
+            ptr_offset: 0,
+            map_id: None,
+            mem_range: Some(size),
+            maybe_null,
         }
     }
 

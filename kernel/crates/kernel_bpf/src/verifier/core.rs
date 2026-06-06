@@ -23,6 +23,21 @@ use crate::bytecode::program::{BpfProgType, BpfProgram};
 use crate::bytecode::registers::Register;
 use crate::profile::{ActiveProfile, PhysicalProfile};
 
+/// Sizes the verifier cannot infer from bytecode alone and must be told by the
+/// caller (eventually the `sys_bpf` load path, #48): the byte size of the
+/// context struct reachable through R1 (`PtrToCtx`) at entry, and the byte
+/// size of a map value returned by `bpf_map_lookup_elem`. Both default to 0,
+/// under which the verifier **rejects** ctx/map dereferences — it will not
+/// assume a region size it was not given.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VerifyConfig {
+    /// Bytes accessible through the context pointer (R1) at program entry.
+    pub ctx_size: u32,
+    /// Bytes accessible through a map-value pointer (`bpf_map_lookup_elem`
+    /// result, `bpf_ringbuf_reserve`, etc.).
+    pub map_value_size: u32,
+}
+
 /// BPF program verifier.
 ///
 /// The verifier ensures that BPF programs are safe to execute by performing
@@ -50,6 +65,11 @@ pub struct Verifier<P: PhysicalProfile = ActiveProfile> {
     /// pruner consultation.
     liveness: Option<Liveness>,
 
+    /// Caller-supplied sizes (context, map value) the verifier cannot infer
+    /// from bytecode. Read by `verify_safety` (ctx range), `verify_call` (map
+    /// value range), and `verify_memory` (bounds checks).
+    config: VerifyConfig,
+
     /// Profile marker
     _profile: PhantomData<P>,
 }
@@ -62,6 +82,7 @@ impl<P: PhysicalProfile> Verifier<P> {
             states: Vec::new(),
             pruner: StatePruner::new(),
             liveness: None,
+            config: VerifyConfig::default(),
             _profile: PhantomData,
         }
     }
@@ -79,7 +100,23 @@ impl<P: PhysicalProfile> Verifier<P> {
     /// On success, returns a validated `BpfProgram`.
     /// On failure, returns a `VerifyError` describing the issue.
     pub fn verify(prog_type: BpfProgType, insns: &[BpfInsn]) -> VerifyResult<BpfProgram<P>> {
+        Self::verify_with_config(prog_type, insns, VerifyConfig::default())
+    }
+
+    /// Verify a BPF program with caller-supplied region sizes.
+    ///
+    /// Identical to [`verify`](Self::verify) but takes a [`VerifyConfig`]
+    /// carrying the context size and map-value size the verifier needs to
+    /// bounds-check `PtrToCtx` / `PtrToMapValue` accesses. The zero-config
+    /// [`verify`](Self::verify) rejects such accesses; the load path (#48)
+    /// will pass the real sizes from the program type and map definitions.
+    pub fn verify_with_config(
+        prog_type: BpfProgType,
+        insns: &[BpfInsn],
+        config: VerifyConfig,
+    ) -> VerifyResult<BpfProgram<P>> {
         let mut verifier = Self::new();
+        verifier.config = config;
 
         // Phase 1: Basic checks
         verifier.check_basic(insns)?;
@@ -182,8 +219,11 @@ impl<P: PhysicalProfile> Verifier<P> {
         // to ignore dead-register differences during subsumption.
         self.liveness = Some(Liveness::analyze(insns, cfg));
 
-        // Start verification from entry
-        let initial_state = VerifierState::new_entry(P::MAX_STACK_SIZE);
+        // Start verification from entry. R1 is the context pointer; give it
+        // the caller-declared accessible size so ctx loads can be bounds-
+        // checked. With the default size 0, any ctx dereference is rejected.
+        let mut initial_state = VerifierState::new_entry(P::MAX_STACK_SIZE);
+        initial_state.reg_mut(Register::R1).mem_range = Some(self.config.ctx_size);
         self.verify_path(insns, 0, initial_state)?;
 
         // Return computed stack size
@@ -284,16 +324,20 @@ impl<P: PhysicalProfile> Verifier<P> {
                     fallthrough,
                     target,
                     refinement,
+                    null_refine,
                 } => {
-                    // Verify both paths, applying per-arm scalar
-                    // refinement when present. `true_branch` is the target
-                    // (taken) side; `false_branch` is the fallthrough side.
-                    // Per JIT/verifier convention: `BPF_JEQ r0, 0, +1`
-                    // jumps to target when condition is true, falls
-                    // through when false.
+                    // Verify both paths, applying per-arm scalar and pointer
+                    // null-check refinement when present. `true_branch` is the
+                    // target (taken) side; `false_branch` is the fallthrough
+                    // side. Per JIT/verifier convention: `BPF_JEQ r0, 0, +1`
+                    // jumps to target when condition is true, falls through
+                    // when false.
                     let mut branch_state = state.clone();
                     if let Some(r) = refinement {
                         branch_state.reg_mut(r.dst).scalar_value = Some(r.true_branch);
+                    }
+                    if let Some(nr) = null_refine {
+                        apply_null_refine(&mut branch_state, nr, true);
                     }
                     branch_state.insn_idx = target;
                     branch_state.insn_processed += 1;
@@ -301,6 +345,9 @@ impl<P: PhysicalProfile> Verifier<P> {
 
                     if let Some(r) = refinement {
                         state.reg_mut(r.dst).scalar_value = Some(r.false_branch);
+                    }
+                    if let Some(nr) = null_refine {
+                        apply_null_refine(&mut state, nr, false);
                     }
                     state.insn_idx = fallthrough;
                     state.insn_processed += 1;
@@ -565,10 +612,36 @@ impl<P: PhysicalProfile> Verifier<P> {
             _ => None,
         };
 
+        // Null-check refinement: `if ptr == 0` / `if ptr != 0` on a maybe-null
+        // pointer (e.g. a `bpf_map_lookup_elem` result) proves the pointer
+        // non-null on one arm and null on the other. `verify_memory` rejects
+        // dereferences of a maybe-null pointer, so this refinement is what
+        // lets a null-checked map lookup actually be used. Detection: `dst` is
+        // a maybe-null pointer and `rhs` is the constant 0.
+        let rhs_is_zero = rhs.and_then(|s| s.value) == Some(0);
+        let dst_rs = state.reg(dst);
+        let null_refine = if rhs_is_zero
+            && dst_rs.maybe_null
+            && dst_rs.reg_type.is_pointer()
+            && matches!(
+                jmp_op,
+                crate::bytecode::opcode::JmpOp::Jeq | crate::bytecode::opcode::JmpOp::Jne
+            ) {
+            Some(PtrNullRefine {
+                reg: dst,
+                // JNE (`!= 0`): pointer is non-null on the taken/target arm.
+                // JEQ (`== 0`): pointer is non-null on the fallthrough arm.
+                nonnull_on_true: matches!(jmp_op, crate::bytecode::opcode::JmpOp::Jne),
+            })
+        } else {
+            None
+        };
+
         Ok(InsnResult::Branch {
             fallthrough: idx + 1,
             target,
             refinement,
+            null_refine,
         })
     }
 
@@ -605,8 +678,10 @@ impl<P: PhysicalProfile> Verifier<P> {
                     *state.reg_mut(reg) = RegState::uninit();
                 }
 
-                // R0 contains return value based on helper signature
-                *state.reg_mut(Register::R0) = sig.ret.to_reg_state();
+                // R0 contains return value based on helper signature. Pointer
+                // returns (map value / reserved memory) become maybe-null
+                // pointers carrying the configured accessible size.
+                *state.reg_mut(Register::R0) = sig.ret.to_reg_state(self.config.map_value_size);
 
                 Ok(())
             }
@@ -691,7 +766,10 @@ impl<P: PhysicalProfile> Verifier<P> {
                     });
                 }
 
-                // Check stack bounds if stack pointer
+                // Bounds-check the access. Stack/FP use the stack model;
+                // every other dereferenceable pointer (map value, ctx, packet)
+                // is bounds-checked against its tracked region size and
+                // rejected if maybe-null or of unknown size.
                 if src_state.reg_type == RegType::PtrToStack
                     || src_state.reg_type == RegType::PtrToFp
                 {
@@ -703,6 +781,8 @@ impl<P: PhysicalProfile> Verifier<P> {
                             size: size.size_bytes(),
                         });
                     }
+                } else {
+                    check_ranged_deref(src_state, insn.offset as i64, size.size_bytes(), idx)?;
                 }
 
                 // Result is scalar
@@ -742,7 +822,9 @@ impl<P: PhysicalProfile> Verifier<P> {
                     });
                 }
 
-                // Update stack state if writing to stack
+                // Update stack state if writing to stack; otherwise bounds-
+                // check the write against the pointer's tracked region (map
+                // value / packet), rejecting maybe-null or unsized pointers.
                 if dst_state.reg_type == RegType::PtrToStack
                     || dst_state.reg_type == RegType::PtrToFp
                 {
@@ -759,6 +841,8 @@ impl<P: PhysicalProfile> Verifier<P> {
                     for i in 0..size.size_bytes() {
                         let _ = state.stack.set(offset - i as i64, StackSlot::Scalar);
                     }
+                } else {
+                    check_ranged_deref(dst_state, insn.offset as i64, size.size_bytes(), idx)?;
                 }
             }
 
@@ -782,6 +866,25 @@ impl<P: PhysicalProfile> Verifier<P> {
                         insn_idx: idx,
                         reason: "cannot write to this pointer type",
                     });
+                }
+
+                // Bounds-check the immediate store, same as Stx.
+                if dst_state.reg_type == RegType::PtrToStack
+                    || dst_state.reg_type == RegType::PtrToFp
+                {
+                    let offset = dst_state.ptr_offset + insn.offset as i64;
+                    if !state.stack.is_valid_access(offset, size.size_bytes()) {
+                        return Err(VerifyError::OutOfBoundsAccess {
+                            insn_idx: idx,
+                            offset,
+                            size: size.size_bytes(),
+                        });
+                    }
+                    for i in 0..size.size_bytes() {
+                        let _ = state.stack.set(offset - i as i64, StackSlot::Scalar);
+                    }
+                } else {
+                    check_ranged_deref(dst_state, insn.offset as i64, size.size_bytes(), idx)?;
                 }
             }
 
@@ -892,6 +995,11 @@ enum InsnResult {
         /// true branch with `r1 ∈ [0, 99]` and the false branch with
         /// `r1 ∈ [100, u64::MAX]`. None for unrefinable jumps.
         refinement: Option<BranchRefinement>,
+        /// Optional pointer null-check refinement. When present, one arm
+        /// proves the pointer non-null (clearing `maybe_null` so it can be
+        /// dereferenced) and the other proves it null. None for non-null
+        /// checks.
+        null_refine: Option<PtrNullRefine>,
     },
     /// Program exit
     Exit,
@@ -908,6 +1016,85 @@ struct BranchRefinement {
     dst: Register,
     true_branch: ScalarValue,
     false_branch: ScalarValue,
+}
+
+/// Pointer null-check refinement attached to a conditional Branch result.
+///
+/// `reg` is the maybe-null pointer being checked. `nonnull_on_true` says
+/// which arm proves it non-null: `true` for `JNE reg, 0` (non-null when the
+/// branch is taken), `false` for `JEQ reg, 0` (non-null on fallthrough). On
+/// the non-null arm the verifier clears `maybe_null`; on the other arm it
+/// retypes the register as `NullPtr` (undereferenceable).
+#[derive(Debug, Clone, Copy)]
+struct PtrNullRefine {
+    reg: Register,
+    nonnull_on_true: bool,
+}
+
+/// Apply a [`PtrNullRefine`] to `state` for one branch arm.
+///
+/// `is_true_arm` is true for the taken/target arm, false for fallthrough.
+/// On the arm where the pointer is proven non-null, `maybe_null` is cleared
+/// so dereferences are allowed; on the other arm the register becomes a
+/// `NullPtr` so any dereference is rejected.
+fn apply_null_refine(state: &mut VerifierState, nr: PtrNullRefine, is_true_arm: bool) {
+    let nonnull = is_true_arm == nr.nonnull_on_true;
+    let reg = state.reg_mut(nr.reg);
+    if nonnull {
+        reg.maybe_null = false;
+    } else {
+        reg.reg_type = RegType::NullPtr;
+        reg.maybe_null = false;
+    }
+}
+
+/// Bounds-check a dereference through a non-stack pointer that carries a
+/// tracked region size (map value, ctx, packet).
+///
+/// Rejects, in order: a **maybe-null** pointer (needs a null check first); a
+/// pointer whose region size is **unknown** (`mem_range == None` — never blind-
+/// dereference); and an access whose window
+/// `[ptr_offset + insn_off, ptr_offset + insn_off + access_size)` falls
+/// **outside** `[0, mem_range)`. This is what the old verifier was missing:
+/// `verify_memory` only bounds-checked the stack, so map-value/ctx/packet
+/// dereferences went entirely unchecked and the interpreter then trusted any
+/// non-null pointer.
+fn check_ranged_deref(
+    rs: &RegState,
+    insn_off: i64,
+    access_size: usize,
+    idx: usize,
+) -> VerifyResult<()> {
+    if rs.maybe_null {
+        return Err(VerifyError::InvalidMemoryAccess {
+            insn_idx: idx,
+            reason: "dereference of possibly-null pointer (missing null check)",
+        });
+    }
+
+    let off = rs.ptr_offset + insn_off;
+    match rs.mem_range {
+        Some(range) => {
+            // Reject negative offsets, and accesses whose end exceeds the
+            // region (treating an overflowing end as out of range).
+            let out_of_range = match off.checked_add(access_size as i64) {
+                Some(end) => off < 0 || end > i64::from(range),
+                None => true,
+            };
+            if out_of_range {
+                return Err(VerifyError::OutOfBoundsAccess {
+                    insn_idx: idx,
+                    offset: off,
+                    size: access_size,
+                });
+            }
+            Ok(())
+        }
+        None => Err(VerifyError::InvalidMemoryAccess {
+            insn_idx: idx,
+            reason: "dereference through pointer with unknown region size",
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -1026,6 +1213,126 @@ mod tests {
 
         let result = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns);
         assert!(result.is_ok(), "got {:?}", result.err());
+    }
+
+    // --- pointer bounds (Stage 0b) ---
+
+    #[test]
+    fn check_ranged_deref_rejects_maybe_null() {
+        // A maybe-null map-value pointer cannot be dereferenced until checked.
+        let rs = RegState::map_value(16, true);
+        assert!(matches!(
+            check_ranged_deref(&rs, 0, 8, 0),
+            Err(VerifyError::InvalidMemoryAccess { .. })
+        ));
+    }
+
+    #[test]
+    fn check_ranged_deref_rejects_unknown_size() {
+        // No tracked region size → never blind-dereference.
+        let mut rs = RegState::map_value(0, false);
+        rs.mem_range = None;
+        assert!(matches!(
+            check_ranged_deref(&rs, 0, 1, 0),
+            Err(VerifyError::InvalidMemoryAccess { .. })
+        ));
+    }
+
+    #[test]
+    fn check_ranged_deref_in_bounds_ok() {
+        let rs = RegState::map_value(16, false);
+        assert!(check_ranged_deref(&rs, 0, 8, 0).is_ok());
+        assert!(check_ranged_deref(&rs, 8, 8, 0).is_ok()); // [8, 16)
+    }
+
+    #[test]
+    fn check_ranged_deref_out_of_bounds_rejected() {
+        let rs = RegState::map_value(16, false);
+        // [9, 17) exceeds the 16-byte region.
+        assert!(matches!(
+            check_ranged_deref(&rs, 9, 8, 0),
+            Err(VerifyError::OutOfBoundsAccess { .. })
+        ));
+        // Negative offset is rejected.
+        assert!(matches!(
+            check_ranged_deref(&rs, -1, 1, 0),
+            Err(VerifyError::OutOfBoundsAccess { .. })
+        ));
+    }
+
+    #[test]
+    fn null_refine_clears_on_nonnull_arm_and_retypes_on_null_arm() {
+        let mut st = VerifierState::new_entry(512);
+        *st.reg_mut(Register::R0) = RegState::map_value(16, true);
+        // `if r0 != 0`: non-null on the taken (true) arm.
+        let nr = PtrNullRefine {
+            reg: Register::R0,
+            nonnull_on_true: true,
+        };
+
+        let mut taken = st.clone();
+        apply_null_refine(&mut taken, nr, true);
+        assert!(!taken.reg(Register::R0).maybe_null);
+        assert_eq!(taken.reg(Register::R0).reg_type, RegType::PtrToMapValue);
+
+        let mut fallthrough = st.clone();
+        apply_null_refine(&mut fallthrough, nr, false);
+        assert_eq!(fallthrough.reg(Register::R0).reg_type, RegType::NullPtr);
+    }
+
+    /// End-to-end: a context read (`r0 = *(u64*)(r1 + 0)`) is rejected under
+    /// the default config (ctx_size 0) because the verifier was given no
+    /// region size — previously this dereference went entirely unchecked.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn ctx_read_rejected_without_declared_size() {
+        let insns = [
+            BpfInsn::new(0x79, 0, 1, 0, 0), // r0 = *(u64*)(r1 + 0)  (LDX|MEM|DW)
+            BpfInsn::exit(),
+        ];
+        let result = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns);
+        assert!(
+            matches!(result, Err(VerifyError::OutOfBoundsAccess { .. })),
+            "ctx read with size 0 should be out of bounds; got {result:?}"
+        );
+    }
+
+    /// Same program verifies once the caller declares a context size that
+    /// covers the access.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn ctx_read_ok_with_declared_size() {
+        let insns = [
+            BpfInsn::new(0x79, 0, 1, 0, 0), // r0 = *(u64*)(r1 + 0)
+            BpfInsn::exit(),
+        ];
+        let cfg = VerifyConfig {
+            ctx_size: 64,
+            map_value_size: 0,
+        };
+        let result =
+            Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, cfg);
+        assert!(result.is_ok(), "got {:?}", result.err());
+    }
+
+    /// A context read past the declared size is rejected.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn ctx_read_past_declared_size_rejected() {
+        let insns = [
+            BpfInsn::new(0x79, 0, 1, 60, 0), // r0 = *(u64*)(r1 + 60), needs 68 > 64
+            BpfInsn::exit(),
+        ];
+        let cfg = VerifyConfig {
+            ctx_size: 64,
+            map_value_size: 0,
+        };
+        let result =
+            Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, cfg);
+        assert!(
+            matches!(result, Err(VerifyError::OutOfBoundsAccess { .. })),
+            "got {result:?}"
+        );
     }
 
     /// Acceptance for the ALU32 width fix.

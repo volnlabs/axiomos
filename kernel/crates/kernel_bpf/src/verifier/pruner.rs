@@ -92,10 +92,18 @@ impl StateSubsumes for RegState {
             }
 
             // Pointer types: same type plus same offset is required for
-            // subsumption. A real implementation would track range on
-            // pointer arithmetic and allow our range to cover theirs; for
-            // now we require exact offset, which is sound but conservative.
-            _ => self.ptr_offset == other.ptr_offset && self.map_id == other.map_id,
+            // subsumption. We also require the nullness flag and tracked
+            // region size to match — pruning a non-null state against a
+            // maybe-null one (or across different region sizes) could skip a
+            // dereference check, so keep them equal. A real implementation
+            // would track range on pointer arithmetic and allow our range to
+            // cover theirs; for now this is sound but conservative.
+            _ => {
+                self.ptr_offset == other.ptr_offset
+                    && self.map_id == other.map_id
+                    && self.maybe_null == other.maybe_null
+                    && self.mem_range == other.mem_range
+            }
         }
     }
 }
