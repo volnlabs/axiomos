@@ -224,7 +224,7 @@ impl<P: PhysicalProfile> Verifier<P> {
         // checked. With the default size 0, any ctx dereference is rejected.
         let mut initial_state = VerifierState::new_entry(P::MAX_STACK_SIZE);
         initial_state.reg_mut(Register::R1).mem_range = Some(self.config.ctx_size);
-        self.verify_path(insns, 0, initial_state)?;
+        self.explore(insns, initial_state)?;
 
         // Return computed stack size
         let max_stack = self
@@ -238,125 +238,115 @@ impl<P: PhysicalProfile> Verifier<P> {
         Ok(max_stack)
     }
 
-    /// Verify a single execution path.
-    fn verify_path(
-        &mut self,
-        insns: &[BpfInsn],
-        start_idx: usize,
-        mut state: VerifierState,
-    ) -> VerifyResult<()> {
-        state.insn_idx = start_idx;
+    /// Explore all reachable verifier states with an explicit worklist.
+    ///
+    /// Replaces the previous recursive `verify_path`. Branches no longer
+    /// recurse — which grew the **kernel** stack with the program's branch
+    /// nesting and risked overflow on adversarial input — but instead push the
+    /// deferred arm onto an explicit `work` stack. Exploration order is
+    /// preserved: the taken (target) arm is followed inline while the
+    /// fallthrough arm is deferred, so the pruner observes states in the same
+    /// order as the recursive DFS and accept/reject decisions are unchanged.
+    /// The work-stack depth is bounded by the same recorded-state budget that
+    /// bounds memory (#116), so verification is now bounded in both heap and
+    /// native-stack use.
+    fn explore(&mut self, insns: &[BpfInsn], initial: VerifierState) -> VerifyResult<()> {
+        let mut work: Vec<VerifierState> = Vec::new();
+        work.push(initial);
 
-        loop {
-            let idx = state.insn_idx;
+        while let Some(mut state) = work.pop() {
+            // Follow this path until it exits or is pruned; a branch pushes the
+            // deferred (fallthrough) arm and continues the taken arm here.
+            loop {
+                let idx = state.insn_idx;
 
-            // Bounds check
-            if idx >= insns.len() {
-                return Err(VerifyError::InvalidJump {
-                    insn_idx: idx.saturating_sub(1),
-                    target: idx as i32,
-                });
-            }
-
-            // Check for infinite loops (visited same instruction too many times)
-            if state.insn_processed > P::MAX_INSN_COUNT {
-                return Err(VerifyError::InfiniteLoop { insn_idx: idx });
-            }
-
-            // Consult the state pruner — if a previously-recorded state at
-            // this pc subsumes the current one, we can stop exploring this
-            // path. This is the bounded-time win documented in #83: instead
-            // of re-exploring every basic block once per branch combination
-            // (O(2^branches)), we explore each basic block once per
-            // distinct state shape that reaches it.
-            //
-            // Liveness-aware subsumption (#104): two states that disagree
-            // only on dead registers at this pc are equivalent for pruning
-            // purposes, because dead values can never affect future
-            // execution. With `live_in[idx]` passed in, subsumption walks
-            // only live registers — pruning fires more often on stateful
-            // programs without losing soundness.
-            let live = self
-                .liveness
-                .as_ref()
-                .map(|l| l.live_in(idx))
-                .unwrap_or(RegSet::ALL);
-            if self.pruner.check_or_record_with_liveness(idx, &state, live) == PruneDecision::Prune
-            {
-                return Ok(());
-            }
-            // Bound the verifier's memory. The pruner just recorded a new
-            // state, and each recorded state carries a full stack image (up to
-            // the profile stack size), so a loop whose states never subsume
-            // (cloud profile allows loops) can allocate gigabytes and OOM.
-            // Once the recorded-state budget is hit, reject — this is sound
-            // (the program is simply not proven) and turns an OOM into a clean
-            // verification failure.
-            if self.pruner.at_capacity() {
-                return Err(VerifyError::StateLimitExceeded {
-                    insn_idx: idx,
-                    limit: self.pruner.max_states(),
-                });
-            }
-            // Keep `self.states` populated so the post-verification stack-
-            // depth scan still works — it reads `state.stack.max_depth()`.
-            self.states[idx] = Some(state.clone());
-
-            let insn = &insns[idx];
-
-            // Verify this instruction
-            let result = self.verify_insn(insn, &mut state, idx)?;
-
-            match result {
-                InsnResult::Continue => {
-                    if insn.is_wide() {
-                        state.insn_idx += 2;
-                    } else {
-                        state.insn_idx += 1;
-                    }
-                    state.insn_processed += 1;
+                // Bounds check
+                if idx >= insns.len() {
+                    return Err(VerifyError::InvalidJump {
+                        insn_idx: idx.saturating_sub(1),
+                        target: idx as i32,
+                    });
                 }
-                InsnResult::Jump(target) => {
-                    state.insn_idx = target;
-                    state.insn_processed += 1;
-                }
-                InsnResult::Branch {
-                    fallthrough,
-                    target,
-                    refinement,
-                    null_refine,
-                } => {
-                    // Verify both paths, applying per-arm scalar and pointer
-                    // null-check refinement when present. `true_branch` is the
-                    // target (taken) side; `false_branch` is the fallthrough
-                    // side. Per JIT/verifier convention: `BPF_JEQ r0, 0, +1`
-                    // jumps to target when condition is true, falls through
-                    // when false.
-                    let mut branch_state = state.clone();
-                    if let Some(r) = refinement {
-                        branch_state.reg_mut(r.dst).scalar_value = Some(r.true_branch);
-                    }
-                    if let Some(nr) = null_refine {
-                        apply_null_refine(&mut branch_state, nr, true);
-                    }
-                    branch_state.insn_idx = target;
-                    branch_state.insn_processed += 1;
-                    self.verify_path(insns, target, branch_state)?;
 
-                    if let Some(r) = refinement {
-                        state.reg_mut(r.dst).scalar_value = Some(r.false_branch);
-                    }
-                    if let Some(nr) = null_refine {
-                        apply_null_refine(&mut state, nr, false);
-                    }
-                    state.insn_idx = fallthrough;
-                    state.insn_processed += 1;
+                // Infinite-loop guard (too many instructions on this path).
+                if state.insn_processed > P::MAX_INSN_COUNT {
+                    return Err(VerifyError::InfiniteLoop { insn_idx: idx });
                 }
-                InsnResult::Exit => {
-                    return Ok(());
+
+                // Consult the state pruner. If a previously-recorded state at
+                // this pc subsumes the current one, stop exploring this path
+                // and move on to the next work item. Liveness-aware (#104): two
+                // states disagreeing only on dead registers prune.
+                let live = self
+                    .liveness
+                    .as_ref()
+                    .map(|l| l.live_in(idx))
+                    .unwrap_or(RegSet::ALL);
+                if self.pruner.check_or_record_with_liveness(idx, &state, live)
+                    == PruneDecision::Prune
+                {
+                    break;
+                }
+
+                // Bound the verifier's memory (#116): each recorded state
+                // carries a full stack image, so reject once the budget is hit
+                // rather than allocating without bound on a loop.
+                if self.pruner.at_capacity() {
+                    return Err(VerifyError::StateLimitExceeded {
+                        insn_idx: idx,
+                        limit: self.pruner.max_states(),
+                    });
+                }
+
+                // Keep `self.states` populated for the post-verification
+                // stack-depth scan (it reads `state.stack.max_depth()`).
+                self.states[idx] = Some(state.clone());
+
+                let insn = &insns[idx];
+                match self.verify_insn(insn, &mut state, idx)? {
+                    InsnResult::Continue => {
+                        state.insn_idx += if insn.is_wide() { 2 } else { 1 };
+                        state.insn_processed += 1;
+                    }
+                    InsnResult::Jump(target) => {
+                        state.insn_idx = target;
+                        state.insn_processed += 1;
+                    }
+                    InsnResult::Branch {
+                        fallthrough,
+                        target,
+                        refinement,
+                        null_refine,
+                    } => {
+                        // Defer the fallthrough arm; continue the taken arm
+                        // inline (preserving recursive DFS order). `true_branch`
+                        // is the taken side, `false_branch` the fallthrough side.
+                        let mut fallthrough_state = state.clone();
+                        if let Some(r) = refinement {
+                            fallthrough_state.reg_mut(r.dst).scalar_value = Some(r.false_branch);
+                        }
+                        if let Some(nr) = null_refine {
+                            apply_null_refine(&mut fallthrough_state, nr, false);
+                        }
+                        fallthrough_state.insn_idx = fallthrough;
+                        fallthrough_state.insn_processed += 1;
+                        work.push(fallthrough_state);
+
+                        if let Some(r) = refinement {
+                            state.reg_mut(r.dst).scalar_value = Some(r.true_branch);
+                        }
+                        if let Some(nr) = null_refine {
+                            apply_null_refine(&mut state, nr, true);
+                        }
+                        state.insn_idx = target;
+                        state.insn_processed += 1;
+                    }
+                    InsnResult::Exit => break,
                 }
             }
         }
+
+        Ok(())
     }
 
     /// Verify a single instruction.
@@ -1460,5 +1450,23 @@ mod tests {
             matches!(result, Err(VerifyError::StateLimitExceeded { .. })),
             "got {result:?}"
         );
+    }
+
+    /// The worklist explorer handles branchy programs (the path exploration
+    /// that was recursive before this change). Several conditional jumps create
+    /// multiple paths; all must be explored and the program accepted.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn worklist_explores_branchy_program() {
+        let insns = [
+            BpfInsn::mov64_imm(0, 0),  // r0 = 0
+            BpfInsn::jeq_imm(0, 0, 1), // if r0 == 0 goto +1
+            BpfInsn::mov64_imm(0, 1),  // r0 = 1   (fallthrough arm)
+            BpfInsn::jeq_imm(0, 1, 1), // if r0 == 1 goto +1
+            BpfInsn::mov64_imm(0, 2),  // r0 = 2
+            BpfInsn::exit(),
+        ];
+        let result = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns);
+        assert!(result.is_ok(), "got {:?}", result.err());
     }
 }
