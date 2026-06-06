@@ -38,6 +38,20 @@ pub struct VerifyConfig {
     pub map_value_size: u32,
 }
 
+/// Cost of a verification run, returned by [`Verifier::verify_with_stats`].
+///
+/// `states_explored` is the number of distinct verifier states the pruner
+/// recorded during exploration — the dominant cost metric, since it bounds
+/// both verification time (work per state is bounded) and memory (one recorded
+/// state each). For the loop-free embedded fragment this is bounded by the
+/// program size; this is the figure the bounded-verification / verifier-WCET
+/// work measures. See `docs/verifier-fragment.md`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VerifyStats {
+    /// Distinct verifier states explored during verification.
+    pub states_explored: usize,
+}
+
 /// BPF program verifier.
 ///
 /// The verifier ensures that BPF programs are safe to execute by performing
@@ -115,6 +129,19 @@ impl<P: PhysicalProfile> Verifier<P> {
         insns: &[BpfInsn],
         config: VerifyConfig,
     ) -> VerifyResult<BpfProgram<P>> {
+        Self::verify_with_stats(prog_type, insns, config).map(|(prog, _)| prog)
+    }
+
+    /// Like [`verify_with_config`](Self::verify_with_config) but also returns
+    /// [`VerifyStats`] describing the verification *cost* — chiefly the number
+    /// of distinct states explored. This is the metric the bounded-verification
+    /// work measures: for the loop-free embedded fragment it is bounded by the
+    /// program size (see `docs/verifier-fragment.md`).
+    pub fn verify_with_stats(
+        prog_type: BpfProgType,
+        insns: &[BpfInsn],
+        config: VerifyConfig,
+    ) -> VerifyResult<(BpfProgram<P>, VerifyStats)> {
         let mut verifier = Self::new();
         verifier.config = config;
 
@@ -131,8 +158,15 @@ impl<P: PhysicalProfile> Verifier<P> {
         // Phase 4: Profile-specific constraints
         verifier.verify_profile_constraints(insns)?;
 
+        // Capture the cost: total distinct states the pruner recorded during
+        // exploration. Read before building the program so it reflects exactly
+        // the verification work.
+        let stats = VerifyStats {
+            states_explored: verifier.pruner.recorded(),
+        };
+
         // Build the verified program
-        BpfProgram::new(prog_type, insns.to_vec(), stack_size).map_err(|e| match e {
+        let prog = BpfProgram::new(prog_type, insns.to_vec(), stack_size).map_err(|e| match e {
             crate::bytecode::program::ProgramError::StackSizeExceeded { required, limit } => {
                 VerifyError::StackExceeded {
                     used: required,
@@ -143,7 +177,9 @@ impl<P: PhysicalProfile> Verifier<P> {
                 VerifyError::InsnCountExceeded { count, limit }
             }
             _ => VerifyError::EmptyProgram,
-        })
+        })?;
+
+        Ok((prog, stats))
     }
 
     /// Perform basic structural checks.
@@ -1468,5 +1504,49 @@ mod tests {
         ];
         let result = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns);
         assert!(result.is_ok(), "got {:?}", result.err());
+    }
+
+    /// Verifier-WCET (state-count) bound on the bounded fragment.
+    ///
+    /// A straight-line program of `n` instructions has a single path, so the
+    /// verifier explores exactly one state per reachable instruction — cost is
+    /// linear in program size. This is the empirical form of the bound in
+    /// `docs/verifier-fragment.md`; it guards against a regression that would
+    /// make verification cost super-linear on loop-free programs.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn bounded_fragment_state_count_is_linear() {
+        fn straight_line(n: usize) -> Vec<BpfInsn> {
+            // mov r0,0 ; (n-2)×(r0 += 1) ; exit  →  n instructions, one path.
+            let mut v = Vec::with_capacity(n);
+            v.push(BpfInsn::mov64_imm(0, 0));
+            for _ in 0..n.saturating_sub(2) {
+                v.push(BpfInsn::add64_imm(0, 1));
+            }
+            v.push(BpfInsn::exit());
+            v
+        }
+
+        for n in [4usize, 16, 64, 256] {
+            let insns = straight_line(n);
+            let (_, stats) = Verifier::<ActiveProfile>::verify_with_stats(
+                BpfProgType::SocketFilter,
+                &insns,
+                VerifyConfig::default(),
+            )
+            .expect("straight-line program verifies");
+            // One recorded state per instruction on the single path: ≤ n, and
+            // genuinely scaling with n (not collapsed to a constant).
+            assert!(
+                stats.states_explored <= n,
+                "n={n}: states_explored={} exceeds linear bound",
+                stats.states_explored
+            );
+            assert!(
+                stats.states_explored >= n - 1,
+                "n={n}: states_explored={} unexpectedly small",
+                stats.states_explored
+            );
+        }
     }
 }
