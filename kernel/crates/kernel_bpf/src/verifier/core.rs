@@ -245,6 +245,19 @@ impl<P: PhysicalProfile> Verifier<P> {
             {
                 return Ok(());
             }
+            // Bound the verifier's memory. The pruner just recorded a new
+            // state, and each recorded state carries a full stack image (up to
+            // the profile stack size), so a loop whose states never subsume
+            // (cloud profile allows loops) can allocate gigabytes and OOM.
+            // Once the recorded-state budget is hit, reject — this is sound
+            // (the program is simply not proven) and turns an OOM into a clean
+            // verification failure.
+            if self.pruner.at_capacity() {
+                return Err(VerifyError::StateLimitExceeded {
+                    insn_idx: idx,
+                    limit: self.pruner.max_states(),
+                });
+            }
             // Keep `self.states` populated so the post-verification stack-
             // depth scan still works — it reads `state.stack.max_depth()`.
             self.states[idx] = Some(state.clone());
@@ -989,5 +1002,30 @@ mod tests {
 
         let result = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns);
         assert!(result.is_ok(), "got {:?}", result.err());
+    }
+
+    /// The verifier rejects (rather than OOMing) once its recorded-state budget
+    /// is exhausted. Driven through the private `verify_safety` with a tiny
+    /// injected budget so the test stays cheap; the real cap
+    /// (`StatePruner::DEFAULT_MAX_STATES`) prevents the loop-driven OOM the fuzz
+    /// harness found.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn rejects_when_state_budget_exhausted() {
+        let insns = [
+            BpfInsn::mov64_imm(0, 0),        // r0 = 0
+            BpfInsn::add64_imm(0, 1),        // r0 += 1
+            BpfInsn::new(0x55, 0, 0, -2, 5), // JNE r0, 5, -2  (loop back edge)
+            BpfInsn::exit(),
+        ];
+        let mut v = Verifier::<ActiveProfile>::new();
+        v.check_basic(&insns).expect("basic checks pass");
+        v.cfg = Some(ControlFlowGraph::build(&insns));
+        v.pruner.set_max_states(2);
+        let result = v.verify_safety(&insns);
+        assert!(
+            matches!(result, Err(VerifyError::StateLimitExceeded { .. })),
+            "got {result:?}"
+        );
     }
 }

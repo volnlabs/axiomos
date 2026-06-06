@@ -163,11 +163,50 @@ impl VerifierState {
 pub struct StatePruner {
     /// For each pc, the set of states we've already explored.
     by_pc: alloc::collections::BTreeMap<usize, Vec<VerifierState>>,
+    /// Running total of recorded states (kept incrementally so the budget
+    /// check is O(1) rather than summing `by_pc` every instruction).
+    count: usize,
+    /// Maximum number of states to record before the verifier gives up and
+    /// rejects the program. Bounds the verifier's memory: each recorded
+    /// `VerifierState` carries a full stack image (up to the profile stack
+    /// size), so without a cap a loop whose states never subsume can allocate
+    /// gigabytes and OOM. See [`Self::DEFAULT_MAX_STATES`].
+    max_states: usize,
 }
 
 impl StatePruner {
+    /// Default recorded-state budget. Sized so the worst case stays well under
+    /// typical CI / runtime memory: a cloud-profile state is ~1 MiB (a
+    /// 512 KiB-slot stack image), so 1024 states ≈ 1 GiB. The bounded
+    /// (loop-free) embedded fragment never approaches this; it matters only
+    /// for loop-bearing cloud programs. The forthcoming worklist verifier will
+    /// shrink per-state cost (shared/CoW stacks) and can then raise this.
+    pub const DEFAULT_MAX_STATES: usize = 1024;
+
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            by_pc: alloc::collections::BTreeMap::new(),
+            count: 0,
+            max_states: Self::DEFAULT_MAX_STATES,
+        }
+    }
+
+    /// True once the recorded-state budget is reached; the verifier should
+    /// then reject the program rather than record more states.
+    pub fn at_capacity(&self) -> bool {
+        self.count >= self.max_states
+    }
+
+    /// The configured recorded-state budget.
+    pub fn max_states(&self) -> usize {
+        self.max_states
+    }
+
+    /// Override the budget. Test-only so a unit test can hit the cap without
+    /// allocating a gigabyte of states.
+    #[cfg(test)]
+    pub fn set_max_states(&mut self, max: usize) {
+        self.max_states = max;
     }
 
     /// Consult the pruner with the current `state` at program counter
@@ -197,6 +236,7 @@ impl StatePruner {
             }
         }
         entries.push(state.clone());
+        self.count += 1;
         PruneDecision::Continue
     }
 
@@ -204,11 +244,12 @@ impl StatePruner {
     /// verifications when the pruner is held in a long-lived context.
     pub fn clear(&mut self) {
         self.by_pc.clear();
+        self.count = 0;
     }
 
     /// Total number of recorded states across all pcs. Diagnostic only.
     pub fn recorded(&self) -> usize {
-        self.by_pc.values().map(|v| v.len()).sum()
+        self.count
     }
 }
 
@@ -322,5 +363,24 @@ mod tests {
         pruner.check_or_record(1, &s); // Prune
 
         assert_eq!(pruner.recorded(), 2);
+    }
+
+    #[test]
+    fn pruner_enforces_state_budget() {
+        let mut pruner = StatePruner::new();
+        pruner.set_max_states(2);
+        assert!(!pruner.at_capacity());
+
+        let s = entry_state();
+        pruner.check_or_record(0, &s); // count 1
+        assert!(!pruner.at_capacity());
+        pruner.check_or_record(1, &s); // count 2 → at budget
+        assert!(pruner.at_capacity());
+        assert_eq!(pruner.recorded(), 2);
+
+        // clear() resets the budget tracking.
+        pruner.clear();
+        assert!(!pruner.at_capacity());
+        assert_eq!(pruner.recorded(), 0);
     }
 }

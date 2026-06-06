@@ -66,6 +66,19 @@ pub enum VerifyError {
         insn_idx: usize,
     },
 
+    /// The verifier's explored-state budget was exhausted before the program
+    /// could be fully verified. Path-sensitive verification records a state
+    /// per distinct program point/shape; programs with enough branching or
+    /// loop-driven state divergence can exceed the memory budget. Rejecting is
+    /// sound (the program is simply not proven safe) and bounds the verifier's
+    /// memory use.
+    StateLimitExceeded {
+        /// Instruction index reached when the budget was exhausted.
+        insn_idx: usize,
+        /// The recorded-state budget that was hit.
+        limit: usize,
+    },
+
     /// Invalid jump target
     InvalidJump {
         /// Instruction index of jump
@@ -238,6 +251,13 @@ impl fmt::Display for VerifyError {
             }
             Self::InfiniteLoop { insn_idx } => {
                 write!(f, "infinite loop detected at instruction {}", insn_idx)
+            }
+            Self::StateLimitExceeded { insn_idx, limit } => {
+                write!(
+                    f,
+                    "verifier state budget ({} states) exhausted at instruction {}",
+                    limit, insn_idx
+                )
             }
             Self::InvalidJump { insn_idx, target } => {
                 write!(
