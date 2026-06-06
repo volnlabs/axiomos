@@ -31,13 +31,25 @@ fi
 echo "Building userspace binaries and disk image..."
 cargo build -p muffinos --target "$TARGET" --no-default-features --features aarch64_deps
 
-# Find the most recently built disk.img
-DISK_PATH=$(find "target/$TARGET" -name disk.img -printf "%T@ %p\n" | sort -n | tail -n 1 | awk '{print $2}')
+# Find the disk.img produced by THIS build. Restrict to muffinos build outputs:
+# `find -name disk.img` across the whole target dir also turns up stale copies
+# the kernel build.rs leaves in kernel-*/out/ and disk.img from other feature
+# sets, and picking the newest of those by mtime can select a stale rootfs — you
+# then flash a kernel with an out-of-date embedded filesystem (old init/binaries)
+# while everything reports success. Scope to muffinos/out and take the newest.
+DISK_PATH=$(find "target/$TARGET" -path "*muffinos-*/out/disk.img" -printf "%T@ %p\n" | sort -n | tail -n 1 | awk '{print $2}')
 if [ -z "$DISK_PATH" ]; then
-    echo "Error: disk.img not found after workspace build"
+    echo "Error: disk.img not found in any muffinos build output"
     exit 1
 fi
 echo "Using disk image: $DISK_PATH ($(stat -c%s "$DISK_PATH" 2>/dev/null || stat -f%z "$DISK_PATH") bytes)"
+
+# Force the kernel to re-embed this disk. The kernel embeds the rootfs via
+# include_bytes!(env!("EMBEDDED_DISK_PATH")), and build.rs has a
+# rerun-if-changed on AXIOM_DISK_IMAGE — but cargo only reruns the copy + relink
+# if it sees the path as changed. Bumping the mtime guarantees that rerun, so a
+# rebuilt rootfs is never silently dropped in favour of a previously embedded one.
+touch "$DISK_PATH"
 
 # Step 2: Build the kernel with embedded disk image
 export AXIOM_DISK_IMAGE="$PROJECT_DIR/$DISK_PATH"
