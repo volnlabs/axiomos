@@ -26,6 +26,7 @@ safety_demo_x86 = { package = "safety_demo", path = "userspace/safety_demo", art
 fork_test_x86 = { package = "fork_test", path = "userspace/fork_test", artifact = "bin", target = "x86_64-unknown-none", optional = true }
 bpf_loader_x86 = { package = "bpf_loader", path = "userspace/bpf_loader", artifact = "bin", target = "x86_64-unknown-none", optional = true }
 benchmark_x86 = { package = "benchmark", path = "userspace/benchmark", artifact = "bin", target = "x86_64-unknown-none", optional = true }
+rk_uart_forwarder_x86 = { package = "rk_uart_forwarder", path = "userspace/rk_uart_forwarder", artifact = "bin", target = "x86_64-unknown-none", optional = true }
 kernel_x86 = { package = "kernel", path = "kernel", artifact = "bin", target = "x86_64-unknown-none", optional = true, features = ["cloud-profile"] }
 
 # aarch64 dependencies
@@ -44,6 +45,7 @@ safety_demo_aarch64 = { package = "safety_demo", path = "userspace/safety_demo",
 fork_test_aarch64 = { package = "fork_test", path = "userspace/fork_test", artifact = "bin", target = "aarch64-unknown-none", optional = true }
 bpf_loader_aarch64 = { package = "bpf_loader", path = "userspace/bpf_loader", artifact = "bin", target = "aarch64-unknown-none", optional = true }
 benchmark_aarch64 = { package = "benchmark", path = "userspace/benchmark", artifact = "bin", target = "aarch64-unknown-none", optional = true }
+rk_uart_forwarder_aarch64 = { package = "rk_uart_forwarder", path = "userspace/rk_uart_forwarder", artifact = "bin", target = "aarch64-unknown-none", optional = true }
 kernel_aarch64 = { package = "kernel", path = "kernel", artifact = "bin", target = "aarch64-unknown-none", optional = true, features = ["cloud-profile"] }
 
 [features]
@@ -64,6 +66,7 @@ x86_64_deps = [
   "dep:fork_test_x86",
   "dep:bpf_loader_x86",
   "dep:benchmark_x86",
+  "dep:rk_uart_forwarder_x86",
   "dep:kernel_x86",
 ]
 aarch64_deps = [
@@ -82,6 +85,7 @@ aarch64_deps = [
   "dep:fork_test_aarch64",
   "dep:bpf_loader_aarch64",
   "dep:benchmark_aarch64",
+  "dep:rk_uart_forwarder_aarch64",
   "dep:kernel_aarch64",
 ]
 
@@ -120,6 +124,7 @@ members = [
   "userspace/safety_demo",
   "userspace/fork_test",
   "userspace/benchmark",
+  "userspace/rk_uart_forwarder",
 ]
 default-members = [
   ".",

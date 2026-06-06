@@ -1058,6 +1058,7 @@ dependencies = [
  "kernel",
  "ovmf-prebuilt",
  "pwm_demo",
+ "rk_uart_forwarder",
  "safety_demo",
  "sched_switch_bridge_demo",
  "sched_switch_demo",
@@ -1253,6 +1254,14 @@ checksum = "2f5c1b8bf41ea746266cdee443d1d1e9125c86ce1447e1a2615abd34330d33a9"
 dependencies = [
  "critical-section",
  "embedded-hal",
+]
+
+[[package]]
+name = "rk_uart_forwarder"
+version = "0.1.0"
+dependencies = [
+ "kernel_abi",
+ "minilib",
 ]
 
 [[package]]

@@ -36,10 +36,12 @@
 //! ```
 
 pub mod event;
+pub mod input;
 pub mod publisher;
 pub mod ringbuf;
 
 pub use event::{EventHeader, ImuEvent, MotorEvent, RkEvent, SafetyEvent, SchedSwitchEvent};
+pub use input::{from_stdin, InputError, StreamSource, SUPPORTED_PROTOCOL_VERSION};
 pub use publisher::{EventPublisher, PublisherConfig, RosPublisher, StdoutPublisher};
 pub use ringbuf::{RingBufConsumer, RingBufError};
 
@@ -68,4 +70,8 @@ pub enum Error {
     /// Configuration error
     #[error("configuration error: {0}")]
     Config(String),
+
+    /// Stream input error
+    #[error("stream input error: {0}")]
+    Input(#[from] input::InputError),
 }

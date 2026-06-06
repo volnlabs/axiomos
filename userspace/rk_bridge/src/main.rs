@@ -20,9 +20,11 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use rk_bridge::{
     event::RkEvent,
+    input::StreamSource,
     publisher::{EventPublisher, OutputFormat, PublisherConfig, RosPublisher, StdoutPublisher},
     ringbuf::RingBufConsumer,
 };
+use std::io::{self, Read};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -89,6 +91,21 @@ struct Args {
     /// Event payload kind expected in the ring buffer
     #[arg(long, default_value = "sched-switch", value_enum)]
     event_kind: EventKindArg,
+
+    /// Read events from a JSON-lines stream instead of a pinned BPF object.
+    /// This is the path used when running `rk-to-ros` on a host that doesn't
+    /// have access to the Axiom BPF syscall — events arrive over UART from
+    /// `rk_uart_forwarder`. Pipe them in with `socat` or similar.
+    ///
+    /// Currently supported: `stdin`. Serial-port support is a follow-up.
+    #[arg(long)]
+    input: Option<InputArg>,
+}
+
+#[derive(ValueEnum, Clone, Debug)]
+enum InputArg {
+    /// Read newline-delimited JSON from stdin.
+    Stdin,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -174,6 +191,57 @@ impl Bridge {
         }
 
         let _ = self.publisher.flush();
+        Ok(())
+    }
+
+    /// Run the bridge against a host-side JSON stream (e.g. UART-forwarded
+    /// events from `rk_uart_forwarder`). The reader is consumed in a blocking
+    /// task so we don't block the tokio runtime; the `running` flag is
+    /// checked between events.
+    async fn run_with_stream<R>(&self, reader: R) -> Result<()>
+    where
+        R: Read + Send + 'static,
+    {
+        log::info!("Starting bridge in stream-input mode");
+
+        let publisher_running = self.running.clone();
+        // The publisher is owned by `&self`, so the actual publish must happen
+        // on this task. We use a channel from a blocking reader task to here.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<RkEvent>(256);
+
+        let reader_running = self.running.clone();
+        let read_task = tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut source = StreamSource::new(reader);
+            while reader_running.load(Ordering::Relaxed) {
+                match source.next_event() {
+                    Ok(Some(event)) => {
+                        if tx.blocking_send(event).is_err() {
+                            break; // receiver dropped
+                        }
+                    }
+                    Ok(None) => break, // EOF
+                    Err(e) => {
+                        log::warn!("stream parse error: {}", e);
+                        // Continue — a single malformed line shouldn't abort the bridge.
+                    }
+                }
+            }
+            Ok(())
+        });
+
+        while publisher_running.load(Ordering::Relaxed) {
+            match rx.recv().await {
+                Some(event) => {
+                    if let Err(e) = self.publisher.publish(&event) {
+                        log::warn!("Failed to publish event: {}", e);
+                    }
+                }
+                None => break, // reader finished
+            }
+        }
+
+        let _ = self.publisher.flush();
+        let _ = read_task.await;
         Ok(())
     }
 
@@ -321,6 +389,13 @@ async fn main() -> Result<()> {
     // Run the bridge
     if args.demo {
         bridge.run_demo().await?;
+    } else if let Some(input) = args.input.clone() {
+        match input {
+            InputArg::Stdin => {
+                log::info!("Reading events from stdin (host-side ingest mode)");
+                bridge.run_with_stream(io::stdin()).await?;
+            }
+        }
     } else {
         // Open the ring buffer
         let consumer = RingBufConsumer::open(&args.map).with_context(|| {
