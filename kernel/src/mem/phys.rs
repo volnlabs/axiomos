@@ -1,3 +1,5 @@
+#![allow(static_mut_refs)]
+
 use alloc::vec::Vec;
 use core::iter::from_fn;
 use core::mem::swap;
@@ -12,6 +14,7 @@ use crate::arch::types::{PageSize, PhysAddr, PhysFrame, PhysFrameRange, Size4KiB
 use crate::mem::heap::Heap;
 
 static mut PHYS_ALLOC: Option<Mutex<MultiStageAllocator>> = None;
+static mut FRAME_REFS: Option<Mutex<FrameRefCounts>> = None;
 
 #[derive(Clone, Copy)]
 struct ReservedRegions {
@@ -49,12 +52,108 @@ impl ReservedRegions {
 
 static mut RESERVED_REGIONS: ReservedRegions = ReservedRegions::new();
 
+struct FrameRefCountRegion {
+    base: u64,
+    counts: Vec<u8>,
+}
+
+impl FrameRefCountRegion {
+    fn frame_index(&self, addr: u64) -> Option<usize> {
+        if addr < self.base {
+            return None;
+        }
+
+        let offset = addr - self.base;
+        let index = (offset / Size4KiB::SIZE) as usize;
+        (index < self.counts.len()).then_some(index)
+    }
+}
+
+struct FrameRefCounts {
+    regions: Vec<FrameRefCountRegion>,
+}
+
+impl FrameRefCounts {
+    fn with_regions(memory_regions: &[kernel_physical_memory::MemoryRegion]) -> Self {
+        let mut regions = Vec::with_capacity(memory_regions.len());
+        for region in memory_regions {
+            let counts = region
+                .frames()
+                .iter()
+                .map(|state| {
+                    if matches!(state, FrameState::Free) {
+                        0
+                    } else {
+                        1
+                    }
+                })
+                .collect();
+            regions.push(FrameRefCountRegion {
+                base: region.base_addr(),
+                counts,
+            });
+        }
+
+        Self { regions }
+    }
+
+    fn locate_mut(&mut self, addr: u64) -> Option<(&mut u8, u64)> {
+        for region in &mut self.regions {
+            if let Some(index) = region.frame_index(addr) {
+                return Some((&mut region.counts[index], region.base));
+            }
+        }
+
+        None
+    }
+
+    fn locate(&self, addr: u64) -> Option<u32> {
+        for region in &self.regions {
+            if let Some(index) = region.frame_index(addr) {
+                return Some(region.counts[index] as u32);
+            }
+        }
+
+        None
+    }
+
+    fn set_allocated(&mut self, addr: u64) {
+        let (count, _) = self
+            .locate_mut(addr)
+            .unwrap_or_else(|| panic!("frame refcount missing for {addr:#x}"));
+        *count = 1;
+    }
+
+    fn retain(&mut self, addr: u64) -> u32 {
+        let (count, _) = self
+            .locate_mut(addr)
+            .unwrap_or_else(|| panic!("frame refcount missing for {addr:#x}"));
+        *count = count.saturating_add(1);
+        u32::from(*count)
+    }
+
+    fn release(&mut self, addr: u64) -> Option<u32> {
+        let (count, _) = self.locate_mut(addr)?;
+        if *count == 0 {
+            warn!("Attempted to release unreferenced frame {addr:#x}");
+            return Some(0);
+        }
+
+        *count -= 1;
+        Some(u32::from(*count))
+    }
+
+    fn count(&self, addr: u64) -> Option<u32> {
+        self.locate(addr)
+    }
+}
+
 #[inline(always)]
-fn dbg_mark(ch: u32) {
+fn dbg_mark(_ch: u32) {
     #[cfg(feature = "rpi5")]
-    // SAFETY: Early debug marker write to Pi 5 debug UART10 data register.
+    // SAFETY: Write to Pi 5 debug UART10 data register.
     unsafe {
-        (0x10_7D00_1000 as *mut u32).write_volatile(ch);
+        (0x10_7D00_1000 as *mut u32).write_volatile(_ch);
     }
 }
 
@@ -66,6 +165,19 @@ fn allocator() -> &'static Mutex<MultiStageAllocator> {
             .as_ref()
             .expect("physical allocator not initialized")
     }
+}
+
+fn frame_refs() -> &'static Mutex<FrameRefCounts> {
+    #[allow(static_mut_refs)]
+    unsafe {
+        FRAME_REFS
+            .as_ref()
+            .expect("frame refcounts not initialized")
+    }
+}
+
+fn frame_refs_initialized() -> bool {
+    unsafe { FRAME_REFS.is_some() }
 }
 
 /// Zero-sized facade to the global physical memory allocator.
@@ -91,7 +203,13 @@ impl PhysicalMemory {
     where
         PhysicalMemoryManager: PhysicalFrameAllocator<S>,
     {
-        allocator().lock().allocate_frame()
+        let frame = allocator().lock().allocate_frame()?;
+        if frame_refs_initialized() {
+            frame_refs()
+                .lock()
+                .set_allocated(frame.start_address().as_u64());
+        }
+        Some(frame)
     }
 
     #[must_use]
@@ -99,21 +217,70 @@ impl PhysicalMemory {
     where
         PhysicalMemoryManager: PhysicalFrameAllocator<S>,
     {
-        allocator().lock().allocate_frames(n)
+        let range = allocator().lock().allocate_frames(n)?;
+        if frame_refs_initialized() {
+            let mut refs = frame_refs().lock();
+            for frame in range {
+                refs.set_allocated(frame.start_address().as_u64());
+            }
+        }
+        Some(range)
     }
 
     pub fn deallocate_frame<S: PageSize>(frame: PhysFrame<S>)
     where
         PhysicalMemoryManager: PhysicalFrameAllocator<S>,
     {
-        allocator().lock().deallocate_frame(frame);
+        if !frame_refs_initialized() {
+            allocator().lock().deallocate_frame(frame);
+            return;
+        }
+
+        let remaining = frame_refs()
+            .lock()
+            .release(frame.start_address().as_u64())
+            .unwrap_or(0);
+        if remaining == 0 {
+            allocator().lock().deallocate_frame(frame);
+        }
     }
 
     pub fn deallocate_frames<S: PageSize>(range: PhysFrameRange<S>)
     where
         PhysicalMemoryManager: PhysicalFrameAllocator<S>,
     {
-        allocator().lock().deallocate_frames(range);
+        for frame in range {
+            Self::deallocate_frame(frame);
+        }
+    }
+
+    pub fn retain_frame<S: PageSize>(frame: PhysFrame<S>) -> u32
+    where
+        PhysicalMemoryManager: PhysicalFrameAllocator<S>,
+    {
+        assert!(frame_refs_initialized(), "frame refcounts not initialized");
+        frame_refs().lock().retain(frame.start_address().as_u64())
+    }
+
+    pub fn retain_frames<S: PageSize>(range: PhysFrameRange<S>)
+    where
+        PhysicalMemoryManager: PhysicalFrameAllocator<S>,
+    {
+        assert!(frame_refs_initialized(), "frame refcounts not initialized");
+        let mut refs = frame_refs().lock();
+        for frame in range {
+            refs.retain(frame.start_address().as_u64());
+        }
+    }
+
+    pub fn frame_ref_count<S: PageSize>(frame: PhysFrame<S>) -> Option<u32>
+    where
+        PhysicalMemoryManager: PhysicalFrameAllocator<S>,
+    {
+        if !frame_refs_initialized() {
+            return None;
+        }
+        frame_refs().lock().count(frame.start_address().as_u64())
     }
 }
 
@@ -291,6 +458,11 @@ pub fn init_stage2() {
         error!("NO FREE PHYSICAL MEMORY FOR STAGE 2!");
     }
 
+    let ref_counts = FrameRefCounts::with_regions(&memory_regions);
+    unsafe {
+        FRAME_REFS = Some(Mutex::new(ref_counts));
+    }
+
     let bitmap_allocator = PhysicalMemoryManager::new(memory_regions);
     let mut stage2 = MultiStageAllocator::Stage2(bitmap_allocator);
     swap(&mut *guard, &mut stage2);
@@ -361,11 +533,8 @@ where
         match self {
             Self::Stage1(_) => unimplemented!("can't deallocate frames in stage1"),
             Self::Stage2(_a) => {
-                #[cfg(target_arch = "aarch64")]
-                {
-                    // kernel_physical_memory::PhysFrameRangeInclusive is different from our PhysFrameRange
-                    // Need to be careful here if we ever use this.
-                    // For now, let's just use the trait's default deallocate_frames or loop.
+                for frame in _range {
+                    self.deallocate_frame(frame);
                 }
             }
         }

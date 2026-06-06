@@ -33,3 +33,10 @@ impl<S: PageSize> From<&Segment> for PageRangeInclusive<S> {
         }
     }
 }
+
+#[cfg(target_arch = "x86_64")]
+impl<S: PageSize> From<Segment> for PageRangeInclusive<S> {
+    fn from(value: Segment) -> Self {
+        Self::from(&value)
+    }
+}

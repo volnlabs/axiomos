@@ -18,7 +18,6 @@ use x86_64::registers::model_specific::FsBase;
 use crate::arch::aarch64::Aarch64 as Arch;
 #[cfg(all(target_arch = "aarch64", feature = "aarch64_arch"))]
 use crate::arch::traits::Architecture;
-#[cfg(target_arch = "x86_64")]
 use crate::mcore::context::ExecutionContext;
 #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
 use crate::mcore::mtask::process::Process;
@@ -37,10 +36,10 @@ static SCHED_SWITCH_TARGET_MARKER_SENT: AtomicBool = AtomicBool::new(false);
 
 #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
 #[inline(always)]
-fn dbg_mark(ch: u32) {
+fn dbg_mark(_ch: u32) {
     // SAFETY: Write to Pi 5 debug UART10 data register.
     unsafe {
-        (0x10_7D00_1000 as *mut u32).write_volatile(ch);
+        (0x10_7D00_1000 as *mut u32).write_volatile(_ch);
     }
 }
 
@@ -152,6 +151,20 @@ impl Scheduler {
                 .with_address_space(|as_| as_.ttbr0_value());
 
             // log::info!("reschedule: switching to task {} with ttbr0={:#x}", next_task.id(), cr3_value);
+
+            let sched_ctx = kernel_bpf::execution::SchedSwitchContext {
+                cpu_id: ExecutionContext::load().cpu_id() as u64,
+                prev_pid: self.current_task.process().pid().as_u64(),
+                prev_tid: self.current_task.id().as_u64(),
+                next_pid: next_task.process().pid().as_u64(),
+                next_tid: next_task.id().as_u64(),
+            };
+            let bpf_ctx = kernel_bpf::execution::BpfContext::from_struct(&sched_ctx);
+            let _ = crate::bpf::BpfManager::run_hook_programs(
+                crate::bpf::ATTACH_TYPE_SCHED_SWITCH,
+                &bpf_ctx,
+                "sched_switch",
+            );
 
             (next_task, cr3_value)
         };

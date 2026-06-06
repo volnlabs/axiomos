@@ -28,6 +28,8 @@ use x86_64::registers::rflags::RFlags;
 use x86_64::structures::idt::InterruptStackFrameValue;
 
 use crate::arch::{PageSize, Size4KiB, VirtAddr};
+#[cfg(feature = "rpi5")]
+use crate::dbg_mark;
 use crate::file::{vfs, OpenFileDescription};
 use crate::mcore::context::ExecutionContext;
 use crate::mcore::mtask::process::fd::{FdNum, FileDescriptor, FileDescriptorFlags};
@@ -87,15 +89,6 @@ static TRAMPOLINE_ELF_STAGE_SENT: AtomicBool = AtomicBool::new(false);
 static TRAMPOLINE_ENTER_USER_STAGE_SENT: AtomicBool = AtomicBool::new(false);
 #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
 static TRAMPOLINE_TTBR0_STAGE_SENT: AtomicBool = AtomicBool::new(false);
-
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
-#[inline(always)]
-fn dbg_mark(ch: u32) {
-    // SAFETY: Write to Pi 5 debug UART10 data register through higher-half alias.
-    unsafe {
-        (0xFFFF_8010_7D00_1000 as *mut u32).write_volatile(ch);
-    }
-}
 
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
@@ -884,10 +877,7 @@ extern "C" fn trampoline(_arg: *mut c_void) {
             #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
             dbg_mark(b'Q' as u32);
 
-            crate::arch::aarch64::context::enter_userspace(
-                code_ptr as usize,
-                ustack_rsp.as_u64() as usize,
-            );
+            crate::arch::aarch64::context::enter_userspace(code_ptr, ustack_rsp.as_u64() as usize);
         }
     }
 }

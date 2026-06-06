@@ -26,11 +26,11 @@ static mut BOOT_TABLES: BootPageTables = BootPageTables {
 };
 
 #[inline(always)]
-fn dbg_mark(ch: u32) {
+fn dbg_mark(_ch: u32) {
     #[cfg(feature = "rpi5")]
     // SAFETY: Early debug marker write to Pi 5 debug UART10 data register.
     unsafe {
-        (0x10_7D00_1000 as *mut u32).write_volatile(ch);
+        (0x10_7D00_1000 as *mut u32).write_volatile(_ch);
     }
 }
 
@@ -133,6 +133,7 @@ unsafe fn setup_kernel_page_tables(total_memory: usize) {
         let phys_addr = i << 30; // 1GB per entry
 
         // L1 block descriptor for 1GB mapping
+        #[allow(unused_mut)]
         let mut block_flags = pte_flags::VALID | pte_flags::AF | pte_flags::SH_INNER;
 
         // QEMU virt memory map:
@@ -165,11 +166,10 @@ unsafe fn setup_kernel_page_tables(total_memory: usize) {
     #[cfg(feature = "rpi5")]
     {
         use crate::arch::aarch64::platform::rpi5::memory_map::{
-            BCM2712_UART10_BASE, GICC_BASE, GICD_BASE, RP1_PERIPHERAL_BASE,
+            BCM2712_UART10_BASE_PHYS, GICC_BASE_PHYS, GICD_BASE_PHYS, RP1_PERIPHERAL_BASE_PHYS,
         };
 
         // Keep Pi 5 high MMIO apertures accessible after MMU-on.
-        // Without this, post-MMU debug UART writes can fault immediately.
         let mmio_flags = pte_flags::VALID
             | pte_flags::AF
             | pte_flags::SH_INNER
@@ -177,19 +177,25 @@ unsafe fn setup_kernel_page_tables(total_memory: usize) {
             | pte_flags::PXN
             | pte_flags::attr_index(mem::mair::DEVICE_NGNRE);
 
-        for &mmio_base in &[
-            BCM2712_UART10_BASE,
-            GICD_BASE,
-            GICC_BASE,
-            RP1_PERIPHERAL_BASE,
+        for &phys_base in &[
+            BCM2712_UART10_BASE_PHYS,
+            GICD_BASE_PHYS,
+            GICC_BASE_PHYS,
+            RP1_PERIPHERAL_BASE_PHYS,
         ] {
-            let l1_idx = mmio_base >> 30; // 1GB block index
+            let l1_idx = phys_base >> 30; // 1GB block index
             if l1_idx < 512 {
                 let phys_addr = l1_idx << 30;
+                // Map in identity region
                 *boot_tables.l1_low.entry_mut(l1_idx) =
                     paging::PageTableEntry::block(phys_addr, mmio_flags);
-                *boot_tables.l1_high.entry_mut(l1_idx) =
-                    paging::PageTableEntry::block(phys_addr, mmio_flags);
+
+                // Map in higher-half region ONLY if it doesn't conflict with kernel RAM (index 0)
+                // Pi 5 RAM starts at 0x0, so kernel is in index 0.
+                if l1_idx > 0 {
+                    *boot_tables.l1_high.entry_mut(l1_idx) =
+                        paging::PageTableEntry::block(phys_addr, mmio_flags);
+                }
             }
         }
     }
@@ -270,32 +276,64 @@ pub fn create_user_address_space() -> Option<usize> {
         );
 
         // UART (PL011) at 0x0900_0000
-        let _ = walker.map_page(0x0900_0000, 0x0900_0000, device_flags.to_pte_bits());
+        walker
+            .map_page(0x0900_0000, 0x0900_0000, device_flags.to_pte_bits())
+            .ok()?;
 
         // Pi 5 debug connector UART10 (BCM2712 PL011) used by serial/log paths.
         // This MMIO must remain visible while TTBR0 is switched for process-AS operations.
         #[cfg(feature = "rpi5")]
-        let _ = walker.map_page(0x10_7D00_1000, 0x10_7D00_1000, device_flags.to_pte_bits());
+        {
+            use crate::arch::aarch64::platform::rpi5::memory_map::BCM2712_UART10_BASE_PHYS;
+            walker
+                .map_page(
+                    BCM2712_UART10_BASE_PHYS,
+                    BCM2712_UART10_BASE_PHYS,
+                    device_flags.to_pte_bits(),
+                )
+                .ok()?;
+        }
 
         #[cfg(feature = "rpi5")]
         {
-            use crate::arch::aarch64::platform::rpi5::memory_map::{GICC_BASE, GICD_BASE};
+            use crate::arch::aarch64::platform::rpi5::memory_map::{
+                GICC_BASE_PHYS, GICD_BASE_PHYS, RP1_PERIPHERAL_BASE_PHYS,
+            };
 
             // Keep the Pi 5 GIC distributor + CPU interface visible while TTBR0 is active.
-            let _ = walker.map_range(GICD_BASE, GICD_BASE, 0x20000, device_flags.to_pte_bits());
-            let _ = walker.map_range(GICC_BASE, GICC_BASE, 0x20000, device_flags.to_pte_bits());
+            // These apertures overlap (GICC is 0x1000 above GICD), so we map them as one contiguous range.
+            let gic_start = GICD_BASE_PHYS;
+            let gic_end = GICC_BASE_PHYS + 0x20000;
+            let gic_size = gic_end - gic_start;
+            walker
+                .map_range(gic_start, gic_start, gic_size, device_flags.to_pte_bits())
+                .ok()?;
+
+            // Map RP1 peripheral range using an efficient 1GB block mapping.
+            // This replaces the previous 4KiB page-by-page mapping of the full range.
+            walker
+                .map_l1_block(
+                    RP1_PERIPHERAL_BASE_PHYS,
+                    RP1_PERIPHERAL_BASE_PHYS,
+                    device_flags.to_pte_bits(),
+                )
+                .ok()?;
         }
 
         #[cfg(all(feature = "virt", not(feature = "rpi5")))]
-        let _ = walker.map_range(
-            0x0800_0000,
-            0x0800_0000,
-            0x20000,
-            device_flags.to_pte_bits(),
-        );
+        walker
+            .map_range(
+                0x0800_0000,
+                0x0800_0000,
+                0x20000,
+                device_flags.to_pte_bits(),
+            )
+            .ok()?;
 
         // VirtIO MMIO at 0x0a00_0000 (32 devices * 512 bytes = 16KB)
-        let _ = walker.map_range(0x0a00_0000, 0x0a00_0000, 0x4000, device_flags.to_pte_bits());
+        walker
+            .map_range(0x0a00_0000, 0x0a00_0000, 0x4000, device_flags.to_pte_bits())
+            .ok()?;
 
         // Note: We leave the rest of 0-1GB unmapped so userspace can use it.
     }

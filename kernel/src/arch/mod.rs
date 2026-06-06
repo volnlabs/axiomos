@@ -32,9 +32,6 @@ pub mod riscv64;
 pub mod aarch64;
 
 #[cfg(target_arch = "aarch64")]
-pub use self::aarch64::*;
-
-#[cfg(target_arch = "aarch64")]
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct UserContext {
@@ -43,8 +40,6 @@ pub struct UserContext {
 }
 
 // Re-export the current architecture
-#[cfg(target_arch = "aarch64")]
-pub use self::aarch64::*;
 #[cfg(target_arch = "riscv64")]
 pub use self::riscv64::*;
 #[cfg(target_arch = "aarch64")]

@@ -1058,7 +1058,12 @@ dependencies = [
  "kernel",
  "ovmf-prebuilt",
  "pwm_demo",
+ "rk_uart_forwarder",
  "safety_demo",
+ "sched_switch_bridge_demo",
+ "sched_switch_demo",
+ "sched_switch_export_demo",
+ "sys_exit_demo",
  "syscall_demo",
  "timeseries_demo",
 ]
@@ -1252,6 +1257,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rk_uart_forwarder"
+version = "0.1.0"
+dependencies = [
+ "kernel_abi",
+ "minilib",
+]
+
+[[package]]
 name = "rustc-demangle"
 version = "0.1.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1335,6 +1348,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "sched_switch_bridge_demo"
+version = "0.1.0"
+dependencies = [
+ "kernel_abi",
+ "minilib",
+]
+
+[[package]]
+name = "sched_switch_demo"
+version = "0.1.0"
+dependencies = [
+ "kernel_abi",
+ "minilib",
+]
+
+[[package]]
+name = "sched_switch_export_demo"
+version = "0.1.0"
+dependencies = [
+ "kernel_abi",
+ "minilib",
 ]
 
 [[package]]
@@ -1479,6 +1516,14 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "sys_exit_demo"
+version = "0.1.0"
+dependencies = [
+ "kernel_abi",
+ "minilib",
 ]
 
 [[package]]

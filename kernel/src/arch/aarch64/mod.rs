@@ -18,11 +18,13 @@ use crate::arch::traits::Architecture;
 pub struct Aarch64;
 
 #[inline(always)]
-fn dbg_mark(ch: u32) {
+fn dbg_mark(_ch: u32) {
     #[cfg(feature = "rpi5")]
     // SAFETY: Early debug marker write to Pi 5 debug UART10 data register.
+    // ALWAYS use the physical address here so it works both before and after MMU is enabled
+    // (requires the address to be identity mapped in the page tables).
     unsafe {
-        (0x10_7D00_1000 as *mut u32).write_volatile(ch);
+        (platform::rpi5::memory_map::BCM2712_UART10_BASE_PHYS as *mut u32).write_volatile(_ch);
     }
 }
 

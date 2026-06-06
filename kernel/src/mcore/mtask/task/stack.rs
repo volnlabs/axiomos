@@ -1,6 +1,7 @@
 use core::ffi::c_void;
 use core::fmt::{Debug, Formatter};
-use core::mem::{size_of, size_of_val};
+use core::mem::size_of;
+#[cfg(target_arch = "x86_64")]
 use core::slice::from_raw_parts_mut;
 
 use kernel_virtual_memory::Segment;
@@ -199,7 +200,7 @@ impl HigherHalfStack {
             }
 
             // 2. Initialize stack with trampoline
-            let entry_point_addr = restore_user_context as usize;
+            let entry_point_addr = restore_user_context as *const () as usize;
             let arg_addr = context_addr;
             let exit_addr = 0; // restore_user_context does not return
 

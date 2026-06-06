@@ -32,7 +32,7 @@ pub mod aarch64 {
             return core::ptr::null_mut();
         }
 
-        let pages_needed = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+        let pages_needed = size.div_ceil(PAGE_SIZE);
         let alloc_size = pages_needed * PAGE_SIZE;
 
         // Reserve virtual address space

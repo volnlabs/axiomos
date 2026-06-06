@@ -55,6 +55,10 @@ pub fn syscall_debug(n: usize) -> usize {
     syscall0(n)
 }
 
+pub fn debug_syscall(op: usize, value: usize) -> isize {
+    syscall2(60, op, value) as isize
+}
+
 pub fn syscall1(n: usize, arg1: usize) -> usize {
     #[cfg(target_arch = "x86_64")]
     unsafe {

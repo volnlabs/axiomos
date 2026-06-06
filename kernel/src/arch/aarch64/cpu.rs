@@ -89,6 +89,11 @@ pub fn timer_tick() {
 /// This function performs the necessary barriers and cache maintenance
 /// to ensure that instructions written to memory are visible to the
 /// instruction fetch unit.
+///
+/// # Safety
+///
+/// The caller must ensure that the memory range [start, start + len) is
+/// valid and belongs to the JIT code region.
 #[no_mangle]
 pub unsafe extern "C" fn aarch64_jit_sync_cache(start: usize, len: usize) {
     // Get cache line sizes

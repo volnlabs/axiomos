@@ -1,294 +1,181 @@
-//! Ring buffer consumer for reading rkBPF events.
+//! Ring buffer consumer for reading rkBPF events through the Axiom BPF syscall path.
 //!
-//! This module provides a userspace consumer for BPF ring buffers,
-//! allowing efficient reading of kernel events via memory mapping.
+//! The current kernel exposes pinned map lookup plus `BPF_RINGBUF_POLL`, not a
+//! file-backed `mmap` interface. This consumer opens a pinned object path,
+//! queries the map metadata, and drains events by polling the kernel.
 
-use std::fs::File;
-use std::os::unix::io::AsRawFd;
+use kernel_abi::{
+    BpfAttr, BpfObjectInfo, BpfMapTags, SYS_BPF, BPF_OBJECT_KIND_MAP, BPF_OBJ_GET,
+    BPF_OBJ_GET_INFO_BY_FD, BPF_RINGBUF_POLL,
+};
+use std::ffi::CString;
+use std::io;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Ring buffer header structure (matches kernel definition).
-#[repr(C)]
-struct RingBufHeader {
-    /// Consumer position (userspace updates this)
-    consumer_pos: AtomicU64,
-    /// Padding to cache line
-    _pad1: [u8; 56],
-    /// Producer position (kernel updates this)
-    producer_pos: AtomicU64,
-    /// Padding to cache line
-    _pad2: [u8; 56],
-}
-
-/// Ring buffer record header.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct RecordHeader {
-    /// Length of the record data
-    len: u32,
-    /// Page offset (internal use)
-    pg_off: u32,
-}
-
-impl RecordHeader {
-    /// Flag indicating record is busy (being written)
-    const BPF_RINGBUF_BUSY_BIT: u32 = 1 << 31;
-    /// Flag indicating record should be discarded
-    const BPF_RINGBUF_DISCARD_BIT: u32 = 1 << 30;
-
-    /// Check if the record is busy (still being written).
-    fn is_busy(&self) -> bool {
-        self.len & Self::BPF_RINGBUF_BUSY_BIT != 0
-    }
-
-    /// Check if the record should be discarded.
-    fn is_discarded(&self) -> bool {
-        self.len & Self::BPF_RINGBUF_DISCARD_BIT != 0
-    }
-
-    /// Get the actual data length.
-    fn data_len(&self) -> u32 {
-        self.len & !(Self::BPF_RINGBUF_BUSY_BIT | Self::BPF_RINGBUF_DISCARD_BIT)
-    }
-}
+const DEFAULT_EVENT_BUF_SIZE: usize = 4096;
 
 /// Errors that can occur when working with ring buffers.
 #[derive(Debug, thiserror::Error)]
 pub enum RingBufError {
-    /// Failed to open the ring buffer file
-    #[error("failed to open ring buffer: {0}")]
-    Open(std::io::Error),
+    /// Failed to resolve the pinned ring buffer object.
+    #[error("failed to open pinned ring buffer {path}: {source}")]
+    Open { path: String, source: io::Error },
 
-    /// Failed to memory map the ring buffer
-    #[error("failed to mmap ring buffer: {0}")]
-    Mmap(std::io::Error),
+    /// Failed to query ring buffer metadata from the kernel.
+    #[error("failed to query ring buffer info for map fd {map_fd}: {source}")]
+    Info { map_fd: u32, source: io::Error },
 
-    /// Invalid ring buffer size
-    #[error("invalid ring buffer size: {0}")]
-    InvalidSize(usize),
+    /// The object returned by the kernel is not a ring buffer map.
+    #[error("object at {path} is not a ring buffer map")]
+    NotRingBuf { path: String },
 
-    /// Ring buffer path not found
-    #[error("ring buffer not found: {0}")]
-    NotFound(String),
+    /// Ring buffer path is invalid for syscall use.
+    #[error("invalid pinned object path {0}")]
+    InvalidPath(String),
+
+    /// Polling the ring buffer failed.
+    #[error("ring buffer poll failed for map fd {map_fd}: {source}")]
+    Poll { map_fd: u32, source: io::Error },
 }
 
-/// Consumer for reading events from a BPF ring buffer.
+/// Consumer for reading events from a pinned BPF ring buffer.
 pub struct RingBufConsumer {
-    /// Memory-mapped header region
-    header: *mut RingBufHeader,
-    /// Memory-mapped data region
-    data: *const u8,
-    /// Size of the data region (power of 2)
-    data_size: usize,
-    /// Mask for wrapping (data_size - 1)
-    mask: usize,
-    /// File descriptor (kept open for the mapping lifetime)
-    _file: File,
+    map_fd: u32,
+    event_buf: Vec<u8>,
+    info: BpfObjectInfo,
 }
-
-// SAFETY: The ring buffer is thread-safe through atomic operations on the control
-// structures (consumer_pos, producer_pos). The pointers are raw but valid for the
-// lifetime of the struct.
-unsafe impl Send for RingBufConsumer {}
-// SAFETY: The ring buffer is thread-safe through atomic operations on the control
-// structures.
-unsafe impl Sync for RingBufConsumer {}
 
 impl RingBufConsumer {
-    /// Open a ring buffer from a BPF filesystem path.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to the pinned ring buffer map (e.g., `/sys/fs/bpf/maps/events`)
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the path doesn't exist or the mmap fails.
+    /// Open a ring buffer from a pinned BPF object path.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, RingBufError> {
         let path = path.as_ref();
+        let path_string = path.display().to_string();
+        let c_path = CString::new(path.as_os_str().as_encoded_bytes())
+            .map_err(|_| RingBufError::InvalidPath(path_string.clone()))?;
 
-        if !path.exists() {
-            return Err(RingBufError::NotFound(path.display().to_string()));
+        let map_fd = bpf_obj_get(&c_path).map_err(|source| RingBufError::Open {
+            path: path_string.clone(),
+            source,
+        })?;
+
+        let info = bpf_obj_get_info_by_fd(map_fd).map_err(|source| RingBufError::Info {
+            map_fd,
+            source,
+        })?;
+
+        if info.object_kind != BPF_OBJECT_KIND_MAP
+            || info.map_type != BpfMapTags::RINGBUF.bits()
+        {
+            return Err(RingBufError::NotRingBuf { path: path_string });
         }
 
-        let file = File::open(path).map_err(RingBufError::Open)?;
-        let fd = file.as_raw_fd();
-
-        // Get the map info to determine size
-        // For now, we'll use a reasonable default and let the kernel tell us
-        let data_size = Self::get_ringbuf_size(fd)?;
-
-        if !data_size.is_power_of_two() {
-            return Err(RingBufError::InvalidSize(data_size));
-        }
-
-        let header_size = std::mem::size_of::<RingBufHeader>();
-        let total_size = header_size + data_size;
-
-        // Memory map the ring buffer
-        // SAFETY: We are mapping a file descriptor that represents a BPF ring buffer.
-        // We trust the kernel to provide a valid mapping. The size is calculated based
-        // on the header size and data size.
-        let ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                total_size,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                fd,
-                0,
-            )
-        };
-
-        if ptr == libc::MAP_FAILED {
-            return Err(RingBufError::Mmap(std::io::Error::last_os_error()));
-        }
-
-        let header = ptr as *mut RingBufHeader;
-        // SAFETY: The data region follows the header in the mapped memory.
-        // We verified the mapping size covers both header and data.
-        let data = unsafe { (ptr as *const u8).add(header_size) };
+        let event_buf_size = usize::try_from(info.max_entries)
+            .ok()
+            .filter(|size| *size > 0)
+            .unwrap_or(DEFAULT_EVENT_BUF_SIZE);
 
         Ok(Self {
-            header,
-            data,
-            data_size,
-            mask: data_size - 1,
-            _file: file,
+            map_fd,
+            event_buf: vec![0u8; event_buf_size],
+            info,
         })
     }
 
-    /// Get the ring buffer size from the kernel.
-    fn get_ringbuf_size(fd: i32) -> Result<usize, RingBufError> {
-        // Use BPF_OBJ_GET_INFO_BY_FD to get the map info
-        // For simplicity, we'll use a default size that can be overridden
-        // In production, this would query the kernel for the actual size
-        let _ = fd;
+    /// Drain all currently available events without blocking.
+    pub fn poll(&mut self) -> Result<Vec<Vec<u8>>, RingBufError> {
+        let mut events = Vec::new();
 
-        // Default to 64KB - this matches common rkBPF ring buffer sizes
-        // The actual size should be queried from the kernel
-        Ok(64 * 1024)
-    }
+        while let Some(event) = self.read_event()? {
+            events.push(event);
+        }
 
-    /// Poll for available events without blocking.
-    ///
-    /// Returns an iterator over available events.
-    pub fn poll(&self) -> RingBufIter<'_> {
-        RingBufIter { consumer: self }
+        Ok(events)
     }
 
     /// Read the next event from the ring buffer.
-    ///
-    /// Returns `None` if no events are available.
-    pub fn read_event(&self) -> Option<Vec<u8>> {
-        // SAFETY: self.header points to valid mapped memory for the lifetime of self.
-        let header = unsafe { &*self.header };
+    pub fn read_event(&mut self) -> Result<Option<Vec<u8>>, RingBufError> {
+        loop {
+            let attr = BpfAttr {
+                map_fd: self.map_fd,
+                key: self.event_buf.as_mut_ptr() as u64,
+                value: self.event_buf.len() as u64,
+                ..Default::default()
+            };
 
-        let cons_pos = header.consumer_pos.load(Ordering::Acquire);
-        let prod_pos = header.producer_pos.load(Ordering::Acquire);
-
-        if cons_pos >= prod_pos {
-            return None;
-        }
-
-        // Read the record header
-        let record_offset = (cons_pos as usize) & self.mask;
-        // SAFETY: We calculated record_offset using the mask, so it's within bounds.
-        // The memory is mapped and readable.
-        let record_header = unsafe {
-            let ptr = self.data.add(record_offset) as *const RecordHeader;
-            *ptr
-        };
-
-        // Check if the record is still being written
-        if record_header.is_busy() {
-            return None;
-        }
-
-        let data_len = record_header.data_len() as usize;
-        let header_size = std::mem::size_of::<RecordHeader>();
-
-        // Calculate total record size (header + data, 8-byte aligned)
-        let record_size = (header_size + data_len + 7) & !7;
-
-        // Read the data if not discarded
-        let data = if record_header.is_discarded() {
-            Vec::new()
-        } else {
-            let data_offset = (record_offset + header_size) & self.mask;
-            let mut data = vec![0u8; data_len];
-
-            // Handle wrap-around
-            let first_chunk = std::cmp::min(data_len, self.data_size - data_offset);
-            // SAFETY: We are copying data from the memory mapped ring buffer to a vector.
-            // We ensure that we don't read past the bounds of the ring buffer using first_chunk calculation.
-            unsafe {
-                std::ptr::copy_nonoverlapping(self.data.add(data_offset), data.as_mut_ptr(), first_chunk);
-
-                if first_chunk < data_len {
-                    std::ptr::copy_nonoverlapping(
-                        self.data,
-                        data.as_mut_ptr().add(first_chunk),
-                        data_len - first_chunk,
-                    );
-                }
+            let result = sys_bpf(BPF_RINGBUF_POLL, &attr);
+            if result == 0 {
+                return Ok(None);
+            }
+            if result > 0 {
+                let size = result as usize;
+                return Ok(Some(self.event_buf[..size].to_vec()));
             }
 
-            data
-        };
+            let err = io::Error::from_raw_os_error((-result) as i32);
+            if err.raw_os_error() == Some(libc::ENOSPC) {
+                let next_len = self.event_buf.len().saturating_mul(2).max(DEFAULT_EVENT_BUF_SIZE);
+                self.event_buf.resize(next_len, 0);
+                continue;
+            }
 
-        // Advance consumer position
-        let new_cons_pos = cons_pos + record_size as u64;
-        header.consumer_pos.store(new_cons_pos, Ordering::Release);
-
-        if data.is_empty() {
-            // Discarded record, try next
-            self.read_event()
-        } else {
-            Some(data)
+            return Err(RingBufError::Poll {
+                map_fd: self.map_fd,
+                source: err,
+            });
         }
     }
 
-    /// Get the number of bytes available to read.
-    pub fn available(&self) -> usize {
-        // SAFETY: self.header points to valid mapped memory for the lifetime of self.
-        let header = unsafe { &*self.header };
-        let cons_pos = header.consumer_pos.load(Ordering::Relaxed);
-        let prod_pos = header.producer_pos.load(Ordering::Relaxed);
-
-        (prod_pos.saturating_sub(cons_pos)) as usize
+    /// Return the pinned map identifier exposed by the kernel.
+    pub fn map_fd(&self) -> u32 {
+        self.map_fd
     }
 
-    /// Check if the ring buffer is empty.
-    pub fn is_empty(&self) -> bool {
-        self.available() == 0
+    /// Return kernel metadata for the opened map.
+    pub fn info(&self) -> &BpfObjectInfo {
+        &self.info
     }
 }
 
-impl Drop for RingBufConsumer {
-    fn drop(&mut self) {
-        let header_size = std::mem::size_of::<RingBufHeader>();
-        let total_size = header_size + self.data_size;
+fn bpf_obj_get(path: &CString) -> io::Result<u32> {
+    let attr = BpfAttr {
+        pathname: path.as_ptr() as u64,
+        path_len: path.as_bytes_with_nul().len() as u32,
+        ..Default::default()
+    };
 
-        // SAFETY: We are unmapping the memory we previously mapped in open().
-        // self.header points to the start of the mapping.
-        unsafe {
-            libc::munmap(self.header as *mut libc::c_void, total_size);
-        }
+    let result = sys_bpf(BPF_OBJ_GET, &attr);
+    if result < 0 {
+        Err(io::Error::from_raw_os_error((-result) as i32))
+    } else {
+        Ok(result as u32)
     }
 }
 
-/// Iterator over ring buffer events.
-pub struct RingBufIter<'a> {
-    consumer: &'a RingBufConsumer,
+fn bpf_obj_get_info_by_fd(map_fd: u32) -> io::Result<BpfObjectInfo> {
+    let mut info = BpfObjectInfo::default();
+    let attr = BpfAttr {
+        map_fd,
+        info: (&mut info as *mut BpfObjectInfo) as u64,
+        info_len: core::mem::size_of::<BpfObjectInfo>() as u32,
+        ..Default::default()
+    };
+
+    let result = sys_bpf(BPF_OBJ_GET_INFO_BY_FD, &attr);
+    if result < 0 {
+        Err(io::Error::from_raw_os_error((-result) as i32))
+    } else {
+        Ok(info)
+    }
 }
 
-impl Iterator for RingBufIter<'_> {
-    type Item = Vec<u8>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.consumer.read_event()
+fn sys_bpf(cmd: u32, attr: &BpfAttr) -> i32 {
+    unsafe {
+        libc::syscall(
+            SYS_BPF as libc::c_long,
+            cmd as libc::c_long,
+            attr as *const BpfAttr,
+            core::mem::size_of::<BpfAttr>() as libc::c_long,
+        ) as i32
     }
 }
 
@@ -324,25 +211,6 @@ impl MockRingBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_record_header_flags() {
-        let busy = RecordHeader {
-            len: RecordHeader::BPF_RINGBUF_BUSY_BIT | 100,
-            pg_off: 0,
-        };
-        assert!(busy.is_busy());
-        assert!(!busy.is_discarded());
-        assert_eq!(busy.data_len(), 100);
-
-        let discarded = RecordHeader {
-            len: RecordHeader::BPF_RINGBUF_DISCARD_BIT | 50,
-            pg_off: 0,
-        };
-        assert!(!discarded.is_busy());
-        assert!(discarded.is_discarded());
-        assert_eq!(discarded.data_len(), 50);
-    }
 
     #[test]
     fn test_mock_ringbuf() {

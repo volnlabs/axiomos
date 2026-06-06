@@ -328,11 +328,17 @@ pub unsafe extern "C" fn restore_user_context(ctx: *const crate::arch::UserConte
     core::arch::naked_asm!(
         // x0 points to UserContext
         // UserContext layout:
-        // inner: ExceptionContext (offset 0, size 272)
-        // sp: u64 (offset 272)
+        // inner: ExceptionContext (offset 0, size 280)
+        // sp: u64 (offset 280)
+        //
+        // ExceptionContext tail:
+        // elr: offset 248
+        // spsr: offset 256
+        // sp_el0: offset 264
+        // vector_entry_timestamp: offset 272
 
         // 1. Restore sp_el0
-        "ldr x1, [x0, #272]",
+        "ldr x1, [x0, #280]",
         "msr sp_el0, x1",
         // 2. Restore ELR, SPSR
         // elr is at offset 248, spsr at 256

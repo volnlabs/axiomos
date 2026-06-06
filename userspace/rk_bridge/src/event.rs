@@ -202,6 +202,27 @@ impl TimeSeriesEvent {
     pub const EVENT_TYPE: u32 = 5;
 }
 
+/// Scheduler task-switch event from the live kernel scheduler path.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[repr(C)]
+pub struct SchedSwitchEvent {
+    /// CPU that executed the switch
+    pub cpu_id: u64,
+    /// Previous process ID
+    pub prev_pid: u64,
+    /// Previous task ID
+    pub prev_tid: u64,
+    /// Next process ID
+    pub next_pid: u64,
+    /// Next task ID
+    pub next_tid: u64,
+}
+
+impl SchedSwitchEvent {
+    /// Event type discriminator for scheduler switch events.
+    pub const EVENT_TYPE: u32 = 7;
+}
+
 /// Generic trace event for debugging.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceEvent {
@@ -229,6 +250,8 @@ pub enum RkEvent {
     Gpio(GpioEvent),
     /// Time-series data point
     TimeSeries(TimeSeriesEvent),
+    /// Live scheduler task-switch event
+    SchedSwitch(SchedSwitchEvent),
     /// Debug trace event
     Trace(TraceEvent),
     /// Unknown/raw event
@@ -241,6 +264,17 @@ pub enum RkEvent {
 }
 
 impl RkEvent {
+    /// Parse a live sched_switch event from raw bytes.
+    pub fn from_sched_switch_bytes(data: &[u8]) -> Result<Self, &'static str> {
+        if data.len() < core::mem::size_of::<SchedSwitchEvent>() {
+            return Err("data too short for sched_switch event");
+        }
+
+        // SAFETY: Length checked above. SchedSwitchEvent is repr(C) with only POD fields.
+        let event = unsafe { *(data.as_ptr() as *const SchedSwitchEvent) };
+        Ok(RkEvent::SchedSwitch(event))
+    }
+
     /// Parse an event from raw bytes.
     pub fn from_bytes(data: &[u8]) -> Result<Self, &'static str> {
         if data.len() < EventHeader::SIZE {
@@ -295,6 +329,14 @@ impl RkEvent {
                 let event = unsafe { *(data.as_ptr() as *const TimeSeriesEvent) };
                 Ok(RkEvent::TimeSeries(event))
             }
+            SchedSwitchEvent::EVENT_TYPE => {
+                if data.len() < core::mem::size_of::<SchedSwitchEvent>() {
+                    return Err("data too short for sched_switch event");
+                }
+                // SAFETY: Length checked above. SchedSwitchEvent is repr(C).
+                let event = unsafe { *(data.as_ptr() as *const SchedSwitchEvent) };
+                Ok(RkEvent::SchedSwitch(event))
+            }
             _ => Ok(RkEvent::Unknown {
                 event_type: header.event_type,
                 data: data.to_vec(),
@@ -310,6 +352,7 @@ impl RkEvent {
             RkEvent::Safety(e) => e.header.timestamp_ns,
             RkEvent::Gpio(e) => e.header.timestamp_ns,
             RkEvent::TimeSeries(e) => e.header.timestamp_ns,
+            RkEvent::SchedSwitch(_) => 0,
             RkEvent::Trace(e) => e.header.timestamp_ns,
             RkEvent::Unknown { .. } => 0,
         }
@@ -323,6 +366,7 @@ impl RkEvent {
             RkEvent::Safety(_) => SafetyEvent::EVENT_TYPE,
             RkEvent::Gpio(_) => GpioEvent::EVENT_TYPE,
             RkEvent::TimeSeries(_) => TimeSeriesEvent::EVENT_TYPE,
+            RkEvent::SchedSwitch(_) => SchedSwitchEvent::EVENT_TYPE,
             RkEvent::Trace(_) => TraceEvent::EVENT_TYPE,
             RkEvent::Unknown { event_type, .. } => *event_type,
         }
@@ -381,5 +425,35 @@ mod tests {
         assert!(matches!(SafetyType::from(0), SafetyType::LimitSwitch));
         assert!(matches!(SafetyType::from(1), SafetyType::EmergencyStop));
         assert!(matches!(SafetyType::from(99), SafetyType::Unknown));
+    }
+
+    #[test]
+    fn test_sched_switch_event_parse() {
+        let event = SchedSwitchEvent {
+            cpu_id: 0,
+            prev_pid: 2,
+            prev_tid: 4,
+            next_pid: 3,
+            next_tid: 5,
+        };
+
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                &event as *const _ as *const u8,
+                core::mem::size_of_val(&event),
+            )
+        };
+
+        let parsed = RkEvent::from_sched_switch_bytes(bytes).unwrap();
+        match parsed {
+            RkEvent::SchedSwitch(e) => {
+                assert_eq!(e.cpu_id, 0);
+                assert_eq!(e.prev_pid, 2);
+                assert_eq!(e.prev_tid, 4);
+                assert_eq!(e.next_pid, 3);
+                assert_eq!(e.next_tid, 5);
+            }
+            _ => panic!("expected sched_switch event"),
+        }
     }
 }

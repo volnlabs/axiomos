@@ -35,17 +35,25 @@
 //! - **Cloud**: Relaxed constraints, JIT hints, soft WCET
 //! - **Embedded**: Strict constraints, hard WCET, interrupt safety
 
+mod alu;
 mod cfg;
 mod core;
 mod error;
 pub mod helpers;
+mod liveness;
+mod pruner;
+mod refine;
 mod state;
 mod streaming;
 
-pub use core::Verifier;
+pub use core::{Verifier, VerifyConfig, VerifyStats};
 
+pub use alu::{compute_alu_result, compute_alu_result_width, scalar_from_imm};
 pub use cfg::ControlFlowGraph;
 pub use error::VerifyError;
 pub use helpers::{ArgType, HelperId, HelperSignature, get_helper_signature, validate_helper_call};
+pub use liveness::{Liveness, RegSet};
+pub use pruner::{PruneDecision, StatePruner, StateSubsumes};
+pub use refine::{RefinedScalar, refine_scalar};
 pub use state::{RegState, RegType, StackSlot, VerifierState};
 pub use streaming::StreamingVerifier;

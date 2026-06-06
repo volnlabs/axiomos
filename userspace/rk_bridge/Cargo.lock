@@ -229,6 +229,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kernel_abi"
+version = "0.1.0"
+dependencies = [
+ "bitflags",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.180"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -355,6 +362,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "env_logger",
+ "kernel_abi",
  "libc",
  "log",
  "serde",

@@ -1,0 +1,43 @@
+[package]
+name = "kernel-bpf-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Stand-alone workspace so parent workspace doesn't try to resolve our deps.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1.4", features = ["derive"] }
+
+[dependencies.kernel_bpf]
+path = ".."
+features = ["cloud-profile"]
+
+[profile.release]
+debug = true
+
+[[bin]]
+name = "verify_only"
+path = "fuzz_targets/verify_only.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "verify_then_exec"
+path = "fuzz_targets/verify_then_exec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "streaming_match"
+path = "fuzz_targets/streaming_match.rs"
+test = false
+doc = false
+bench = false

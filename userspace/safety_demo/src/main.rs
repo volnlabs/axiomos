@@ -5,8 +5,8 @@ use kernel_abi::BpfAttr;
 use minilib::{bpf, exit, write};
 
 // === Configuration ===
-// Limit switch pin (GPIO 22 — configurable for different wiring)
-const LIMIT_SWITCH_PIN: u32 = 22;
+// Limit switch pin (GPIO 17 — configurable for different wiring)
+const LIMIT_SWITCH_PIN: u32 = 17;
 // PWM configuration for simulated motor
 const PWM_CHIP: u32 = 0;
 const PWM_CHANNEL: u32 = 1;
@@ -293,7 +293,7 @@ pub extern "C" fn _start() -> ! {
     //   - This entire path is in kernel interrupt context
     //   - ZERO userspace dependency
     //
-    // Trigger the limit switch on GPIO 22 to verify.
+    // Trigger the limit switch on GPIO 17 to verify.
     // ---------------------------------------------------------
     print("[4/4] Safety interlock ARMED.\n");
     print("\n");

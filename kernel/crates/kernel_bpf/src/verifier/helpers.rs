@@ -303,18 +303,21 @@ pub enum ReturnType {
 
 impl ReturnType {
     /// Convert return type to register state.
-    pub fn to_reg_state(&self) -> RegState {
+    ///
+    /// `map_value_size` is the accessible byte size attached to map-value /
+    /// allocated-memory pointers (from `VerifyConfig::map_value_size`). Those
+    /// pointers are marked **maybe-null** because `bpf_map_lookup_elem` /
+    /// `bpf_ringbuf_reserve` can return NULL; `verify_memory` rejects any
+    /// dereference until a null check (`if r != 0`) clears the flag on that
+    /// branch. This replaces the previous behavior of collapsing every
+    /// pointer return to an untracked scalar.
+    pub fn to_reg_state(&self, map_value_size: u32) -> RegState {
         match self {
             Self::Integer | Self::Void => {
                 RegState::scalar(Some(super::state::ScalarValue::unknown()))
             }
-            Self::PtrToMapValueOrNull => {
-                // Could be NULL or valid pointer - for now treat as scalar
-                // A full implementation would track this as a maybe-null pointer
-                RegState::scalar(Some(super::state::ScalarValue::unknown()))
-            }
-            Self::PtrToAllocMemOrNull => {
-                RegState::scalar(Some(super::state::ScalarValue::unknown()))
+            Self::PtrToMapValueOrNull | Self::PtrToAllocMemOrNull => {
+                RegState::map_value(map_value_size, true)
             }
         }
     }

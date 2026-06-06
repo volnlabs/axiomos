@@ -16,6 +16,7 @@ impl VirtAddr {
     }
 
     #[inline]
+    #[allow(clippy::result_unit_err)]
     pub fn try_new(addr: u64) -> Result<Self, ()> {
         // For now, we don't implement strict canonicality checks on AArch64
         // as they depend on the specific configuration (T0SZ, etc.)
@@ -39,7 +40,7 @@ impl VirtAddr {
 
     #[inline]
     pub const fn is_aligned(self, align: u64) -> bool {
-        self.0 % align == 0
+        self.0.wrapping_rem(align) == 0
     }
 
     #[inline]
@@ -112,6 +113,7 @@ impl<S: PageSize> Page<S> {
         }
     }
 
+    #[allow(clippy::result_unit_err)]
     pub const fn from_start_address(address: VirtAddr) -> Result<Self, ()> {
         if address.0 & (S::SIZE - 1) != 0 {
             return Err(());

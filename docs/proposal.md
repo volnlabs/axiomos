@@ -30,15 +30,24 @@ Debug with printf                  Trace anything, live
 **This is not eBPF bolted onto Linux.** This is a kernel designed from day one around safe, verified, runtime-loadable programs.
 
 **What exists today:**
-- Complete bootable kernel (x86_64, AArch64/RPi5, RISC-V)
-- Full BPF subsystem (verifier, interpreter, JIT, maps)
-- Memory management, processes, VFS, syscalls
-- Boots on real hardware
+- Bootable kernel on x86_64 (QEMU) and AArch64 (QEMU + Raspberry Pi 5 silicon). RISC-V is boot-only: SBI console, trap stub, paging skeleton — no userspace.
+- BPF subsystem: verifier (CFG + path-sensitive abstract interpretation), interpreter, ARM64 JIT, maps (hash, array, ring buffer, time-series). Verifier hardening track (tnum, state pruning, range refinement, liveness) shipped as modules with libfuzzer harness; integration into `verify_alu` / `verify_safety` / `verify_jump` is in progress (see roadmap).
+- Memory management (per-process address spaces, frame allocator), processes, ext2 VFS, syscalls.
+- BPF hooks live on Pi5: sched_switch, sys_enter, sys_exit, GPIO, PWM, timer. Pinned-object map sharing across processes proven.
+
+**What's NOT in today (the honest list):**
+- BPF program signing is implemented but not invoked at `sys_bpf` load — any bytecode is accepted today.
+- No POSIX signals; user-mode page faults panic the kernel.
+- No demand paging; `nanosleep` busy-spins.
+- Scheduler is a single global queue; no per-CPU queues, no priority inheritance.
+- No I²C, SPI, CAN, or Ethernet drivers — only GPIO / PWM / UART on the RP1.
+- No hardware-in-loop CI, no persistent crash dump, no A/B kernel slots.
 
 **What's next:**
-- Wire BPF into the running kernel
-- Demonstrate runtime programmability
-- Ship on Raspberry Pi 5
+- Wire the hardening verifier modules into the verifier core loop.
+- Phase-0 credibility fixes: signing wire-up, verifier-stack-depth pipe, errno mapping, hardcoded-offset cleanup.
+- Hardware-validate the UART transport for the end-to-end ROS2 demo path.
+- Soak-test for P99/P99.9 latency on real silicon.
 
 ---
 

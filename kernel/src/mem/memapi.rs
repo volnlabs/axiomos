@@ -233,143 +233,43 @@ impl<T: AllocationType> LowerHalfAllocation<T> {
 
     /// Clones this allocation into another process.
     ///
-    /// This allocates new physical memory, copies the content, and maps it into the target
-    /// process's address space at the same virtual address.
+    /// Read-only and executable allocations are shared directly. Writable allocations are
+    /// remapped into copy-on-write shared pages in both parent and child.
     pub fn clone_to_process(&self, new_process: Arc<Process>) -> Option<Self> {
-        // 1. Reserve the same segment in the new process
-        // The segment might need to be "Fixed" location reservation.
-        // Our VMM allows reserving a specific segment via mark_as_reserved.
-
-        // We need to construct a new Segment with the same range.
         let new_segment_inner = kernel_virtual_memory::Segment::new(
             self.inner.mapped_segment.start,
             self.inner.mapped_segment.len,
         );
-
         let new_segment = new_process.vmm().mark_as_reserved(new_segment_inner).ok()?;
 
-        // 2. Allocate new physical frames
-        // We need to know how many pages.
         let page_count = (self.inner.mapped_segment.len / Size4KiB::SIZE) as usize;
-
-        // Use non-contiguous allocation to be safe against fragmentation,
-        // though `allocate` uses `allocate_frames_non_contiguous`.
-        // We will collect them into a Vec to iterate for copying and mapping.
-        let mut new_frames = alloc::vec::Vec::new();
-        for _ in 0..page_count {
-            new_frames.push(PhysicalMemory::allocate_frame::<Size4KiB>()?);
-        }
-
-        // 3. Copy data
-        // We can access self's memory via self.as_ref() (it is mapped in current AS).
-        // For new frames, we must use the direct map (phys_to_virt).
-
-        let _src_slice = self.as_ref();
-        // We need to copy page by page because new_frames are not contiguous.
-        // But `src_slice` is virtually contiguous.
-
-        for (i, frame) in new_frames.iter().enumerate() {
-            let _src_offset = i * Size4KiB::SIZE as usize;
-            // The allocation might include guard pages.
-            // `self.inner.mapped_segment` covers the whole mapped range (including guards?).
-            // `self.start` is the start of the *usable* memory.
-            // Let's check `allocate` impl.
-            // `mapped_segment` is what is mapped in page tables.
-            // If Guarded::Yes, mapped_segment is smaller than the VMM segment?
-            // In allocate:
-            // segment = vmm.reserve(...)
-            // mapped_segment = segment (shrunk if guarded)
-            // So `mapped_segment` contains only the mapped pages (no guards).
-            // So we can blindly copy all pages in `mapped_segment`.
-
-            // Wait, `self.as_ref()` returns `from_raw_parts(self.start... self.layout.size())`.
-            // `self.start` might be offset from `mapped_segment.start` if alignment adjustments happened?
-            // `allocate` says: `start = start.unwrap_or(mapped_segment.start)`.
-            // And `mapped_segment` excludes guard pages.
-
-            // So `mapped_segment` represents the *mapped* pages.
-            // We should copy the content of these pages.
-            // Is it safe to read from `mapped_segment.start`?
-            // Yes, it's mapped in the current process.
-
+        let mut shared_frames = alloc::vec::Vec::with_capacity(page_count);
+        for i in 0..page_count {
             let page_vaddr = self.inner.mapped_segment.start + (i as u64 * Size4KiB::SIZE);
-            let src_ptr = page_vaddr.as_ptr::<u8>();
-
-            let dst_paddr = frame.start_address().as_u64();
-            let dst_vaddr = crate::mem::phys_to_virt(dst_paddr as usize);
-            let dst_ptr = dst_vaddr as *mut u8;
-
-            unsafe {
-                core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, Size4KiB::SIZE as usize);
-            }
-
-            #[cfg(target_arch = "aarch64")]
-            if !T::flags().contains(PageTableFlags::NO_EXECUTE) {
-                // Sync caches for the destination page to ensure I-cache sees the written instructions.
-                // We use the Kernel VA (dst_vaddr) which maps to the same physical address.
-                // Note: We need to declare the external function.
-                unsafe {
-                    extern "C" {
-                        fn aarch64_jit_sync_cache(start: usize, len: usize);
-                    }
-                    aarch64_jit_sync_cache(dst_vaddr, Size4KiB::SIZE as usize);
-                }
-            }
+            let (phys, _) = self
+                .process
+                .with_address_space(|as_| as_.translate_page_flags(page_vaddr))?;
+            let frame = crate::arch::types::PhysFrame::<Size4KiB>::containing_address(phys);
+            PhysicalMemory::retain_frame(frame);
+            shared_frames.push(frame);
         }
 
-        // 4. Map in new process address space
-        // We need the same flags as the current mapping.
-        // We can't easily get flags from `LowerHalfAllocation` struct (phantom data doesn't help).
-        // However, `LowerHalfAllocation` is usually Writable or Executable or Readonly.
-        // But `T` is a generic type parameter.
-        // We can check `T`? No, specialization is unstable.
-        // We should probably look up the flags from the current page table?
-        // Or just assume RW for now?
-        // If it was Executable, we probably want it to be Writable first, then made Executable?
-        // Actually, `fork` usually keeps the same permissions.
-        // If we clone an `Executable` allocation, we want the result to be `Executable`.
-        // But we just wrote to the physical frames (using direct map), so that's fine.
-        // We need to map them as Executable in the new AS if T is Executable.
-
-        // Getting flags from current page table:
-        let _sample_page = crate::arch::types::Page::<Size4KiB>::containing_address(
-            self.inner.mapped_segment.start,
-        );
-        // We can use `process.address_space().translate()` but that gives PhysAddr.
-        // We need flags. `visit_user_pages` gives flags but iterates everything.
-        // Let's add `get_flags(page)` to AddressSpace?
-        // For now, let's assume a default set of flags based on usage, or try to be generic.
-        // Ideally `LowerHalfAllocation` would store the flags.
-        //
-        // Let's use a safe default: PRESENT | USER_ACCESSIBLE.
-        // Then we check if we can deduce WRITABLE/NO_EXECUTE.
-        // `LowerHalfAllocation` doesn't store state about whether it's currently Writable/Exec.
-        // BUT, the type `T` *statically* tells us!
-        // `LowerHalfAllocation<Writable>` implies Writable.
-        // `LowerHalfAllocation<Executable>` implies Executable.
-        // We can't easily match on T.
-
-        // HACK: For now, map as WRITABLE | NO_EXECUTE.
-        // If the original was Executable, the caller (Process::fork) might need to "fix" it?
-        // Or we can rely on `make_executable` being called later?
-        // No, `fork` returns a ready-to-go process.
-
-        // Let's look up the flags from the first page of the mapping.
-        // We need to expose a way to get flags.
-        // Or we can just blindly copy flags from the source page table?
-        // Since we are in the kernel and have access to the current AS, we can walk it.
-        // But `AddressSpace` abstracts the walker.
-
-        // Alternative: Just map as RWX for now? No, insecure.
-        // Let's assume RW for stack (Writable) and RX for code (Executable).
-        // Since this method is generic over T, we can't easily distinguish.
-
-        // Let's add a helper trait `AllocationFlags` implemented for `Writable`, `Executable`, `Readonly`.
-        let flags = T::flags() | PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+        if T::fork_requires_cow() {
+            let cow_flags = T::fork_mapping_flags();
+            self.process
+                .with_address_space(|as_| {
+                    as_.remap_range::<Size4KiB, _>(&self.inner.mapped_segment, |_| cow_flags)
+                })
+                .ok()?;
+        }
 
         new_process
             .with_address_space(|as_| {
-                as_.map_range(&self.inner.mapped_segment, new_frames.into_iter(), flags)
+                as_.map_range(
+                    &self.inner.mapped_segment,
+                    shared_frames.into_iter(),
+                    T::fork_mapping_flags(),
+                )
             })
             .ok()?;
 
@@ -388,11 +288,37 @@ impl<T: AllocationType> LowerHalfAllocation<T> {
 
 pub trait AllocationFlags {
     fn flags() -> PageTableFlags;
+    fn fork_requires_cow() -> bool {
+        false
+    }
+
+    fn fork_mapping_flags() -> PageTableFlags {
+        Self::flags() | PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE
+    }
 }
 
 impl AllocationFlags for Writable {
     fn flags() -> PageTableFlags {
         PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE
+    }
+
+    fn fork_requires_cow() -> bool {
+        cfg!(target_arch = "aarch64")
+    }
+
+    fn fork_mapping_flags() -> PageTableFlags {
+        #[cfg(target_arch = "aarch64")]
+        {
+            PageTableFlags::PRESENT
+                | PageTableFlags::USER_ACCESSIBLE
+                | PageTableFlags::NO_EXECUTE
+                | PageTableFlags::COPY_ON_WRITE
+        }
+
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            Self::flags() | PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE
+        }
     }
 }
 

@@ -8,8 +8,8 @@ use core::ptr;
 use bitflags::bitflags;
 
 use super::mem::{
-    mair, phys_to_virt, pte_flags, ENTRIES_PER_TABLE, L0_SHIFT, L1_SHIFT, L2_SHIFT, L3_SHIFT,
-    PAGE_SIZE,
+    mair, phys_to_virt, pte_flags, ENTRIES_PER_TABLE, L0_SHIFT, L1_BLOCK_SIZE, L1_SHIFT,
+    L2_BLOCK_SIZE, L2_SHIFT, L3_SHIFT, PAGE_SIZE,
 };
 use super::phys::{self};
 
@@ -30,6 +30,8 @@ bitflags! {
         const HUGE_PAGE = 0;
         /// Custom bit to mark this as a device mapping (Device-nGnRE)
         const MMIO_DEVICE = 1 << 62;
+        /// Software-defined bit used to mark a userspace page as copy-on-write.
+        const COPY_ON_WRITE = 1 << 55;
     }
 }
 
@@ -88,6 +90,10 @@ impl PageTableFlags {
         // Check for Device-nGnRE attribute (Index 1)
         if (bits >> 2) & 0x7 == mair::DEVICE_NGNRE as u64 {
             flags |= PageTableFlags::MMIO_DEVICE;
+        }
+
+        if bits & PageTableFlags::COPY_ON_WRITE.bits() != 0 {
+            flags |= PageTableFlags::COPY_ON_WRITE;
         }
 
         flags
@@ -241,6 +247,66 @@ impl PageTableWalker {
         *entry = PageTableEntry::page(phys, flags);
 
         // Ensure the write is visible to the MMU and subsequent instruction fetches
+        unsafe {
+            core::arch::asm!("dsb ishst", "isb", options(nostack, preserves_flags));
+        }
+
+        Ok(())
+    }
+
+    /// Map a 1GB block (L1 entry)
+    pub fn map_l1_block(
+        &mut self,
+        virt: usize,
+        phys: usize,
+        flags: u64,
+    ) -> Result<(), &'static str> {
+        if virt & (L1_BLOCK_SIZE - 1) != 0 || phys & (L1_BLOCK_SIZE - 1) != 0 {
+            return Err("Address not aligned to 1GB boundary");
+        }
+
+        let indices = va_to_indices(virt);
+        let _l0 = unsafe { &mut *self.root };
+        let l1_ptr = Self::get_or_create_table_ptr(self.root, indices[0])?;
+        let l1 = unsafe { &mut *l1_ptr };
+
+        let entry = l1.entry_mut(indices[1]);
+        if entry.is_valid() {
+            return Err("L1 entry already mapped");
+        }
+
+        *entry = PageTableEntry::block(phys, flags);
+
+        unsafe {
+            core::arch::asm!("dsb ishst", "isb", options(nostack, preserves_flags));
+        }
+
+        Ok(())
+    }
+
+    /// Map a 2MB block (L2 entry)
+    pub fn map_l2_block(
+        &mut self,
+        virt: usize,
+        phys: usize,
+        flags: u64,
+    ) -> Result<(), &'static str> {
+        if virt & (L2_BLOCK_SIZE - 1) != 0 || phys & (L2_BLOCK_SIZE - 1) != 0 {
+            return Err("Address not aligned to 2MB boundary");
+        }
+
+        let indices = va_to_indices(virt);
+        let l1_ptr = Self::get_or_create_table_ptr(self.root, indices[0])?;
+        let l2_ptr = Self::get_or_create_table_ptr(l1_ptr, indices[1])?;
+        let l2 = unsafe { &mut *l2_ptr };
+
+        let entry = l2.entry_mut(indices[2]);
+        if entry.is_valid() {
+            return Err("L2 entry already mapped");
+        }
+
+        *entry = PageTableEntry::block(phys, flags);
+
         unsafe {
             core::arch::asm!("dsb ishst", "isb", options(nostack, preserves_flags));
         }
@@ -495,6 +561,12 @@ pub fn get_ttbr1() -> usize {
     value
 }
 
+/// Configure MAIR_EL1
+///
+/// # Safety
+///
+/// This function is unsafe because it modifies the processor's memory
+/// attribute configuration.
 pub unsafe fn configure_mair() {
     unsafe {
         core::arch::asm!(
@@ -506,6 +578,12 @@ pub unsafe fn configure_mair() {
     }
 }
 
+/// Configure TCR_EL1
+///
+/// # Safety
+///
+/// This function is unsafe because it modifies the processor's translation
+/// control configuration.
 pub unsafe fn configure_tcr() {
     let tcr: u64 = 16               // T0SZ = 16 (48-bit VA)
                  | (16 << 16)       // T1SZ = 16 (48-bit VA)
@@ -532,6 +610,13 @@ pub fn init() {
     log::info!("ARM64 paging initialized (4KB granule, 48-bit VA)");
 }
 
+/// Enable the MMU
+///
+/// # Safety
+///
+/// This function is unsafe because it enables address translation, which
+/// will cause immediate page faults if the current execution flow is not
+/// properly mapped.
 pub unsafe fn enable_mmu() {
     let mut sctlr: u64;
     unsafe {

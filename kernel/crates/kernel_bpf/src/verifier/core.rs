@@ -9,15 +9,48 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
+use super::alu::{compute_alu_result_width, scalar_from_imm};
 use super::cfg::ControlFlowGraph;
 use super::error::{VerifyError, VerifyResult};
 use super::helpers::{HelperValidation, validate_helper_call};
+use super::liveness::{Liveness, RegSet};
+use super::pruner::{PruneDecision, StatePruner};
+use super::refine::refine_scalar;
 use super::state::{RegState, RegType, ScalarValue, StackSlot, VerifierState};
 use crate::bytecode::insn::BpfInsn;
 use crate::bytecode::opcode::{AluOp, OpcodeClass};
 use crate::bytecode::program::{BpfProgType, BpfProgram};
 use crate::bytecode::registers::Register;
 use crate::profile::{ActiveProfile, PhysicalProfile};
+
+/// Sizes the verifier cannot infer from bytecode alone and must be told by the
+/// caller (eventually the `sys_bpf` load path, #48): the byte size of the
+/// context struct reachable through R1 (`PtrToCtx`) at entry, and the byte
+/// size of a map value returned by `bpf_map_lookup_elem`. Both default to 0,
+/// under which the verifier **rejects** ctx/map dereferences — it will not
+/// assume a region size it was not given.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VerifyConfig {
+    /// Bytes accessible through the context pointer (R1) at program entry.
+    pub ctx_size: u32,
+    /// Bytes accessible through a map-value pointer (`bpf_map_lookup_elem`
+    /// result, `bpf_ringbuf_reserve`, etc.).
+    pub map_value_size: u32,
+}
+
+/// Cost of a verification run, returned by [`Verifier::verify_with_stats`].
+///
+/// `states_explored` is the number of distinct verifier states the pruner
+/// recorded during exploration — the dominant cost metric, since it bounds
+/// both verification time (work per state is bounded) and memory (one recorded
+/// state each). For the loop-free embedded fragment this is bounded by the
+/// program size; this is the figure the bounded-verification / verifier-WCET
+/// work measures. See `docs/verifier-fragment.md`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VerifyStats {
+    /// Distinct verifier states explored during verification.
+    pub states_explored: usize,
+}
 
 /// BPF program verifier.
 ///
@@ -28,8 +61,28 @@ pub struct Verifier<P: PhysicalProfile = ActiveProfile> {
     /// Control flow graph
     cfg: Option<ControlFlowGraph>,
 
-    /// Verifier states at each instruction (for path-sensitive analysis)
+    /// Verifier states at each instruction (for path-sensitive analysis).
+    /// Kept alongside [`pruner`] because the post-verification stack-depth
+    /// scan reads `state.stack.max_depth()` from each recorded state.
     states: Vec<Option<VerifierState>>,
+
+    /// State pruning table. The verifier consults this before re-exploring
+    /// any program point — if a previously-recorded state at the same pc
+    /// subsumes the current one, we skip exploration. See [`StatePruner`]
+    /// for the subsumption check.
+    pruner: StatePruner,
+
+    /// Per-instruction liveness analysis. Pruner subsumption ignores
+    /// registers not in `liveness.live_in(pc)`, so two states differing
+    /// only on dead registers prune. Computed once per `verify_safety`
+    /// call after the CFG is built; queried per-instruction by the
+    /// pruner consultation.
+    liveness: Option<Liveness>,
+
+    /// Caller-supplied sizes (context, map value) the verifier cannot infer
+    /// from bytecode. Read by `verify_safety` (ctx range), `verify_call` (map
+    /// value range), and `verify_memory` (bounds checks).
+    config: VerifyConfig,
 
     /// Profile marker
     _profile: PhantomData<P>,
@@ -41,6 +94,9 @@ impl<P: PhysicalProfile> Verifier<P> {
         Self {
             cfg: None,
             states: Vec::new(),
+            pruner: StatePruner::new(),
+            liveness: None,
+            config: VerifyConfig::default(),
             _profile: PhantomData,
         }
     }
@@ -58,7 +114,36 @@ impl<P: PhysicalProfile> Verifier<P> {
     /// On success, returns a validated `BpfProgram`.
     /// On failure, returns a `VerifyError` describing the issue.
     pub fn verify(prog_type: BpfProgType, insns: &[BpfInsn]) -> VerifyResult<BpfProgram<P>> {
+        Self::verify_with_config(prog_type, insns, VerifyConfig::default())
+    }
+
+    /// Verify a BPF program with caller-supplied region sizes.
+    ///
+    /// Identical to [`verify`](Self::verify) but takes a [`VerifyConfig`]
+    /// carrying the context size and map-value size the verifier needs to
+    /// bounds-check `PtrToCtx` / `PtrToMapValue` accesses. The zero-config
+    /// [`verify`](Self::verify) rejects such accesses; the load path (#48)
+    /// will pass the real sizes from the program type and map definitions.
+    pub fn verify_with_config(
+        prog_type: BpfProgType,
+        insns: &[BpfInsn],
+        config: VerifyConfig,
+    ) -> VerifyResult<BpfProgram<P>> {
+        Self::verify_with_stats(prog_type, insns, config).map(|(prog, _)| prog)
+    }
+
+    /// Like [`verify_with_config`](Self::verify_with_config) but also returns
+    /// [`VerifyStats`] describing the verification *cost* — chiefly the number
+    /// of distinct states explored. This is the metric the bounded-verification
+    /// work measures: for the loop-free embedded fragment it is bounded by the
+    /// program size (see `docs/verifier-fragment.md`).
+    pub fn verify_with_stats(
+        prog_type: BpfProgType,
+        insns: &[BpfInsn],
+        config: VerifyConfig,
+    ) -> VerifyResult<(BpfProgram<P>, VerifyStats)> {
         let mut verifier = Self::new();
+        verifier.config = config;
 
         // Phase 1: Basic checks
         verifier.check_basic(insns)?;
@@ -73,8 +158,15 @@ impl<P: PhysicalProfile> Verifier<P> {
         // Phase 4: Profile-specific constraints
         verifier.verify_profile_constraints(insns)?;
 
+        // Capture the cost: total distinct states the pruner recorded during
+        // exploration. Read before building the program so it reflects exactly
+        // the verification work.
+        let stats = VerifyStats {
+            states_explored: verifier.pruner.recorded(),
+        };
+
         // Build the verified program
-        BpfProgram::new(prog_type, insns.to_vec(), stack_size).map_err(|e| match e {
+        let prog = BpfProgram::new(prog_type, insns.to_vec(), stack_size).map_err(|e| match e {
             crate::bytecode::program::ProgramError::StackSizeExceeded { required, limit } => {
                 VerifyError::StackExceeded {
                     used: required,
@@ -85,7 +177,9 @@ impl<P: PhysicalProfile> Verifier<P> {
                 VerifyError::InsnCountExceeded { count, limit }
             }
             _ => VerifyError::EmptyProgram,
-        })
+        })?;
+
+        Ok((prog, stats))
     }
 
     /// Perform basic structural checks.
@@ -153,12 +247,20 @@ impl<P: PhysicalProfile> Verifier<P> {
             }
         }
 
-        // Initialize states
+        // Initialize states and pruner.
         self.states = alloc::vec![None; insns.len()];
+        self.pruner.clear();
 
-        // Start verification from entry
-        let initial_state = VerifierState::new_entry(P::MAX_STACK_SIZE);
-        self.verify_path(insns, 0, initial_state)?;
+        // Compute liveness once per verification run; the pruner uses it
+        // to ignore dead-register differences during subsumption.
+        self.liveness = Some(Liveness::analyze(insns, cfg));
+
+        // Start verification from entry. R1 is the context pointer; give it
+        // the caller-declared accessible size so ctx loads can be bounds-
+        // checked. With the default size 0, any ctx dereference is rejected.
+        let mut initial_state = VerifierState::new_entry(P::MAX_STACK_SIZE);
+        initial_state.reg_mut(Register::R1).mem_range = Some(self.config.ctx_size);
+        self.explore(insns, initial_state)?;
 
         // Return computed stack size
         let max_stack = self
@@ -172,89 +274,115 @@ impl<P: PhysicalProfile> Verifier<P> {
         Ok(max_stack)
     }
 
-    /// Verify a single execution path.
-    fn verify_path(
-        &mut self,
-        insns: &[BpfInsn],
-        start_idx: usize,
-        mut state: VerifierState,
-    ) -> VerifyResult<()> {
-        state.insn_idx = start_idx;
+    /// Explore all reachable verifier states with an explicit worklist.
+    ///
+    /// Replaces the previous recursive `verify_path`. Branches no longer
+    /// recurse — which grew the **kernel** stack with the program's branch
+    /// nesting and risked overflow on adversarial input — but instead push the
+    /// deferred arm onto an explicit `work` stack. Exploration order is
+    /// preserved: the taken (target) arm is followed inline while the
+    /// fallthrough arm is deferred, so the pruner observes states in the same
+    /// order as the recursive DFS and accept/reject decisions are unchanged.
+    /// The work-stack depth is bounded by the same recorded-state budget that
+    /// bounds memory (#116), so verification is now bounded in both heap and
+    /// native-stack use.
+    fn explore(&mut self, insns: &[BpfInsn], initial: VerifierState) -> VerifyResult<()> {
+        let mut work: Vec<VerifierState> = Vec::new();
+        work.push(initial);
 
-        loop {
-            let idx = state.insn_idx;
+        while let Some(mut state) = work.pop() {
+            // Follow this path until it exits or is pruned; a branch pushes the
+            // deferred (fallthrough) arm and continues the taken arm here.
+            loop {
+                let idx = state.insn_idx;
 
-            // Bounds check
-            if idx >= insns.len() {
-                return Err(VerifyError::InvalidJump {
-                    insn_idx: idx.saturating_sub(1),
-                    target: idx as i32,
-                });
-            }
-
-            // Check for infinite loops (visited same instruction too many times)
-            if state.insn_processed > P::MAX_INSN_COUNT {
-                return Err(VerifyError::InfiniteLoop { insn_idx: idx });
-            }
-
-            // Merge or store state
-            if let Some(existing) = &self.states[idx] {
-                // Already verified this path with compatible state
-                if self.states_compatible(&state, existing) {
-                    return Ok(());
+                // Bounds check
+                if idx >= insns.len() {
+                    return Err(VerifyError::InvalidJump {
+                        insn_idx: idx.saturating_sub(1),
+                        target: idx as i32,
+                    });
                 }
-                // Different state - would need full state merging for production
-                // For now, just continue
-            }
-            self.states[idx] = Some(state.clone());
 
-            let insn = &insns[idx];
+                // Infinite-loop guard (too many instructions on this path).
+                if state.insn_processed > P::MAX_INSN_COUNT {
+                    return Err(VerifyError::InfiniteLoop { insn_idx: idx });
+                }
 
-            // Verify this instruction
-            let result = self.verify_insn(insn, &mut state, idx)?;
+                // Consult the state pruner. If a previously-recorded state at
+                // this pc subsumes the current one, stop exploring this path
+                // and move on to the next work item. Liveness-aware (#104): two
+                // states disagreeing only on dead registers prune.
+                let live = self
+                    .liveness
+                    .as_ref()
+                    .map(|l| l.live_in(idx))
+                    .unwrap_or(RegSet::ALL);
+                if self.pruner.check_or_record_with_liveness(idx, &state, live)
+                    == PruneDecision::Prune
+                {
+                    break;
+                }
 
-            match result {
-                InsnResult::Continue => {
-                    if insn.is_wide() {
-                        state.insn_idx += 2;
-                    } else {
-                        state.insn_idx += 1;
+                // Bound the verifier's memory (#116): each recorded state
+                // carries a full stack image, so reject once the budget is hit
+                // rather than allocating without bound on a loop.
+                if self.pruner.at_capacity() {
+                    return Err(VerifyError::StateLimitExceeded {
+                        insn_idx: idx,
+                        limit: self.pruner.max_states(),
+                    });
+                }
+
+                // Keep `self.states` populated for the post-verification
+                // stack-depth scan (it reads `state.stack.max_depth()`).
+                self.states[idx] = Some(state.clone());
+
+                let insn = &insns[idx];
+                match self.verify_insn(insn, &mut state, idx)? {
+                    InsnResult::Continue => {
+                        state.insn_idx += if insn.is_wide() { 2 } else { 1 };
+                        state.insn_processed += 1;
                     }
-                    state.insn_processed += 1;
-                }
-                InsnResult::Jump(target) => {
-                    state.insn_idx = target;
-                    state.insn_processed += 1;
-                }
-                InsnResult::Branch {
-                    fallthrough,
-                    target,
-                } => {
-                    // Verify both paths
-                    let mut branch_state = state.clone();
-                    branch_state.insn_idx = target;
-                    branch_state.insn_processed += 1;
-                    self.verify_path(insns, target, branch_state)?;
+                    InsnResult::Jump(target) => {
+                        state.insn_idx = target;
+                        state.insn_processed += 1;
+                    }
+                    InsnResult::Branch {
+                        fallthrough,
+                        target,
+                        refinement,
+                        null_refine,
+                    } => {
+                        // Defer the fallthrough arm; continue the taken arm
+                        // inline (preserving recursive DFS order). `true_branch`
+                        // is the taken side, `false_branch` the fallthrough side.
+                        let mut fallthrough_state = state.clone();
+                        if let Some(r) = refinement {
+                            fallthrough_state.reg_mut(r.dst).scalar_value = Some(r.false_branch);
+                        }
+                        if let Some(nr) = null_refine {
+                            apply_null_refine(&mut fallthrough_state, nr, false);
+                        }
+                        fallthrough_state.insn_idx = fallthrough;
+                        fallthrough_state.insn_processed += 1;
+                        work.push(fallthrough_state);
 
-                    state.insn_idx = fallthrough;
-                    state.insn_processed += 1;
-                }
-                InsnResult::Exit => {
-                    return Ok(());
+                        if let Some(r) = refinement {
+                            state.reg_mut(r.dst).scalar_value = Some(r.true_branch);
+                        }
+                        if let Some(nr) = null_refine {
+                            apply_null_refine(&mut state, nr, true);
+                        }
+                        state.insn_idx = target;
+                        state.insn_processed += 1;
+                    }
+                    InsnResult::Exit => break,
                 }
             }
         }
-    }
 
-    /// Check if two states are compatible (for path merging).
-    fn states_compatible(&self, s1: &VerifierState, s2: &VerifierState) -> bool {
-        // Simple compatibility check: same register types
-        for i in 0..Register::COUNT {
-            if s1.regs[i].reg_type != s2.regs[i].reg_type {
-                return false;
-            }
-        }
-        true
+        Ok(())
     }
 
     /// Verify a single instruction.
@@ -348,11 +476,20 @@ impl<P: PhysicalProfile> Verifier<P> {
                 });
             }
 
-            // Check for division by zero
+            // Check for division by zero. For a 32-bit div/mod the divisor is
+            // truncated to its low 32 bits before the operation, so the zero
+            // check must look at the low 32 bits too: a divisor like `2^32` has
+            // all-zero low bits and would otherwise slip past `could_be_zero()`
+            // on its full 64-bit value (e.g. `r1 = 1; r1 <<= 32; w0 /= w1`).
             if alu_op.can_divide_by_zero() {
                 let src_state = state.reg(src);
                 if let Some(ref scalar) = src_state.scalar_value {
-                    if scalar.could_be_zero() {
+                    let divisor = if insn.is_alu64() {
+                        *scalar
+                    } else {
+                        super::alu::zero_extend_32(*scalar)
+                    };
+                    if divisor.could_be_zero() {
                         return Err(VerifyError::DivisionByZero { insn_idx: idx });
                     }
                 } else if src_state.reg_type == RegType::Scalar {
@@ -375,8 +512,32 @@ impl<P: PhysicalProfile> Verifier<P> {
             });
         }
 
-        // Update destination register to scalar
-        state.set_scalar(dst, Some(ScalarValue::unknown()));
+        // Compute the rhs ScalarValue from either the source register or
+        // the sign-extended immediate. tnum + interval flow through
+        // `compute_alu_result`, replacing the prior unconditional collapse
+        // to `ScalarValue::unknown()`.
+        let rhs = if matches!(insn.source_type(), crate::bytecode::opcode::SourceType::Reg) {
+            // `src` validated above (init check + div-by-zero); unwrap is
+            // sound because we've already returned on `None`.
+            let src = insn.src().expect("src register validated above");
+            state
+                .reg(src)
+                .scalar_value
+                .unwrap_or_else(ScalarValue::unknown)
+        } else {
+            scalar_from_imm(insn.imm)
+        };
+
+        let dst_scalar = state
+            .reg(dst)
+            .scalar_value
+            .unwrap_or_else(ScalarValue::unknown);
+
+        // Thread the ALU width: 32-bit ops zero-extend their result into the
+        // 64-bit register, which `compute_alu_result_width` models. Modeling a
+        // 32-bit op as 64-bit is unsound (see the function's docs).
+        let result = compute_alu_result_width(dst_scalar, alu_op, rhs, insn.is_alu64());
+        state.set_scalar(dst, Some(result));
 
         Ok(())
     }
@@ -421,7 +582,11 @@ impl<P: PhysicalProfile> Verifier<P> {
             });
         }
 
-        if matches!(insn.source_type(), crate::bytecode::opcode::SourceType::Reg) {
+        // Build the rhs ScalarValue for refinement: either the src
+        // register's tracked scalar (reg mode) or a sign-extended constant
+        // from the immediate (imm mode). Refining dst when its scalar is
+        // None (e.g. dst is a pointer type) is a no-op.
+        let rhs = if matches!(insn.source_type(), crate::bytecode::opcode::SourceType::Reg) {
             let src = insn.src().ok_or(VerifyError::InvalidRegister {
                 insn_idx: idx,
                 reg: insn.src_reg(),
@@ -433,11 +598,76 @@ impl<P: PhysicalProfile> Verifier<P> {
                     reg: src,
                 });
             }
-        }
+
+            state.reg(src).scalar_value
+        } else {
+            // BPF spec: immediate is i32 sign-extended to i64.
+            let v = insn.imm as i64 as u64;
+            Some(ScalarValue {
+                value: Some(v),
+                min: v,
+                max: v,
+                tnum: super::state::TnumValue::constant(v),
+            })
+        };
+
+        // Compute branch refinement when both dst and rhs are scalar.
+        // Pointer-arithmetic refinement is its own future-issue.
+        //
+        // Width gate: a 32-bit jump (`BPF_JMP32`) compares only the low 32
+        // bits of its operands (the interpreter truncates dst/src to u32
+        // before comparing). Refining the full 64-bit `ScalarValue` against a
+        // 32-bit comparison would be unsound — e.g. `if w0 < 100` tells us
+        // nothing about bits 32..63 of r0. Until 32-bit-aware refinement
+        // lands, only refine on 64-bit jumps (`BPF_JMP`); skipping refinement
+        // is always sound, just less precise.
+        let is_jmp64 = matches!(
+            insn.class(),
+            Some(crate::bytecode::opcode::OpcodeClass::Jmp)
+        );
+        let dst_scalar = state.reg(dst).scalar_value;
+        let refinement = match (dst_scalar, rhs) {
+            (Some(dst_sv), Some(rhs_sv)) if is_jmp64 => {
+                let refined = refine_scalar(dst_sv, jmp_op, rhs_sv);
+                Some(BranchRefinement {
+                    dst,
+                    true_branch: refined.true_branch,
+                    false_branch: refined.false_branch,
+                })
+            }
+            _ => None,
+        };
+
+        // Null-check refinement: `if ptr == 0` / `if ptr != 0` on a maybe-null
+        // pointer (e.g. a `bpf_map_lookup_elem` result) proves the pointer
+        // non-null on one arm and null on the other. `verify_memory` rejects
+        // dereferences of a maybe-null pointer, so this refinement is what
+        // lets a null-checked map lookup actually be used. Detection: `dst` is
+        // a maybe-null pointer and `rhs` is the constant 0.
+        let rhs_is_zero = rhs.and_then(|s| s.value) == Some(0);
+        let dst_rs = state.reg(dst);
+        let null_refine = if rhs_is_zero
+            && dst_rs.maybe_null
+            && dst_rs.reg_type.is_pointer()
+            && matches!(
+                jmp_op,
+                crate::bytecode::opcode::JmpOp::Jeq | crate::bytecode::opcode::JmpOp::Jne
+            ) {
+            Some(PtrNullRefine {
+                reg: dst,
+                // JNE (`!= 0`): pointer is non-null on the taken/target arm.
+                // JEQ (`== 0`): pointer is non-null on the fallthrough arm.
+                nonnull_on_true: matches!(jmp_op, crate::bytecode::opcode::JmpOp::Jne),
+            })
+        } else {
+            None
+        };
 
         Ok(InsnResult::Branch {
             fallthrough: idx + 1,
             target,
+            refinement,
+            null_refine,
         })
     }
 
@@ -474,8 +704,10 @@ impl<P: PhysicalProfile> Verifier<P> {
                     *state.reg_mut(reg) = RegState::uninit();
                 }
 
-                // R0 contains return value based on helper signature
-                *state.reg_mut(Register::R0) = sig.ret.to_reg_state();
+                // R0 contains return value based on helper signature. Pointer
+                // returns (map value / reserved memory) become maybe-null
+                // pointers carrying the configured accessible size.
+                *state.reg_mut(Register::R0) = sig.ret.to_reg_state(self.config.map_value_size);
 
                 Ok(())
             }
@@ -560,7 +792,10 @@ impl<P: PhysicalProfile> Verifier<P> {
                     });
                 }
 
-                // Check stack bounds if stack pointer
+                // Bounds-check the access. Stack/FP use the stack model;
+                // every other dereferenceable pointer (map value, ctx, packet)
+                // is bounds-checked against its tracked region size and
+                // rejected if maybe-null or of unknown size.
                 if src_state.reg_type == RegType::PtrToStack
                     || src_state.reg_type == RegType::PtrToFp
                 {
@@ -572,6 +807,8 @@ impl<P: PhysicalProfile> Verifier<P> {
                             size: size.size_bytes(),
                         });
                     }
+                } else {
+                    check_ranged_deref(src_state, insn.offset as i64, size.size_bytes(), idx)?;
                 }
 
                 // Result is scalar
@@ -611,7 +848,9 @@ impl<P: PhysicalProfile> Verifier<P> {
                     });
                 }
 
-                // Update stack state if writing to stack
+                // Update stack state if writing to stack; otherwise bounds-
+                // check the write against the pointer's tracked region (map
+                // value / packet), rejecting maybe-null or unsized pointers.
                 if dst_state.reg_type == RegType::PtrToStack
                     || dst_state.reg_type == RegType::PtrToFp
                 {
@@ -628,6 +867,8 @@ impl<P: PhysicalProfile> Verifier<P> {
                     for i in 0..size.size_bytes() {
                         let _ = state.stack.set(offset - i as i64, StackSlot::Scalar);
                     }
+                } else {
+                    check_ranged_deref(dst_state, insn.offset as i64, size.size_bytes(), idx)?;
                 }
             }
 
@@ -651,6 +892,25 @@ impl<P: PhysicalProfile> Verifier<P> {
                         insn_idx: idx,
                         reason: "cannot write to this pointer type",
                     });
+                }
+
+                // Bounds-check the immediate store, same as Stx.
+                if dst_state.reg_type == RegType::PtrToStack
+                    || dst_state.reg_type == RegType::PtrToFp
+                {
+                    let offset = dst_state.ptr_offset + insn.offset as i64;
+                    if !state.stack.is_valid_access(offset, size.size_bytes()) {
+                        return Err(VerifyError::OutOfBoundsAccess {
+                            insn_idx: idx,
+                            offset,
+                            size: size.size_bytes(),
+                        });
+                    }
+                    for i in 0..size.size_bytes() {
+                        let _ = state.stack.set(offset - i as i64, StackSlot::Scalar);
+                    }
+                } else {
+                    check_ranged_deref(dst_state, insn.offset as i64, size.size_bytes(), idx)?;
                 }
             }
 
@@ -752,9 +1012,115 @@ enum InsnResult {
     /// Jump to target instruction
     Jump(usize),
     /// Branch: verify both paths
-    Branch { fallthrough: usize, target: usize },
+    Branch {
+        fallthrough: usize,
+        target: usize,
+        /// Optional range refinement for dst register on the two branch
+        /// arms. When present, the verifier substitutes the refined scalar
+        /// before exploring each arm — `if r1 < 100 { ... }` lands the
+        /// true branch with `r1 ∈ [0, 99]` and the false branch with
+        /// `r1 ∈ [100, u64::MAX]`. None for unrefinable jumps.
+        refinement: Option<BranchRefinement>,
+        /// Optional pointer null-check refinement. When present, one arm
+        /// proves the pointer non-null (clearing `maybe_null` so it can be
+        /// dereferenced) and the other proves it null. None for non-null
+        /// checks.
+        null_refine: Option<PtrNullRefine>,
+    },
     /// Program exit
     Exit,
+}
+
+/// Per-arm scalar refinement attached to a conditional Branch result.
+///
+/// `dst` is the register being refined; `true_branch` / `false_branch`
+/// are the refined `ScalarValue`s for that register on each side. The
+/// reg-vs-reg case can in principle also refine the src register; that's
+/// tracked as a follow-up to #105 and currently returns `None` for src.
+#[derive(Debug, Clone, Copy)]
+struct BranchRefinement {
+    dst: Register,
+    true_branch: ScalarValue,
+    false_branch: ScalarValue,
+}
+
+/// Pointer null-check refinement attached to a conditional Branch result.
+///
+/// `reg` is the maybe-null pointer being checked. `nonnull_on_true` says
+/// which arm proves it non-null: `true` for `JNE reg, 0` (non-null when the
+/// branch is taken), `false` for `JEQ reg, 0` (non-null on fallthrough). On
+/// the non-null arm the verifier clears `maybe_null`; on the other arm it
+/// retypes the register as `NullPtr` (undereferenceable).
+#[derive(Debug, Clone, Copy)]
+struct PtrNullRefine {
+    reg: Register,
+    nonnull_on_true: bool,
+}
+
+/// Apply a [`PtrNullRefine`] to `state` for one branch arm.
+///
+/// `is_true_arm` is true for the taken/target arm, false for fallthrough.
+/// On the arm where the pointer is proven non-null, `maybe_null` is cleared
+/// so dereferences are allowed; on the other arm the register becomes a
+/// `NullPtr` so any dereference is rejected.
+fn apply_null_refine(state: &mut VerifierState, nr: PtrNullRefine, is_true_arm: bool) {
+    let nonnull = is_true_arm == nr.nonnull_on_true;
+    let reg = state.reg_mut(nr.reg);
+    if nonnull {
+        reg.maybe_null = false;
+    } else {
+        reg.reg_type = RegType::NullPtr;
+        reg.maybe_null = false;
+    }
+}
+
+/// Bounds-check a dereference through a non-stack pointer that carries a
+/// tracked region size (map value, ctx, packet).
+///
+/// Rejects, in order: a **maybe-null** pointer (needs a null check first); a
+/// pointer whose region size is **unknown** (`mem_range == None` — never blind-
+/// dereference); and an access whose window
+/// `[ptr_offset + insn_off, ptr_offset + insn_off + access_size)` falls
+/// **outside** `[0, mem_range)`. This is what the old verifier was missing:
+/// `verify_memory` only bounds-checked the stack, so map-value/ctx/packet
+/// dereferences went entirely unchecked and the interpreter then trusted any
+/// non-null pointer.
+fn check_ranged_deref(
+    rs: &RegState,
+    insn_off: i64,
+    access_size: usize,
+    idx: usize,
+) -> VerifyResult<()> {
+    if rs.maybe_null {
+        return Err(VerifyError::InvalidMemoryAccess {
+            insn_idx: idx,
+            reason: "dereference of possibly-null pointer (missing null check)",
+        });
+    }
+
+    let off = rs.ptr_offset + insn_off;
+    match rs.mem_range {
+        Some(range) => {
+            // Reject negative offsets, and accesses whose end exceeds the
+            // region (treating an overflowing end as out of range).
+            let out_of_range = match off.checked_add(access_size as i64) {
+                Some(end) => off < 0 || end > i64::from(range),
+                None => true,
+            };
+            if out_of_range {
+                return Err(VerifyError::OutOfBoundsAccess {
+                    insn_idx: idx,
+                    offset: off,
+                    size: access_size,
+                });
+            }
+            Ok(())
+        }
+        None => Err(VerifyError::InvalidMemoryAccess {
+            insn_idx: idx,
+            reason: "dereference through pointer with unknown region size",
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -830,5 +1196,357 @@ mod tests {
             result,
             Err(VerifyError::UninitializedRegister { .. })
         ));
+    }
+
+    /// Acceptance test for #102 — tnum + interval flow through ALU sequence.
+    ///
+    /// Before this wiring landed, `verify_alu` collapsed `dst` to
+    /// `ScalarValue::unknown()` after every operation, losing all bit-level
+    /// precision. This program — `r0 &= 0xff; r0 += 1` — is the canonical
+    /// case where that precision matters: after the AND, low byte unknown
+    /// + high 56 bits known zero; after the add, the interval is exactly
+    /// [1, 256]. The verifier should accept and the final r0 should carry
+    /// the refined range.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn tnum_flows_through_and_then_add() {
+        let insns = [
+            BpfInsn::mov64_imm(0, 0),          // r0 = 0 (init)
+            BpfInsn::new(0x57, 0, 0, 0, 0xff), // r0 &= 0xff (BPF_ALU64 | BPF_AND | BPF_K)
+            BpfInsn::add64_imm(0, 1),          // r0 += 1
+            BpfInsn::exit(),
+        ];
+
+        let result = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns);
+        assert!(
+            result.is_ok(),
+            "program should verify; got {:?}",
+            result.err()
+        );
+    }
+
+    /// Companion: a constant-fold case. `mov r0 = 5; r0 += 3` should
+    /// produce a concrete r0 = 8 in the verifier's view. Acceptance for
+    /// #102 — value propagation through Mov + Add.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn alu_constant_fold_through_add() {
+        let insns = [
+            BpfInsn::mov64_imm(0, 5),
+            BpfInsn::add64_imm(0, 3),
+            BpfInsn::exit(),
+        ];
+
+        let result = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns);
+        assert!(result.is_ok(), "got {:?}", result.err());
+    }
+
+    // --- pointer bounds (Stage 0b) ---
+
+    #[test]
+    fn check_ranged_deref_rejects_maybe_null() {
+        // A maybe-null map-value pointer cannot be dereferenced until checked.
+        let rs = RegState::map_value(16, true);
+        assert!(matches!(
+            check_ranged_deref(&rs, 0, 8, 0),
+            Err(VerifyError::InvalidMemoryAccess { .. })
+        ));
+    }
+
+    #[test]
+    fn check_ranged_deref_rejects_unknown_size() {
+        // No tracked region size → never blind-dereference.
+        let mut rs = RegState::map_value(0, false);
+        rs.mem_range = None;
+        assert!(matches!(
+            check_ranged_deref(&rs, 0, 1, 0),
+            Err(VerifyError::InvalidMemoryAccess { .. })
+        ));
+    }
+
+    #[test]
+    fn check_ranged_deref_in_bounds_ok() {
+        let rs = RegState::map_value(16, false);
+        assert!(check_ranged_deref(&rs, 0, 8, 0).is_ok());
+        assert!(check_ranged_deref(&rs, 8, 8, 0).is_ok()); // [8, 16)
+    }
+
+    #[test]
+    fn check_ranged_deref_out_of_bounds_rejected() {
+        let rs = RegState::map_value(16, false);
+        // [9, 17) exceeds the 16-byte region.
+        assert!(matches!(
+            check_ranged_deref(&rs, 9, 8, 0),
+            Err(VerifyError::OutOfBoundsAccess { .. })
+        ));
+        // Negative offset is rejected.
+        assert!(matches!(
+            check_ranged_deref(&rs, -1, 1, 0),
+            Err(VerifyError::OutOfBoundsAccess { .. })
+        ));
+    }
+
+    #[test]
+    fn null_refine_clears_on_nonnull_arm_and_retypes_on_null_arm() {
+        let mut st = VerifierState::new_entry(512);
+        *st.reg_mut(Register::R0) = RegState::map_value(16, true);
+        // `if r0 != 0`: non-null on the taken (true) arm.
+        let nr = PtrNullRefine {
+            reg: Register::R0,
+            nonnull_on_true: true,
+        };
+
+        let mut taken = st.clone();
+        apply_null_refine(&mut taken, nr, true);
+        assert!(!taken.reg(Register::R0).maybe_null);
+        assert_eq!(taken.reg(Register::R0).reg_type, RegType::PtrToMapValue);
+
+        let mut fallthrough = st.clone();
+        apply_null_refine(&mut fallthrough, nr, false);
+        assert_eq!(fallthrough.reg(Register::R0).reg_type, RegType::NullPtr);
+    }
+
+    /// End-to-end: a context read (`r0 = *(u64*)(r1 + 0)`) is rejected under
+    /// the default config (ctx_size 0) because the verifier was given no
+    /// region size — previously this dereference went entirely unchecked.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn ctx_read_rejected_without_declared_size() {
+        let insns = [
+            BpfInsn::new(0x79, 0, 1, 0, 0), // r0 = *(u64*)(r1 + 0)  (LDX|MEM|DW)
+            BpfInsn::exit(),
+        ];
+        let result = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns);
+        assert!(
+            matches!(result, Err(VerifyError::OutOfBoundsAccess { .. })),
+            "ctx read with size 0 should be out of bounds; got {result:?}"
+        );
+    }
+
+    /// Same program verifies once the caller declares a context size that
+    /// covers the access.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn ctx_read_ok_with_declared_size() {
+        let insns = [
+            BpfInsn::new(0x79, 0, 1, 0, 0), // r0 = *(u64*)(r1 + 0)
+            BpfInsn::exit(),
+        ];
+        let cfg = VerifyConfig {
+            ctx_size: 64,
+            map_value_size: 0,
+        };
+        let result =
+            Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, cfg);
+        assert!(result.is_ok(), "got {:?}", result.err());
+    }
+
+    /// A context read past the declared size is rejected.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn ctx_read_past_declared_size_rejected() {
+        let insns = [
+            BpfInsn::new(0x79, 0, 1, 60, 0), // r0 = *(u64*)(r1 + 60), needs 68 > 64
+            BpfInsn::exit(),
+        ];
+        let cfg = VerifyConfig {
+            ctx_size: 64,
+            map_value_size: 0,
+        };
+        let result =
+            Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, cfg);
+        assert!(
+            matches!(result, Err(VerifyError::OutOfBoundsAccess { .. })),
+            "got {result:?}"
+        );
+    }
+
+    /// Acceptance for the ALU32 width fix.
+    ///
+    /// `w0 = 0xFFFFFFFF; w0 += 1` zero-extends to `0` (the interpreter
+    /// truncates 32-bit ALU results), so a subsequent 32-bit divide *by* w0
+    /// is a real division by zero. The previous width-blind verifier tracked
+    /// r0 as `0x1_0000_0000` (nonzero) and proved the divide safe — unsound.
+    /// The verifier must now reject it, matching runtime.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn alu32_wrap_is_division_by_zero() {
+        let insns = [
+            BpfInsn::new(0xb4, 0, 0, 0, -1), // w0 = 0xFFFFFFFF  (mov32 imm)
+            BpfInsn::new(0x04, 0, 0, 0, 1),  // w0 += 1          (add32 imm) → wraps to 0
+            BpfInsn::mov64_imm(1, 10),       // r1 = 10
+            BpfInsn::new(0x3c, 1, 0, 0, 0),  // w1 /= w0         (div32 reg) → div by zero
+            BpfInsn::exit(),
+        ];
+
+        let result = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns);
+        assert!(
+            matches!(result, Err(VerifyError::DivisionByZero { .. })),
+            "32-bit wrap to zero should be caught as division by zero; got {result:?}"
+        );
+    }
+
+    /// Companion: a 32-bit program that does *not* wrap to a dangerous value
+    /// still verifies. `w0 = 5; w0 += 3` → 8.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn alu32_safe_program_verifies() {
+        let insns = [
+            BpfInsn::new(0xb4, 0, 0, 0, 5), // w0 = 5   (mov32 imm)
+            BpfInsn::new(0x04, 0, 0, 0, 3), // w0 += 3  (add32 imm)
+            BpfInsn::exit(),
+        ];
+
+        let result = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns);
+        assert!(result.is_ok(), "got {:?}", result.err());
+    }
+
+    /// ALU32 divisor zero-check must look at the low 32 bits (codex re-review
+    /// on #114). `r1 = 1; r1 <<= 32` makes r1 = 2^32, whose low 32 bits are
+    /// zero, so a 32-bit divide by it is a division by zero even though the
+    /// full 64-bit value is nonzero.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn alu32_divisor_with_zero_low_bits_is_division_by_zero() {
+        let insns = [
+            BpfInsn::mov64_imm(1, 1),       // r1 = 1
+            BpfInsn::lsh64_imm(1, 32),      // r1 <<= 32  → 0x1_0000_0000
+            BpfInsn::mov64_imm(0, 10),      // r0 = 10
+            BpfInsn::new(0x3c, 0, 1, 0, 0), // w0 /= w1   (div32 reg) → low32(w1) = 0
+            BpfInsn::exit(),
+        ];
+        let result = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns);
+        assert!(
+            matches!(result, Err(VerifyError::DivisionByZero { .. })),
+            "32-bit divide by a value with zero low bits should be division by zero; got {result:?}"
+        );
+    }
+
+    /// Width-sensitivity companion: the *64-bit* divide by the same 2^32 is a
+    /// nonzero divisor and must still verify.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn alu64_divide_by_two_pow_32_is_ok() {
+        let insns = [
+            BpfInsn::mov64_imm(1, 1),
+            BpfInsn::lsh64_imm(1, 32), // r1 = 2^32
+            BpfInsn::mov64_imm(0, 10),
+            BpfInsn::new(0x3f, 0, 1, 0, 0), // r0 /= r1  (div64 reg), divisor nonzero
+            BpfInsn::exit(),
+        ];
+        let result = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns);
+        assert!(result.is_ok(), "got {:?}", result.err());
+    }
+
+    /// ALU32 arithmetic-shift soundness (codex re-review on #114).
+    ///
+    /// `w0 = 0x80000000; w0 s>>= 31; w0 += 1; w1 = 10; w1 /= w0`. On the
+    /// AArch64 JIT the signed-32 arsh gives `0xFFFFFFFF`, so `+1` wraps to `0`
+    /// and the final divide is by zero. Because ALU32 arsh is widened (the
+    /// interpreter and JIT disagree), `w0` stays unknown and the verifier
+    /// rejects the divide rather than trusting a wrong constant.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn alu32_arsh_then_div_is_caught_as_division_by_zero() {
+        let insns = [
+            BpfInsn::new(0xb4, 0, 0, 0, i32::MIN), // w0 = 0x80000000 (mov32 imm)
+            BpfInsn::new(0xc4, 0, 0, 0, 31),       // w0 s>>= 31      (arsh32 imm)
+            BpfInsn::new(0x04, 0, 0, 0, 1),        // w0 += 1         (add32 imm)
+            BpfInsn::new(0xb4, 1, 0, 0, 10),       // w1 = 10         (mov32 imm)
+            BpfInsn::new(0x3c, 1, 0, 0, 0),        // w1 /= w0        (div32 reg)
+            BpfInsn::exit(),
+        ];
+        let result = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns);
+        assert!(
+            matches!(result, Err(VerifyError::DivisionByZero { .. })),
+            "got {result:?}"
+        );
+    }
+
+    /// The verifier rejects (rather than OOMing) once its recorded-state budget
+    /// is exhausted. Driven through the private `verify_safety` with a tiny
+    /// injected budget so the test stays cheap; the real cap
+    /// (`StatePruner::DEFAULT_MAX_STATES`) prevents the loop-driven OOM the fuzz
+    /// harness found.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn rejects_when_state_budget_exhausted() {
+        let insns = [
+            BpfInsn::mov64_imm(0, 0),        // r0 = 0
+            BpfInsn::add64_imm(0, 1),        // r0 += 1
+            BpfInsn::new(0x55, 0, 0, -2, 5), // JNE r0, 5, -2  (loop back edge)
+            BpfInsn::exit(),
+        ];
+        let mut v = Verifier::<ActiveProfile>::new();
+        v.check_basic(&insns).expect("basic checks pass");
+        v.cfg = Some(ControlFlowGraph::build(&insns));
+        v.pruner.set_max_states(2);
+        let result = v.verify_safety(&insns);
+        assert!(
+            matches!(result, Err(VerifyError::StateLimitExceeded { .. })),
+            "got {result:?}"
+        );
+    }
+
+    /// The worklist explorer handles branchy programs (the path exploration
+    /// that was recursive before this change). Several conditional jumps create
+    /// multiple paths; all must be explored and the program accepted.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn worklist_explores_branchy_program() {
+        let insns = [
+            BpfInsn::mov64_imm(0, 0),  // r0 = 0
+            BpfInsn::jeq_imm(0, 0, 1), // if r0 == 0 goto +1
+            BpfInsn::mov64_imm(0, 1),  // r0 = 1   (fallthrough arm)
+            BpfInsn::jeq_imm(0, 1, 1), // if r0 == 1 goto +1
+            BpfInsn::mov64_imm(0, 2),  // r0 = 2
+            BpfInsn::exit(),
+        ];
+        let result = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns);
+        assert!(result.is_ok(), "got {:?}", result.err());
+    }
+
+    /// Verifier-WCET (state-count) bound on the bounded fragment.
+    ///
+    /// A straight-line program of `n` instructions has a single path, so the
+    /// verifier explores exactly one state per reachable instruction — cost is
+    /// linear in program size. This is the empirical form of the bound in
+    /// `docs/verifier-fragment.md`; it guards against a regression that would
+    /// make verification cost super-linear on loop-free programs.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn bounded_fragment_state_count_is_linear() {
+        fn straight_line(n: usize) -> Vec<BpfInsn> {
+            // mov r0,0 ; (n-2)×(r0 += 1) ; exit  →  n instructions, one path.
+            let mut v = Vec::with_capacity(n);
+            v.push(BpfInsn::mov64_imm(0, 0));
+            for _ in 0..n.saturating_sub(2) {
+                v.push(BpfInsn::add64_imm(0, 1));
+            }
+            v.push(BpfInsn::exit());
+            v
+        }
+
+        for n in [4usize, 16, 64, 256] {
+            let insns = straight_line(n);
+            let (_, stats) = Verifier::<ActiveProfile>::verify_with_stats(
+                BpfProgType::SocketFilter,
+                &insns,
+                VerifyConfig::default(),
+            )
+            .expect("straight-line program verifies");
+            // One recorded state per instruction on the single path: ≤ n, and
+            // genuinely scaling with n (not collapsed to a constant).
+            assert!(
+                stats.states_explored <= n,
+                "n={n}: states_explored={} exceeds linear bound",
+                stats.states_explored
+            );
+            assert!(
+                stats.states_explored >= n - 1,
+                "n={n}: states_explored={} unexpectedly small",
+                stats.states_explored
+            );
+        }
     }
 }

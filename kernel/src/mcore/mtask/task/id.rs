@@ -27,4 +27,9 @@ impl TaskId {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         TaskId(COUNTER.fetch_add(1, Relaxed))
     }
+
+    #[must_use]
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
 }

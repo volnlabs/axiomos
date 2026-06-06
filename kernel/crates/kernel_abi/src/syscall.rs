@@ -70,4 +70,5 @@ n! {
     SYS_FORK = 57,
     SYS_EXECVE = 58,
     SYS_WAITPID = 59,
+    SYS_DEBUG = 60,
 }

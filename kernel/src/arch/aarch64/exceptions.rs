@@ -21,7 +21,7 @@ static INSTR_ABORT_MARKER_SENT: AtomicBool = AtomicBool::new(false);
 
 #[cfg(feature = "rpi5")]
 #[inline(always)]
-fn dbg_mark(ch: u32) {
+fn dbg_mark(_ch: u32) {
     const UART_BASE: usize = 0xFFFF_8010_7D00_1000;
     const UART_FR: usize = UART_BASE + 0x18;
     const UART_TXFF: u32 = 1 << 5;
@@ -29,7 +29,7 @@ fn dbg_mark(ch: u32) {
     unsafe {
         // Pace writes so marker bursts are not dropped when TX FIFO is full.
         while (UART_FR as *const u32).read_volatile() & UART_TXFF != 0 {}
-        (UART_BASE as *mut u32).write_volatile(ch);
+        (UART_BASE as *mut u32).write_volatile(_ch);
     }
 }
 
@@ -187,6 +187,7 @@ pub extern "C" fn handle_sync_exception(ctx: &mut ExceptionContext) {
     let esr: u64;
     let elr: u64;
     let far: u64;
+    #[allow(unused_variables)]
     let spsr: u64;
 
     // SAFETY: Reading exception registers (ESR, ELR, FAR) is safe in an exception handler.
@@ -366,6 +367,61 @@ impl DataFaultCode {
     }
 }
 
+fn try_handle_copy_on_write_fault(far: u64, is_write: bool) -> Result<bool, &'static str> {
+    if !is_write {
+        return Ok(false);
+    }
+
+    let current_process = crate::mcore::context::ExecutionContext::load().current_process();
+    let page_vaddr = crate::arch::types::VirtAddr::new(far).align_down(4096);
+    let page =
+        crate::arch::types::Page::<crate::arch::types::Size4KiB>::containing_address(page_vaddr);
+
+    let (phys, flags) = current_process
+        .with_address_space(|as_| as_.translate_page_flags(page_vaddr))
+        .ok_or("fault page not mapped")?;
+
+    if !flags.contains(crate::arch::types::PageTableFlags::COPY_ON_WRITE) {
+        return Ok(false);
+    }
+
+    let mut writable_flags = flags;
+    writable_flags.remove(crate::arch::types::PageTableFlags::COPY_ON_WRITE);
+    writable_flags.insert(crate::arch::types::PageTableFlags::WRITABLE);
+
+    let old_frame =
+        crate::arch::types::PhysFrame::<crate::arch::types::Size4KiB>::containing_address(phys);
+
+    if crate::mem::phys::PhysicalMemory::frame_ref_count(old_frame) == Some(1) {
+        current_process
+            .with_address_space(|as_| as_.remap(page, |_| writable_flags))
+            .map_err(|_| "failed to upgrade COW page in place")?;
+        return Ok(true);
+    }
+
+    let new_frame =
+        crate::mem::phys::PhysicalMemory::allocate_frame::<crate::arch::types::Size4KiB>()
+            .ok_or("out of physical memory during COW fault")?;
+
+    unsafe {
+        let src =
+            crate::mem::phys_to_virt(old_frame.start_address().as_u64() as usize) as *const u8;
+        let dst = crate::mem::phys_to_virt(new_frame.start_address().as_u64() as usize) as *mut u8;
+        core::ptr::copy_nonoverlapping(src, dst, 4096);
+    }
+
+    current_process
+        .with_address_space(|as_| {
+            as_.unmap(page).ok_or("failed to unmap old COW page")?;
+            as_.map(page, new_frame, writable_flags)
+        })
+        .map_err(|_| "failed to remap private writable page after COW fault")?;
+
+    crate::mem::phys::PhysicalMemory::deallocate_frame(old_frame);
+
+    Ok(true)
+}
+
 fn handle_data_abort(elr: u64, far: u64, iss: u64) {
     let is_write = (iss & (1 << 6)) != 0; // WnR bit
     let _is_cm = (iss & (1 << 8)) != 0; // Cache maintenance
@@ -429,6 +485,14 @@ fn handle_data_abort(elr: u64, far: u64, iss: u64) {
                     elr, far, is_write
                 );
             } else {
+                match try_handle_copy_on_write_fault(far, is_write) {
+                    Ok(true) => return,
+                    Ok(false) => {}
+                    Err(err) => {
+                        log::error!("copy-on-write fault handling failed: {}", err);
+                    }
+                }
+
                 // Could be copy-on-write
                 panic!(
                     "User permission fault at PC={:#x}, address={:#x}, write={}",

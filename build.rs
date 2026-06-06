@@ -73,7 +73,10 @@ fn build_os_disk_image(target_arch: &str) -> PathBuf {
             .to_str()
             .expect("disk_image path should be valid UTF-8"),
     );
-    cmd.arg("10M");
+    // The embedded ext2 image now carries multiple demo/bridge binaries.
+    // Keep some headroom so incremental demo work does not immediately exhaust
+    // the rootfs during image population.
+    cmd.arg("20M");
 
     let rc = cmd.status().expect("mke2fs command should execute");
     assert_eq!(

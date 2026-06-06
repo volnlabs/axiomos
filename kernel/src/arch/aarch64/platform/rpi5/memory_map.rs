@@ -6,17 +6,15 @@
 //! With firmware shortcuts enabled (pciex4_reset=0, enable_rp1_uart=1),
 //! the RP1 peripherals are pre-mapped to the CPU's physical address space.
 
+use crate::arch::aarch64::mem::phys_to_virt;
+
 /// RP1 peripheral base address (PCIe BAR1 window)
-///
-/// The RP1's internal address space (starting at 0x4000_0000) is mapped
-/// to this CPU physical address by the PCIe controller.
-pub const RP1_PERIPHERAL_BASE: usize = 0x1F_0000_0000;
+pub const RP1_PERIPHERAL_BASE_PHYS: usize = 0x1F_0000_0000;
+pub const RP1_PERIPHERAL_BASE: usize = phys_to_virt(RP1_PERIPHERAL_BASE_PHYS);
 
 /// BCM2712 primary/debug UART (PL011, uart10)
-///
-/// This is the console UART exposed on the Pi 5 debug connector
-/// and selected as the primary UART in upstream device trees.
-pub const BCM2712_UART10_BASE: usize = 0x10_7D00_1000;
+pub const BCM2712_UART10_BASE_PHYS: usize = 0x10_7D00_1000;
+pub const BCM2712_UART10_BASE: usize = phys_to_virt(BCM2712_UART10_BASE_PHYS);
 
 /// RP1 internal offset for UART0
 pub const RP1_UART0_OFFSET: usize = 0x0003_0000;
@@ -39,10 +37,10 @@ pub const RP1_PWM0_OFFSET: usize = 0x0009_8000;
 /// RP1 internal offset for PWM1
 pub const RP1_PWM1_OFFSET: usize = 0x0009_C000;
 
-/// Calculate CPU physical address for an RP1 peripheral
+/// Calculate CPU virtual address for an RP1 peripheral
 #[inline]
 pub const fn rp1_peripheral_addr(offset: usize) -> usize {
-    RP1_PERIPHERAL_BASE + offset
+    RP1_PERIPHERAL_BASE.wrapping_add(offset)
 }
 
 /// UART0 base address (PL011-compatible)
@@ -60,14 +58,13 @@ pub const RP1_PWM0_BASE: usize = rp1_peripheral_addr(RP1_PWM0_OFFSET);
 /// PWM1 base address
 pub const RP1_PWM1_BASE: usize = rp1_peripheral_addr(RP1_PWM1_OFFSET);
 
-/// ARM GIC-400 distributor base address (translated through the main SoC bus)
-///
-/// The Pi 5 DTB exposes the GIC at child addresses `0x7fff9000/0x7fffa000`
-/// under the `soc` bus, which maps to CPU physical `0x10_7fff9000/0x10_7fffa000`.
-pub const GICD_BASE: usize = 0x10_7FFF_9000;
+/// ARM GIC-400 distributor base address
+pub const GICD_BASE_PHYS: usize = 0x10_7FFF_9000;
+pub const GICD_BASE: usize = phys_to_virt(GICD_BASE_PHYS);
 
 /// ARM GIC-400 CPU interface base address
-pub const GICC_BASE: usize = 0x10_7FFF_A000;
+pub const GICC_BASE_PHYS: usize = 0x10_7FFF_A000;
+pub const GICC_BASE: usize = phys_to_virt(GICC_BASE_PHYS);
 
 /// Physical memory (DRAM) start
 pub const DRAM_BASE: usize = 0x0;

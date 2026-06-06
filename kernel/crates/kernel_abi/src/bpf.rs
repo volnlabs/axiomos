@@ -111,4 +111,27 @@ pub struct BpfAttr {
     pub key: u64,   // pointer to key
     pub value: u64, // pointer to value (or next_key for GET_NEXT_KEY)
     pub flags: u64, // update flags
+
+    // Object pin/get operations
+    pub pathname: u64, // pointer to null-terminated object path
+    pub path_len: u32, // maximum path length including null terminator
+    pub file_flags: u32,
+
+    // Object info queries
+    pub info: u64,     // pointer to output info struct
+    pub info_len: u32, // output info buffer length
+    pub _reserved: u32,
 }
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BpfObjectInfo {
+    pub id: u32,
+    pub object_kind: u32,
+    pub map_type: u32,
+    pub key_size: u32,
+    pub value_size: u32,
+    pub max_entries: u32,
+}
+
+pub const BPF_OBJECT_KIND_MAP: u32 = 1;

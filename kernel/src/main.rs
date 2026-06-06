@@ -27,7 +27,7 @@ use kernel::{
 use kernel_device::block::{BlockBuf, BlockDevice};
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use kernel_vfs::path::{AbsolutePath, ROOT};
-use log::{error, info};
+use log::info;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use spin::RwLock;
 #[cfg(target_arch = "x86_64")]
@@ -91,11 +91,11 @@ unsafe extern "C" fn main() -> ! {
 // SAFETY: Kernel entry point.
 unsafe extern "C" fn main() -> ! {
     #[inline(always)]
-    fn dbg_mark(ch: u32) {
+    fn dbg_mark(_ch: u32) {
         #[cfg(feature = "rpi5")]
         // SAFETY: Early debug marker write to Pi 5 debug UART10 data register.
         unsafe {
-            (0x10_7D00_1000 as *mut u32).write_volatile(ch);
+            (0x10_7D00_1000 as *mut u32).write_volatile(_ch);
         }
     }
 

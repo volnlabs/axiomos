@@ -1,46 +1,47 @@
 //! rkBPF to ROS2 Bridge
 //!
-//! This crate provides functionality to bridge kernel events from rkBPF
-//! ring buffers to ROS2 topics, enabling unified observability of kernel
-//! and userspace events in the ROS2 ecosystem.
+//! This crate provides functionality to bridge kernel events from pinned rkBPF
+//! ring buffers to stdout or ROS2 topics, enabling unified observability of
+//! kernel and userspace events in the ROS2 ecosystem.
 //!
 //! # Architecture
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────────┐
-//! │                        User Space                                │
-//! │                                                                  │
-//! │  ┌─────────────┐    ┌─────────────┐    ┌────────────────────┐  │
-//! │  │  rk-bridge  │    │  Ring       │    │   ROS2 Node        │  │
-//! │  │  (this)     │───▶│  Buffer     │───▶│   /rk/* topics     │  │
-//! │  └──────┬──────┘    │  Consumer   │    └────────────────────┘  │
-//! │         │           └──────▲──────┘                             │
-//! └─────────┼──────────────────┼────────────────────────────────────┘
-//!           │ mmap             │
-//! ┌─────────┼──────────────────┼────────────────────────────────────┐
-//! │         │           Kernel │                                    │
-//! │    ┌────▼────┐       ┌─────┴─────┐                              │
-//! │    │ rkBPF   │──────▶│ Ring      │                              │
-//! │    │ Program │       │ Buffer    │                              │
-//! │    └─────────┘       └───────────┘                              │
-//! └─────────────────────────────────────────────────────────────────┘
+//! │                        User Space                               │
+//! │                                                                 │
+//! │  ┌─────────────┐    sys_bpf     ┌───────────────────────────┐  │
+//! │  │  rk-bridge  │◀──────────────▶│ pinned ringbuf object     │  │
+//! │  │  (this)     │                │ BPF_OBJ_GET + POLL        │  │
+//! │  └──────┬──────┘                └──────────────▲────────────┘  │
+//! │         │                                      │               │
+//! │         └──────────────────────────────────────┼──────────────▶│
+//! │                                                │   /rk/*       │
+//! └────────────────────────────────────────────────┼───────────────┘
+//!                                                  │
+//! ┌────────────────────────────────────────────────▼───────────────┐
+//! │                           Kernel                               │
+//! │                    live sched_switch/sys_exit                  │
+//! └────────────────────────────────────────────────────────────────┘
 //! ```
 //!
 //! # Usage
 //!
 //! ```bash
-//! # Bridge IMU events to ROS2 topic
-//! rk-to-ros --map /sys/fs/bpf/maps/imu_events --topic /rk/imu
+//! # Bridge live scheduler events to stdout
+//! rk-to-ros --stdout --format text
 //!
-//! # Bridge motor events with custom rate limiting
-//! rk-to-ros --map /sys/fs/bpf/maps/motor_events --topic /rk/motor --rate-limit 1000
+//! # Bridge a different pinned object path
+//! rk-to-ros --map /sys/fs/bpf/maps/imu_events --event-kind legacy --topic /rk/imu
 //! ```
 
 pub mod event;
+pub mod input;
 pub mod publisher;
 pub mod ringbuf;
 
-pub use event::{EventHeader, ImuEvent, MotorEvent, RkEvent, SafetyEvent};
+pub use event::{EventHeader, ImuEvent, MotorEvent, RkEvent, SafetyEvent, SchedSwitchEvent};
+pub use input::{from_stdin, InputError, StreamSource, SUPPORTED_PROTOCOL_VERSION};
 pub use publisher::{EventPublisher, PublisherConfig, RosPublisher, StdoutPublisher};
 pub use ringbuf::{RingBufConsumer, RingBufError};
 
@@ -69,4 +70,8 @@ pub enum Error {
     /// Configuration error
     #[error("configuration error: {0}")]
     Config(String),
+
+    /// Stream input error
+    #[error("stream input error: {0}")]
+    Input(#[from] input::InputError),
 }

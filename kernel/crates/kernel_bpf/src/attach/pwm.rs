@@ -133,10 +133,8 @@ impl<P: PhysicalProfile> AttachPoint<P> for PwmAttach<P> {
         self.next_id += 1;
         self.attached.push(id);
 
-        // In a real implementation:
-        // 1. Hook into the PWM subsystem (e.g., via kprobe on pwm_apply_state)
-        // 2. Filter for the specific chip/channel
-        // 3. Invoke the BPF program on each PWM state change
+        // Note: For Raspberry Pi 5, the hardware-level attachment is handled
+        // directly in kernel/src/arch/aarch64/platform/rpi5/pwm.rs.
 
         Ok(id)
     }

@@ -16,7 +16,7 @@ impl PhysAddr {
 
     #[inline]
     pub const fn is_aligned(self, align: u64) -> bool {
-        self.0 % align == 0
+        self.0.wrapping_rem(align) == 0
     }
 
     #[inline]
@@ -77,6 +77,7 @@ impl<S: PageSize> PhysFrame<S> {
         }
     }
 
+    #[allow(clippy::result_unit_err)]
     pub const fn from_start_address(address: PhysAddr) -> Result<Self, ()> {
         if address.0 & (S::SIZE - 1) != 0 {
             return Err(());

@@ -41,6 +41,7 @@ mod reg {
 }
 
 /// Flag Register bits
+#[allow(dead_code)]
 mod fr {
     /// Transmit FIFO full
     pub const TXFF: u32 = 1 << 5;
@@ -51,6 +52,7 @@ mod fr {
 }
 
 /// Line Control Register bits
+#[allow(dead_code)]
 mod lcrh {
     /// Enable FIFOs
     pub const FEN: u32 = 1 << 4;
@@ -80,6 +82,7 @@ mod lcrh {
 }
 
 /// Control Register bits
+#[allow(dead_code)]
 mod cr {
     /// UART enable
     pub const UARTEN: u32 = 1 << 0;
@@ -171,16 +174,19 @@ impl Rp1Uart {
         unsafe { MmioReg::new(self.base + reg::FR) }
     }
 
+    #[allow(dead_code)]
     fn reg_lcrh(&self) -> MmioReg<u32> {
         // SAFETY: The base address is valid and the offset is within bounds.
         unsafe { MmioReg::new(self.base + reg::LCRH) }
     }
 
+    #[allow(dead_code)]
     fn reg_cr(&self) -> MmioReg<u32> {
         // SAFETY: The base address is valid and the offset is within bounds.
         unsafe { MmioReg::new(self.base + reg::CR) }
     }
 
+    #[allow(dead_code)]
     fn reg_icr(&self) -> MmioReg<u32> {
         // SAFETY: The base address is valid and the offset is within bounds.
         unsafe { MmioReg::new(self.base + reg::ICR) }

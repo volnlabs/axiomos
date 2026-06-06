@@ -10,10 +10,12 @@ license = "MIT"
 
 [features]
 default = []
-# Enable actual ROS2 integration (requires rclrs)
+# Enable actual ROS2 integration via the `ros2` CLI on the host.
 ros2 = []
 
 [dependencies]
+kernel_abi = { path = "../../kernel/crates/kernel_abi" }
+
 # Memory mapping for ring buffer access
 libc = "0.2"
 

@@ -223,10 +223,7 @@ impl core::fmt::Debug for SignedProgram<'_> {
             .field("version", &self.header.version)
             .field("flags", &self.header.flags)
             .field("program_hash", &self.header.program_hash)
-            .field(
-                "signer_id",
-                &format_args!("{:02x?}", &self.header.signer_id),
-            )
+            .field("signer_id", &format_args!("{:02x?}", self.header.signer_id))
             .field("timestamp", &self.header.timestamp)
             .field("data_len", &self.program_data.len())
             .finish()

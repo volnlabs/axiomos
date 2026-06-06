@@ -281,12 +281,39 @@ impl AddressSpaceMapper {
         self.page_table.translate_addr(vaddr)
     }
 
+    #[cfg(target_arch = "x86_64")]
+    pub fn translate_page_flags(&self, vaddr: VirtAddr) -> Option<(PhysAddr, PageTableFlags)> {
+        let TranslateResult::Mapped {
+            frame,
+            offset,
+            flags,
+        } = self.page_table.translate(vaddr)
+        else {
+            return None;
+        };
+
+        Some((frame.start_address() + offset, flags))
+    }
+
     #[cfg(target_arch = "aarch64")]
     pub fn translate(&self, vaddr: VirtAddr) -> Option<PhysAddr> {
         let walker = unsafe { PageTableWalker::new(self.level0_vaddr.as_mut_ptr()) };
         walker
             .translate(vaddr.as_usize())
             .map(|phys| PhysAddr::new(phys as u64))
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    pub fn translate_page_flags(&self, vaddr: VirtAddr) -> Option<(PhysAddr, PageTableFlags)> {
+        let walker = unsafe { PageTableWalker::new(self.level0_vaddr.as_mut_ptr()) };
+        walker
+            .translate_full(vaddr.as_usize())
+            .map(|(phys, raw_flags)| {
+                (
+                    PhysAddr::new(phys as u64),
+                    PageTableFlags::from_pte_bits(raw_flags),
+                )
+            })
     }
 
     pub fn visit_user_pages<F>(&self, mut callback: F)

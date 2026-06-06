@@ -146,10 +146,9 @@ impl<P: PhysicalProfile> AttachPoint<P> for GpioAttach<P> {
         self.next_id += 1;
         self.attached.push(id);
 
-        // In a real implementation:
-        // 1. Open the GPIO chip via /dev/gpiochipN
-        // 2. Request the line with edge detection
-        // 3. Register a callback that invokes the BPF program
+        // Note: For Raspberry Pi 5, the hardware-level attachment is handled
+        // directly in kernel/src/arch/aarch64/platform/rpi5/gpio.rs via the
+        // sys_bpf(BPF_PROG_ATTACH) syscall.
 
         Ok(id)
     }

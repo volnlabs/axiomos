@@ -483,6 +483,11 @@ impl AddressSpace {
         self.inner.read().translate(vaddr)
     }
 
+    #[allow(dead_code)]
+    pub fn translate_page_flags(&self, vaddr: VirtAddr) -> Option<(PhysAddr, PageTableFlags)> {
+        self.inner.read().translate_page_flags(vaddr)
+    }
+
     #[cfg(target_arch = "aarch64")]
     pub fn map<S: PageSize>(
         &self,

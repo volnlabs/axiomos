@@ -2,12 +2,15 @@ use alloc::vec::Vec;
 use core::mem::size_of;
 
 use kernel_abi::{
-    BpfAttr, BPF_MAP_CREATE, BPF_MAP_DELETE_ELEM, BPF_MAP_LOOKUP_ELEM, BPF_MAP_UPDATE_ELEM,
-    BPF_PROG_ATTACH, BPF_PROG_DETACH, BPF_PROG_LOAD, BPF_PROG_LOAD_ELF, BPF_RINGBUF_POLL,
+    BpfAttr, BpfObjectInfo, BPF_MAP_CREATE, BPF_MAP_DELETE_ELEM, BPF_MAP_LOOKUP_ELEM,
+    BPF_MAP_UPDATE_ELEM, BPF_OBJ_GET, BPF_OBJ_GET_INFO_BY_FD, BPF_OBJ_PIN, BPF_PROG_ATTACH,
+    BPF_PROG_DETACH, BPF_PROG_LOAD, BPF_PROG_LOAD_ELF, BPF_RINGBUF_POLL,
 };
 use kernel_bpf::bytecode::insn::BpfInsn;
 
-use super::validation::{copy_from_userspace, copy_to_userspace, read_userspace_slice};
+use super::validation::{
+    copy_from_userspace, copy_to_userspace, read_userspace_slice, read_userspace_string,
+};
 use crate::BPF_MANAGER;
 
 pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
@@ -180,6 +183,82 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
                     Ok(_) => 0,
                     Err(_) => -2, // ENOENT
                 }
+            } else {
+                -1
+            }
+        }
+        BPF_OBJ_PIN => {
+            log::info!("sys_bpf: OBJ_PIN");
+            let attr = match copy_from_userspace::<BpfAttr>(attr_ptr) {
+                Ok(a) => a,
+                Err(_) => return -1,
+            };
+
+            let map_id = attr.map_fd;
+            let path = match read_userspace_string(attr.pathname as usize, attr.path_len as usize) {
+                Ok(path) => path,
+                Err(_) => return -1,
+            };
+
+            if let Some(manager) = BPF_MANAGER.get() {
+                match manager.lock().pin_map(path, map_id) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        log::error!("sys_bpf: OBJ_PIN failed: {}", e);
+                        -1
+                    }
+                }
+            } else {
+                -1
+            }
+        }
+        BPF_OBJ_GET => {
+            log::info!("sys_bpf: OBJ_GET");
+            let attr = match copy_from_userspace::<BpfAttr>(attr_ptr) {
+                Ok(a) => a,
+                Err(_) => return -1,
+            };
+
+            let path = match read_userspace_string(attr.pathname as usize, attr.path_len as usize) {
+                Ok(path) => path,
+                Err(_) => return -1,
+            };
+
+            if let Some(manager) = BPF_MANAGER.get() {
+                match manager.lock().get_pinned_map(&path) {
+                    Some(map_id) => map_id as isize,
+                    None => -2,
+                }
+            } else {
+                -1
+            }
+        }
+        BPF_OBJ_GET_INFO_BY_FD => {
+            log::debug!("sys_bpf: OBJ_GET_INFO_BY_FD");
+            let attr = match copy_from_userspace::<BpfAttr>(attr_ptr) {
+                Ok(a) => a,
+                Err(_) => return -1,
+            };
+
+            if attr.info == 0 || (attr.info_len as usize) < size_of::<BpfObjectInfo>() {
+                return -1;
+            }
+
+            if let Some(manager) = BPF_MANAGER.get() {
+                let info = match manager.lock().get_map_info(attr.map_fd) {
+                    Some(info) => info,
+                    None => return -1,
+                };
+                let info_bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        (&info as *const BpfObjectInfo).cast::<u8>(),
+                        size_of::<BpfObjectInfo>(),
+                    )
+                };
+                if copy_to_userspace(attr.info as usize, info_bytes).is_err() {
+                    return -1;
+                }
+                size_of::<BpfObjectInfo>() as isize
             } else {
                 -1
             }

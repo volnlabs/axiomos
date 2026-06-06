@@ -3,6 +3,7 @@ use core::ops::Neg;
 use core::slice::{from_raw_parts, from_raw_parts_mut};
 #[cfg(feature = "rpi5")]
 use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use access::KernelAccess;
@@ -62,14 +63,18 @@ use crate::arch::UserContext;
 static WRITE_MARKER_SENT: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "rpi5")]
 static BPF_MARKER_SENT: AtomicBool = AtomicBool::new(false);
+static EXPORTED_RINGBUF_MAP_ID: AtomicU32 = AtomicU32::new(u32::MAX);
+
+const DEBUG_OP_SET_EXPORTED_RINGBUF_MAP_ID: usize = 1;
+const DEBUG_OP_GET_EXPORTED_RINGBUF_MAP_ID: usize = 2;
 
 #[cfg(feature = "rpi5")]
 #[inline(always)]
-fn dbg_mark(ch: u32) {
+fn dbg_mark(_ch: u32) {
     // SAFETY: Write to Pi 5 debug UART10 data register through the
     // higher-half direct map alias so this remains valid after TTBR0 switch.
     unsafe {
-        (0xFFFF_8010_7D00_1000 as *mut u32).write_volatile(ch);
+        (0xFFFF_8010_7D00_1000 as *mut u32).write_volatile(_ch);
     }
 }
 
@@ -90,9 +95,8 @@ pub fn dispatch_syscall(
         syscall_name(n)
     );
 
-    // Run BPF hooks (AttachType::Syscall = 2) at syscall entry
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    if let Some(manager) = crate::BPF_MANAGER.get() {
+    {
         use kernel_bpf::execution::SyscallTraceContext;
 
         let trace_ctx = SyscallTraceContext {
@@ -104,33 +108,12 @@ pub fn dispatch_syscall(
             arg5: arg5 as u64,
             arg6: arg6 as u64,
         };
-
-        // SAFETY: We are creating a slice from a stack-allocated struct.
-        // The slice is only used within this scope to create the BpfContext.
-        let slice = unsafe {
-            core::slice::from_raw_parts(
-                &trace_ctx as *const _ as *const u8,
-                core::mem::size_of::<SyscallTraceContext>(),
-            )
-        };
-
-        let ctx = kernel_bpf::execution::BpfContext::from_slice(slice);
-
-        // Lock-free pattern: clone programs and release lock BEFORE execution
-        // so that BPF helpers can re-acquire the lock without deadlocking.
-        let programs = manager
-            .lock()
-            .get_hook_programs(crate::bpf::ATTACH_TYPE_SYSCALL);
-        for (prog_id, program) in &programs {
-            match crate::bpf::BpfManager::execute_program(program, &ctx) {
-                Ok(res) => {
-                    if res != 0 {
-                        log::info!("Syscall Trace [id={}] syscall_nr: {}", prog_id, res);
-                    }
-                }
-                Err(e) => log::error!("Syscall BPF Hook [id={}] failed: {:?}", prog_id, e),
-            }
-        }
+        let ctx = kernel_bpf::execution::BpfContext::from_struct(&trace_ctx);
+        let _ = crate::bpf::BpfManager::run_hook_programs(
+            crate::bpf::ATTACH_TYPE_SYS_ENTER,
+            &ctx,
+            "sys_enter",
+        );
     }
 
     let result: Result<usize, Errno> = match n {
@@ -201,6 +184,7 @@ pub fn dispatch_syscall(
         kernel_abi::SYS_FORK => dispatch_sys_fork(ctx),
         kernel_abi::SYS_EXECVE => dispatch_sys_execve(ctx, arg1, arg2, arg3),
         kernel_abi::SYS_WAITPID => dispatch_sys_waitpid(arg1, arg2, arg3),
+        kernel_abi::SYS_DEBUG => dispatch_sys_debug(arg1, arg2),
         _ => {
             error!("unimplemented syscall: {} ({n})", syscall_name(n));
             loop {
@@ -209,7 +193,7 @@ pub fn dispatch_syscall(
         }
     };
 
-    match result {
+    let result = match result {
         Ok(ret) => {
             trace!("syscall {} ({n}) returned {ret}", syscall_name(n));
             ret as isize
@@ -218,6 +202,52 @@ pub fn dispatch_syscall(
             error!("syscall {} ({n}) failed with error: {e:?}", syscall_name(n));
             Into::<isize>::into(e).neg()
         }
+    };
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        use kernel_bpf::execution::SyscallExitContext;
+
+        let exit_ctx = SyscallExitContext {
+            syscall_nr: n as u64,
+            result: result as i64,
+        };
+        let ctx = kernel_bpf::execution::BpfContext::from_struct(&exit_ctx);
+        if let Some(manager) = crate::BPF_MANAGER.get() {
+            let attached = manager
+                .lock()
+                .get_hook_programs(crate::bpf::ATTACH_TYPE_SYS_EXIT)
+                .len();
+            if attached != 0 {
+                trace!("sys_exit dispatch: syscall={n} attached_programs={attached}");
+            }
+        }
+        let _ = crate::bpf::BpfManager::run_hook_programs(
+            crate::bpf::ATTACH_TYPE_SYS_EXIT,
+            &ctx,
+            "sys_exit",
+        );
+    }
+
+    result
+}
+
+fn dispatch_sys_debug(op: usize, value: usize) -> Result<usize, Errno> {
+    match op {
+        DEBUG_OP_SET_EXPORTED_RINGBUF_MAP_ID => {
+            let map_id = u32::try_from(value).map_err(|_| EINVAL)?;
+            EXPORTED_RINGBUF_MAP_ID.store(map_id, AtomicOrdering::Relaxed);
+            Ok(0)
+        }
+        DEBUG_OP_GET_EXPORTED_RINGBUF_MAP_ID => {
+            let map_id = EXPORTED_RINGBUF_MAP_ID.load(AtomicOrdering::Relaxed);
+            if map_id == u32::MAX {
+                Err(EINVAL)
+            } else {
+                Ok(map_id as usize)
+            }
+        }
+        _ => Err(EINVAL),
     }
 }
 

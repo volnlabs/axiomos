@@ -2,7 +2,9 @@
 
 A bare-metal Rust kernel with runtime-programmable behavior through verified eBPF programs.
 
-Axiom targets robotics and embedded systems where kernel logic must evolve without reflashing firmware. Instead of recompiling to change kernel behavior, verified programs are loaded and attached to kernel hooks at runtime.
+Axiom targets robotics and embedded systems where kernel logic should evolve without reflashing firmware. Instead of recompiling to change kernel behavior, verified programs are loaded and attached to kernel hooks at runtime.
+
+> **Status: research kernel under active hardware bring-up on Raspberry Pi 5.** Not production-ready. See [Limitations](#limitations) for the current honest list of what works and what doesn't. Benchmarks in [docs/benchmarks.md](docs/benchmarks.md) are measured on real hardware; the headline numbers (e.g. 211 ns interrupt latency) are single-core, single-program, no-contention measurements — multi-core RT claims require the scheduler work tracked under [issue #57](https://github.com/pro-utkarshM/axiomOS/issues/57).
 
 **Repository structure:**
 - `kernel/src` — core kernel implementation
@@ -46,9 +48,9 @@ Axiom boots directly on hardware with no underlying OS:
 |----------|---------|-----------|---------|------------|
 | Linux + eBPF | ~2,000ns jitter | ~60MB (kernel) | Limited | Lower |
 | RTOS + custom | <10,000ns | ~1MB | Partial | Medium |
-| **Axiom (Pi5)** | **211ns (fixed)** | **~22MB** | **Total** | **Higher** |
+| **Axiom (Pi5)** | **211ns avg, single-core** | **~22MB** | **Total** | **Higher** |
 
-For robotics with sub-millisecond control loops, bare metal is required. See [docs/benchmarks.md](docs/benchmarks.md) for detailed hardware measurements.
+For robotics with sub-millisecond control loops, bare metal is the right target. The latency figure above is honest about its measurement boundary: hardware vector entry → BPF dispatch on a single core with no contention. P99 / P99.9 tail latency under multi-core load is tracked in [issue #74](https://github.com/pro-utkarshM/axiomOS/issues/74) and is not yet measured. See [docs/benchmarks.md](docs/benchmarks.md) for the full methodology.
 
 ---
 
@@ -95,11 +97,15 @@ BPF_PROG(gpio_handler, struct gpio_event *event) {
 }
 ```
 
-**Verification guarantees:**
+**Verification guarantees (today):**
 - Bounded execution (no infinite loops)
 - Constrained stack usage (up to 512KB depending on profile)
 - Validated memory access (no arbitrary pointers)
 - Termination proof (static analysis of control flow)
+
+**Verifier hardening track:** the verifier ships with tnum bit-tracking, state pruning, range refinement, and per-instruction liveness as separate modules ([state.rs](kernel/crates/kernel_bpf/src/verifier/state.rs), [pruner.rs](kernel/crates/kernel_bpf/src/verifier/pruner.rs), [refine.rs](kernel/crates/kernel_bpf/src/verifier/refine.rs), [liveness.rs](kernel/crates/kernel_bpf/src/verifier/liveness.rs)). The integration of these modules into `verify_alu`, `verify_safety`, and `verify_jump` is tracked under [#102](https://github.com/pro-utkarshM/axiomOS/issues/102), [#103](https://github.com/pro-utkarshM/axiomOS/issues/103), [#104](https://github.com/pro-utkarshM/axiomOS/issues/104), [#105](https://github.com/pro-utkarshM/axiomOS/issues/105). A libfuzzer harness ([kernel_bpf/fuzz](kernel/crates/kernel_bpf/fuzz)) runs on every PR and nightly.
+
+**Signing:** [kernel_bpf::signing](kernel/crates/kernel_bpf/src/signing) implements Ed25519 verification but the `sys_bpf` load path does not invoke it yet ([#20](https://github.com/pro-utkarshM/axiomOS/issues/20)). Until that lands, any valid BPF bytecode is accepted.
 
 **Execution paths:**
 - **Interpreter:** Portable, ~50ns overhead per instruction (x86_64)
@@ -418,10 +424,11 @@ fn handle_interrupt(irq: u32) {
 - **Boot:** Device tree
 
 ### RISC-V
-- **Status:** Minimal Boot Only
+- **Status:** Early bring-up — boot only, no userspace
 - **Target:** QEMU virt
-- **Current Support:** Logging, dummy allocator
-- **Planned:** MMU, PLIC, scheduler, JIT
+- **Current support:** SBI console, trap stub, paging skeleton (~860 LoC in `kernel/src/arch/riscv64/`)
+- **Missing for parity with aarch64:** PLIC wiring, userspace syscall dispatch, fork/exec, real memory subsystem, BPF execution
+- Listed for completeness; not on the critical path
 
 ---
 
@@ -511,6 +518,51 @@ cargo run
 - [ ] SMP support
 - [ ] eBPF JIT
 - [ ] Real hardware testing
+
+---
+
+## Limitations
+
+The kernel boots and runs real BPF programs on a Raspberry Pi 5. Several load-bearing pieces are not yet in place; pretending otherwise wastes a reader's time.
+
+**Kernel core:**
+- **User-mode page faults panic the kernel** — there is no signal delivery, so a faulting user task takes the kernel with it ([#52](https://github.com/pro-utkarshM/axiomOS/issues/52), [#53](https://github.com/pro-utkarshM/axiomOS/issues/53))
+- **No demand paging** — every user page is pre-allocated at process creation; `brk` / `mmap` don't grow lazily ([#54](https://github.com/pro-utkarshM/axiomOS/issues/54))
+- **No copy-on-write fork on x86_64** — full page copy; aarch64 path has CoW
+- **`sys_nanosleep` busy-spins** — wait queues not yet wired ([#56](https://github.com/pro-utkarshM/axiomOS/issues/56))
+- **No POSIX signals** — `kill`, `sigaction`, `SIGSEGV` delivery all absent
+- **Boot panics on missing `/bin/init`** — no recovery path ([#55](https://github.com/pro-utkarshM/axiomOS/issues/55))
+
+**Scheduler:**
+- **Single global run queue** across all CPUs — work-stealing + per-CPU queues tracked under [#57](https://github.com/pro-utkarshM/axiomOS/issues/57)
+- **No priority inheritance** on kernel mutexes — classic priority inversion possible ([#60](https://github.com/pro-utkarshM/axiomOS/issues/60))
+- **No `preempt_disable` / `preempt_enable` primitive** — critical sections either use IRQ-disable or hope ([#62](https://github.com/pro-utkarshM/axiomOS/issues/62))
+- **EDF scheduling exists for BPF programs only**, not for native OS tasks ([#61](https://github.com/pro-utkarshM/axiomOS/issues/61))
+
+**BPF subsystem:**
+- **Signing not wired** ([#20](https://github.com/pro-utkarshM/axiomOS/issues/20)) — any bytecode is accepted today
+- **Verifier stack-depth output discarded** at load ([#48](https://github.com/pro-utkarshM/axiomOS/issues/48))
+- **BPF Manager guarded by one global mutex** — every map op / load / attach serializes ([#58](https://github.com/pro-utkarshM/axiomOS/issues/58))
+- **No BPF-to-BPF function calls** ([#87](https://github.com/pro-utkarshM/axiomOS/issues/87)), no BTF integration ([#90](https://github.com/pro-utkarshM/axiomOS/issues/90)), no Spectre mitigations ([#89](https://github.com/pro-utkarshM/axiomOS/issues/89))
+
+**Memory:**
+- **AddressSpace doesn't track per-frame ownership on Drop** — long-running systems with process churn slowly leak physical memory ([#69](https://github.com/pro-utkarshM/axiomOS/issues/69))
+- **Task stack isolation FIXME** — stacks in higher half may be cross-writable; security audit pending ([#70](https://github.com/pro-utkarshM/axiomOS/issues/70))
+
+**Drivers:**
+- **No I²C, SPI, CAN, or Ethernet drivers** today — only GPIO / PWM / UART on the RP1. Tracked under [#63](https://github.com/pro-utkarshM/axiomOS/issues/63), [#64](https://github.com/pro-utkarshM/axiomOS/issues/64), [#66](https://github.com/pro-utkarshM/axiomOS/issues/66), [#67](https://github.com/pro-utkarshM/axiomOS/issues/67)
+- **No hardware watchdog integration** ([#72](https://github.com/pro-utkarshM/axiomOS/issues/72))
+
+**Operations:**
+- **No persistent crash dump** ([#73](https://github.com/pro-utkarshM/axiomOS/issues/73))
+- **No A/B kernel slots / rollback** ([#75](https://github.com/pro-utkarshM/axiomOS/issues/75))
+- **No hardware-in-loop CI** — Pi5 testing is currently manual ([#76](https://github.com/pro-utkarshM/axiomOS/issues/76))
+
+**Benchmark caveats:**
+- The 211 ns interrupt-latency headline is a single-core, single-program, no-contention measurement. Multi-core RT claims require the per-CPU run queue work in [#57](https://github.com/pro-utkarshM/axiomOS/issues/57) plus a 24h soak with P99 / P99.9 histograms ([#74](https://github.com/pro-utkarshM/axiomOS/issues/74)).
+- The 5.8× boot-time improvement is measured against stock Raspberry Pi OS Linux. A minimal Buildroot Linux on the same hardware closes much of that gap. Honest comparative benchmarks against Zephyr / NuttX / Linux PREEMPT_RT are tracked under [#78](https://github.com/pro-utkarshM/axiomOS/issues/78).
+
+The full picture lives in [issue #81 — execution roadmap](https://github.com/pro-utkarshM/axiomOS/issues/81). If a feature isn't in the list above, treat it as not yet implemented and check the roadmap before relying on it.
 
 ---
 

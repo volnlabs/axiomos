@@ -21,7 +21,9 @@ impl Default for MemoryRegions {
 
 use alloc::sync::Arc;
 
-use crate::arch::types::{PageSize, PageTableFlags, Size4KiB};
+use crate::arch::types::PageTableFlags;
+#[cfg(target_arch = "aarch64")]
+use crate::arch::types::Size4KiB;
 use crate::mcore::mtask::process::Process;
 use crate::mem::virt::VirtualMemoryAllocator;
 
@@ -160,11 +162,8 @@ impl MemoryRegion {
     }
 }
 
-use crate::mem::phys_to_virt;
-
 impl MappedMemoryRegion {
     pub fn clone_to_process(&self, new_process: &Arc<Process>) -> Result<Self, &'static str> {
-        // 1. Reserve segment in new process
         let new_segment_inner =
             kernel_virtual_memory::Segment::new(self.segment.start, self.segment.len);
 
@@ -173,49 +172,39 @@ impl MappedMemoryRegion {
             .mark_as_reserved(new_segment_inner)
             .map_err(|_| "Failed to reserve segment in new process")?;
 
-        // 2. Allocate new physical frames (must be contiguous for MappedMemoryRegion)
-        // actually self.segment should be page aligned and size covered.
-        // self.physical_frames covers the whole segment?
-        // Let's use the count from physical_frames.
-        let frame_count = self.physical_frames.end.start_address().as_u64() / Size4KiB::SIZE
-            - self.physical_frames.start.start_address().as_u64() / Size4KiB::SIZE
-            + 1;
+        PhysicalMemory::retain_frames(self.physical_frames);
 
-        let new_frames = PhysicalMemory::allocate_frames::<Size4KiB>(frame_count as usize)
-            .ok_or("Out of physical memory")?;
+        #[cfg(target_arch = "aarch64")]
+        let flags = PageTableFlags::PRESENT
+            | PageTableFlags::USER_ACCESSIBLE
+            | PageTableFlags::NO_EXECUTE
+            | PageTableFlags::COPY_ON_WRITE;
 
-        // 3. Copy data
-        for (i, frame) in new_frames.into_iter().enumerate() {
-            // Calculate source virtual address
-            let src_vaddr = self.segment.start + (i as u64 * Size4KiB::SIZE);
-            let src_ptr = src_vaddr.as_ptr::<u8>();
-
-            // Calculate dest physical -> virtual address (direct map)
-            let dst_paddr = frame.start_address().as_u64();
-            let dst_vaddr = phys_to_virt(dst_paddr as usize);
-            let dst_ptr = dst_vaddr as *mut u8;
-
-            unsafe {
-                core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, Size4KiB::SIZE as usize);
-            }
-        }
-
-        // 4. Map in new process
-        // We assume typical user permissions (RW).
-        // TODO: Ideally we should preserve original permissions.
+        #[cfg(not(target_arch = "aarch64"))]
         let flags = PageTableFlags::PRESENT
             | PageTableFlags::WRITABLE
             | PageTableFlags::USER_ACCESSIBLE
             | PageTableFlags::NO_EXECUTE;
 
         new_process
-            .with_address_space(|as_| as_.map_range(&*new_segment, new_frames.into_iter(), flags))
+            .with_address_space(|as_| {
+                as_.map_range(*new_segment, self.physical_frames.into_iter(), flags)
+            })
             .map_err(|_| "Failed to map memory in new process")?;
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            // Writable mapped regions become shared read-only pages in both parent and child.
+            let current = crate::mcore::context::ExecutionContext::load().current_process();
+            current
+                .with_address_space(|as_| as_.remap_range::<Size4KiB, _>(*self.segment, |_| flags))
+                .map_err(|_| "Failed to remap parent memory as copy-on-write")?;
+        }
 
         Ok(MappedMemoryRegion {
             segment: new_segment,
             size: self.size,
-            physical_frames: new_frames,
+            physical_frames: self.physical_frames,
         })
     }
 }

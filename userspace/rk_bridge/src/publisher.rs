@@ -5,6 +5,8 @@
 
 use crate::event::RkEvent;
 use std::io::Write;
+#[cfg(feature = "ros2")]
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -194,6 +196,12 @@ impl StdoutPublisher {
                     ts, e.series_id, e.value, e.tag
                 )
             }
+            RkEvent::SchedSwitch(e) => {
+                format!(
+                    "{}SCHED_SWITCH: cpu={} prev(pid={}, tid={}) -> next(pid={}, tid={})",
+                    ts, e.cpu_id, e.prev_pid, e.prev_tid, e.next_pid, e.next_tid
+                )
+            }
             RkEvent::Trace(e) => {
                 format!("{}TRACE: {}", ts, e.message)
             }
@@ -290,59 +298,116 @@ impl EventPublisher for FilePublisher {
     }
 }
 
-/// Placeholder ROS2 publisher.
+/// ROS2 publisher.
 ///
-/// In a full implementation, this would use rclrs (ros2_rust) bindings
-/// to publish to actual ROS2 topics.
+/// With the `ros2` feature enabled, this publishes real `std_msgs/msg/String`
+/// messages through the host `ros2` CLI. Without that feature, construction
+/// fails so the bridge does not silently pretend to publish.
 pub struct RosPublisher {
     config: PublisherConfig,
     events_published: AtomicU64,
     events_dropped: AtomicU64,
+    last_publish: std::sync::Mutex<std::time::Instant>,
 }
 
 impl RosPublisher {
     /// Create a new ROS2 publisher.
-    ///
-    /// Note: This is a placeholder. Real implementation requires rclrs.
-    pub fn new(config: PublisherConfig) -> Self {
+    pub fn new(config: PublisherConfig) -> Result<Self, PublishError> {
         log::info!("Creating ROS2 publisher for topic: {}", config.topic);
 
-        Self {
+        #[cfg(feature = "ros2")]
+        ensure_ros2_cli_available()?;
+
+        #[cfg(not(feature = "ros2"))]
+        {
+            return Err(PublishError::Ros2(
+                "rk_bridge was built without the `ros2` feature".to_string(),
+            ));
+        }
+
+        #[allow(unreachable_code)]
+        Ok(Self {
             config,
             events_published: AtomicU64::new(0),
             events_dropped: AtomicU64::new(0),
-        }
+            last_publish: std::sync::Mutex::new(std::time::Instant::now()),
+        })
     }
 
     /// Get the topic name.
     pub fn topic(&self) -> &str {
         &self.config.topic
     }
+
+    fn check_rate_limit(&self) -> bool {
+        if self.config.rate_limit == 0 {
+            return true;
+        }
+
+        let mut last = self.last_publish.lock().unwrap();
+        let now = std::time::Instant::now();
+        let min_interval = Duration::from_secs_f64(1.0 / self.config.rate_limit as f64);
+
+        if now.duration_since(*last) >= min_interval {
+            *last = now;
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg_attr(not(test), cfg(feature = "ros2"))]
+    fn topic_for_event(&self, event: &RkEvent) -> &str {
+        if self.config.topic != "/rk/events" {
+            return &self.config.topic;
+        }
+
+        match event {
+            RkEvent::Imu(_) => "/rk/imu",
+            RkEvent::Motor(_) => "/rk/motor",
+            RkEvent::Safety(_) => "/rk/safety",
+            RkEvent::Gpio(_) => "/rk/gpio",
+            RkEvent::TimeSeries(_) => "/rk/timeseries",
+            RkEvent::SchedSwitch(_) => "/rk/sched_switch",
+            RkEvent::Trace(_) => "/rk/trace",
+            RkEvent::Unknown { .. } => "/rk/events",
+        }
+    }
+
+    #[cfg_attr(not(test), cfg(feature = "ros2"))]
+    fn encode_event_message(&self, event: &RkEvent) -> Result<String, PublishError> {
+        let payload = serde_json::to_string(event)
+            .map_err(|e| PublishError::Serialization(e.to_string()))?;
+        serde_json::to_string(&serde_json::json!({ "data": payload }))
+            .map_err(|e| PublishError::Serialization(e.to_string()))
+    }
 }
 
 impl EventPublisher for RosPublisher {
     fn publish(&self, event: &RkEvent) -> Result<(), PublishError> {
-        // Placeholder: In real implementation, convert to ROS2 message and publish
-        // For now, we just count the events
+        if !self.check_rate_limit() {
+            self.events_dropped.fetch_add(1, Ordering::Relaxed);
+            return Err(PublishError::RateLimited);
+        }
 
         #[cfg(feature = "ros2")]
         {
-            // rclrs integration would go here
-            // self.publisher.publish(ros_msg)?;
-            unimplemented!("ROS2 integration requires rclrs feature");
+            let topic = self.topic_for_event(event);
+            let message = self.encode_event_message(event)?;
+
+            publish_via_ros2_cli(topic, &message)?;
+
+            self.events_published.fetch_add(1, Ordering::Relaxed);
+            Ok(())
         }
 
         #[cfg(not(feature = "ros2"))]
         {
-            log::debug!(
-                "ROS2 publish to {}: event_type={}",
-                self.config.topic,
-                event.event_type()
-            );
+            let _ = event;
+            Err(PublishError::Ros2(
+                "rk_bridge was built without the `ros2` feature".to_string(),
+            ))
         }
-
-        self.events_published.fetch_add(1, Ordering::Relaxed);
-        Ok(())
     }
 
     fn flush(&self) -> Result<(), PublishError> {
@@ -384,6 +449,54 @@ impl Default for MultiPublisher {
     }
 }
 
+#[cfg(feature = "ros2")]
+fn ensure_ros2_cli_available() -> Result<(), PublishError> {
+    let status = Command::new("ros2")
+        .arg("--help")
+        .status()
+        .map_err(|e| PublishError::Ros2(format!("failed to execute `ros2`: {e}")))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(PublishError::Ros2(format!(
+            "`ros2 --help` exited with status {status}"
+        )))
+    }
+}
+
+#[cfg(feature = "ros2")]
+fn publish_via_ros2_cli(topic: &str, message: &str) -> Result<(), PublishError> {
+    let output = Command::new("ros2")
+        .args([
+            "topic",
+            "pub",
+            "--once",
+            topic,
+            "std_msgs/msg/String",
+            message,
+        ])
+        .output()
+        .map_err(|e| PublishError::Ros2(format!("failed to execute `ros2 topic pub`: {e}")))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("exit status {}", output.status)
+        };
+        Err(PublishError::Ros2(format!(
+            "ros2 topic publish to {topic} failed: {detail}"
+        )))
+    }
+}
+
 impl EventPublisher for MultiPublisher {
     fn publish(&self, event: &RkEvent) -> Result<(), PublishError> {
         for publisher in &self.publishers {
@@ -418,7 +531,7 @@ impl EventPublisher for MultiPublisher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{EventHeader, ImuEvent};
+    use crate::event::{EventHeader, ImuEvent, SchedSwitchEvent};
 
     fn make_test_event() -> RkEvent {
         RkEvent::Imu(ImuEvent {
@@ -473,5 +586,79 @@ mod tests {
         let config = PublisherConfig::default();
         assert_eq!(config.topic, "/rk/events");
         assert_eq!(config.rate_limit, 0);
+    }
+
+    #[test]
+    fn test_stdout_publisher_format_sched_switch_text() {
+        let config = PublisherConfig {
+            format: OutputFormat::Text,
+            include_timestamps: false,
+            ..Default::default()
+        };
+        let publisher = StdoutPublisher::new(config);
+        let event = RkEvent::SchedSwitch(SchedSwitchEvent {
+            cpu_id: 0,
+            prev_pid: 2,
+            prev_tid: 4,
+            next_pid: 3,
+            next_tid: 5,
+        });
+
+        let formatted = publisher.format_event(&event).unwrap();
+        assert!(formatted.contains("SCHED_SWITCH"));
+        assert!(formatted.contains("prev(pid=2, tid=4)"));
+        assert!(formatted.contains("next(pid=3, tid=5)"));
+    }
+
+    #[test]
+    fn test_ros_publisher_routes_default_topics() {
+        let publisher = RosPublisher {
+            config: PublisherConfig::default(),
+            events_published: AtomicU64::new(0),
+            events_dropped: AtomicU64::new(0),
+            last_publish: std::sync::Mutex::new(std::time::Instant::now()),
+        };
+
+        assert_eq!(publisher.topic_for_event(&make_test_event()), "/rk/imu");
+        assert_eq!(
+            publisher.topic_for_event(&RkEvent::SchedSwitch(SchedSwitchEvent {
+                cpu_id: 0,
+                prev_pid: 2,
+                prev_tid: 4,
+                next_pid: 3,
+                next_tid: 5,
+            })),
+            "/rk/sched_switch"
+        );
+    }
+
+    #[test]
+    fn test_ros_publisher_honors_custom_topic() {
+        let publisher = RosPublisher {
+            config: PublisherConfig {
+                topic: "/rk/custom".to_string(),
+                ..Default::default()
+            },
+            events_published: AtomicU64::new(0),
+            events_dropped: AtomicU64::new(0),
+            last_publish: std::sync::Mutex::new(std::time::Instant::now()),
+        };
+
+        assert_eq!(publisher.topic_for_event(&make_test_event()), "/rk/custom");
+    }
+
+    #[test]
+    fn test_ros_publisher_encodes_string_message() {
+        let publisher = RosPublisher {
+            config: PublisherConfig::default(),
+            events_published: AtomicU64::new(0),
+            events_dropped: AtomicU64::new(0),
+            last_publish: std::sync::Mutex::new(std::time::Instant::now()),
+        };
+
+        let message = publisher.encode_event_message(&make_test_event()).unwrap();
+        assert!(message.starts_with('{'));
+        assert!(message.contains("\"data\":\"{\\\"Imu\\\""));
+        assert!(message.ends_with('}'));
     }
 }

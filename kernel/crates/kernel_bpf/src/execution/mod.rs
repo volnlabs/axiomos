@@ -191,6 +191,25 @@ pub struct SyscallTraceContext {
     pub arg6: u64,
 }
 
+/// Context for syscall exit hooks.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct SyscallExitContext {
+    pub syscall_nr: u64,
+    pub result: i64,
+}
+
+/// Context for scheduler task switch hooks.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct SchedSwitchContext {
+    pub cpu_id: u64,
+    pub prev_pid: u64,
+    pub prev_tid: u64,
+    pub next_pid: u64,
+    pub next_tid: u64,
+}
+
 impl BpfContext {
     /// Create an empty context.
     pub const fn empty() -> Self {
@@ -217,6 +236,14 @@ impl BpfContext {
             kernel_heap_kb: 0,
             kernel_image_mb: 0,
         }
+    }
+
+    /// Create a context from any `repr(C)` POD-like value.
+    pub fn from_struct<T>(value: &T) -> Self {
+        let data = unsafe {
+            core::slice::from_raw_parts(value as *const T as *const u8, core::mem::size_of::<T>())
+        };
+        Self::from_slice(data)
     }
 
     /// Get the data length.
@@ -265,6 +292,9 @@ pub enum BpfError {
 
     /// Out of memory
     OutOfMemory,
+
+    /// The program failed static verification and was rejected at load time.
+    VerificationFailed,
 }
 
 impl core::fmt::Display for BpfError {
@@ -278,6 +308,7 @@ impl core::fmt::Display for BpfError {
             Self::InvalidInstruction => write!(f, "invalid instruction"),
             Self::NotLoaded => write!(f, "program not loaded"),
             Self::OutOfMemory => write!(f, "out of memory"),
+            Self::VerificationFailed => write!(f, "program failed verification"),
         }
     }
 }

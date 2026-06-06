@@ -1,0 +1,101 @@
+name: Fuzz
+
+on:
+  pull_request:
+    paths:
+      - 'kernel/crates/kernel_bpf/**'
+      - '.github/workflows/fuzz.yml'
+  schedule:
+    # 02:30 UTC nightly. Long campaigns run here, not on every PR.
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+
+# A finding here is a soundness bug. Do not cancel a run that is still
+# producing useful coverage just because a new commit arrived.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pr-smoke:
+    if: github.event_name == 'pull_request'
+    name: "Fuzz smoke (verify_only, 60s)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          components: rust-src
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version "^0.13"
+
+      - name: Run verify_only for 60s
+        working-directory: kernel/crates/kernel_bpf
+        run: cargo fuzz run verify_only -- -max_total_time=60
+
+      - name: Upload crash artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-verify_only
+          path: kernel/crates/kernel_bpf/fuzz/artifacts/
+          retention-days: 14
+
+  nightly:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: "Fuzz nightly (${{ matrix.target }}, 8h)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 510   # 8h + slack
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - verify_only
+          - verify_then_exec
+          # streaming_match excluded from nightly until known-findings/streaming-divergence-001
+          # is triaged. Re-enable once the divergence is either fixed or the
+          # oracle is relaxed with explicit justification.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          components: rust-src
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version "^0.13"
+
+      - name: Restore corpus
+        uses: actions/cache@v4
+        with:
+          path: kernel/crates/kernel_bpf/fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+
+      - name: Run ${{ matrix.target }} for 8h
+        working-directory: kernel/crates/kernel_bpf
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=28800
+
+      - name: Upload corpus
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          path: kernel/crates/kernel_bpf/fuzz/corpus/${{ matrix.target }}
+          retention-days: 30
+
+      - name: Upload crash artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-${{ matrix.target }}-${{ github.run_id }}
+          path: kernel/crates/kernel_bpf/fuzz/artifacts/${{ matrix.target }}
+          retention-days: 30

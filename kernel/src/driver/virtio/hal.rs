@@ -187,7 +187,7 @@ unsafe impl Hal for HalImpl {
             let flags = pte_flags::DEVICE;
 
             walker
-                .map_range(vaddr_page, paddr_page, size_aligned, flags as u64)
+                .map_range(vaddr_page, paddr_page, size_aligned, flags)
                 .expect("Failed to map MMIO");
 
             // Flush TLB to ensure new mappings are visible
