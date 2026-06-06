@@ -9,7 +9,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use super::alu::{compute_alu_result, scalar_from_imm};
+use super::alu::{compute_alu_result_width, scalar_from_imm};
 use super::cfg::ControlFlowGraph;
 use super::error::{VerifyError, VerifyResult};
 use super::helpers::{HelperValidation, validate_helper_call};
@@ -403,11 +403,20 @@ impl<P: PhysicalProfile> Verifier<P> {
                 });
             }
 
-            // Check for division by zero
+            // Check for division by zero. For a 32-bit div/mod the divisor is
+            // truncated to its low 32 bits before the operation, so the zero
+            // check must look at the low 32 bits too: a divisor like `2^32` has
+            // all-zero low bits and would otherwise slip past `could_be_zero()`
+            // on its full 64-bit value (e.g. `r1 = 1; r1 <<= 32; w0 /= w1`).
             if alu_op.can_divide_by_zero() {
                 let src_state = state.reg(src);
                 if let Some(ref scalar) = src_state.scalar_value {
-                    if scalar.could_be_zero() {
+                    let divisor = if insn.is_alu64() {
+                        *scalar
+                    } else {
+                        super::alu::zero_extend_32(*scalar)
+                    };
+                    if divisor.could_be_zero() {
                         return Err(VerifyError::DivisionByZero { insn_idx: idx });
                     }
                 } else if src_state.reg_type == RegType::Scalar {
@@ -451,7 +460,10 @@ impl<P: PhysicalProfile> Verifier<P> {
             .scalar_value
             .unwrap_or_else(ScalarValue::unknown);
 
-        let result = compute_alu_result(dst_scalar, alu_op, rhs);
+        // Thread the ALU width: 32-bit ops zero-extend their result into the
+        // 64-bit register, which `compute_alu_result_width` models. Modeling a
+        // 32-bit op as 64-bit is unsound (see the function's docs).
+        let result = compute_alu_result_width(dst_scalar, alu_op, rhs, insn.is_alu64());
         state.set_scalar(dst, Some(result));
 
         Ok(())
@@ -528,9 +540,21 @@ impl<P: PhysicalProfile> Verifier<P> {
 
         // Compute branch refinement when both dst and rhs are scalar.
         // Pointer-arithmetic refinement is its own future-issue.
+        //
+        // Width gate: a 32-bit jump (`BPF_JMP32`) compares only the low 32
+        // bits of its operands (the interpreter truncates dst/src to u32
+        // before comparing). Refining the full 64-bit `ScalarValue` against a
+        // 32-bit comparison would be unsound — e.g. `if w0 < 100` tells us
+        // nothing about bits 32..63 of r0. Until 32-bit-aware refinement
+        // lands, only refine on 64-bit jumps (`BPF_JMP`); skipping refinement
+        // is always sound, just less precise.
+        let is_jmp64 = matches!(
+            insn.class(),
+            Some(crate::bytecode::opcode::OpcodeClass::Jmp)
+        );
         let dst_scalar = state.reg(dst).scalar_value;
         let refinement = match (dst_scalar, rhs) {
-            (Some(dst_sv), Some(rhs_sv)) => {
+            (Some(dst_sv), Some(rhs_sv)) if is_jmp64 => {
                 let refined = refine_scalar(dst_sv, jmp_op, rhs_sv);
                 Some(BranchRefinement {
                     dst,
@@ -1002,6 +1026,108 @@ mod tests {
 
         let result = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns);
         assert!(result.is_ok(), "got {:?}", result.err());
+    }
+
+    /// Acceptance for the ALU32 width fix.
+    ///
+    /// `w0 = 0xFFFFFFFF; w0 += 1` zero-extends to `0` (the interpreter
+    /// truncates 32-bit ALU results), so a subsequent 32-bit divide *by* w0
+    /// is a real division by zero. The previous width-blind verifier tracked
+    /// r0 as `0x1_0000_0000` (nonzero) and proved the divide safe — unsound.
+    /// The verifier must now reject it, matching runtime.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn alu32_wrap_is_division_by_zero() {
+        let insns = [
+            BpfInsn::new(0xb4, 0, 0, 0, -1), // w0 = 0xFFFFFFFF  (mov32 imm)
+            BpfInsn::new(0x04, 0, 0, 0, 1),  // w0 += 1          (add32 imm) → wraps to 0
+            BpfInsn::mov64_imm(1, 10),       // r1 = 10
+            BpfInsn::new(0x3c, 1, 0, 0, 0),  // w1 /= w0         (div32 reg) → div by zero
+            BpfInsn::exit(),
+        ];
+
+        let result = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns);
+        assert!(
+            matches!(result, Err(VerifyError::DivisionByZero { .. })),
+            "32-bit wrap to zero should be caught as division by zero; got {result:?}"
+        );
+    }
+
+    /// Companion: a 32-bit program that does *not* wrap to a dangerous value
+    /// still verifies. `w0 = 5; w0 += 3` → 8.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn alu32_safe_program_verifies() {
+        let insns = [
+            BpfInsn::new(0xb4, 0, 0, 0, 5), // w0 = 5   (mov32 imm)
+            BpfInsn::new(0x04, 0, 0, 0, 3), // w0 += 3  (add32 imm)
+            BpfInsn::exit(),
+        ];
+
+        let result = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns);
+        assert!(result.is_ok(), "got {:?}", result.err());
+    }
+
+    /// ALU32 divisor zero-check must look at the low 32 bits (codex re-review
+    /// on #114). `r1 = 1; r1 <<= 32` makes r1 = 2^32, whose low 32 bits are
+    /// zero, so a 32-bit divide by it is a division by zero even though the
+    /// full 64-bit value is nonzero.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn alu32_divisor_with_zero_low_bits_is_division_by_zero() {
+        let insns = [
+            BpfInsn::mov64_imm(1, 1),       // r1 = 1
+            BpfInsn::lsh64_imm(1, 32),      // r1 <<= 32  → 0x1_0000_0000
+            BpfInsn::mov64_imm(0, 10),      // r0 = 10
+            BpfInsn::new(0x3c, 0, 1, 0, 0), // w0 /= w1   (div32 reg) → low32(w1) = 0
+            BpfInsn::exit(),
+        ];
+        let result = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns);
+        assert!(
+            matches!(result, Err(VerifyError::DivisionByZero { .. })),
+            "32-bit divide by a value with zero low bits should be division by zero; got {result:?}"
+        );
+    }
+
+    /// Width-sensitivity companion: the *64-bit* divide by the same 2^32 is a
+    /// nonzero divisor and must still verify.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn alu64_divide_by_two_pow_32_is_ok() {
+        let insns = [
+            BpfInsn::mov64_imm(1, 1),
+            BpfInsn::lsh64_imm(1, 32), // r1 = 2^32
+            BpfInsn::mov64_imm(0, 10),
+            BpfInsn::new(0x3f, 0, 1, 0, 0), // r0 /= r1  (div64 reg), divisor nonzero
+            BpfInsn::exit(),
+        ];
+        let result = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns);
+        assert!(result.is_ok(), "got {:?}", result.err());
+    }
+
+    /// ALU32 arithmetic-shift soundness (codex re-review on #114).
+    ///
+    /// `w0 = 0x80000000; w0 s>>= 31; w0 += 1; w1 = 10; w1 /= w0`. On the
+    /// AArch64 JIT the signed-32 arsh gives `0xFFFFFFFF`, so `+1` wraps to `0`
+    /// and the final divide is by zero. Because ALU32 arsh is widened (the
+    /// interpreter and JIT disagree), `w0` stays unknown and the verifier
+    /// rejects the divide rather than trusting a wrong constant.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn alu32_arsh_then_div_is_caught_as_division_by_zero() {
+        let insns = [
+            BpfInsn::new(0xb4, 0, 0, 0, i32::MIN), // w0 = 0x80000000 (mov32 imm)
+            BpfInsn::new(0xc4, 0, 0, 0, 31),       // w0 s>>= 31      (arsh32 imm)
+            BpfInsn::new(0x04, 0, 0, 0, 1),        // w0 += 1         (add32 imm)
+            BpfInsn::new(0xb4, 1, 0, 0, 10),       // w1 = 10         (mov32 imm)
+            BpfInsn::new(0x3c, 1, 0, 0, 0),        // w1 /= w0        (div32 reg)
+            BpfInsn::exit(),
+        ];
+        let result = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns);
+        assert!(
+            matches!(result, Err(VerifyError::DivisionByZero { .. })),
+            "got {result:?}"
+        );
     }
 
     /// The verifier rejects (rather than OOMing) once its recorded-state budget

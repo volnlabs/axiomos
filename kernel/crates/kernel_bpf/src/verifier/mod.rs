@@ -48,7 +48,7 @@ mod streaming;
 
 pub use core::Verifier;
 
-pub use alu::{compute_alu_result, scalar_from_imm};
+pub use alu::{compute_alu_result, compute_alu_result_width, scalar_from_imm};
 pub use cfg::ControlFlowGraph;
 pub use error::VerifyError;
 pub use helpers::{ArgType, HelperId, HelperSignature, get_helper_signature, validate_helper_call};

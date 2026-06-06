@@ -23,14 +23,52 @@
 use super::state::{ScalarValue, TnumValue};
 use crate::bytecode::opcode::AluOp;
 
-/// Compute the new ScalarValue after `dst = op(dst, rhs)`.
+/// Compute the new ScalarValue after a **64-bit** `dst = op(dst, rhs)`.
 ///
 /// Falls back to `ScalarValue::unknown()` for operations the lattice can't
 /// represent precisely (e.g. integer division by a range, byte swap).
 /// Conservative: any imprecision widens to fully unknown so the existing
 /// memory-bounds / safety checks downstream see the widest reachable value.
+///
+/// This is the width-agnostic entry point retained for API stability; it is
+/// equivalent to [`compute_alu_result_width`] with `is_64bit = true`.
 pub fn compute_alu_result(dst: ScalarValue, op: AluOp, rhs: ScalarValue) -> ScalarValue {
-    match op {
+    compute_alu_result_width(dst, op, rhs, true)
+}
+
+/// Compute the new ScalarValue after `dst = op(dst, rhs)`, accounting for ALU
+/// width.
+///
+/// BPF 32-bit ALU (`BPF_ALU` / the `w`-register form) computes the operation
+/// then **zero-extends the low 32 bits into the 64-bit register** — exactly
+/// `(result as u32) as u64`, matching the interpreter
+/// (`execution/interpreter.rs`, "Truncate to 32 bits for 32-bit ALU"). The
+/// previous width-blind implementation modeled every op as 64-bit, which is
+/// unsound: e.g. `w0 = 0xFFFFFFFF; w0 += 1` is tracked as the constant
+/// `0x1_0000_0000` (nonzero) while the runtime wraps to `0`, so a subsequent
+/// 32-bit `div`/`mod` by `w0` is proven safe yet divides by zero. Threading
+/// the width here and zero-extending the result closes that gap.
+pub fn compute_alu_result_width(
+    dst: ScalarValue,
+    op: AluOp,
+    rhs: ScalarValue,
+    is_64bit: bool,
+) -> ScalarValue {
+    // For 32-bit ALU, truncate **both operands** to their low 32 bits *before*
+    // the operation, then zero-extend the result. Truncating only the result
+    // is unsound for the non-modular operations: division, modulo, and the
+    // right shifts depend on the high operand bits, so e.g. ALU32 `(2^32) / 2`
+    // must be `0 / 2 == 0`, not `2^31`. For add/sub/mul/and/or/xor/lsh the low
+    // 32 result bits depend only on the low 32 operand bits, so pre-truncating
+    // is a harmless normalization there. This matches the interpreter, which
+    // operates on registers already zero-extended by prior 32-bit ops.
+    let (dst, rhs) = if is_64bit {
+        (dst, rhs)
+    } else {
+        (zero_extend_32(dst), zero_extend_32(rhs))
+    };
+
+    let res = match op {
         AluOp::Mov => mov(rhs),
         AluOp::Add => add(dst, rhs),
         AluOp::Sub => sub(dst, rhs),
@@ -42,9 +80,80 @@ pub fn compute_alu_result(dst: ScalarValue, op: AluOp, rhs: ScalarValue) -> Scal
         AluOp::Xor => bitwise_xor(dst, rhs),
         AluOp::Lsh => lshift(dst, rhs),
         AluOp::Rsh => rshift(dst, rhs),
-        AluOp::Arsh => arshift(dst, rhs),
+        AluOp::Arsh => {
+            if is_64bit {
+                arshift(dst, rhs)
+            } else {
+                // ALU32 ARSH: the sign comes from bit 31, but `arshift` shifts
+                // a (zero-extended) 64-bit value whose bit 63 is 0, so it fills
+                // zeros instead of replicating bit 31. Worse, the two executors
+                // disagree: the interpreter logical-shifts the zero-extended
+                // value (fills 0), while the AArch64 JIT (`emit_asr32_reg`)
+                // does a true signed-32 shift (fills 1) — so for an input with
+                // bit 31 set, `w0 s>>= 31` is `0x0000_0001` on the interpreter
+                // and `0xFFFF_FFFF` on the JIT. No single value is sound for
+                // both, so conservatively widen the low 32 bits to unknown
+                // (high 32 known zero). Precise modeling needs the interpreter
+                // and JIT to agree on ALU32 ARSH first (separate issue).
+                zero_extend_32(ScalarValue::unknown())
+            }
+        }
         AluOp::Neg => negate(dst),
         AluOp::End => ScalarValue::unknown(),
+    };
+
+    if is_64bit { res } else { zero_extend_32(res) }
+}
+
+/// Model the 64-bit register state after a 32-bit ALU result is written:
+/// the upper 32 bits become known-zero and the value is `x & 0xFFFF_FFFF`.
+///
+/// Soundness: the returned scalar contains exactly
+/// `{ v & 0xFFFF_FFFF : v ∈ γ(input) }`. The tnum high half is forced to
+/// known-zero; the interval is kept exact when the input does not straddle a
+/// 2^32 boundary and widened to `[0, u32::MAX]` otherwise; a known constant is
+/// truncated and pins the interval.
+///
+/// `pub(crate)` so `verify_alu`'s 32-bit division-by-zero guard can truncate
+/// the divisor before its `could_be_zero()` check (an all-zero low 32 bits
+/// under a nonzero high half is still a zero divisor for ALU32).
+pub(crate) fn zero_extend_32(v: ScalarValue) -> ScalarValue {
+    const MASK: u64 = 0xFFFF_FFFF;
+
+    // High 32 bits become known-zero; low 32 retain whatever the op produced.
+    let tnum = TnumValue {
+        value: v.tnum.value & MASK,
+        mask: v.tnum.mask & MASK,
+    };
+
+    let value = v.value.map(|x| x & MASK);
+
+    // Truncation preserves ordering only inside a single 2^32 block.
+    let (mut min, mut max) = if (v.min >> 32) == (v.max >> 32) {
+        (v.min & MASK, v.max & MASK)
+    } else {
+        (0, MASK)
+    };
+
+    // The masked tnum gives sound bounds too; intersect when consistent.
+    let tnum_min = tnum.value;
+    let tnum_max = tnum.value | tnum.mask;
+    if tnum_min <= tnum_max && tnum_min >= min && tnum_max <= max {
+        min = tnum_min;
+        max = tnum_max;
+    }
+
+    // A known constant pins the interval exactly.
+    if let Some(c) = value {
+        min = c;
+        max = c;
+    }
+
+    ScalarValue {
+        value,
+        min,
+        max,
+        tnum,
     }
 }
 
@@ -486,5 +595,117 @@ mod tests {
         // i32 -1 should become u64::MAX as a sign-extended scalar.
         let r = scalar_from_imm(-1);
         assert_eq!(r.value, Some(u64::MAX));
+    }
+
+    // --- ALU width (32-bit zero-extension) ---
+
+    #[test]
+    fn alu32_add_wraps_to_zero() {
+        // w0 = 0xFFFFFFFF; w0 += 1  →  0 (zero-extended), not 2^32.
+        let start = ScalarValue::constant(0xFFFF_FFFF);
+        let r = compute_alu_result_width(start, AluOp::Add, ScalarValue::constant(1), false);
+        assert_eq!(r.value, Some(0));
+        assert_eq!(r.min, 0);
+        assert_eq!(r.max, 0);
+        assert!(r.could_be_zero());
+    }
+
+    #[test]
+    fn alu64_add_does_not_wrap() {
+        // Same operands, 64-bit: result is 2^32, no truncation.
+        let start = ScalarValue::constant(0xFFFF_FFFF);
+        let r = compute_alu_result_width(start, AluOp::Add, ScalarValue::constant(1), true);
+        assert_eq!(r.value, Some(0x1_0000_0000));
+        assert!(!r.could_be_zero());
+    }
+
+    #[test]
+    fn alu32_mov_truncates_high_bits() {
+        // w0 = r1 where r1 = 0x1_0000_00AA  →  0xAA.
+        let big = ScalarValue::constant(0x1_0000_00AA);
+        let r = compute_alu_result_width(ScalarValue::unknown(), AluOp::Mov, big, false);
+        assert_eq!(r.value, Some(0xAA));
+        assert_eq!(r.tnum.mask, 0); // known constant
+    }
+
+    #[test]
+    fn alu32_result_high_bits_known_zero() {
+        // 32-bit AND of unknown with 0xff: low byte unknown, every high bit
+        // (including bits 32..63) known zero.
+        let r = compute_alu_result_width(
+            ScalarValue::unknown(),
+            AluOp::And,
+            ScalarValue::constant(0xff),
+            false,
+        );
+        assert_eq!(r.tnum.mask & 0xFFFF_FFFF_0000_0000, 0);
+        assert_eq!(r.max, 0xff);
+        // Soundness: result contains every truncated concrete value 0..=255.
+        for k in 0..=255u64 {
+            assert!(r.tnum.contains(k), "missing {k}");
+        }
+    }
+
+    #[test]
+    fn alu32_straddling_interval_widens_soundly() {
+        // Input interval crosses a 2^32 boundary → truncated interval must
+        // widen to the full 32-bit range (no false tight bound).
+        let v = ScalarValue {
+            value: None,
+            min: 0xFFFF_FFF0,
+            max: 0x1_0000_0010,
+            tnum: TnumValue::unknown(),
+        };
+        let r = compute_alu_result_width(v, AluOp::Mov, v, false);
+        assert_eq!(r.min, 0);
+        assert_eq!(r.max, 0xFFFF_FFFF);
+    }
+
+    // ALU32 div/mod/rsh must truncate operands *before* the op, not just the
+    // result (codex review on #114). These are the non-modular cases where a
+    // high operand bit changes the low result bits.
+
+    #[test]
+    fn alu32_div_truncates_operands_not_just_result() {
+        // dst = 2^32 (a bit above the 32-bit window), ALU32 `/2`.
+        // Correct: (dst as u32) = 0, so 0 / 2 == 0. The result-only-truncation
+        // bug computed 2^32 / 2 = 2^31 and zero-extended to 0x8000_0000, which
+        // would wrongly look nonzero to the div-by-zero check.
+        let dst = ScalarValue::constant(0x1_0000_0000);
+        let r = compute_alu_result_width(dst, AluOp::Div, ScalarValue::constant(2), false);
+        assert_eq!(r.value, Some(0));
+        assert!(r.could_be_zero());
+    }
+
+    #[test]
+    fn alu32_mod_truncates_operands() {
+        // dst = 2^32 + 1, ALU32 `% 4`  →  (1) % 4 == 1, not (2^32 + 1) % 4.
+        let dst = ScalarValue::constant(0x1_0000_0001);
+        let r = compute_alu_result_width(dst, AluOp::Mod, ScalarValue::constant(4), false);
+        assert_eq!(r.value, Some(1));
+    }
+
+    #[test]
+    fn alu32_rsh_truncates_operands() {
+        // dst = 2^32, ALU32 `>> 1`  →  (0) >> 1 == 0, not 2^31. Right shift
+        // pulls high operand bits down into the low 32, so operand truncation
+        // matters here too.
+        let dst = ScalarValue::constant(0x1_0000_0000);
+        let r = compute_alu_result_width(dst, AluOp::Rsh, ScalarValue::constant(1), false);
+        assert_eq!(r.value, Some(0));
+    }
+
+    #[test]
+    fn alu32_arsh_widens_due_to_executor_divergence() {
+        // `w0 = 0x8000_0000; w0 s>>= 31`: interpreter yields 1, AArch64 JIT
+        // yields 0xFFFF_FFFF. No single value is sound for both executors, so
+        // the verifier widens the low 32 bits rather than committing to one.
+        let dst = ScalarValue::constant(0x8000_0000);
+        let r = compute_alu_result_width(dst, AluOp::Arsh, ScalarValue::constant(31), false);
+        assert!(r.value.is_none(), "must not commit to a constant");
+        assert_eq!(r.max, 0xFFFF_FFFF);
+        // High 32 bits stay known-zero.
+        assert_eq!(r.tnum.mask & 0xFFFF_FFFF_0000_0000, 0);
+        assert_eq!(r.tnum.value & 0xFFFF_FFFF_0000_0000, 0);
     }
 }
