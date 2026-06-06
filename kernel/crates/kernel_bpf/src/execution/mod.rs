@@ -292,6 +292,9 @@ pub enum BpfError {
 
     /// Out of memory
     OutOfMemory,
+
+    /// The program failed static verification and was rejected at load time.
+    VerificationFailed,
 }
 
 impl core::fmt::Display for BpfError {
@@ -305,6 +308,7 @@ impl core::fmt::Display for BpfError {
             Self::InvalidInstruction => write!(f, "invalid instruction"),
             Self::NotLoaded => write!(f, "program not loaded"),
             Self::OutOfMemory => write!(f, "out of memory"),
+            Self::VerificationFailed => write!(f, "program failed verification"),
         }
     }
 }

@@ -8,13 +8,41 @@ use alloc::vec::Vec;
 
 use kernel_abi::{BpfObjectInfo, BPF_OBJECT_KIND_MAP};
 use kernel_bpf::bytecode::insn::BpfInsn;
-use kernel_bpf::bytecode::program::BpfProgram;
+use kernel_bpf::bytecode::program::{BpfProgType, BpfProgram};
 use kernel_bpf::execution::{BpfContext, BpfError, BpfExecutor, Interpreter};
 use kernel_bpf::loader::BpfLoader;
 use kernel_bpf::maps::{ArrayMap, BpfMap, HashMap as BpfHashMap, RingBufMap, TimeSeriesMap};
 use kernel_bpf::profile::ActiveProfile;
 #[cfg(target_arch = "aarch64")]
 use kernel_bpf::profile::PhysicalProfile;
+use kernel_bpf::verifier::{Verifier, VerifyConfig};
+
+/// Context size used for load-time verification.
+///
+/// The exact context size depends on the attach point — each hook passes a
+/// different ctx struct (`SyscallTraceContext`, `SchedSwitchContext`, …) — and
+/// the attach type is not known at load (attach is a separate syscall). Until
+/// verification is repeated at attach time with the real program-type → ctx
+/// binding, use a value that covers every kernel ctx struct so context reads
+/// are not falsely rejected. Consequence: context-access bounds are not yet
+/// *precisely* enforced at load (the attach-time-typing follow-up); every
+/// size-independent safety check still is.
+const VERIFY_CTX_SIZE: u32 = 256;
+
+/// Map-value size used for load-time verification.
+///
+/// Precise per-lookup sizing needs the map id from each `bpf_map_lookup_elem`
+/// threaded into the verifier (the loader knows the program's maps) — a
+/// follow-up. Until then use a permissive value so map-using programs are not
+/// falsely rejected.
+const VERIFY_MAP_VALUE_SIZE: u32 = 256;
+
+const fn verify_config() -> VerifyConfig {
+    VerifyConfig {
+        ctx_size: VERIFY_CTX_SIZE,
+        map_value_size: VERIFY_MAP_VALUE_SIZE,
+    }
+}
 
 pub const ATTACH_TYPE_TIMER: u32 = 1;
 pub const ATTACH_TYPE_GPIO: u32 = 2;
@@ -53,12 +81,17 @@ impl BpfManager {
         let obj = loader.load(elf_bytes).map_err(|_| BpfError::NotLoaded)?;
 
         if let Some(loaded_prog) = obj.programs().first() {
-            let bpf_prog = BpfProgram::new(
+            // Verify before accepting: rejects unsafe bytecode and computes the
+            // real stack usage (no longer the hardcoded 0). #48.
+            let bpf_prog = Verifier::<ActiveProfile>::verify_with_config(
                 loaded_prog.prog_type(),
-                loaded_prog.insns().to_vec(),
-                0, // TODO: Calculate stack usage via Verifier
+                loaded_prog.insns(),
+                verify_config(),
             )
-            .map_err(|_| BpfError::InvalidInstruction)?;
+            .map_err(|e| {
+                log::error!("BpfManager: ELF program rejected by verifier: {}", e);
+                BpfError::VerificationFailed
+            })?;
 
             let id = self.programs.len() as u32;
             self.programs.push(bpf_prog);
@@ -69,9 +102,18 @@ impl BpfManager {
     }
 
     pub fn load_raw_program(&mut self, insns: Vec<BpfInsn>) -> Result<u32, BpfError> {
-        let bpf_prog =
-            BpfProgram::new(kernel_bpf::bytecode::program::BpfProgType::Unspec, insns, 0)
-                .map_err(|_| BpfError::InvalidInstruction)?;
+        // Verify before accepting: this is the gate that makes the verifier
+        // load-bearing — unsafe bytecode is rejected and the real stack usage is
+        // computed rather than trusting a hardcoded 0. #48.
+        let bpf_prog = Verifier::<ActiveProfile>::verify_with_config(
+            BpfProgType::Unspec,
+            &insns,
+            verify_config(),
+        )
+        .map_err(|e| {
+            log::error!("BpfManager: raw program rejected by verifier: {}", e);
+            BpfError::VerificationFailed
+        })?;
 
         let id = self.programs.len() as u32;
         self.programs.push(bpf_prog);
