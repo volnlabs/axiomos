@@ -175,21 +175,25 @@ pub struct StatePruner {
     /// check is O(1) rather than summing `by_pc` every instruction).
     count: usize,
     /// Maximum number of states to record before the verifier gives up and
-    /// rejects the program. Bounds the verifier's memory: each recorded
-    /// `VerifierState` carries a full stack image (up to the profile stack
-    /// size), so without a cap a loop whose states never subsume can allocate
-    /// gigabytes and OOM. See [`Self::DEFAULT_MAX_STATES`].
+    /// rejects the program. Bounds both verifier memory and the pruner's
+    /// per-pc subsumption work: without a cap a loop whose states never subsume
+    /// records without bound. See [`Self::DEFAULT_MAX_STATES`].
     max_states: usize,
 }
 
 impl StatePruner {
-    /// Default recorded-state budget. Sized so the worst case stays well under
-    /// typical CI / runtime memory: a cloud-profile state is ~1 MiB (a
-    /// 512 KiB-slot stack image), so 1024 states ≈ 1 GiB. The bounded
-    /// (loop-free) embedded fragment never approaches this; it matters only
-    /// for loop-bearing cloud programs. The forthcoming worklist verifier will
-    /// shrink per-state cost (shared/CoW stacks) and can then raise this.
-    pub const DEFAULT_MAX_STATES: usize = 1024;
+    /// Default recorded-state budget.
+    ///
+    /// Now that [`VerifierState`] stacks are sparse (`StackState` stores only
+    /// the touched slots, not a full 512 KiB image), each recorded state costs
+    /// ~1 KiB instead of ~1 MiB, so memory is no longer the binding constraint
+    /// — 8192 states is ~8 MiB. The new ceiling is the pruner's per-pc linear
+    /// subsumption walk, which is O(states²) on a loop that never converges;
+    /// 8192 keeps worst-case verification time well under a second. Raising
+    /// this further wants a sub-quadratic pruner (hash/bucket the per-pc
+    /// states, like Linux's `is_state_visited`) — tracked as a follow-up. The
+    /// loop-free embedded fragment never approaches this.
+    pub const DEFAULT_MAX_STATES: usize = 8192;
 
     pub fn new() -> Self {
         Self {

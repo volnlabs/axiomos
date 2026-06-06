@@ -6,7 +6,6 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
 use core::fmt;
 
 use crate::bytecode::registers::Register;
@@ -522,13 +521,26 @@ pub enum StackSlot {
 }
 
 /// Stack state during verification.
+///
+/// **Sparse**: only the slots a program actually touches are stored, keyed by
+/// `idx = -offset - 1` (idx 0 = FP-1); an absent slot reads as
+/// [`StackSlot::Invalid`]. The previous dense representation allocated a
+/// `Vec<StackSlot>` of the *full* profile stack size — 512 KiB slots (~1 MiB)
+/// on the cloud profile — for **every** cloned verifier state, which dominated
+/// the verifier's memory and was the root of the loop-driven OOM bounded in
+/// #116. Real programs touch a tiny fraction of the stack, so the sparse map
+/// is orders of magnitude smaller and makes per-state cloning cheap, which is
+/// what lets the recorded-state budget be raised.
 #[derive(Clone)]
 pub struct StackState {
-    /// Stack slots (indexed by offset from FP, negative values)
-    /// Index 0 = FP-1, Index 1 = FP-2, etc.
-    slots: Vec<StackSlot>,
+    /// Non-`Invalid` slots, keyed by `idx = -offset - 1`.
+    slots: alloc::collections::BTreeMap<usize, StackSlot>,
 
-    /// Maximum stack depth used (positive value)
+    /// Number of addressable slots (the profile stack size). Bounds checks use
+    /// this; it does not allocate.
+    capacity: usize,
+
+    /// Maximum stack depth used (positive value).
     max_depth: usize,
 }
 
@@ -536,29 +548,37 @@ impl StackState {
     /// Create a new stack state with given capacity.
     pub fn new(max_size: usize) -> Self {
         Self {
-            slots: alloc::vec![StackSlot::Invalid; max_size],
+            slots: alloc::collections::BTreeMap::new(),
+            capacity: max_size,
             max_depth: 0,
         }
     }
 
     /// Get the slot at the given offset from FP.
     ///
-    /// Offset should be negative (stack grows down).
+    /// Offset should be negative (stack grows down). An in-bounds slot that was
+    /// never written reads as [`StackSlot::Invalid`].
     pub fn get(&self, offset: i64) -> Option<StackSlot> {
-        if offset >= 0 || offset < -(self.slots.len() as i64) {
+        if offset >= 0 || offset < -(self.capacity as i64) {
             return None;
         }
         let idx = (-offset - 1) as usize;
-        Some(self.slots[idx])
+        Some(self.slots.get(&idx).copied().unwrap_or(StackSlot::Invalid))
     }
 
     /// Set the slot at the given offset from FP.
     pub fn set(&mut self, offset: i64, slot: StackSlot) -> bool {
-        if offset >= 0 || offset < -(self.slots.len() as i64) {
+        if offset >= 0 || offset < -(self.capacity as i64) {
             return false;
         }
         let idx = (-offset - 1) as usize;
-        self.slots[idx] = slot;
+        // Keep the map sparse: an `Invalid` slot is the default, so store it as
+        // absence rather than an entry.
+        if matches!(slot, StackSlot::Invalid) {
+            self.slots.remove(&idx);
+        } else {
+            self.slots.insert(idx, slot);
+        }
 
         // Update max depth
         let depth = idx + 1;
@@ -583,7 +603,7 @@ impl StackState {
 
         // Check bounds
         let end_offset = offset - (size as i64) + 1;
-        if end_offset < -(self.slots.len() as i64) {
+        if end_offset < -(self.capacity as i64) {
             return false;
         }
 
@@ -601,7 +621,8 @@ impl fmt::Debug for StackState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StackState")
             .field("max_depth", &self.max_depth)
-            .field("capacity", &self.slots.len())
+            .field("capacity", &self.capacity)
+            .field("live_slots", &self.slots.len())
             .finish()
     }
 }
