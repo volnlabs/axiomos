@@ -6,7 +6,7 @@ use minilib::{bpf, exit, write};
 
 // Helper IDs (runtime dispatch in interpreter/JIT)
 const HELPER_KTIME_GET_NS: i32 = 1;
-const HELPER_RINGBUF_OUTPUT: i32 = 6;
+const HELPER_RINGBUF_OUTPUT: i32 = 8;
 const HELPER_PWM_WRITE: i32 = 1005;
 
 // Attach Types

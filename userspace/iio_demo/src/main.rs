@@ -5,7 +5,7 @@ use kernel_abi::BpfAttr;
 use minilib::{bpf, exit, msleep, write};
 
 // BPF Helper IDs
-const HELPER_RINGBUF_OUTPUT: i32 = 6;
+const HELPER_RINGBUF_OUTPUT: i32 = 8;
 
 #[repr(C)]
 struct BpfInsn {

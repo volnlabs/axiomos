@@ -350,111 +350,13 @@ pub fn default_executor<P: PhysicalProfile>() -> impl BpfExecutor<P> {
 pub type HelperFn = fn(u64, u64, u64, u64, u64) -> u64;
 
 /// Built-in helper function IDs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i32)]
-pub enum HelperFunc {
-    /// Unspec / invalid
-    Unspec = 0,
-
-    /// Get current time in nanoseconds
-    KtimeGetNs = 1,
-
-    /// Print debug message (trace_printk)
-    TracePrintk = 2,
-
-    /// Get pseudo-random number
-    GetPrandomU32 = 3,
-
-    /// Get current SMP processor ID
-    GetSmpProcessorId = 4,
-
-    /// Map lookup element
-    MapLookupElem = 5,
-
-    /// Map update element
-    MapUpdateElem = 6,
-
-    /// Map delete element
-    MapDeleteElem = 7,
-
-    /// Ring buffer output
-    RingbufOutput = 8,
-
-    /// Time series push
-    TimeseriesPush = 9,
-
-    /// Get current PID/TID
-    GetCurrentPidTgid = 10,
-
-    /// Get current UID/GID
-    GetCurrentUidGid = 11,
-
-    /// Get current comm (process name)
-    GetCurrentComm = 12,
-
-    /// Get interrupt latency in nanoseconds
-    GetInterruptLatencyNs = 13,
-
-    /// Get boot time in milliseconds
-    GetBootTimeMs = 15,
-
-    /// Get kernel heap usage in KB
-    GetKernelHeapKb = 16,
-
-    /// Get kernel image size in MB
-    GetKernelImageMb = 17,
-
-    /// Probe read
-    ProbeRead = 14,
-
-    /// GPIO read
-    GpioRead = 1004,
-
-    /// GPIO write
-    GpioWrite = 1003,
-
-    /// Motor emergency stop
-    MotorEmergencyStop = 1000,
-
-    /// PWM write
-    PwmWrite = 1005,
-}
-
-impl HelperFunc {
-    /// Check if this helper is allowed for the given profile.
-    pub fn is_allowed_for_profile<P: PhysicalProfile>(&self) -> bool {
-        // Most helpers are allowed in both profiles
-        match self {
-            // All basic helpers are allowed
-            Self::Unspec
-            | Self::KtimeGetNs
-            | Self::GetPrandomU32
-            | Self::GetSmpProcessorId
-            | Self::MapLookupElem
-            | Self::MapUpdateElem
-            | Self::MapDeleteElem
-            | Self::RingbufOutput
-            | Self::TimeseriesPush
-            | Self::GetCurrentPidTgid
-            | Self::GetCurrentUidGid
-            | Self::GetCurrentComm
-            | Self::GetInterruptLatencyNs
-            | Self::GetBootTimeMs
-            | Self::GetKernelHeapKb
-            | Self::GetKernelImageMb
-            | Self::GpioRead
-            | Self::GpioWrite
-            | Self::MotorEmergencyStop
-            | Self::PwmWrite => true,
-
-            // Trace/debug helpers may be restricted in embedded
-            Self::TracePrintk | Self::ProbeRead => {
-                // In a real implementation, check profile constraints
-                true
-            }
-        }
-    }
-}
+///
+/// Alias of the verifier's [`HelperId`](crate::verifier::HelperId) — the single
+/// source of truth for helper numbering. The interpreter's `call_helper`
+/// dispatch and the verifier's signature lookup therefore reference the same
+/// values, so they cannot drift (the #121 unsoundness). Use
+/// `HelperFunc::from_raw(n)` to resolve a raw call number.
+pub use crate::verifier::HelperId as HelperFunc;
 
 #[cfg(test)]
 mod tests {

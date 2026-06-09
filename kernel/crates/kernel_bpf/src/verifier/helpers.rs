@@ -27,38 +27,54 @@ use super::state::{RegState, RegType};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(i32)]
 pub enum HelperId {
-    // ===== Core Helpers (1-10) =====
+    // ===== Core Helpers =====
+    // SINGLE SOURCE OF TRUTH for helper IDs. These numbers ARE the runtime ABI:
+    // the interpreter's `call_helper` dispatch (execution/interpreter.rs) matches
+    // on these exact values, and `execution::HelperFunc` aliases this enum. Do not
+    // renumber without changing dispatch — the verifier would then type-check
+    // against the wrong helper (the #121 unsoundness). Guarded by
+    // `helper_ids_match_runtime_abi`.
     /// Get current time in nanoseconds
     KtimeGetNs = 1,
     /// Print debug message (debug builds only)
     TracePrintk = 2,
-    /// Look up element in map
-    MapLookupElem = 3,
-    /// Update element in map
-    MapUpdateElem = 4,
-    /// Delete element from map
-    MapDeleteElem = 5,
-    /// Output to ring buffer (reserve + submit)
-    RingbufOutput = 6,
-
     /// Get pseudo-random u32
-    GetPrandomU32 = 7,
+    GetPrandomU32 = 3,
     /// Get current CPU ID
-    GetSmpProcessorId = 8,
+    GetSmpProcessorId = 4,
+    /// Look up element in map
+    MapLookupElem = 5,
+    /// Update element in map
+    MapUpdateElem = 6,
+    /// Delete element from map
+    MapDeleteElem = 7,
+    /// Output to ring buffer (reserve + submit)
+    RingbufOutput = 8,
+    /// Push value to time-series map
+    TimeseriesPush = 9,
 
-    // ===== Memory Helpers (20-30) =====
-    /// Read from arbitrary memory (with safety checks)
-    ProbeRead = 20,
-
-    // ===== Process Helpers (30-40) =====
+    // ===== Process Helpers =====
     /// Get current PID and TGID
-    GetCurrentPidTgid = 30,
+    GetCurrentPidTgid = 10,
     /// Get current UID and GID
-    GetCurrentUidGid = 31,
+    GetCurrentUidGid = 11,
     /// Get current process command name
-    GetCurrentComm = 32,
+    GetCurrentComm = 12,
 
-    // ===== Ring Buffer Helpers (Advanced) (40-50) =====
+    // ===== Kernel Introspection Helpers =====
+    /// Get interrupt latency in nanoseconds
+    GetInterruptLatencyNs = 13,
+    /// Read from arbitrary memory (with safety checks)
+    ProbeRead = 14,
+    /// Get boot time in milliseconds
+    GetBootTimeMs = 15,
+    /// Get kernel heap usage in KB
+    GetKernelHeapKb = 16,
+    /// Get kernel image size in MB
+    GetKernelImageMb = 17,
+
+    // ===== Ring Buffer Helpers (Advanced) =====
+    // Verifier-known but not yet dispatched by the interpreter; numbers reserved.
     /// Reserve space in ring buffer
     RingbufReserve = 40,
     /// Submit reserved ring buffer entry
@@ -69,8 +85,6 @@ pub enum HelperId {
     // ===== rkBPF Robotics Helpers (1000+) =====
     /// Emergency stop all motors
     MotorEmergencyStop = 1000,
-    /// Push value to time-series map
-    TimeseriesPush = 1001,
     /// Get last timestamp from sensor
     SensorLastTimestamp = 1002,
     /// Set GPIO pin state
@@ -91,21 +105,25 @@ impl HelperId {
         match id {
             1 => Some(Self::KtimeGetNs),
             2 => Some(Self::TracePrintk),
-            3 => Some(Self::MapLookupElem),
-            4 => Some(Self::MapUpdateElem),
-            5 => Some(Self::MapDeleteElem),
-            6 => Some(Self::RingbufOutput),
-            7 => Some(Self::GetPrandomU32),
-            8 => Some(Self::GetSmpProcessorId),
-            20 => Some(Self::ProbeRead),
-            30 => Some(Self::GetCurrentPidTgid),
-            31 => Some(Self::GetCurrentUidGid),
-            32 => Some(Self::GetCurrentComm),
+            3 => Some(Self::GetPrandomU32),
+            4 => Some(Self::GetSmpProcessorId),
+            5 => Some(Self::MapLookupElem),
+            6 => Some(Self::MapUpdateElem),
+            7 => Some(Self::MapDeleteElem),
+            8 => Some(Self::RingbufOutput),
+            9 => Some(Self::TimeseriesPush),
+            10 => Some(Self::GetCurrentPidTgid),
+            11 => Some(Self::GetCurrentUidGid),
+            12 => Some(Self::GetCurrentComm),
+            13 => Some(Self::GetInterruptLatencyNs),
+            14 => Some(Self::ProbeRead),
+            15 => Some(Self::GetBootTimeMs),
+            16 => Some(Self::GetKernelHeapKb),
+            17 => Some(Self::GetKernelImageMb),
             40 => Some(Self::RingbufReserve),
             41 => Some(Self::RingbufSubmit),
             42 => Some(Self::RingbufDiscard),
             1000 => Some(Self::MotorEmergencyStop),
-            1001 => Some(Self::TimeseriesPush),
             1002 => Some(Self::SensorLastTimestamp),
             1003 => Some(Self::GpioSet),
             1004 => Some(Self::GpioGet),
@@ -130,6 +148,10 @@ impl HelperId {
             Self::GetCurrentPidTgid => "bpf_get_current_pid_tgid",
             Self::GetCurrentUidGid => "bpf_get_current_uid_gid",
             Self::GetCurrentComm => "bpf_get_current_comm",
+            Self::GetInterruptLatencyNs => "bpf_get_interrupt_latency_ns",
+            Self::GetBootTimeMs => "bpf_get_boot_time_ms",
+            Self::GetKernelHeapKb => "bpf_get_kernel_heap_kb",
+            Self::GetKernelImageMb => "bpf_get_kernel_image_mb",
             Self::RingbufReserve => "bpf_ringbuf_reserve",
             Self::RingbufSubmit => "bpf_ringbuf_submit",
             Self::RingbufDiscard => "bpf_ringbuf_discard",
@@ -169,6 +191,12 @@ impl HelperId {
             Self::GetCurrentPidTgid => true,
             Self::GetCurrentUidGid => true,
             Self::GetCurrentComm => true,
+
+            // Kernel introspection - available
+            Self::GetInterruptLatencyNs => true,
+            Self::GetBootTimeMs => true,
+            Self::GetKernelHeapKb => true,
+            Self::GetKernelImageMb => true,
 
             // Ring buffer - reserve disabled (dynamic alloc)
             Self::RingbufReserve => false,
@@ -404,6 +432,12 @@ pub fn get_helper_signature(id: HelperId) -> HelperSignature {
             ReturnType::Integer,
         ),
 
+        // Kernel introspection helpers (interpreter injects ctx; no BPF args)
+        HelperId::GetInterruptLatencyNs => HelperSignature::new(id, &[], ReturnType::Integer),
+        HelperId::GetBootTimeMs => HelperSignature::new(id, &[], ReturnType::Integer),
+        HelperId::GetKernelHeapKb => HelperSignature::new(id, &[], ReturnType::Integer),
+        HelperId::GetKernelImageMb => HelperSignature::new(id, &[], ReturnType::Integer),
+
         // Ring buffer helpers
         HelperId::RingbufReserve => HelperSignature::new(
             id,
@@ -550,9 +584,35 @@ mod tests {
     #[test]
     fn helper_id_from_raw() {
         assert_eq!(HelperId::from_raw(1), Some(HelperId::KtimeGetNs));
-        assert_eq!(HelperId::from_raw(3), Some(HelperId::MapLookupElem));
+        assert_eq!(HelperId::from_raw(5), Some(HelperId::MapLookupElem));
         assert_eq!(HelperId::from_raw(1000), Some(HelperId::MotorEmergencyStop));
         assert_eq!(HelperId::from_raw(9999), None);
+    }
+
+    /// Regression guard for #121: the verifier's helper IDs MUST equal the
+    /// interpreter's `call_helper` dispatch numbers (execution/interpreter.rs).
+    /// If they diverge, the verifier type-checks a call against the wrong
+    /// helper's signature — a live unsoundness on every load.
+    #[test]
+    fn helper_ids_match_runtime_abi() {
+        assert_eq!(HelperId::from_raw(3), Some(HelperId::GetPrandomU32));
+        assert_eq!(HelperId::from_raw(4), Some(HelperId::GetSmpProcessorId));
+        assert_eq!(HelperId::from_raw(5), Some(HelperId::MapLookupElem));
+        assert_eq!(HelperId::from_raw(6), Some(HelperId::MapUpdateElem));
+        assert_eq!(HelperId::from_raw(7), Some(HelperId::MapDeleteElem));
+        assert_eq!(HelperId::from_raw(8), Some(HelperId::RingbufOutput));
+        assert_eq!(HelperId::from_raw(9), Some(HelperId::TimeseriesPush));
+        assert_eq!(
+            HelperId::from_raw(13),
+            Some(HelperId::GetInterruptLatencyNs)
+        );
+        assert_eq!(HelperId::from_raw(14), Some(HelperId::ProbeRead));
+        assert_eq!(HelperId::from_raw(15), Some(HelperId::GetBootTimeMs));
+        assert_eq!(HelperId::from_raw(16), Some(HelperId::GetKernelHeapKb));
+        assert_eq!(HelperId::from_raw(17), Some(HelperId::GetKernelImageMb));
+        assert_eq!(HelperId::from_raw(1003), Some(HelperId::GpioSet));
+        assert_eq!(HelperId::from_raw(1004), Some(HelperId::GpioGet));
+        assert_eq!(HelperId::from_raw(1005), Some(HelperId::PwmWrite));
     }
 
     #[test]
@@ -584,7 +644,7 @@ mod tests {
         args[0] = RegType::Scalar; // R1 = map ID
         args[1] = RegType::PtrToStack; // R2 = key on stack
 
-        let result = validate_helper_call(3, &args);
+        let result = validate_helper_call(5, &args); // 5 = map_lookup_elem (ABI)
         assert!(matches!(result, HelperValidation::Valid(_)));
     }
 
@@ -594,7 +654,7 @@ mod tests {
         args[0] = RegType::PtrToStack; // Wrong! Should be map ID (Scalar)
         args[1] = RegType::PtrToStack;
 
-        let result = validate_helper_call(3, &args);
+        let result = validate_helper_call(5, &args); // 5 = map_lookup_elem (ABI)
         assert!(matches!(
             result,
             HelperValidation::ArgTypeMismatch { arg_idx: 0, .. }
@@ -628,7 +688,7 @@ mod tests {
     fn robotics_helpers_available() {
         // Robotics helpers should be defined
         assert!(HelperId::from_raw(1000).is_some());
-        assert!(HelperId::from_raw(1001).is_some());
+        assert_eq!(HelperId::from_raw(9), Some(HelperId::TimeseriesPush));
 
         let sig = get_helper_signature(HelperId::MotorEmergencyStop);
         assert_eq!(sig.args.len(), 1);
