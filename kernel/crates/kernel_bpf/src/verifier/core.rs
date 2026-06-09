@@ -1361,6 +1361,53 @@ mod tests {
         );
     }
 
+    /// Guards the #122 contract: the kernel verifies with
+    /// `ctx_size = size_of::<BpfContext>()`, because R1 uniformly points at a
+    /// `BpfContext`. The last context byte must be readable and one byte past
+    /// the struct must be rejected — pinning that the chosen bound is exact, not
+    /// the old over-permissive placeholder.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn ctx_read_bounded_to_bpfcontext_size() {
+        let ctx_size = core::mem::size_of::<crate::execution::BpfContext>() as u32;
+        let cfg = VerifyConfig {
+            ctx_size,
+            map_value_size: 0,
+        };
+
+        // Read the final 8 bytes of the context: in bounds.
+        let last_field = [
+            BpfInsn::new(0x79, 0, 1, (ctx_size - 8) as i16, 0), // r0 = *(u64*)(r1 + size-8)
+            BpfInsn::exit(),
+        ];
+        assert!(
+            Verifier::<ActiveProfile>::verify_with_config(
+                BpfProgType::SocketFilter,
+                &last_field,
+                cfg
+            )
+            .is_ok(),
+            "reading the last context field must be allowed"
+        );
+
+        // Read starting exactly at the end of the context: out of bounds.
+        let past_end = [
+            BpfInsn::new(0x79, 0, 1, ctx_size as i16, 0), // r0 = *(u64*)(r1 + size)
+            BpfInsn::exit(),
+        ];
+        assert!(
+            matches!(
+                Verifier::<ActiveProfile>::verify_with_config(
+                    BpfProgType::SocketFilter,
+                    &past_end,
+                    cfg
+                ),
+                Err(VerifyError::OutOfBoundsAccess { .. })
+            ),
+            "reading past the context must be rejected"
+        );
+    }
+
     /// Acceptance for the ALU32 width fix.
     ///
     /// `w0 = 0xFFFFFFFF; w0 += 1` zero-extends to `0` (the interpreter

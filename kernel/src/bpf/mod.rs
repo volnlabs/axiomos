@@ -18,17 +18,20 @@ use kernel_bpf::profile::PhysicalProfile;
 use kernel_bpf::signing::{SignatureVerifier, TrustedKey};
 use kernel_bpf::verifier::{Verifier, VerifyConfig};
 
-/// Context size used for load-time verification.
+/// Context size used for load-time verification (#122).
 ///
-/// The exact context size depends on the attach point — each hook passes a
-/// different ctx struct (`SyscallTraceContext`, `SchedSwitchContext`, …) — and
-/// the attach type is not known at load (attach is a separate syscall). Until
-/// verification is repeated at attach time with the real program-type → ctx
-/// binding, use a value that covers every kernel ctx struct so context reads
-/// are not falsely rejected. Consequence: context-access bounds are not yet
-/// *precisely* enforced at load (the attach-time-typing follow-up); every
-/// size-independent safety check still is.
-const VERIFY_CTX_SIZE: u32 = 256;
+/// R1 at program entry points at a [`BpfContext`] — *uniformly for every attach
+/// type*. The interpreter sets `R1 = &BpfContext` (see
+/// `Interpreter::execute`) and bounds R1-relative reads to
+/// `size_of::<BpfContext>()` (the "context access" arm of `execute_load`); the
+/// per-hook structs (`SyscallTraceContext`, `SchedSwitchContext`, …) are reached
+/// through the `BpfContext::data` pointer, not off R1. So the precise context
+/// size is the same at load time as at attach time, and there is no attach-type
+/// variance to defer: bound it to exactly the context the interpreter exposes.
+/// The previous 256 placeholder let a program read past the real context into
+/// adjacent kernel memory (the interpreter's generic-deref arm trusts the
+/// verifier), which is the info-leak this closes.
+const VERIFY_CTX_SIZE: u32 = core::mem::size_of::<BpfContext>() as u32;
 
 /// Map-value size used for load-time verification.
 ///
