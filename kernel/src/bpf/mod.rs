@@ -15,6 +15,7 @@ use kernel_bpf::maps::{ArrayMap, BpfMap, HashMap as BpfHashMap, RingBufMap, Time
 use kernel_bpf::profile::ActiveProfile;
 #[cfg(target_arch = "aarch64")]
 use kernel_bpf::profile::PhysicalProfile;
+use kernel_bpf::signing::{SignatureVerifier, TrustedKey};
 use kernel_bpf::verifier::{Verifier, VerifyConfig};
 
 /// Context size used for load-time verification.
@@ -58,6 +59,13 @@ pub struct BpfManager {
     attachments: BTreeMap<u32, Vec<u32>>,
     maps: Vec<Box<dyn BpfMap<ActiveProfile>>>,
     pinned_maps: BTreeMap<String, u32>,
+    /// Trust store for program provenance (#20). A program is authentic if it
+    /// is an RBPF [`SignedProgram`] signed by a key in here.
+    signature_verifier: SignatureVerifier,
+    /// When true, programs without a signature container are accepted. Defaults
+    /// to true for v0.1.x because no userspace signer ships yet; flip to false
+    /// (via [`BpfManager::set_allow_unsigned`]) to enforce provenance.
+    allow_unsigned: bool,
 }
 
 impl Default for BpfManager {
@@ -73,10 +81,38 @@ impl BpfManager {
             attachments: BTreeMap::new(),
             maps: Vec::new(),
             pinned_maps: BTreeMap::new(),
+            signature_verifier: SignatureVerifier::new(),
+            allow_unsigned: true,
         }
     }
 
+    /// Register a trusted signing key (the kernel-held root of trust). Keys come
+    /// from the kernel build, never from the untrusted syscall caller — that is
+    /// what makes the signature check a provenance check rather than theater.
+    pub fn add_trusted_key(&mut self, key: TrustedKey) -> Result<(), BpfError> {
+        self.signature_verifier
+            .add_trusted_key(key)
+            .map_err(|_| BpfError::SignatureRejected)
+    }
+
+    /// Enable or disable signature enforcement. When `false`, only programs
+    /// signed by a trusted key load.
+    pub fn set_allow_unsigned(&mut self, allow: bool) {
+        self.allow_unsigned = allow;
+    }
+
     pub fn load_program(&mut self, elf_bytes: &[u8]) -> Result<u32, BpfError> {
+        // Authenticate provenance before parsing (#20): a signed RBPF container
+        // is verified against the trust store and unwrapped to its inner ELF; a
+        // plain ELF is accepted only when unsigned loads are permitted.
+        let elf_bytes = self
+            .signature_verifier
+            .authenticate(elf_bytes, self.allow_unsigned)
+            .map_err(|e| {
+                log::error!("BpfManager: ELF program failed authentication: {}", e);
+                BpfError::SignatureRejected
+            })?;
+
         let mut loader = BpfLoader::<ActiveProfile>::new();
         let obj = loader.load(elf_bytes).map_err(|_| BpfError::NotLoaded)?;
 
@@ -102,6 +138,13 @@ impl BpfManager {
     }
 
     pub fn load_raw_program(&mut self, insns: Vec<BpfInsn>) -> Result<u32, BpfError> {
+        // Raw instruction loads carry no signature container, so they cannot be
+        // authenticated (#20). Reject them when enforcement is on.
+        if !self.allow_unsigned {
+            log::error!("BpfManager: raw program rejected (signature enforcement enabled)");
+            return Err(BpfError::SignatureRejected);
+        }
+
         // Verify before accepting: this is the gate that makes the verifier
         // load-bearing — unsafe bytecode is rejected and the real stack usage is
         // computed rather than trusting a hardcoded 0. #48.

@@ -295,6 +295,10 @@ pub enum BpfError {
 
     /// The program failed static verification and was rejected at load time.
     VerificationFailed,
+
+    /// The program failed signature authentication (untrusted signer, bad
+    /// signature, tampered data, or unsigned while enforcement is enabled).
+    SignatureRejected,
 }
 
 impl core::fmt::Display for BpfError {
@@ -309,6 +313,7 @@ impl core::fmt::Display for BpfError {
             Self::NotLoaded => write!(f, "program not loaded"),
             Self::OutOfMemory => write!(f, "out of memory"),
             Self::VerificationFailed => write!(f, "program failed verification"),
+            Self::SignatureRejected => write!(f, "program failed signature authentication"),
         }
     }
 }

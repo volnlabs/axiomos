@@ -40,6 +40,9 @@ pub enum SigningError {
 
     /// Program requires capabilities that are not available.
     MissingCapabilities,
+
+    /// Program is unsigned and unsigned loads are not permitted.
+    UnsignedRejected,
 }
 
 impl fmt::Display for SigningError {
@@ -59,6 +62,12 @@ impl fmt::Display for SigningError {
             Self::TooManyKeys => write!(f, "maximum number of trusted keys exceeded"),
             Self::MissingCapabilities => {
                 write!(f, "program requires capabilities that are not available")
+            }
+            Self::UnsignedRejected => {
+                write!(
+                    f,
+                    "unsigned program rejected (signature enforcement enabled)"
+                )
             }
         }
     }
