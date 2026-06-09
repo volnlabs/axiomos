@@ -160,11 +160,153 @@ impl SignatureVerifier {
         self.verify(signed)?;
         Ok(signed.program_data())
     }
+
+    /// Authenticate bytes presented to the load path and return the program
+    /// payload to hand to the loader.
+    ///
+    /// - If `bytes` is an RBPF [`SignedProgram`] container, it is verified
+    ///   against the trust store (signer must be trusted, hash must match, and
+    ///   signature must be valid) and the inner program data is returned.
+    /// - If `bytes` is not a signed container (wrong magic / too short to hold a
+    ///   header), it is returned unchanged **only** when `allow_unsigned` is set;
+    ///   otherwise [`SigningError::UnsignedRejected`].
+    ///
+    /// A container that carries the RBPF magic but fails to parse or verify is
+    /// always rejected — `allow_unsigned` never relaxes a failed signature
+    /// (fail closed: someone attempted to sign and got it wrong).
+    pub fn authenticate<'a>(
+        &self,
+        bytes: &'a [u8],
+        allow_unsigned: bool,
+    ) -> SigningResult<&'a [u8]> {
+        match SignedProgram::from_bytes(bytes) {
+            Ok(signed) => {
+                self.verify(&signed)?;
+                // The borrow inside `signed` points into `bytes`, so the inner
+                // program slice outlives the parsed wrapper.
+                let data_len = signed.program_data().len();
+                Ok(&bytes[bytes.len() - data_len..])
+            }
+            // Not a signed container: no RBPF magic, or too short to even hold a
+            // header. Treat as a plain (unsigned) program.
+            Err(SigningError::InvalidMagic) | Err(SigningError::DataTooShort { .. }) => {
+                if allow_unsigned {
+                    Ok(bytes)
+                } else {
+                    Err(SigningError::UnsignedRejected)
+                }
+            }
+            // Had the RBPF magic but is malformed -> reject regardless of policy.
+            Err(e) => Err(e),
+        }
+    }
 }
 
 impl Default for SignatureVerifier {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod authenticate_tests {
+    use super::*;
+    use crate::signing::hash::ProgramHash;
+    use crate::signing::signature::{SIGNATURE_LEN, Signature, SignedProgramHeader};
+    use crate::signing::{SIGNING_VERSION, SignatureFlags};
+
+    /// Build an RBPF signed container with a correct hash but the given
+    /// signer id and (bogus) signature.
+    fn make_container(program: &[u8], signer_id: [u8; SIGNER_ID_LEN]) -> Vec<u8> {
+        let header = SignedProgramHeader {
+            version: SIGNING_VERSION,
+            flags: SignatureFlags::NONE,
+            program_hash: ProgramHash::compute(program),
+            signature: Signature::from_bytes([0u8; SIGNATURE_LEN]),
+            signer_id,
+            timestamp: 1_700_000_000,
+        };
+        let mut data = Vec::new();
+        data.extend_from_slice(&header.to_bytes());
+        data.extend_from_slice(program);
+        data
+    }
+
+    /// A plausible plain (unsigned) ELF-ish blob: long enough to clear the
+    /// header-length check, wrong magic so it is treated as unsigned.
+    fn plain_blob() -> Vec<u8> {
+        let mut v = alloc::vec![0u8; 256];
+        v[0..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+        v
+    }
+
+    #[test]
+    fn passes_through_unsigned_when_allowed() {
+        let verifier = SignatureVerifier::new();
+        let blob = plain_blob();
+        let out = verifier.authenticate(&blob, true).unwrap();
+        assert_eq!(out, blob.as_slice());
+    }
+
+    #[test]
+    fn rejects_unsigned_when_enforced() {
+        let verifier = SignatureVerifier::new();
+        let blob = plain_blob();
+        assert_eq!(
+            verifier.authenticate(&blob, false),
+            Err(SigningError::UnsignedRejected)
+        );
+    }
+
+    #[test]
+    fn rejects_signed_by_untrusted_signer() {
+        let verifier = SignatureVerifier::new(); // empty trust store
+        let container = make_container(b"prog", [9, 9, 9, 9, 9, 9, 9, 9]);
+        // Even with unsigned allowed, a *signed* container must be verified.
+        assert_eq!(
+            verifier.authenticate(&container, true),
+            Err(SigningError::UntrustedSigner)
+        );
+    }
+
+    #[test]
+    fn rejects_trusted_signer_with_bad_signature() {
+        // Trust-store membership alone is not enough: the signature must verify.
+        let mut pubkey = [0u8; PUBLIC_KEY_LEN];
+        let signer_id = [1, 2, 3, 4, 5, 6, 7, 8];
+        pubkey[..SIGNER_ID_LEN].copy_from_slice(&signer_id);
+        let mut verifier = SignatureVerifier::new();
+        verifier
+            .add_trusted_key(TrustedKey::from_bytes(&pubkey).unwrap())
+            .unwrap();
+
+        let container = make_container(b"prog", signer_id);
+        assert_eq!(
+            verifier.authenticate(&container, false),
+            Err(SigningError::InvalidSignature)
+        );
+    }
+
+    #[test]
+    fn rejects_tampered_program_data() {
+        // Valid header hash but mutated program body -> hash mismatch.
+        let signer_id = [1, 2, 3, 4, 5, 6, 7, 8];
+        let mut container = make_container(b"original-bytes", signer_id);
+        let last = container.len() - 1;
+        container[last] ^= 0xff;
+        assert_eq!(
+            verifier_with_key(signer_id).authenticate(&container, false),
+            Err(SigningError::HashMismatch)
+        );
+    }
+
+    fn verifier_with_key(signer_id: [u8; SIGNER_ID_LEN]) -> SignatureVerifier {
+        let mut pubkey = [0u8; PUBLIC_KEY_LEN];
+        pubkey[..SIGNER_ID_LEN].copy_from_slice(&signer_id);
+        let mut v = SignatureVerifier::new();
+        v.add_trusted_key(TrustedKey::from_bytes(&pubkey).unwrap())
+            .unwrap();
+        v
     }
 }
 

@@ -15,34 +15,28 @@ use kernel_bpf::maps::{ArrayMap, BpfMap, HashMap as BpfHashMap, RingBufMap, Time
 use kernel_bpf::profile::ActiveProfile;
 #[cfg(target_arch = "aarch64")]
 use kernel_bpf::profile::PhysicalProfile;
+use kernel_bpf::signing::{SignatureVerifier, TrustedKey};
 use kernel_bpf::verifier::{Verifier, VerifyConfig};
 
-/// Context size used for load-time verification.
+/// Context size used for load-time verification (#122).
 ///
-/// The exact context size depends on the attach point — each hook passes a
-/// different ctx struct (`SyscallTraceContext`, `SchedSwitchContext`, …) — and
-/// the attach type is not known at load (attach is a separate syscall). Until
-/// verification is repeated at attach time with the real program-type → ctx
-/// binding, use a value that covers every kernel ctx struct so context reads
-/// are not falsely rejected. Consequence: context-access bounds are not yet
-/// *precisely* enforced at load (the attach-time-typing follow-up); every
-/// size-independent safety check still is.
-const VERIFY_CTX_SIZE: u32 = 256;
+/// R1 at program entry points at a [`BpfContext`] — *uniformly for every attach
+/// type*. The interpreter sets `R1 = &BpfContext` (see
+/// `Interpreter::execute`) and bounds R1-relative reads to
+/// `size_of::<BpfContext>()` (the "context access" arm of `execute_load`); the
+/// per-hook structs (`SyscallTraceContext`, `SchedSwitchContext`, …) are reached
+/// through the `BpfContext::data` pointer, not off R1. So the precise context
+/// size is the same at load time as at attach time, and there is no attach-type
+/// variance to defer: bound it to exactly the context the interpreter exposes.
+/// The previous 256 placeholder let a program read past the real context into
+/// adjacent kernel memory (the interpreter's generic-deref arm trusts the
+/// verifier), which is the info-leak this closes.
+const VERIFY_CTX_SIZE: u32 = core::mem::size_of::<BpfContext>() as u32;
 
-/// Map-value size used for load-time verification.
-///
-/// Precise per-lookup sizing needs the map id from each `bpf_map_lookup_elem`
-/// threaded into the verifier (the loader knows the program's maps) — a
-/// follow-up. Until then use a permissive value so map-using programs are not
-/// falsely rejected.
+/// Fallback map-value size, used only when no per-map sizes are available
+/// (e.g. a `bpf_ringbuf_reserve` allocation return, or a program loaded before
+/// any map exists). Precise per-map bounds come from [`map_value_sizes`] (#123).
 const VERIFY_MAP_VALUE_SIZE: u32 = 256;
-
-const fn verify_config() -> VerifyConfig {
-    VerifyConfig {
-        ctx_size: VERIFY_CTX_SIZE,
-        map_value_size: VERIFY_MAP_VALUE_SIZE,
-    }
-}
 
 pub const ATTACH_TYPE_TIMER: u32 = 1;
 pub const ATTACH_TYPE_GPIO: u32 = 2;
@@ -58,6 +52,13 @@ pub struct BpfManager {
     attachments: BTreeMap<u32, Vec<u32>>,
     maps: Vec<Box<dyn BpfMap<ActiveProfile>>>,
     pinned_maps: BTreeMap<String, u32>,
+    /// Trust store for program provenance (#20). A program is authentic if it
+    /// is an RBPF [`SignedProgram`] signed by a key in here.
+    signature_verifier: SignatureVerifier,
+    /// When true, programs without a signature container are accepted. Defaults
+    /// to true for v0.1.x because no userspace signer ships yet; flip to false
+    /// (via [`BpfManager::set_allow_unsigned`]) to enforce provenance.
+    allow_unsigned: bool,
 }
 
 impl Default for BpfManager {
@@ -73,20 +74,67 @@ impl BpfManager {
             attachments: BTreeMap::new(),
             maps: Vec::new(),
             pinned_maps: BTreeMap::new(),
+            signature_verifier: SignatureVerifier::new(),
+            allow_unsigned: true,
+        }
+    }
+
+    /// Register a trusted signing key (the kernel-held root of trust). Keys come
+    /// from the kernel build, never from the untrusted syscall caller — that is
+    /// what makes the signature check a provenance check rather than theater.
+    pub fn add_trusted_key(&mut self, key: TrustedKey) -> Result<(), BpfError> {
+        self.signature_verifier
+            .add_trusted_key(key)
+            .map_err(|_| BpfError::SignatureRejected)
+    }
+
+    /// Enable or disable signature enforcement. When `false`, only programs
+    /// signed by a trusted key load.
+    pub fn set_allow_unsigned(&mut self, allow: bool) {
+        self.allow_unsigned = allow;
+    }
+
+    /// Per-map value sizes indexed by map id (#123). A map's id is its index in
+    /// `self.maps` (see [`create_map`](Self::create_map)), so this Vec, indexed
+    /// by the constant map id a `bpf_map_lookup_elem` loads, gives that map's
+    /// exact value size for the verifier to bound dereferences with.
+    fn map_value_sizes(&self) -> Vec<u32> {
+        self.maps.iter().map(|m| m.def().value_size).collect()
+    }
+
+    /// Build the verifier config for a load. Borrows `sizes` (built by
+    /// [`map_value_sizes`](Self::map_value_sizes)) for the duration of the call.
+    fn verify_config<'a>(&self, sizes: &'a [u32]) -> VerifyConfig<'a> {
+        VerifyConfig {
+            ctx_size: VERIFY_CTX_SIZE,
+            map_value_size: VERIFY_MAP_VALUE_SIZE,
+            map_value_sizes: sizes,
         }
     }
 
     pub fn load_program(&mut self, elf_bytes: &[u8]) -> Result<u32, BpfError> {
+        // Authenticate provenance before parsing (#20): a signed RBPF container
+        // is verified against the trust store and unwrapped to its inner ELF; a
+        // plain ELF is accepted only when unsigned loads are permitted.
+        let elf_bytes = self
+            .signature_verifier
+            .authenticate(elf_bytes, self.allow_unsigned)
+            .map_err(|e| {
+                log::error!("BpfManager: ELF program failed authentication: {}", e);
+                BpfError::SignatureRejected
+            })?;
+
         let mut loader = BpfLoader::<ActiveProfile>::new();
         let obj = loader.load(elf_bytes).map_err(|_| BpfError::NotLoaded)?;
 
         if let Some(loaded_prog) = obj.programs().first() {
             // Verify before accepting: rejects unsafe bytecode and computes the
             // real stack usage (no longer the hardcoded 0). #48.
+            let map_value_sizes = self.map_value_sizes();
             let bpf_prog = Verifier::<ActiveProfile>::verify_with_config(
                 loaded_prog.prog_type(),
                 loaded_prog.insns(),
-                verify_config(),
+                self.verify_config(&map_value_sizes),
             )
             .map_err(|e| {
                 log::error!("BpfManager: ELF program rejected by verifier: {}", e);
@@ -102,13 +150,21 @@ impl BpfManager {
     }
 
     pub fn load_raw_program(&mut self, insns: Vec<BpfInsn>) -> Result<u32, BpfError> {
+        // Raw instruction loads carry no signature container, so they cannot be
+        // authenticated (#20). Reject them when enforcement is on.
+        if !self.allow_unsigned {
+            log::error!("BpfManager: raw program rejected (signature enforcement enabled)");
+            return Err(BpfError::SignatureRejected);
+        }
+
         // Verify before accepting: this is the gate that makes the verifier
         // load-bearing — unsafe bytecode is rejected and the real stack usage is
         // computed rather than trusting a hardcoded 0. #48.
+        let map_value_sizes = self.map_value_sizes();
         let bpf_prog = Verifier::<ActiveProfile>::verify_with_config(
             BpfProgType::Unspec,
             &insns,
-            verify_config(),
+            self.verify_config(&map_value_sizes),
         )
         .map_err(|e| {
             log::error!("BpfManager: raw program rejected by verifier: {}", e);

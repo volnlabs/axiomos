@@ -12,7 +12,7 @@ use core::marker::PhantomData;
 use super::alu::{compute_alu_result_width, scalar_from_imm};
 use super::cfg::ControlFlowGraph;
 use super::error::{VerifyError, VerifyResult};
-use super::helpers::{HelperValidation, validate_helper_call};
+use super::helpers::{HelperValidation, ReturnType, validate_helper_call};
 use super::liveness::{Liveness, RegSet};
 use super::pruner::{PruneDecision, StatePruner};
 use super::refine::refine_scalar;
@@ -30,12 +30,42 @@ use crate::profile::{ActiveProfile, PhysicalProfile};
 /// under which the verifier **rejects** ctx/map dereferences — it will not
 /// assume a region size it was not given.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct VerifyConfig {
+pub struct VerifyConfig<'a> {
     /// Bytes accessible through the context pointer (R1) at program entry.
     pub ctx_size: u32,
-    /// Bytes accessible through a map-value pointer (`bpf_map_lookup_elem`
-    /// result, `bpf_ringbuf_reserve`, etc.).
+    /// Fallback bytes accessible through a map-value / allocated-memory pointer
+    /// when a precise per-map size is unavailable — used for non-map allocation
+    /// returns (`bpf_ringbuf_reserve`) and when `map_value_sizes` is empty.
     pub map_value_size: u32,
+    /// Per-map accessible value sizes, indexed by map id (#123). When non-empty,
+    /// a `bpf_map_lookup_elem` whose map-id register holds a known constant `id`
+    /// yields exactly `map_value_sizes[id]` accessible bytes; a known id outside
+    /// the table is rejected; a *dynamic* (non-constant) id is bounded to the
+    /// smallest entry (sound: never over-permits any reachable map). Empty means
+    /// the caller supplied no per-map info and `map_value_size` is used.
+    pub map_value_sizes: &'a [u32],
+}
+
+/// Accessible byte size for a map-value pointer returned by a map-lookup helper
+/// (`ReturnType::PtrToMapValueOrNull`), given the map-id register (R1 at the
+/// call) and the verifier config. See [`VerifyConfig::map_value_sizes`] for the
+/// soundness rationale. `Err(map_id)` means a known-constant id has no entry in
+/// the table — a reference to a nonexistent map.
+fn map_lookup_value_size(map_id_reg: &RegState, config: &VerifyConfig) -> Result<u32, u64> {
+    let table = config.map_value_sizes;
+    if table.is_empty() {
+        // No per-map info supplied: fall back to the single configured size.
+        return Ok(config.map_value_size);
+    }
+    match map_id_reg.scalar_value.and_then(|s| s.value) {
+        // Known constant map id: exact size, or reject if it names no map.
+        Some(id) => usize::try_from(id)
+            .ok()
+            .and_then(|i| table.get(i).copied())
+            .ok_or(id),
+        // Dynamic map id: bound to the smallest reachable map value (sound).
+        None => Ok(table.iter().copied().min().unwrap_or(0)),
+    }
 }
 
 /// Cost of a verification run, returned by [`Verifier::verify_with_stats`].
@@ -57,7 +87,7 @@ pub struct VerifyStats {
 /// The verifier ensures that BPF programs are safe to execute by performing
 /// static analysis. It is parameterized by the physical profile, which
 /// determines the constraints to enforce.
-pub struct Verifier<P: PhysicalProfile = ActiveProfile> {
+pub struct Verifier<'a, P: PhysicalProfile = ActiveProfile> {
     /// Control flow graph
     cfg: Option<ControlFlowGraph>,
 
@@ -82,13 +112,13 @@ pub struct Verifier<P: PhysicalProfile = ActiveProfile> {
     /// Caller-supplied sizes (context, map value) the verifier cannot infer
     /// from bytecode. Read by `verify_safety` (ctx range), `verify_call` (map
     /// value range), and `verify_memory` (bounds checks).
-    config: VerifyConfig,
+    config: VerifyConfig<'a>,
 
     /// Profile marker
     _profile: PhantomData<P>,
 }
 
-impl<P: PhysicalProfile> Verifier<P> {
+impl<'a, P: PhysicalProfile> Verifier<'a, P> {
     /// Create a new verifier.
     pub fn new() -> Self {
         Self {
@@ -127,7 +157,7 @@ impl<P: PhysicalProfile> Verifier<P> {
     pub fn verify_with_config(
         prog_type: BpfProgType,
         insns: &[BpfInsn],
-        config: VerifyConfig,
+        config: VerifyConfig<'a>,
     ) -> VerifyResult<BpfProgram<P>> {
         Self::verify_with_stats(prog_type, insns, config).map(|(prog, _)| prog)
     }
@@ -140,7 +170,7 @@ impl<P: PhysicalProfile> Verifier<P> {
     pub fn verify_with_stats(
         prog_type: BpfProgType,
         insns: &[BpfInsn],
-        config: VerifyConfig,
+        config: VerifyConfig<'a>,
     ) -> VerifyResult<(BpfProgram<P>, VerifyStats)> {
         let mut verifier = Self::new();
         verifier.config = config;
@@ -692,6 +722,23 @@ impl<P: PhysicalProfile> Verifier<P> {
         // Validate helper call using the registry
         match validate_helper_call(helper_id, &arg_types) {
             HelperValidation::Valid(sig) => {
+                // Determine R0's region size *before* clobbering caller-saved
+                // registers, since a map lookup's value size depends on the map
+                // id still held in R1 (#123).
+                let ret_state = match sig.ret {
+                    ReturnType::PtrToMapValueOrNull => {
+                        let size = map_lookup_value_size(state.reg(Register::R1), &self.config)
+                            .map_err(|map_id| VerifyError::InvalidMapId {
+                                insn_idx: idx,
+                                map_id,
+                            })?;
+                        RegState::map_value(size, true)
+                    }
+                    // Non-map allocation returns (e.g. ringbuf_reserve) and
+                    // scalar/void returns keep the single configured size.
+                    other => other.to_reg_state(self.config.map_value_size),
+                };
+
                 // Caller-saved registers are clobbered
                 for reg in [
                     Register::R0,
@@ -706,8 +753,8 @@ impl<P: PhysicalProfile> Verifier<P> {
 
                 // R0 contains return value based on helper signature. Pointer
                 // returns (map value / reserved memory) become maybe-null
-                // pointers carrying the configured accessible size.
-                *state.reg_mut(Register::R0) = sig.ret.to_reg_state(self.config.map_value_size);
+                // pointers carrying the accessible size computed above.
+                *state.reg_mut(Register::R0) = ret_state;
 
                 Ok(())
             }
@@ -999,7 +1046,7 @@ impl<P: PhysicalProfile> Verifier<P> {
     }
 }
 
-impl<P: PhysicalProfile> Default for Verifier<P> {
+impl<'a, P: PhysicalProfile> Default for Verifier<'a, P> {
     fn default() -> Self {
         Self::new()
     }
@@ -1335,6 +1382,7 @@ mod tests {
         let cfg = VerifyConfig {
             ctx_size: 64,
             map_value_size: 0,
+            map_value_sizes: &[],
         };
         let result =
             Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, cfg);
@@ -1352,6 +1400,7 @@ mod tests {
         let cfg = VerifyConfig {
             ctx_size: 64,
             map_value_size: 0,
+            map_value_sizes: &[],
         };
         let result =
             Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, cfg);
@@ -1359,6 +1408,108 @@ mod tests {
             matches!(result, Err(VerifyError::OutOfBoundsAccess { .. })),
             "got {result:?}"
         );
+    }
+
+    /// Guards the #122 contract: the kernel verifies with
+    /// `ctx_size = size_of::<BpfContext>()`, because R1 uniformly points at a
+    /// `BpfContext`. The last context byte must be readable and one byte past
+    /// the struct must be rejected — pinning that the chosen bound is exact, not
+    /// the old over-permissive placeholder.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn ctx_read_bounded_to_bpfcontext_size() {
+        let ctx_size = core::mem::size_of::<crate::execution::BpfContext>() as u32;
+        let cfg = VerifyConfig {
+            ctx_size,
+            map_value_size: 0,
+            map_value_sizes: &[],
+        };
+
+        // Read the final 8 bytes of the context: in bounds.
+        let last_field = [
+            BpfInsn::new(0x79, 0, 1, (ctx_size - 8) as i16, 0), // r0 = *(u64*)(r1 + size-8)
+            BpfInsn::exit(),
+        ];
+        assert!(
+            Verifier::<ActiveProfile>::verify_with_config(
+                BpfProgType::SocketFilter,
+                &last_field,
+                cfg
+            )
+            .is_ok(),
+            "reading the last context field must be allowed"
+        );
+
+        // Read starting exactly at the end of the context: out of bounds.
+        let past_end = [
+            BpfInsn::new(0x79, 0, 1, ctx_size as i16, 0), // r0 = *(u64*)(r1 + size)
+            BpfInsn::exit(),
+        ];
+        assert!(
+            matches!(
+                Verifier::<ActiveProfile>::verify_with_config(
+                    BpfProgType::SocketFilter,
+                    &past_end,
+                    cfg
+                ),
+                Err(VerifyError::OutOfBoundsAccess { .. })
+            ),
+            "reading past the context must be rejected"
+        );
+    }
+
+    /// #123 sizing policy: with no per-map table, fall back to the single
+    /// configured `map_value_size` (preserves zero-config behavior).
+    #[test]
+    fn map_size_empty_table_uses_fallback() {
+        let cfg = VerifyConfig {
+            ctx_size: 0,
+            map_value_size: 64,
+            map_value_sizes: &[],
+        };
+        let r1 = RegState::scalar(Some(ScalarValue::constant(7)));
+        assert_eq!(map_lookup_value_size(&r1, &cfg), Ok(64));
+    }
+
+    /// A known constant map id selects that map's exact value size.
+    #[test]
+    fn map_size_known_id_is_exact() {
+        let cfg = VerifyConfig {
+            ctx_size: 0,
+            map_value_size: 999,
+            map_value_sizes: &[8, 16, 32],
+        };
+        let r1 = RegState::scalar(Some(ScalarValue::constant(1)));
+        assert_eq!(map_lookup_value_size(&r1, &cfg), Ok(16));
+    }
+
+    /// A known id with no entry in the table is rejected as a nonexistent map.
+    #[test]
+    fn map_size_known_id_out_of_range_rejected() {
+        let cfg = VerifyConfig {
+            ctx_size: 0,
+            map_value_size: 999,
+            map_value_sizes: &[8, 16],
+        };
+        let r1 = RegState::scalar(Some(ScalarValue::constant(5)));
+        assert_eq!(map_lookup_value_size(&r1, &cfg), Err(5));
+    }
+
+    /// A dynamic (non-constant) map id is bounded to the smallest reachable map
+    /// value — sound: it never over-permits any map the program could hit.
+    #[test]
+    fn map_size_dynamic_id_uses_min() {
+        let cfg = VerifyConfig {
+            ctx_size: 0,
+            map_value_size: 999,
+            map_value_sizes: &[32, 8, 16],
+        };
+        // Unknown scalar value => dynamic id.
+        let r1 = RegState::scalar(Some(ScalarValue::unknown()));
+        assert_eq!(map_lookup_value_size(&r1, &cfg), Ok(8));
+        // A register with no tracked scalar value is also dynamic.
+        let r1_none = RegState::scalar(None);
+        assert_eq!(map_lookup_value_size(&r1_none, &cfg), Ok(8));
     }
 
     /// Acceptance for the ALU32 width fix.

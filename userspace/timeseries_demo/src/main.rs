@@ -6,7 +6,7 @@ use minilib::{bpf, exit, sleep, write};
 
 // Helper IDs
 const HELPER_KTIME_GET_NS: i32 = 1;
-const HELPER_TIMESERIES_PUSH: i32 = 1001;
+const HELPER_TIMESERIES_PUSH: i32 = 9;
 
 // Attach Types
 const ATTACH_TYPE_TIMER: u32 = 1;
