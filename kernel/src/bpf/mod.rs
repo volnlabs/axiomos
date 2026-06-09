@@ -33,20 +33,10 @@ use kernel_bpf::verifier::{Verifier, VerifyConfig};
 /// verifier), which is the info-leak this closes.
 const VERIFY_CTX_SIZE: u32 = core::mem::size_of::<BpfContext>() as u32;
 
-/// Map-value size used for load-time verification.
-///
-/// Precise per-lookup sizing needs the map id from each `bpf_map_lookup_elem`
-/// threaded into the verifier (the loader knows the program's maps) — a
-/// follow-up. Until then use a permissive value so map-using programs are not
-/// falsely rejected.
+/// Fallback map-value size, used only when no per-map sizes are available
+/// (e.g. a `bpf_ringbuf_reserve` allocation return, or a program loaded before
+/// any map exists). Precise per-map bounds come from [`map_value_sizes`] (#123).
 const VERIFY_MAP_VALUE_SIZE: u32 = 256;
-
-const fn verify_config() -> VerifyConfig {
-    VerifyConfig {
-        ctx_size: VERIFY_CTX_SIZE,
-        map_value_size: VERIFY_MAP_VALUE_SIZE,
-    }
-}
 
 pub const ATTACH_TYPE_TIMER: u32 = 1;
 pub const ATTACH_TYPE_GPIO: u32 = 2;
@@ -104,6 +94,24 @@ impl BpfManager {
         self.allow_unsigned = allow;
     }
 
+    /// Per-map value sizes indexed by map id (#123). A map's id is its index in
+    /// `self.maps` (see [`create_map`](Self::create_map)), so this Vec, indexed
+    /// by the constant map id a `bpf_map_lookup_elem` loads, gives that map's
+    /// exact value size for the verifier to bound dereferences with.
+    fn map_value_sizes(&self) -> Vec<u32> {
+        self.maps.iter().map(|m| m.def().value_size).collect()
+    }
+
+    /// Build the verifier config for a load. Borrows `sizes` (built by
+    /// [`map_value_sizes`](Self::map_value_sizes)) for the duration of the call.
+    fn verify_config<'a>(&self, sizes: &'a [u32]) -> VerifyConfig<'a> {
+        VerifyConfig {
+            ctx_size: VERIFY_CTX_SIZE,
+            map_value_size: VERIFY_MAP_VALUE_SIZE,
+            map_value_sizes: sizes,
+        }
+    }
+
     pub fn load_program(&mut self, elf_bytes: &[u8]) -> Result<u32, BpfError> {
         // Authenticate provenance before parsing (#20): a signed RBPF container
         // is verified against the trust store and unwrapped to its inner ELF; a
@@ -122,10 +130,11 @@ impl BpfManager {
         if let Some(loaded_prog) = obj.programs().first() {
             // Verify before accepting: rejects unsafe bytecode and computes the
             // real stack usage (no longer the hardcoded 0). #48.
+            let map_value_sizes = self.map_value_sizes();
             let bpf_prog = Verifier::<ActiveProfile>::verify_with_config(
                 loaded_prog.prog_type(),
                 loaded_prog.insns(),
-                verify_config(),
+                self.verify_config(&map_value_sizes),
             )
             .map_err(|e| {
                 log::error!("BpfManager: ELF program rejected by verifier: {}", e);
@@ -151,10 +160,11 @@ impl BpfManager {
         // Verify before accepting: this is the gate that makes the verifier
         // load-bearing — unsafe bytecode is rejected and the real stack usage is
         // computed rather than trusting a hardcoded 0. #48.
+        let map_value_sizes = self.map_value_sizes();
         let bpf_prog = Verifier::<ActiveProfile>::verify_with_config(
             BpfProgType::Unspec,
             &insns,
-            verify_config(),
+            self.verify_config(&map_value_sizes),
         )
         .map_err(|e| {
             log::error!("BpfManager: raw program rejected by verifier: {}", e);

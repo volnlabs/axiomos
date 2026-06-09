@@ -109,6 +109,14 @@ pub enum VerifyError {
         helper_name: &'static str,
     },
 
+    /// A `bpf_map_lookup_elem` names a map id that does not exist (#123).
+    InvalidMapId {
+        /// Instruction index
+        insn_idx: usize,
+        /// The out-of-range map id the program referenced
+        map_id: u64,
+    },
+
     /// Wrong number of arguments to helper
     HelperArgCount {
         /// Instruction index
@@ -286,6 +294,13 @@ impl fmt::Display for VerifyError {
                     f,
                     "helper {} not available in current profile at instruction {}",
                     helper_name, insn_idx
+                )
+            }
+            Self::InvalidMapId { insn_idx, map_id } => {
+                write!(
+                    f,
+                    "map lookup references nonexistent map id {} at instruction {}",
+                    map_id, insn_idx
                 )
             }
             Self::HelperArgCount {
