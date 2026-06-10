@@ -295,6 +295,7 @@ impl ArgType {
                 matches!(
                     reg_type,
                     RegType::PtrToStack
+                        | RegType::PtrToFp
                         | RegType::PtrToMapValue
                         | RegType::PtrToPacket
                         | RegType::PtrToCtx
@@ -304,6 +305,7 @@ impl ArgType {
                 matches!(
                     reg_type,
                     RegType::PtrToStack
+                        | RegType::PtrToFp
                         | RegType::PtrToMapValue
                         | RegType::PtrToPacket
                         | RegType::PtrToCtx

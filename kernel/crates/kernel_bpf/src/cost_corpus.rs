@@ -46,6 +46,11 @@ pub enum Shape {
     HelperReadHeavy,
     /// `bpf_map_lookup_elem` call chain. Calibrates `COST_HELPER_MAP`.
     HelperMapHeavy,
+    /// `bpf_gpio_get` call chain — a device-register read with no manager lock.
+    /// Calibrates `COST_HELPER_COPY` (the copy / single-register-access class).
+    HelperCopyHeavy,
+    /// `bpf_ringbuf_output` call chain. Calibrates `COST_HELPER_RINGBUF`.
+    HelperRingbufHeavy,
 }
 
 /// A single benchmark program: its shape, declared size `n` (== instruction
@@ -192,10 +197,54 @@ pub fn helper_map_heavy(n: usize, map_id: i32) -> (Vec<BpfInsn>, usize) {
     (v, k)
 }
 
+/// `bpf_gpio_get` call chain of exactly `n = 2 + 2k` instructions:
+/// `k`×(`mov r1,0 ; call gpio_get`), then `mov r0,0 ; exit`. Returns the
+/// bytecode and `k` (the call count). Reads a GPIO input register only — no
+/// manager lock, no output side effect — so it is safe to run thousands of
+/// times on a live board while timing the copy/device-access helper class.
+pub fn helper_copy_heavy(n: usize) -> (Vec<BpfInsn>, usize) {
+    let k = n.saturating_sub(2) / 2;
+    let mut v = Vec::with_capacity(n);
+    for _ in 0..k {
+        v.push(BpfInsn::mov64_imm(1, 0)); // r1 = pin 0
+        v.push(BpfInsn::call(crate::verifier::HelperId::GpioGet as i32));
+    }
+    v.push(BpfInsn::mov64_imm(0, 0));
+    v.push(BpfInsn::exit());
+    (v, k)
+}
+
+/// `bpf_ringbuf_output` call chain of exactly `n = 4 + 6k` instructions:
+/// an 8-byte stack-sample prologue, then `k` iterations of
+/// `mov r1,rb_id ; mov r2,r10 ; add r2,-8 ; mov r3,8 ; mov r4,0 ; call
+/// ringbuf_output`, then `mov r0,0 ; exit`. Returns the bytecode and `k`.
+/// `rb_id` is a pre-created ring-buffer map (the bench driver makes it first).
+pub fn helper_ringbuf_heavy(n: usize, rb_id: i32) -> (Vec<BpfInsn>, usize) {
+    let k = n.saturating_sub(4) / 6;
+    let mut v = Vec::with_capacity(n);
+    v.push(BpfInsn::mov64_imm(1, 0));
+    v.push(BpfInsn::new(0x7b, 10, 1, -8, 0)); // stx_dw [r10-8], r1 (init sample)
+    for _ in 0..k {
+        v.push(BpfInsn::mov64_imm(1, rb_id)); // r1 = ringbuf map id
+        v.push(BpfInsn::mov64_reg(2, 10)); // r2 = r10
+        v.push(BpfInsn::add64_imm(2, -8)); // r2 = &sample
+        v.push(BpfInsn::mov64_imm(3, 8)); // r3 = sample size
+        v.push(BpfInsn::mov64_imm(4, 0)); // r4 = flags
+        v.push(BpfInsn::call(
+            crate::verifier::HelperId::RingbufOutput as i32,
+        ));
+    }
+    v.push(BpfInsn::mov64_imm(0, 0));
+    v.push(BpfInsn::exit());
+    (v, k)
+}
+
 /// The execution-cost calibration corpus: every `*Heavy` shape at every
-/// [`CALIBRATION_SIZES`]. `map_id` is the id of a pre-created 8-byte-key map
-/// the `HelperMapHeavy` programs look up (the bench driver creates it first).
-pub fn calibration_corpus(map_id: i32) -> Vec<CorpusProgram> {
+/// [`CALIBRATION_SIZES`]. `map_id` is a pre-created 8-byte-key map the
+/// `HelperMapHeavy` programs look up; `rb_id` is a pre-created ring-buffer map
+/// the `HelperRingbufHeavy` programs write to (the bench driver creates both
+/// first).
+pub fn calibration_corpus(map_id: i32, rb_id: i32) -> Vec<CorpusProgram> {
     let mut corpus = Vec::new();
     for &n in CALIBRATION_SIZES.iter() {
         let (insns, ops) = memory_heavy(n);
@@ -225,6 +274,22 @@ pub fn calibration_corpus(map_id: i32) -> Vec<CorpusProgram> {
         let (insns, ops) = helper_map_heavy(n, map_id);
         corpus.push(CorpusProgram {
             shape: Shape::HelperMapHeavy,
+            n,
+            ops,
+            prog_type: BpfProgType::SocketFilter,
+            insns,
+        });
+        let (insns, ops) = helper_copy_heavy(n);
+        corpus.push(CorpusProgram {
+            shape: Shape::HelperCopyHeavy,
+            n,
+            ops,
+            prog_type: BpfProgType::SocketFilter,
+            insns,
+        });
+        let (insns, ops) = helper_ringbuf_heavy(n, rb_id);
+        corpus.push(CorpusProgram {
+            shape: Shape::HelperRingbufHeavy,
             n,
             ops,
             prog_type: BpfProgType::SocketFilter,
@@ -290,10 +355,10 @@ mod tests {
     /// against a one-map table (the bench driver creates that map first).
     #[test]
     fn calibration_corpus_verifies() {
-        let corpus = calibration_corpus(0);
+        let corpus = calibration_corpus(0, 0);
         assert!(
-            corpus.len() >= 2 * 4,
-            "expected 4 shapes x 2 sizes, got {}",
+            corpus.len() >= 2 * 6,
+            "expected 6 shapes x 2 sizes, got {}",
             corpus.len()
         );
         for prog in &corpus {
@@ -323,6 +388,8 @@ mod tests {
             Shape::DivHeavy,
             Shape::HelperReadHeavy,
             Shape::HelperMapHeavy,
+            Shape::HelperCopyHeavy,
+            Shape::HelperRingbufHeavy,
         ] {
             let sizes: Vec<usize> = corpus
                 .iter()

@@ -42,7 +42,7 @@ EXEC_MARKER = re.compile(
 )
 
 # Shape labels printed by the verifier_bench driver: "<shape> n=<n> prog_id=<id>".
-LABEL = re.compile(r"^(?P<shape>straight|memory|div|ktime|map)\s+n=(?P<n>\d+)\s+prog_id=(?P<prog_id>\d+)")
+LABEL = re.compile(r"^(?P<shape>straight|memory|div|ktime|map|copy|ringbuf)\s+n=(?P<n>\d+)\s+prog_id=(?P<prog_id>\d+)")
 
 # Measured-op count per shape (mirrors kernel_bpf::cost_corpus `ops`).
 SHAPE_OPS = {
@@ -51,6 +51,8 @@ SHAPE_OPS = {
     "div": lambda n: n - 2,
     "ktime": lambda n: n - 1,
     "map": lambda n: (n - 4) // 4,
+    "copy": lambda n: (n - 2) // 2,
+    "ringbuf": lambda n: (n - 4) // 6,
 }
 
 # The cost-model constant each shape calibrates (verifier/cost.rs).
@@ -60,6 +62,8 @@ SHAPE_CONSTANT = {
     "div": "COST_ALU_EXPENSIVE",
     "ktime": "COST_HELPER_READ",
     "map": "COST_HELPER_MAP",
+    "copy": "COST_HELPER_COPY",
+    "ringbuf": "COST_HELPER_RINGBUF",
 }
 
 

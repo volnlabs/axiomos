@@ -43,12 +43,27 @@ const COST_INVOCATION_BASE: u64 = 95;
 /// A register/counter read with no memory walk (ktime, cpu id, prandom, …).
 const COST_HELPER_READ: u32 = 4;
 /// A bounded copy or single device-register access (probe_read, comm, GPIO/PWM/IIO/CAN).
+/// Pi5 `bpf_gpio_get` shape measured 2.54 cyc/op ≈ 8.2× a default op
+/// (`docs/benchmarks.md §12`); 10 is the conservative bound kept.
 const COST_HELPER_COPY: u32 = 10;
-/// A ring-buffer reserve/commit/output (bookkeeping + memcpy).
+/// A ring-buffer reserve/commit/output (bookkeeping + memcpy under the manager
+/// lock). Pi5 `bpf_ringbuf_output` shape measured 3.24 cyc/op ≈ 10.5× a default
+/// op (cost is lock-dominated, so stable even when the buffer fills mid-run); 12
+/// is the conservative bound kept.
 const COST_HELPER_RINGBUF: u32 = 12;
 /// A map operation that walks/hashes a table (lookup/update/delete, timeseries push).
 const COST_HELPER_MAP: u32 = 16;
-/// A trace/print helper that formats a message — the most expensive class.
+/// A trace/print helper that formats a message and writes it to the UART.
+///
+/// Unlike the others this class is **serial-I/O-bound, not CPU-bound**, and so
+/// is *not* exec-calibrated: at 115200 8N1 one byte costs ~86.8 µs ≈ 15_000
+/// cycle units (1 unit ≈ 5.8 ns, `docs/benchmarks.md §12`), so even a short line
+/// is hundreds of thousands of units — and the write would flood the same serial
+/// channel that carries the measurement. The weight stays a nominal "most
+/// expensive helper" ordering value; the real lever for keeping printk out of a
+/// bounded RT hook is a *policy* ban on the loop-free fragment, not a cycle
+/// weight (a baud-accurate weight here would exceed the WCET budget and reject
+/// today's printk-using demos at load).
 const COST_HELPER_TRACE: u32 = 20;
 
 /// Static worst-case cycle cost of a helper call, by helper identity. Unknown

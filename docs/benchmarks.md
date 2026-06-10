@@ -517,18 +517,36 @@ gives measured cycles/op per cost class. Ratio is vs the straight-line baseline.
 | div (`COST_ALU_EXPENSIVE`)       | 4  | 0.34 | 6.3  | 1.1×  | over-charged → retuned 4→2 |
 | ktime (`COST_HELPER_READ`)       | 4  | 1.18 | 21.9 | 3.8×  | near-exact |
 | map (`COST_HELPER_MAP`)          | 16 | 4.16 | 77.0 | 13.3× | conservative |
+| copy/`bpf_gpio_get` (`COST_HELPER_COPY`)        | 10 | 2.54 | 47.1 | 8.2×  | conservative |
+| ringbuf/`bpf_ringbuf_output` (`COST_HELPER_RINGBUF`) | 12 | 3.24 | 60.1 | 10.5× | conservative |
+| trace/`bpf_trace_printk` (`COST_HELPER_TRACE`)  | 20 | — | — | — | I/O-bound, not exec-calibrated (see below) |
 
-The model's **helper ordering is confirmed on silicon** (read < copy < map). It
-is a conservative upper bound for every memory/helper shape; only pure
-straight-line under-predicted (~10%), traced to a fixed ~0.55 µs per-invocation
-JIT entry cost, now modelled as `COST_INVOCATION_BASE` (95 units). `div` was the
-one loose class (model 4× vs measured 1.1×) — retuned to 2 (keeps headroom).
-Predicted-vs-measured at `n=1000`: ktime 1.03×, map/memory 1.4× (safe), straight
-now ~1.0× with the base term.
+The `copy` (`bpf_gpio_get` register read) and `ringbuf` (`bpf_ringbuf_output`
+under the manager lock) rows are from a **second capture** (2026-06-11); that run
+reproduced the first run's slopes within ~1% (div 0.34→0.33, ktime 1.18→1.19,
+map 4.16→4.15, memory 0.41, straight 0.31), confirming the harness is stable.
+**`trace` (`bpf_trace_printk`) is deliberately not exec-calibrated:** it is
+serial-I/O-bound (~86.8 µs/byte ≈ 15k cycle units/byte at 115200 8N1), so even a
+short line costs hundreds of thousands of units, and the write would flood the
+very serial channel that carries the measurement. The right lever for keeping
+printk out of a bounded RT hook is a policy ban on the loop-free fragment, not a
+cycle weight (a baud-accurate weight would exceed the WCET budget and reject
+today's printk-using demos at load).
 
-**Gaps:** PREVAIL head-to-head not yet run (separate harness). `COST_HELPER_COPY`,
-`COST_HELPER_RINGBUF`, `COST_HELPER_TRACE` still uncalibrated (printk would spam
-the timing serial). Utilization-form admission (`Σ WCETᵢ·freqᵢ ≤ U`) pending.
+The model's **helper ordering is confirmed on silicon across all four compute
+helper classes**, in exactly the order the model ranks them: read (1.19) < copy
+(2.54) < ringbuf (3.24) < map (4.15) cyc/op. Every weight is a conservative upper
+bound on the measured ratio; only pure straight-line under-predicted (~10%),
+traced to a fixed ~0.55 µs per-invocation JIT entry cost, now modelled as
+`COST_INVOCATION_BASE` (95 units). `div` was the one loose class (model 4× vs
+measured 1.1×) — retuned to 2 (keeps headroom). Predicted-vs-measured at
+`n=1000`: ktime 1.03×, map/memory 1.4×, copy 1.33×, ringbuf 1.55× (all safe),
+straight ~1.0× with the base term.
+
+**Gaps:** PREVAIL head-to-head not yet run (separate harness). All compute helper
+classes are now calibrated; `COST_HELPER_TRACE` is I/O-bound and handled by
+policy, not exec-calibration (see above). Utilization-form admission
+(`Σ WCETᵢ·freqᵢ ≤ U`) pending.
 
 # References
 

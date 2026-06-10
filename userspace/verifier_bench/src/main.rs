@@ -36,6 +36,12 @@ const EXEC_RUNS: u32 = 64;
 /// Runtime helper ABI ids (must match `kernel_bpf::verifier::HelperId`).
 const HELPER_KTIME_GET_NS: i32 = 1;
 const HELPER_MAP_LOOKUP_ELEM: i32 = 5;
+const HELPER_RINGBUF_OUTPUT: i32 = 8;
+const HELPER_GPIO_GET: i32 = 1004;
+
+/// Ring-buffer map type + size (bytes, power of two) for the ringbuf shape.
+const MAP_TYPE_RINGBUF: u64 = 27;
+const RINGBUF_BYTES: u64 = 65536;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -153,6 +159,57 @@ fn helper_map_heavy(buf: &mut [BpfInsn; MAX_INSNS], n: usize, map_id: i32) -> us
     i
 }
 
+/// `k`×(`mov r1,0 ; call gpio_get`), then `mov r0,0 ; exit` — n = 2 + 2k.
+fn helper_copy_heavy(buf: &mut [BpfInsn; MAX_INSNS], n: usize) -> usize {
+    let k = (n - 2) / 2;
+    let mut i = 0;
+    let mut c = 0;
+    while c < k {
+        buf[i] = BpfInsn::new(0xb7, 1, 0, 0); // mov64 r1, 0 (pin)
+        i += 1;
+        buf[i] = BpfInsn::new(0x85, 0, 0, HELPER_GPIO_GET); // call gpio_get
+        i += 1;
+        c += 1;
+    }
+    buf[i] = BpfInsn::new(0xb7, 0, 0, 0); // mov64 r0, 0
+    i += 1;
+    buf[i] = BpfInsn::new(0x95, 0, 0, 0); // exit
+    i += 1;
+    i
+}
+
+/// Sample prologue, then k×(mov r1,rb ; mov r2,r10 ; add r2,-8 ; mov r3,8 ;
+/// mov r4,0 ; call ringbuf_output), then `mov r0,0 ; exit` — n = 4 + 6k.
+fn helper_ringbuf_heavy(buf: &mut [BpfInsn; MAX_INSNS], n: usize, rb_id: i32) -> usize {
+    let k = (n - 4) / 6;
+    let mut i = 0;
+    buf[i] = BpfInsn::new(0xb7, 1, 0, 0); // mov64 r1, 0
+    i += 1;
+    buf[i] = BpfInsn::new(0x7b, (1 << 4) | 10, -8, 0); // stx_dw [r10-8], r1
+    i += 1;
+    let mut c = 0;
+    while c < k {
+        buf[i] = BpfInsn::new(0xb7, 1, 0, rb_id); // mov64 r1, rb_id
+        i += 1;
+        buf[i] = BpfInsn::new(0xbf, (10 << 4) | 2, 0, 0); // mov64 r2, r10
+        i += 1;
+        buf[i] = BpfInsn::new(0x07, 2, 0, -8); // add64 r2, -8
+        i += 1;
+        buf[i] = BpfInsn::new(0xb7, 3, 0, 8); // mov64 r3, 8 (size)
+        i += 1;
+        buf[i] = BpfInsn::new(0xb7, 4, 0, 0); // mov64 r4, 0 (flags)
+        i += 1;
+        buf[i] = BpfInsn::new(0x85, 0, 0, HELPER_RINGBUF_OUTPUT); // call
+        i += 1;
+        c += 1;
+    }
+    buf[i] = BpfInsn::new(0xb7, 0, 0, 0); // mov64 r0, 0
+    i += 1;
+    buf[i] = BpfInsn::new(0x95, 0, 0, 0); // exit
+    i += 1;
+    i
+}
+
 /// Load `len` instructions from `buf`; returns prog id or negative error.
 fn load_prog(buf: &[BpfInsn; MAX_INSNS], len: usize) -> i32 {
     let load_attr = BpfAttr {
@@ -246,17 +303,43 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
+    // A ring-buffer map for the ringbuf-output shape. No consumer drains it, so
+    // it is sized large enough to absorb the calibration runs (cost is
+    // lock-dominated, so a partial fill does not skew the slope).
+    print("Creating ringbuf map...\n");
+    let rb_attr = BpfAttr {
+        prog_type: MAP_TYPE_RINGBUF as u32,
+        insn_cnt: 0,
+        insns: RINGBUF_BYTES << 32, // max_entries=bytes (pow2) | value_size=0
+        ..Default::default()
+    };
+    let rb_fd = bpf(
+        BPF_MAP_CREATE,
+        &rb_attr as *const _ as *const u8,
+        core::mem::size_of::<BpfAttr>() as i32,
+    );
+    if rb_fd < 0 {
+        print("ringbuf create FAILED — skipping ringbuf shape\n");
+    }
+
     for &n in CALIBRATION_SIZES.iter() {
-        for shape in 0..4u32 {
+        for shape in 0..6u32 {
             let (name, len): (&str, usize) = match shape {
                 0 => ("memory", memory_heavy(&mut buf, n)),
                 1 => ("div", div_heavy(&mut buf, n)),
                 2 => ("ktime", helper_read_heavy(&mut buf, n)),
-                _ => {
+                3 => {
                     if map_fd < 0 {
                         continue;
                     }
                     ("map", helper_map_heavy(&mut buf, n, map_fd))
+                }
+                4 => ("copy", helper_copy_heavy(&mut buf, n)),
+                _ => {
+                    if rb_fd < 0 {
+                        continue;
+                    }
+                    ("ringbuf", helper_ringbuf_heavy(&mut buf, n, rb_fd))
                 }
             };
             let prog_id = load_prog(&buf, len);
