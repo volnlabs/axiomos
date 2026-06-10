@@ -15,10 +15,10 @@ use alloc::vec::Vec;
 
 use crate::bytecode::insn::BpfInsn;
 use crate::bytecode::opcode::AluOp;
-use crate::verifier::ControlFlowGraph;
+use crate::verifier::{ControlFlowGraph, HelperId};
 
-/// Cost of a helper call. A placeholder upper bound until per-helper costs land
-/// (brick 2); helpers are the dominant per-instruction cost.
+/// Default cost of a helper call whose id the cost table does not recognise.
+/// Helpers are the dominant per-instruction cost, so the fallback is high.
 const COST_CALL: u32 = 8;
 /// Cost of a memory load/store — touches the data cache.
 const COST_MEMORY: u32 = 2;
@@ -27,10 +27,65 @@ const COST_ALU_EXPENSIVE: u32 = 4;
 /// Cost of any other instruction (cheap ALU, jump, mov, exit).
 const COST_DEFAULT: u32 = 1;
 
+// Per-helper cost classes. Relative cycle units pending A76 calibration
+// (brick 3); the *ordering* — counter read < copy/IO < ringbuf < map walk <
+// trace formatting — is the structural fact this table encodes.
+/// A register/counter read with no memory walk (ktime, cpu id, prandom, …).
+const COST_HELPER_READ: u32 = 4;
+/// A bounded copy or single device-register access (probe_read, comm, GPIO/PWM/IIO/CAN).
+const COST_HELPER_COPY: u32 = 10;
+/// A ring-buffer reserve/commit/output (bookkeeping + memcpy).
+const COST_HELPER_RINGBUF: u32 = 12;
+/// A map operation that walks/hashes a table (lookup/update/delete, timeseries push).
+const COST_HELPER_MAP: u32 = 16;
+/// A trace/print helper that formats a message — the most expensive class.
+const COST_HELPER_TRACE: u32 = 20;
+
+/// Static worst-case cycle cost of a helper call, by helper identity. Unknown
+/// ids fall back to [`COST_CALL`].
+pub fn helper_cost(helper_id: i32) -> u32 {
+    let Some(id) = HelperId::from_raw(helper_id) else {
+        return COST_CALL;
+    };
+    match id {
+        HelperId::KtimeGetNs
+        | HelperId::GetPrandomU32
+        | HelperId::GetSmpProcessorId
+        | HelperId::GetCurrentPidTgid
+        | HelperId::GetCurrentUidGid
+        | HelperId::GetInterruptLatencyNs
+        | HelperId::GetBootTimeMs
+        | HelperId::GetKernelHeapKb
+        | HelperId::GetKernelImageMb
+        | HelperId::SensorLastTimestamp => COST_HELPER_READ,
+
+        HelperId::ProbeRead
+        | HelperId::GetCurrentComm
+        | HelperId::GpioSet
+        | HelperId::GpioGet
+        | HelperId::PwmWrite
+        | HelperId::IioRead
+        | HelperId::CanSend
+        | HelperId::MotorEmergencyStop => COST_HELPER_COPY,
+
+        HelperId::RingbufOutput
+        | HelperId::RingbufReserve
+        | HelperId::RingbufSubmit
+        | HelperId::RingbufDiscard => COST_HELPER_RINGBUF,
+
+        HelperId::MapLookupElem
+        | HelperId::MapUpdateElem
+        | HelperId::MapDeleteElem
+        | HelperId::TimeseriesPush => COST_HELPER_MAP,
+
+        HelperId::TracePrintk => COST_HELPER_TRACE,
+    }
+}
+
 /// Static worst-case cycle cost of a single instruction.
 pub fn insn_cycle_cost(insn: &BpfInsn) -> u32 {
     if insn.is_call() {
-        return COST_CALL;
+        return helper_cost(insn.imm);
     }
     if insn.is_memory() {
         return COST_MEMORY;
@@ -75,6 +130,28 @@ pub fn wcet_cycles(insns: &[BpfInsn], cfg: &ControlFlowGraph) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::verifier::HelperId;
+
+    #[test]
+    fn helper_call_cost_is_per_helper() {
+        let ktime = insn_cycle_cost(&BpfInsn::call(HelperId::KtimeGetNs as i32));
+        let lookup = insn_cycle_cost(&BpfInsn::call(HelperId::MapLookupElem as i32));
+        let printk = insn_cycle_cost(&BpfInsn::call(HelperId::TracePrintk as i32));
+        // A map op walks a table; a cheap counter read does not — map costs more.
+        assert!(
+            lookup > ktime,
+            "map lookup ({lookup}) should cost more than ktime ({ktime})"
+        );
+        // Trace/print formats a message — the most expensive helper class.
+        assert!(printk >= lookup, "printk ({printk}) >= lookup ({lookup})");
+        // Even a cheap helper costs more than a plain ALU instruction.
+        assert!(
+            ktime > insn_cycle_cost(&BpfInsn::add64_imm(0, 1)),
+            "a helper call ({ktime}) should cost more than an ALU op"
+        );
+        // An unknown helper id falls back to the default call cost.
+        assert_eq!(insn_cycle_cost(&BpfInsn::call(9999)), COST_CALL);
+    }
 
     #[test]
     fn wcet_of_straight_line_is_sum_of_costs() {
@@ -130,8 +207,9 @@ mod tests {
             insn_cycle_cost(&BpfInsn::mod64_imm(0, 3)),
             COST_ALU_EXPENSIVE
         );
-        // Helper calls dominate.
-        assert_eq!(insn_cycle_cost(&BpfInsn::call(1)), COST_CALL);
+        // A call to an unknown helper falls back to the default call cost
+        // (known helpers get per-helper costs — see helper_call_cost_is_per_helper).
+        assert_eq!(insn_cycle_cost(&BpfInsn::call(9999)), COST_CALL);
         // Memory access (LDXW, opcode 0x61) costs the cache-touch price.
         let ldxw = BpfInsn::new(0x61, 1, 10, -8, 0);
         assert!(ldxw.is_memory());

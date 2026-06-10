@@ -10,6 +10,7 @@ use super::elf::ElfParser;
 use super::error::{LoadError, LoadResult};
 use super::object::LoadedMap;
 use crate::bytecode::insn::BpfInsn;
+use crate::verifier::HelperId;
 
 // BPF relocation types
 const R_BPF_64_64: u32 = 1;
@@ -143,72 +144,40 @@ impl<'a> Relocator<'a> {
         Ok(())
     }
 
-    /// Convert helper function name to ID.
+    /// Convert a helper function name to its runtime helper ID.
+    ///
+    /// Returns IDs from the kernel's *runtime ABI* ([`HelperId`]) — the same
+    /// numbering the interpreter dispatches on and the WCET cost model reads —
+    /// not the upstream Linux uapi numbering. Helpers the runtime does not
+    /// implement (skb/csum/xdp/etc.) return `None`: better to leave a call
+    /// unrelocated (and fail verification) than to emit an ID that would
+    /// dispatch a different helper. Single source of truth for helper IDs, per
+    /// #121.
     fn helper_name_to_id(name: &str) -> Option<i32> {
-        // Common BPF helper functions
-        match name {
-            "bpf_map_lookup_elem" => Some(1),
-            "bpf_map_update_elem" => Some(2),
-            "bpf_map_delete_elem" => Some(3),
-            "bpf_probe_read" => Some(4),
-            "bpf_ktime_get_ns" => Some(5),
-            "bpf_trace_printk" => Some(6),
-            "bpf_get_prandom_u32" => Some(7),
-            "bpf_get_smp_processor_id" => Some(8),
-            "bpf_skb_store_bytes" => Some(9),
-            "bpf_l3_csum_replace" => Some(10),
-            "bpf_l4_csum_replace" => Some(11),
-            "bpf_tail_call" => Some(12),
-            "bpf_clone_redirect" => Some(13),
-            "bpf_get_current_pid_tgid" => Some(14),
-            "bpf_get_current_uid_gid" => Some(15),
-            "bpf_get_current_comm" => Some(16),
-            "bpf_get_cgroup_classid" => Some(17),
-            "bpf_skb_vlan_push" => Some(18),
-            "bpf_skb_vlan_pop" => Some(19),
-            "bpf_skb_get_tunnel_key" => Some(20),
-            "bpf_skb_set_tunnel_key" => Some(21),
-            "bpf_perf_event_read" => Some(22),
-            "bpf_redirect" => Some(23),
-            "bpf_get_route_realm" => Some(24),
-            "bpf_perf_event_output" => Some(25),
-            "bpf_skb_load_bytes" => Some(26),
-            "bpf_get_stackid" => Some(27),
-            "bpf_csum_diff" => Some(28),
-            "bpf_skb_get_tunnel_opt" => Some(29),
-            "bpf_skb_set_tunnel_opt" => Some(30),
-            "bpf_skb_change_proto" => Some(31),
-            "bpf_skb_change_type" => Some(32),
-            "bpf_skb_under_cgroup" => Some(33),
-            "bpf_get_hash_recalc" => Some(34),
-            "bpf_get_current_task" => Some(35),
-            "bpf_probe_write_user" => Some(36),
-            "bpf_current_task_under_cgroup" => Some(37),
-            "bpf_skb_change_tail" => Some(38),
-            "bpf_skb_pull_data" => Some(39),
-            "bpf_csum_update" => Some(40),
-            "bpf_set_hash_invalid" => Some(41),
-            "bpf_get_numa_node_id" => Some(42),
-            "bpf_skb_change_head" => Some(43),
-            "bpf_xdp_adjust_head" => Some(44),
-            "bpf_probe_read_str" => Some(45),
-            "bpf_get_socket_cookie" => Some(46),
-            "bpf_get_socket_uid" => Some(47),
-            "bpf_set_hash" => Some(48),
-            "bpf_setsockopt" => Some(49),
-            "bpf_skb_adjust_room" => Some(50),
+        let id = match name {
+            "bpf_map_lookup_elem" => HelperId::MapLookupElem,
+            "bpf_map_update_elem" => HelperId::MapUpdateElem,
+            "bpf_map_delete_elem" => HelperId::MapDeleteElem,
+            "bpf_probe_read" => HelperId::ProbeRead,
+            "bpf_ktime_get_ns" => HelperId::KtimeGetNs,
+            "bpf_trace_printk" => HelperId::TracePrintk,
+            "bpf_get_prandom_u32" => HelperId::GetPrandomU32,
+            "bpf_get_smp_processor_id" => HelperId::GetSmpProcessorId,
+            "bpf_get_current_pid_tgid" => HelperId::GetCurrentPidTgid,
+            "bpf_get_current_uid_gid" => HelperId::GetCurrentUidGid,
+            "bpf_get_current_comm" => HelperId::GetCurrentComm,
             // Ring buffer helpers
-            "bpf_ringbuf_output" => Some(130),
-            "bpf_ringbuf_reserve" => Some(131),
-            "bpf_ringbuf_submit" => Some(132),
-            "bpf_ringbuf_discard" => Some(133),
-            "bpf_ringbuf_query" => Some(134),
+            "bpf_ringbuf_output" => HelperId::RingbufOutput,
+            "bpf_ringbuf_reserve" => HelperId::RingbufReserve,
+            "bpf_ringbuf_submit" => HelperId::RingbufSubmit,
+            "bpf_ringbuf_discard" => HelperId::RingbufDiscard,
             // rkBPF robotics-specific helpers
-            "bpf_motor_emergency_stop" => Some(200),
-            "bpf_timeseries_push" => Some(201),
-            "bpf_sensor_last_timestamp" => Some(202),
-            _ => None,
-        }
+            "bpf_motor_emergency_stop" => HelperId::MotorEmergencyStop,
+            "bpf_timeseries_push" => HelperId::TimeseriesPush,
+            "bpf_sensor_last_timestamp" => HelperId::SensorLastTimestamp,
+            _ => return None,
+        };
+        Some(id as i32)
     }
 }
 
@@ -217,17 +186,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn helper_name_mapping() {
-        assert_eq!(Relocator::helper_name_to_id("bpf_map_lookup_elem"), Some(1));
-        assert_eq!(Relocator::helper_name_to_id("bpf_ktime_get_ns"), Some(5));
+    fn helper_name_mapping_uses_runtime_abi() {
+        use crate::verifier::HelperId;
+        // The loader must emit the *runtime* helper ABI (the IDs the interpreter
+        // dispatches on and the cost model reads), not the upstream Linux uapi
+        // numbering. Otherwise an ELF-loaded `bpf_map_lookup_elem` would be
+        // dispatched as a different helper. See #121.
+        assert_eq!(
+            Relocator::helper_name_to_id("bpf_map_lookup_elem"),
+            Some(HelperId::MapLookupElem as i32)
+        );
+        assert_eq!(
+            Relocator::helper_name_to_id("bpf_ktime_get_ns"),
+            Some(HelperId::KtimeGetNs as i32)
+        );
         assert_eq!(
             Relocator::helper_name_to_id("bpf_ringbuf_output"),
-            Some(130)
+            Some(HelperId::RingbufOutput as i32)
         );
         assert_eq!(
             Relocator::helper_name_to_id("bpf_motor_emergency_stop"),
-            Some(200)
+            Some(HelperId::MotorEmergencyStop as i32)
         );
         assert_eq!(Relocator::helper_name_to_id("unknown_helper"), None);
+    }
+
+    /// Every name the loader relocates must resolve, through the runtime ABI
+    /// decoder, back to a real helper — no id the interpreter would reject or
+    /// mis-dispatch. Guards against the loader/runtime drift #121 closed.
+    #[test]
+    fn every_relocated_helper_id_is_a_known_runtime_helper() {
+        use crate::verifier::HelperId;
+        for name in [
+            "bpf_map_lookup_elem",
+            "bpf_map_update_elem",
+            "bpf_map_delete_elem",
+            "bpf_probe_read",
+            "bpf_ktime_get_ns",
+            "bpf_trace_printk",
+            "bpf_get_prandom_u32",
+            "bpf_get_smp_processor_id",
+            "bpf_get_current_pid_tgid",
+            "bpf_get_current_uid_gid",
+            "bpf_get_current_comm",
+            "bpf_ringbuf_output",
+            "bpf_ringbuf_reserve",
+            "bpf_ringbuf_submit",
+            "bpf_ringbuf_discard",
+            "bpf_motor_emergency_stop",
+            "bpf_timeseries_push",
+            "bpf_sensor_last_timestamp",
+        ] {
+            let id = Relocator::helper_name_to_id(name)
+                .unwrap_or_else(|| panic!("{name} should relocate to a helper id"));
+            assert!(
+                HelperId::from_raw(id).is_some(),
+                "{name} relocated to id {id}, which the runtime ABI does not know"
+            );
+        }
     }
 }
