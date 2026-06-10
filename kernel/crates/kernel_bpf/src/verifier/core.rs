@@ -1758,10 +1758,10 @@ mod tests {
         use crate::cost_corpus::div_heavy;
         use crate::profile::PhysicalProfile;
 
-        // 50k div instructions × COST_ALU_EXPENSIVE(4) ≈ 200k cycle units,
-        // over the embedded budget; the same shape at calibration size is
-        // well under it.
-        let (big, _) = div_heavy(50_000);
+        // 60k div instructions × COST_ALU_EXPENSIVE(2) ≈ 120k cycle units,
+        // comfortably over the 100k embedded budget; the same shape at
+        // calibration size is well under it.
+        let (big, _) = div_heavy(60_000);
         let result = Verifier::<ActiveProfile>::verify_with_config(
             BpfProgType::SocketFilter,
             &big,
@@ -1843,7 +1843,8 @@ mod tests {
     /// `verify_with_stats` reports the static WCET cycle bound (Track C / #43).
     #[test]
     fn verify_reports_wcet_cycles() {
-        // mov ; add ; add ; exit → static cost 1 + 1 + 1 + 1 = 4 cycle units.
+        // mov ; add ; add ; exit → body cost 1 + 1 + 1 + 1 = 4 cycle units, plus
+        // the fixed per-invocation base (95, see verifier/cost.rs) = 99.
         let insns = [
             BpfInsn::mov64_imm(0, 0),
             BpfInsn::add64_imm(0, 1),
@@ -1856,7 +1857,7 @@ mod tests {
             VerifyConfig::default(),
         )
         .expect("straight-line program verifies");
-        assert_eq!(stats.wcet_cycles, 4);
+        assert_eq!(stats.wcet_cycles, 99);
     }
 
     /// Verifier-WCET (state-count) bound on the bounded fragment.

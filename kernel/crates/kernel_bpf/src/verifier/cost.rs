@@ -6,10 +6,14 @@
 //! into one that bounds *how long* they take — the basis for schedulability
 //! admission (`docs/verifier-fragment.md`, RTSS track).
 //!
-//! Costs are in *relative cycle units* for now; brick 3 calibrates them to
-//! measured Cortex-A76 cycles (the same hardware run that captures verifier
-//! cost). The model is deliberately conservative: every instruction is charged
-//! its worst case, and the program is charged its most expensive path.
+//! Costs are in *relative cycle units*. Calibrated against measured Cortex-A76
+//! (Pi5) JIT cycles on 2026-06-11 (`docs/benchmarks.md §12`): the per-helper and
+//! memory weights are conservative upper bounds on the measured ratios, `div`
+//! was retuned 4→2 (measured ~1.1× a default op, not 4×), and a per-invocation
+//! `COST_INVOCATION_BASE` was added to cover the fixed ~0.55 µs JIT entry cost
+//! that a pure-slope model otherwise under-predicts. The model stays
+//! deliberately conservative: every instruction is charged its worst case, and
+//! the program is charged its most expensive path.
 
 use alloc::vec::Vec;
 
@@ -22,10 +26,16 @@ use crate::verifier::{ControlFlowGraph, HelperId};
 const COST_CALL: u32 = 8;
 /// Cost of a memory load/store — touches the data cache.
 const COST_MEMORY: u32 = 2;
-/// Cost of an expensive ALU op (division / remainder) on the A76.
-const COST_ALU_EXPENSIVE: u32 = 4;
+/// Cost of an expensive ALU op (division / remainder) on the A76. Measured at
+/// ~1.1× a default op on the Pi5 JIT (2026-06-11); held at 2 for headroom.
+const COST_ALU_EXPENSIVE: u32 = 2;
 /// Cost of any other instruction (cheap ALU, jump, mov, exit).
 const COST_DEFAULT: u32 = 1;
+/// Fixed per-invocation cost (JIT trampoline entry + dispatch), charged once per
+/// program. Calibrated from the straight-line series' intercept: ~0.55 µs ≈ 95
+/// cycle units on the Pi5 (`docs/benchmarks.md §12`). Without it a pure
+/// longest-path sum under-predicts measured per-run cost by the entry overhead.
+const COST_INVOCATION_BASE: u64 = 95;
 
 // Per-helper cost classes. Relative cycle units pending A76 calibration
 // (brick 3); the *ordering* — counter read < copy/IO < ringbuf < map walk <
@@ -96,12 +106,13 @@ pub fn insn_cycle_cost(insn: &BpfInsn) -> u32 {
     COST_DEFAULT
 }
 
-/// Worst-case execution cost of a program, in cycle units: the most expensive
-/// path from entry to any exit through the loop-free CFG. For straight-line
-/// code this is the sum of every instruction's cost; on branching code it is
-/// the maximum over paths, so cost on the non-taken arm of a branch is excluded.
+/// Worst-case execution cost of a program, in cycle units: a fixed
+/// [`COST_INVOCATION_BASE`] entry cost plus the most expensive path from entry
+/// to any exit through the loop-free CFG. For straight-line code the path term
+/// is the sum of every instruction's cost; on branching code it is the maximum
+/// over paths, so cost on the non-taken arm of a branch is excluded.
 ///
-/// Computed as a longest-path DP over the instruction DAG. Successors of a
+/// The path term is a longest-path DP over the instruction DAG. Successors of a
 /// loop-free program point forward, so a single reverse pass suffices:
 /// `cost_from[i] = cost(i) + max(cost_from[s])` over forward successors `s`.
 /// Back edges (`s ≤ i`) are skipped — the WCET is only meaningful on the
@@ -124,7 +135,7 @@ pub fn wcet_cycles(insns: &[BpfInsn], cfg: &ControlFlowGraph) -> u64 {
         }
         cost_from[i] = u64::from(insn_cycle_cost(&insns[i])) + best_succ;
     }
-    cost_from[0]
+    COST_INVOCATION_BASE + cost_from[0]
 }
 
 #[cfg(test)]
@@ -154,8 +165,9 @@ mod tests {
     }
 
     #[test]
-    fn wcet_of_straight_line_is_sum_of_costs() {
-        // mov ; add ; add ; exit  →  1 + 1 + 1 + 1 = 4 cycle units.
+    fn wcet_of_straight_line_is_base_plus_sum_of_costs() {
+        // mov ; add ; add ; exit  →  1 + 1 + 1 + 1 = 4 cycle units, plus the
+        // fixed per-invocation entry cost.
         let insns = [
             BpfInsn::mov64_imm(0, 0),
             BpfInsn::add64_imm(0, 1),
@@ -163,7 +175,19 @@ mod tests {
             BpfInsn::exit(),
         ];
         let cfg = ControlFlowGraph::build(&insns);
-        assert_eq!(wcet_cycles(&insns, &cfg), 4);
+        assert_eq!(wcet_cycles(&insns, &cfg), COST_INVOCATION_BASE + 4);
+    }
+
+    #[test]
+    fn wcet_includes_a_fixed_per_invocation_base() {
+        // A single-instruction program is dominated by the entry cost, not the
+        // one-cycle body — the base is what makes wcet track measured per-run
+        // cost on small programs (docs/benchmarks.md §12).
+        let insns = [BpfInsn::exit()];
+        let cfg = ControlFlowGraph::build(&insns);
+        assert_eq!(wcet_cycles(&insns, &cfg), COST_INVOCATION_BASE + 1);
+        // An empty program is never invoked, so it carries no base.
+        assert_eq!(wcet_cycles(&[], &ControlFlowGraph::build(&[])), 0);
     }
 
     #[test]
@@ -175,10 +199,11 @@ mod tests {
         // 4: mov r0,1          (1)   cheap, only on taken path
         // 5: exit              (1)
         //
-        // Fallthrough path 0→1→2→3→5 costs 1+1+4+1+1 = 8 (the WCET).
+        // Fallthrough path 0→1→2→3→5 costs 1+1+2+1+1 = 6 (the WCET body).
         // Taken path      0→1→4→5   costs 1+1+1+1   = 4.
-        // Sum of all six insns = 9, so a correct longest-path result (8) must
-        // differ from a naive total (9): the div on the other arm is excluded.
+        // Body sum of all six insns = 7, so a correct longest-path body (6) must
+        // differ from a naive total (7): the div on the other arm is excluded.
+        // wcet adds the fixed per-invocation base on top.
         let insns = [
             BpfInsn::mov64_imm(0, 0),
             BpfInsn::jeq_imm(0, 0, 2),
@@ -188,7 +213,7 @@ mod tests {
             BpfInsn::exit(),
         ];
         let cfg = ControlFlowGraph::build(&insns);
-        assert_eq!(wcet_cycles(&insns, &cfg), 8);
+        assert_eq!(wcet_cycles(&insns, &cfg), COST_INVOCATION_BASE + 6);
     }
 
     #[test]

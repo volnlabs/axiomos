@@ -482,27 +482,53 @@ The same shapes/sizes run on the host (`cargo bench … bench_scaling`, §5) and
 the `cost_corpus` unit tests, so the on-device cycle curve, the host wall-clock
 curve, and the host `states_explored` curve all describe identical programs.
 
-## Results (Hardware)
+## Results (Hardware) — Pi5, 2026-06-11
 
-> _Pending Pi5 capture._ Run the steps above and paste the
-> `scripts/verifier-cost.py` table here.
+Captured on Raspberry Pi 5 (Cortex-A76), kernel built
+`--features embedded-rpi5,verifier-cost`. Cycles are `CNTVCT_EL0` deltas
+(~54 MHz, ~18.5 ns/tick).
+
+### Verification cost (straight-line fragment)
 
 | insns | states_explored | verify cycles | cyc/insn | verify µs (~54 MHz) |
 | ----- | --------------- | ------------- | -------- | ------------------- |
-| 10    | _tbd_           | _tbd_         | _tbd_    | _tbd_               |
-| 50    | _tbd_           | _tbd_         | _tbd_    | _tbd_               |
-| 100   | _tbd_           | _tbd_         | _tbd_    | _tbd_               |
-| 500   | _tbd_           | _tbd_         | _tbd_    | _tbd_               |
-| 1000  | _tbd_           | _tbd_         | _tbd_    | _tbd_               |
+| 10    | 10              | 1398          | 139.8    | 25.9                |
+| 50    | 50              | 3974          | 79.5     | 73.6                |
+| 100   | 100             | 7676          | 76.8     | 142.1               |
+| 500   | 500             | 41533         | 83.1     | 769.1               |
+| 1000  | 1000            | 93551         | 93.6     | 1732.4              |
 
-Expected: `states_explored == n` on the loop-free fragment (one state per
-instruction), and `cycles` linear in `n` — i.e. cost stays under the declared
-budget `T(n)=(h+1)·n`. Contrast Linux from §3 (BPF load 24.8 µs @ 2 insn,
-56.6 µs @ 100 insn — full verifier, no declared bound).
+`states_explored == n` held for **all 13 loaded programs** (one state per
+instruction on the loop-free fragment). Verification cost is near-linear in `n`:
+past the fixed startup at `n=10`, cyc/insn settles at 77–94 (mild drift =
+cache/allocator, not algorithmic) — well under the declared budget
+`T(n)=(h+1)·n`. Contrast Linux from §3 (BPF load 24.8 µs @ 2 insn, 56.6 µs @ 100
+insn — full verifier, no declared bound).
 
-**Gaps:** PREVAIL head-to-head not yet run (separate harness). Execution-WCET /
-EDF admission (the program's own cycle bound, not the verifier's) is the next
-track, not this one.
+### Execution-cost calibration (Track C / brick 3)
+
+Each shape executed 64× via `BPF_BENCH_EXEC`; slope fit between `n={100,1000}`
+gives measured cycles/op per cost class. Ratio is vs the straight-line baseline.
+
+| class (`cost.rs` const) | model weight | measured cyc/op | ns/op | ×baseline | verdict |
+| ----------------------- | ------------ | --------------- | ----- | --------- | ------- |
+| straight (`COST_DEFAULT`)        | 1  | 0.31 | 5.8  | 1.0×  | baseline |
+| memory (`COST_MEMORY`)           | 2  | 0.41 | 7.6  | 1.3×  | conservative |
+| div (`COST_ALU_EXPENSIVE`)       | 4  | 0.34 | 6.3  | 1.1×  | over-charged → retuned 4→2 |
+| ktime (`COST_HELPER_READ`)       | 4  | 1.18 | 21.9 | 3.8×  | near-exact |
+| map (`COST_HELPER_MAP`)          | 16 | 4.16 | 77.0 | 13.3× | conservative |
+
+The model's **helper ordering is confirmed on silicon** (read < copy < map). It
+is a conservative upper bound for every memory/helper shape; only pure
+straight-line under-predicted (~10%), traced to a fixed ~0.55 µs per-invocation
+JIT entry cost, now modelled as `COST_INVOCATION_BASE` (95 units). `div` was the
+one loose class (model 4× vs measured 1.1×) — retuned to 2 (keeps headroom).
+Predicted-vs-measured at `n=1000`: ktime 1.03×, map/memory 1.4× (safe), straight
+now ~1.0× with the base term.
+
+**Gaps:** PREVAIL head-to-head not yet run (separate harness). `COST_HELPER_COPY`,
+`COST_HELPER_RINGBUF`, `COST_HELPER_TRACE` still uncalibrated (printk would spam
+the timing serial). Utilization-form admission (`Σ WCETᵢ·freqᵢ ≤ U`) pending.
 
 # References
 
@@ -515,6 +541,6 @@ track, not this one.
 
 **Document Status:** Hardware benchmarks (boot, memory, BPF load, interrupt latency) validated on Raspberry Pi 5
 
-**Last Updated:** 2026-03-14
+**Last Updated:** 2026-06-11 (Track B/C verifier-cost + execution calibration, Pi5)
 
-**Next Action:** Proceed to Phase 2: Hardware Attach Points (GPIO, PWM, IIO).
+**Next Action:** Utilization-form admission; calibrate remaining helper classes.
