@@ -38,6 +38,7 @@
 mod alu;
 mod cfg;
 mod core;
+pub mod cost;
 mod error;
 pub mod helpers;
 mod liveness;

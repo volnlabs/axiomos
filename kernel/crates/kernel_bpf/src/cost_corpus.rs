@@ -76,14 +76,18 @@ pub struct CostRecord {
     pub states_explored: usize,
     /// Wall-clock verification cost in architectural cycles (CNTVCT_EL0 delta).
     pub cycles: u64,
+    /// Static WCET cycle bound the verifier computed for the program (Track C).
+    /// Capturing it next to the measured verification cost lets the hardware
+    /// run feed brick-3 calibration (predicted vs. measured execution cost).
+    pub wcet_cycles: u64,
 }
 
 impl core::fmt::Display for CostRecord {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "AXIOM VERIFIER COST prog_id={} insns={} states={} cycles={}",
-            self.prog_id, self.insns, self.states_explored, self.cycles
+            "AXIOM VERIFIER COST prog_id={} insns={} states={} cycles={} wcet={}",
+            self.prog_id, self.insns, self.states_explored, self.cycles, self.wcet_cycles
         )
     }
 }
@@ -117,11 +121,12 @@ mod tests {
             insns: 100,
             states_explored: 99,
             cycles: 1234,
+            wcet_cycles: 140,
         };
         // The exact contract the `scripts/verifier-cost.py` parser keys off.
         assert_eq!(
             rec.to_string(),
-            "AXIOM VERIFIER COST prog_id=7 insns=100 states=99 cycles=1234"
+            "AXIOM VERIFIER COST prog_id=7 insns=100 states=99 cycles=1234 wcet=140"
         );
     }
 

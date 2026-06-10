@@ -456,7 +456,11 @@ both `states_explored` and a `CNTVCT_EL0` cycle delta.
 
 1. Build with the instrumentation feature, e.g.
    `./scripts/build-rpi5.sh release --features embedded-rpi5,verifier-cost`.
-   Each BPF load then emits `AXIOM VERIFIER COST prog_id=… insns=… states=… cycles=…`.
+   Each BPF load then emits
+   `AXIOM VERIFIER COST prog_id=… insns=… states=… cycles=… wcet=…`
+   (`cycles` = measured verification cost; `wcet` = the verifier's static WCET
+   cycle bound for the program — captured here so the same run can calibrate the
+   cost model, Track C).
 2. Run `/bin/verifier_bench`, which loads straight-line programs at sizes
    `{10, 50, 100, 500, 1000}` (`kernel_bpf::cost_corpus::MEASUREMENT_SIZES`).
 3. Capture UART and reduce:

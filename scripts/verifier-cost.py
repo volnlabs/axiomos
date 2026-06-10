@@ -29,6 +29,7 @@ MARKER = re.compile(
     r"insns=(?P<insns>\d+)\s+"
     r"states=(?P<states>\d+)\s+"
     r"cycles=(?P<cycles>\d+)"
+    r"(?:\s+wcet=(?P<wcet>\d+))?"
 )
 
 
@@ -37,13 +38,13 @@ def parse(lines):
     for line in lines:
         m = MARKER.search(line)
         if m:
-            rows.append({k: int(v) for k, v in m.groupdict().items()})
+            rows.append({k: (int(v) if v is not None else 0) for k, v in m.groupdict().items()})
     return rows
 
 
 def write_csv(rows, path):
     with open(path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["prog_id", "insns", "states", "cycles"])
+        w = csv.DictWriter(f, fieldnames=["prog_id", "insns", "states", "cycles", "wcet"])
         w.writeheader()
         w.writerows(rows)
 
@@ -52,13 +53,13 @@ def summarize(rows, cntfrq):
     if not rows:
         print("no AXIOM VERIFIER COST markers found", file=sys.stderr)
         return
-    width = "{:>8} {:>8} {:>10} {:>12} {:>14} {:>16}"
-    print(width.format("prog_id", "insns", "states", "cycles", "cyc/insn", "us" if cntfrq else ""))
+    width = "{:>8} {:>8} {:>10} {:>12} {:>10} {:>14} {:>16}"
+    print(width.format("prog_id", "insns", "states", "cycles", "wcet", "cyc/insn", "us" if cntfrq else ""))
     for r in rows:
         cyc_per_insn = r["cycles"] / r["insns"] if r["insns"] else 0.0
         us = "{:.3f}".format(r["cycles"] * 1e6 / cntfrq) if cntfrq else ""
         print(width.format(
-            r["prog_id"], r["insns"], r["states"], r["cycles"],
+            r["prog_id"], r["insns"], r["states"], r["cycles"], r.get("wcet", 0),
             "{:.2f}".format(cyc_per_insn), us,
         ))
     # Bound check: for the loop-free fragment states_explored <= n.

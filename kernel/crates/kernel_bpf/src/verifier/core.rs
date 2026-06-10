@@ -80,6 +80,10 @@ fn map_lookup_value_size(map_id_reg: &RegState, config: &VerifyConfig) -> Result
 pub struct VerifyStats {
     /// Distinct verifier states explored during verification.
     pub states_explored: usize,
+    /// Static worst-case execution cost of the program, in cycle units — the
+    /// most expensive path through the loop-free CFG (Track C / #43). Relative
+    /// units pending A76 calibration; see [`crate::verifier::cost`].
+    pub wcet_cycles: u64,
 }
 
 /// BPF program verifier.
@@ -189,10 +193,13 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
         verifier.verify_profile_constraints(insns)?;
 
         // Capture the cost: total distinct states the pruner recorded during
-        // exploration. Read before building the program so it reflects exactly
-        // the verification work.
+        // exploration (verification cost), plus the program's static WCET — the
+        // longest-path cycle bound over the now-built CFG (execution cost).
+        // Both are read before building the program so they reflect exactly the
+        // verified bytecode.
         let stats = VerifyStats {
             states_explored: verifier.pruner.recorded(),
+            wcet_cycles: super::cost::wcet_cycles(insns, verifier.cfg.as_ref().unwrap()),
         };
 
         // Build the verified program
@@ -1655,6 +1662,25 @@ mod tests {
         ];
         let result = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns);
         assert!(result.is_ok(), "got {:?}", result.err());
+    }
+
+    /// `verify_with_stats` reports the static WCET cycle bound (Track C / #43).
+    #[test]
+    fn verify_reports_wcet_cycles() {
+        // mov ; add ; add ; exit → static cost 1 + 1 + 1 + 1 = 4 cycle units.
+        let insns = [
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::add64_imm(0, 1),
+            BpfInsn::add64_imm(0, 1),
+            BpfInsn::exit(),
+        ];
+        let (_, stats) = Verifier::<ActiveProfile>::verify_with_stats(
+            BpfProgType::SocketFilter,
+            &insns,
+            VerifyConfig::default(),
+        )
+        .expect("straight-line program verifies");
+        assert_eq!(stats.wcet_cycles, 4);
     }
 
     /// Verifier-WCET (state-count) bound on the bounded fragment.

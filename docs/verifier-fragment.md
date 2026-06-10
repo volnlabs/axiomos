@@ -57,6 +57,26 @@ For straight-line code (`h` irrelevant, single path) this is exactly one state
 per instruction — see the `bounded_fragment_state_count_is_linear` test in
 `verifier/core.rs`, which asserts `states_explored ≤ n` across a range of `n`.
 
+## Static WCET cost model (execution cost — Track C / #43)
+
+The bound above is the cost of *verifying*. A separate model bounds the cost of
+*running* a verified program: its worst-case execution time. `verifier/cost.rs`
+assigns each instruction a static cycle cost (`insn_cycle_cost` — helper calls
+and memory accesses cost more than cheap ALU; division/remainder are the
+expensive ALU ops) and computes a program's WCET as the **longest path** through
+its loop-free CFG (`wcet_cycles`, a reverse longest-path DP over the instruction
+DAG). Because the path is the *maximum* over branches, cost on a non-taken arm is
+excluded — WCET ≠ the naive instruction-cost total. The result is returned as
+`VerifyStats::wcet_cycles` and emitted in the `verifier-cost` marker (`wcet=`).
+
+Costs are **relative cycle units** pending Cortex-A76 calibration (the same
+hardware run that captures verifier cost measures per-opcode cycles to replace
+the constants). Once calibrated, this WCET feeds load-time schedulability
+admission: a program is admitted only if its WCET fits the hook's time budget
+(`Σ WCETᵢ·freqᵢ/budgetᵢ ≤ U`). The `WcetExceeded` verifier error is the slot for
+the per-program budget check; the EDF admission ledger is the kernel-side
+counterpart — both pending calibration.
+
 ## What makes the bound real in the implementation
 
 | Mechanism | File | Role |
@@ -91,8 +111,9 @@ and thus the size of programs verifiable in bounded cost — rise substantially.
   state-count test above is the profile-independent, CI-checked measurement.
 - **On-device cost curve (Track B):** build the kernel with the `verifier-cost`
   feature and the load path emits one marker per BPF load,
-  `AXIOM VERIFIER COST prog_id=… insns=… states=… cycles=…`, where `cycles` is a
-  `CNTVCT_EL0` delta around `verify_with_stats`. The `verifier_bench` userspace
+  `AXIOM VERIFIER COST prog_id=… insns=… states=… cycles=… wcet=…`, where
+  `cycles` is a `CNTVCT_EL0` delta around `verify_with_stats` (verification cost)
+  and `wcet` is the program's static WCET cycle bound (execution cost; see below). The `verifier_bench` userspace
   driver loads a size series (`cost_corpus::MEASUREMENT_SIZES`); capture the UART
   log and run `scripts/verifier-cost.py` to get the cost-vs-size CSV and plot
   (states with the `T(n)=(h+1)·n` overlay, cycles vs `n`). The shared shapes live

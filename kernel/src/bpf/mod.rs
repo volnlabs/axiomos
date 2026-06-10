@@ -175,6 +175,7 @@ impl BpfManager {
                     insns: insn_count,
                     states_explored: _stats.states_explored,
                     cycles: verify_cycles,
+                    wcet_cycles: _stats.wcet_cycles,
                 }
             );
             self.programs.push(bpf_prog);
@@ -221,6 +222,7 @@ impl BpfManager {
                 insns: insn_count,
                 states_explored: _stats.states_explored,
                 cycles: verify_cycles,
+                wcet_cycles: _stats.wcet_cycles,
             }
         );
         self.programs.push(bpf_prog);
