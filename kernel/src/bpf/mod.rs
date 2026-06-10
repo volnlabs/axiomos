@@ -38,6 +38,25 @@ const VERIFY_CTX_SIZE: u32 = core::mem::size_of::<BpfContext>() as u32;
 /// any map exists). Precise per-map bounds come from [`map_value_sizes`] (#123).
 const VERIFY_MAP_VALUE_SIZE: u32 = 256;
 
+/// Architectural cycle counter for verifier-cost measurement (Track B).
+///
+/// Reads `CNTVCT_EL0` on AArch64 (the same counter the IRQ-latency benchmark
+/// uses); returns 0 on other targets, where the marker still emits states but
+/// no meaningful cycle delta. Only compiled under the `verifier-cost` feature.
+#[cfg(feature = "verifier-cost")]
+fn read_cycles() -> u64 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let c: u64;
+        unsafe { core::arch::asm!("mrs {}, cntvct_el0", out(reg) c) };
+        c
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        0
+    }
+}
+
 pub const ATTACH_TYPE_TIMER: u32 = 1;
 pub const ATTACH_TYPE_GPIO: u32 = 2;
 pub const ATTACH_TYPE_PWM: u32 = 3;
@@ -131,7 +150,11 @@ impl BpfManager {
             // Verify before accepting: rejects unsafe bytecode and computes the
             // real stack usage (no longer the hardcoded 0). #48.
             let map_value_sizes = self.map_value_sizes();
-            let bpf_prog = Verifier::<ActiveProfile>::verify_with_config(
+            #[cfg(feature = "verifier-cost")]
+            let insn_count = loaded_prog.insns().len();
+            #[cfg(feature = "verifier-cost")]
+            let start_cycles = read_cycles();
+            let (bpf_prog, _stats) = Verifier::<ActiveProfile>::verify_with_stats(
                 loaded_prog.prog_type(),
                 loaded_prog.insns(),
                 self.verify_config(&map_value_sizes),
@@ -140,8 +163,20 @@ impl BpfManager {
                 log::error!("BpfManager: ELF program rejected by verifier: {}", e);
                 BpfError::VerificationFailed
             })?;
+            #[cfg(feature = "verifier-cost")]
+            let verify_cycles = read_cycles().wrapping_sub(start_cycles);
 
             let id = self.programs.len() as u32;
+            #[cfg(feature = "verifier-cost")]
+            crate::serial_println!(
+                "{}",
+                kernel_bpf::cost_corpus::CostRecord {
+                    prog_id: id,
+                    insns: insn_count,
+                    states_explored: _stats.states_explored,
+                    cycles: verify_cycles,
+                }
+            );
             self.programs.push(bpf_prog);
             Ok(id)
         } else {
@@ -161,7 +196,11 @@ impl BpfManager {
         // load-bearing — unsafe bytecode is rejected and the real stack usage is
         // computed rather than trusting a hardcoded 0. #48.
         let map_value_sizes = self.map_value_sizes();
-        let bpf_prog = Verifier::<ActiveProfile>::verify_with_config(
+        #[cfg(feature = "verifier-cost")]
+        let insn_count = insns.len();
+        #[cfg(feature = "verifier-cost")]
+        let start_cycles = read_cycles();
+        let (bpf_prog, _stats) = Verifier::<ActiveProfile>::verify_with_stats(
             BpfProgType::Unspec,
             &insns,
             self.verify_config(&map_value_sizes),
@@ -170,8 +209,20 @@ impl BpfManager {
             log::error!("BpfManager: raw program rejected by verifier: {}", e);
             BpfError::VerificationFailed
         })?;
+        #[cfg(feature = "verifier-cost")]
+        let verify_cycles = read_cycles().wrapping_sub(start_cycles);
 
         let id = self.programs.len() as u32;
+        #[cfg(feature = "verifier-cost")]
+        crate::serial_println!(
+            "{}",
+            kernel_bpf::cost_corpus::CostRecord {
+                prog_id: id,
+                insns: insn_count,
+                states_explored: _stats.states_explored,
+                cycles: verify_cycles,
+            }
+        );
         self.programs.push(bpf_prog);
         log::info!(
             "BpfManager: Loaded raw program. Assigned id={}. Total programs={}",

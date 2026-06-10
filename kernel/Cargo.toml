@@ -72,3 +72,9 @@ embedded-profile = ["kernel_bpf/embedded-profile", "rpi5"]
 # Convenience aliases
 cloud = ["cloud-profile", "x86_64_arch"]
 embedded-rpi5 = ["embedded-profile"]
+
+# Track B: emit a per-load `AXIOM VERIFIER COST` marker (states + cntvct cycles)
+# from the BPF load path. Off by default — measurement instrumentation, not for
+# production images. Enable alongside a profile to capture the verifier-cost
+# curve, e.g. `--features embedded-rpi5,verifier-cost`.
+verifier-cost = []

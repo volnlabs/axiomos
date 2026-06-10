@@ -444,6 +444,55 @@ Userspace Benchmark Tool
 
 ---
 
+# 12. Verifier-Cost Measurement (Track B)
+
+Measures the verifier's **own** execution cost as a function of program size, on
+real A76 hardware — the basis for the claim that verification is bounded and
+schedulable on-device alongside a control loop (see `docs/verifier-fragment.md`).
+Distinct from §3's "BPF load time": this isolates `verify_with_stats` and reports
+both `states_explored` and a `CNTVCT_EL0` cycle delta.
+
+## Method
+
+1. Build with the instrumentation feature, e.g.
+   `./scripts/build-rpi5.sh release --features embedded-rpi5,verifier-cost`.
+   Each BPF load then emits `AXIOM VERIFIER COST prog_id=… insns=… states=… cycles=…`.
+2. Run `/bin/verifier_bench`, which loads straight-line programs at sizes
+   `{10, 50, 100, 500, 1000}` (`kernel_bpf::cost_corpus::MEASUREMENT_SIZES`).
+3. Capture UART and reduce:
+
+   ```
+   sudo timeout 70s cat $PORT | tr -d "\r" | tee verifier-cost.log
+   scripts/verifier-cost.py verifier-cost.log -o verifier-cost.csv \
+       --plot verifier-cost.png --cntfrq 54000000
+   ```
+
+The same shapes/sizes run on the host (`cargo bench … bench_scaling`, §5) and in
+the `cost_corpus` unit tests, so the on-device cycle curve, the host wall-clock
+curve, and the host `states_explored` curve all describe identical programs.
+
+## Results (Hardware)
+
+> _Pending Pi5 capture._ Run the steps above and paste the
+> `scripts/verifier-cost.py` table here.
+
+| insns | states_explored | verify cycles | cyc/insn | verify µs (~54 MHz) |
+| ----- | --------------- | ------------- | -------- | ------------------- |
+| 10    | _tbd_           | _tbd_         | _tbd_    | _tbd_               |
+| 50    | _tbd_           | _tbd_         | _tbd_    | _tbd_               |
+| 100   | _tbd_           | _tbd_         | _tbd_    | _tbd_               |
+| 500   | _tbd_           | _tbd_         | _tbd_    | _tbd_               |
+| 1000  | _tbd_           | _tbd_         | _tbd_    | _tbd_               |
+
+Expected: `states_explored == n` on the loop-free fragment (one state per
+instruction), and `cycles` linear in `n` — i.e. cost stays under the declared
+budget `T(n)=(h+1)·n`. Contrast Linux from §3 (BPF load 24.8 µs @ 2 insn,
+56.6 µs @ 100 insn — full verifier, no declared bound).
+
+**Gaps:** PREVAIL head-to-head not yet run (separate harness). Execution-WCET /
+EDF admission (the program's own cycle bound, not the verifier's) is the next
+track, not this one.
+
 # References
 
 * Axiom Proposal (`docs/proposal.md`)

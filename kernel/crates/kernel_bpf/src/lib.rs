@@ -101,6 +101,7 @@ compile_error!(
 
 pub mod attach;
 pub mod bytecode;
+pub mod cost_corpus;
 pub mod execution;
 pub mod loader;
 pub mod maps;

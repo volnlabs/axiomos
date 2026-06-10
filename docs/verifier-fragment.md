@@ -83,9 +83,20 @@ and thus the size of programs verifiable in bounded cost — rise substantially.
   state-count bound and guards against super-linear regressions.
 - **Cost of any program:** call `Verifier::verify_with_stats(...)` and read
   `VerifyStats::states_explored`.
-- **Wall-clock WCET curve:** the `verifier` criterion bench
+- **Wall-clock WCET curve (host):** the `verifier` criterion bench
   (`kernel/crates/kernel_bpf/benches/verifier.rs`) already times verification vs
   program size (`bench_scaling`). Note that running benches needs the BPF helper
   symbols the interpreter declares `extern "C"` — provided by the kernel or the
   `cfg(test)` stubs — so a standalone `cargo bench` requires host stubs; the
   state-count test above is the profile-independent, CI-checked measurement.
+- **On-device cost curve (Track B):** build the kernel with the `verifier-cost`
+  feature and the load path emits one marker per BPF load,
+  `AXIOM VERIFIER COST prog_id=… insns=… states=… cycles=…`, where `cycles` is a
+  `CNTVCT_EL0` delta around `verify_with_stats`. The `verifier_bench` userspace
+  driver loads a size series (`cost_corpus::MEASUREMENT_SIZES`); capture the UART
+  log and run `scripts/verifier-cost.py` to get the cost-vs-size CSV and plot
+  (states with the `T(n)=(h+1)·n` overlay, cycles vs `n`). The shared shapes live
+  in `kernel_bpf::cost_corpus`, whose `cost_corpus` unit tests pin the
+  `states_explored ≤ n` bound at the exact measurement sizes. This is the
+  authoritative (real A76, in-kernel) measurement; the host criterion curve is a
+  proxy. See `docs/benchmarks.md` §12.
