@@ -21,6 +21,17 @@ pub struct ControlFlowGraph {
     /// Edges in the CFG: (from_idx, to_idx)
     edges: Vec<(usize, usize)>,
 
+    /// Successor adjacency in compressed-sparse-row form: the successors of
+    /// instruction `i` are `succ_targets[succ_offsets[i]..succ_offsets[i+1]]`.
+    /// Built once in [`build`](Self::build) so [`successors`](Self::successors)
+    /// is O(out-degree). Without this every `successors` call re-scanned the
+    /// whole edge list, making each of its per-instruction users — liveness
+    /// fixpoint, reachability BFS, WCET longest-path — quadratic in program
+    /// size, which breaks the verifier's own linear cost bound
+    /// (`docs/verifier-fragment.md`).
+    succ_offsets: Vec<u32>,
+    succ_targets: Vec<u32>,
+
     /// Back edges (for loop detection)
     back_edges: Vec<(usize, usize)>,
 
@@ -35,6 +46,8 @@ impl ControlFlowGraph {
             insn_count: insns.len(),
             leaders: BTreeSet::new(),
             edges: Vec::new(),
+            succ_offsets: Vec::new(),
+            succ_targets: Vec::new(),
             back_edges: Vec::new(),
             exit_points: Vec::new(),
         };
@@ -97,7 +110,35 @@ impl ControlFlowGraph {
         // Identify back edges (for loop detection)
         cfg.identify_back_edges();
 
+        cfg.build_adjacency();
+
         cfg
+    }
+
+    /// Build the CSR successor table from `edges` in two O(E) sweeps:
+    /// count out-degrees → prefix-sum into offsets → scatter targets.
+    fn build_adjacency(&mut self) {
+        let n = self.insn_count;
+        let mut degree = alloc::vec![0u32; n];
+        for &(from, _) in &self.edges {
+            if from < n {
+                degree[from] += 1;
+            }
+        }
+        let mut offsets = alloc::vec![0u32; n + 1];
+        for i in 0..n {
+            offsets[i + 1] = offsets[i] + degree[i];
+        }
+        let mut targets = alloc::vec![0u32; self.edges.len()];
+        let mut cursor = offsets.clone();
+        for &(from, to) in &self.edges {
+            if from < n {
+                targets[cursor[from] as usize] = to as u32;
+                cursor[from] += 1;
+            }
+        }
+        self.succ_offsets = offsets;
+        self.succ_targets = targets;
     }
 
     /// Compute jump target from instruction index and offset.
@@ -135,12 +176,14 @@ impl ControlFlowGraph {
         self.leaders.iter().copied()
     }
 
-    /// Get all edges from an instruction.
+    /// Successors of instruction `idx` — O(out-degree) via the CSR table.
     pub fn successors(&self, idx: usize) -> impl Iterator<Item = usize> + '_ {
-        self.edges
-            .iter()
-            .filter(move |(from, _)| *from == idx)
-            .map(|(_, to)| *to)
+        let range = if idx + 1 < self.succ_offsets.len() {
+            self.succ_offsets[idx] as usize..self.succ_offsets[idx + 1] as usize
+        } else {
+            0..0
+        };
+        self.succ_targets[range].iter().map(|&t| t as usize)
     }
 
     /// Get all edges to an instruction.
@@ -151,11 +194,7 @@ impl ControlFlowGraph {
             .map(|(from, _)| *from)
     }
 
-    /// All edges as `(from, to)` pairs. Callers that need successors for
-    /// *every* instruction (e.g. the WCET longest-path pass) should build an
-    /// adjacency table from this in one O(E) sweep instead of calling
-    /// [`successors`](Self::successors) per instruction, which re-scans the
-    /// edge list each call.
+    /// All edges as `(from, to)` pairs.
     pub fn edges(&self) -> &[(usize, usize)] {
         &self.edges
     }

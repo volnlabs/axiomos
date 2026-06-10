@@ -112,21 +112,10 @@ pub fn wcet_cycles(insns: &[BpfInsn], cfg: &ControlFlowGraph) -> u64 {
     if n == 0 {
         return 0;
     }
-    // One pass over the edge list builds a per-instruction successor table —
-    // O(n + E). Querying `cfg.successors(i)` per instruction would re-scan
-    // the whole edge list each time (O(n·E) ≈ O(n²)), which on a
-    // MAX_INSN_COUNT-sized program breaks the verifier's own linear cost
-    // bound (`docs/verifier-fragment.md`).
-    let mut succ: Vec<Vec<usize>> = alloc::vec![Vec::new(); n];
-    for &(from, to) in cfg.edges() {
-        if from < n {
-            succ[from].push(to);
-        }
-    }
     let mut cost_from: Vec<u64> = alloc::vec![0; n];
     for i in (0..n).rev() {
         let mut best_succ = 0u64;
-        for &s in &succ[i] {
+        for s in cfg.successors(i) {
             // Forward edges only: a loop-free DAG has s > i; a back edge would
             // reference an already-finalised (or self) cost and is ignored.
             if s > i && s < n {

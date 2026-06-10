@@ -1723,6 +1723,31 @@ mod tests {
         assert!(result.is_ok(), "got {:?}", result.err());
     }
 
+    /// Perf canary for the verifier's linear cost bound: a 20k-instruction
+    /// program pays full CFG/reachability/liveness cost before exploration
+    /// hits the recorded-state cap. With the CSR successor table those phases
+    /// are O(n + E) and this test is instantaneous; if a per-instruction
+    /// `successors` edge-list scan (O(n·E)) ever regresses, this test visibly
+    /// drags the suite.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn large_program_analysis_phases_are_linear() {
+        let insns = crate::cost_corpus::straight_line(20_000);
+        let result = Verifier::<ActiveProfile>::verify_with_config(
+            BpfProgType::SocketFilter,
+            &insns,
+            VerifyConfig::default(),
+        );
+        // Exploration records one state per instruction, so the program
+        // exceeds the recorded-state budget — but only after the analysis
+        // phases (CFG, reachability, liveness) ran at full 20k size.
+        assert!(
+            matches!(result, Err(VerifyError::StateLimitExceeded { .. })),
+            "expected the state cap, got {:?}",
+            result.err()
+        );
+    }
+
     /// Embedded profile enforces the per-program WCET budget (#43): a program
     /// whose static worst-case cycle bound exceeds `WCET_CYCLE_BUDGET` is
     /// rejected at verification with `WcetExceeded` — the first time that
