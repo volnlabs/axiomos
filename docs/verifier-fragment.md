@@ -71,11 +71,22 @@ excluded — WCET ≠ the naive instruction-cost total. The result is returned a
 
 Costs are **relative cycle units** pending Cortex-A76 calibration (the same
 hardware run that captures verifier cost measures per-opcode cycles to replace
-the constants). Once calibrated, this WCET feeds load-time schedulability
-admission: a program is admitted only if its WCET fits the hook's time budget
-(`Σ WCETᵢ·freqᵢ/budgetᵢ ≤ U`). The `WcetExceeded` verifier error is the slot for
-the per-program budget check; the EDF admission ledger is the kernel-side
-counterpart — both pending calibration.
+the constants). Two enforcement points consume the bound today:
+
+- **Per-program budget (verifier):** the embedded profile rejects a program
+  whose WCET exceeds `PhysicalProfile::WCET_CYCLE_BUDGET` with `WcetExceeded`.
+  The check runs with the other structural profile constraints *before*
+  path-sensitive exploration, so an over-budget program is refused without
+  paying exploration cost.
+- **Per-hook admission (kernel):** `BpfManager::attach` consults an
+  `AdmissionLedger` (`verifier/admission.rs`) — attaching commits the hook to
+  paying the program's WCET on every fire, and an attach that would push the
+  hook's summed WCET past its capacity is refused with `AdmissionRejected`
+  (safe but not schedulable). Detach returns the budget.
+
+Both budgets are placeholders in relative units until calibration; the full
+utilization form (`Σ WCETᵢ·freqᵢ/budgetᵢ ≤ U` with per-hook fire frequencies)
+lands once cycle↔time is measured.
 
 ## What makes the bound real in the implementation
 

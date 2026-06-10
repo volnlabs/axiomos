@@ -151,6 +151,15 @@ impl ControlFlowGraph {
             .map(|(from, _)| *from)
     }
 
+    /// All edges as `(from, to)` pairs. Callers that need successors for
+    /// *every* instruction (e.g. the WCET longest-path pass) should build an
+    /// adjacency table from this in one O(E) sweep instead of calling
+    /// [`successors`](Self::successors) per instruction, which re-scans the
+    /// edge list each call.
+    pub fn edges(&self) -> &[(usize, usize)] {
+        &self.edges
+    }
+
     /// Check if there's a back edge (potential loop).
     pub fn has_loops(&self) -> bool {
         !self.back_edges.is_empty()

@@ -186,11 +186,16 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
         let cfg = ControlFlowGraph::build(insns);
         verifier.cfg = Some(cfg);
 
-        // Phase 3: Core safety verification
-        let stack_size = verifier.verify_safety(insns)?;
-
-        // Phase 4: Profile-specific constraints
+        // Phase 3: Profile-specific constraints. These are purely structural
+        // (loop-freedom, forbidden helpers, the WCET budget — all computed
+        // from the CFG and raw instructions), so they run *before* the
+        // path-sensitive exploration: an over-budget or loopy program is
+        // rejected without paying exploration cost, and the WCET check cannot
+        // be masked by the explorer's recorded-state cap on large programs.
         verifier.verify_profile_constraints(insns)?;
+
+        // Phase 4: Core safety verification (path-sensitive exploration)
+        let stack_size = verifier.verify_safety(insns)?;
 
         // Capture the cost: total distinct states the pruner recorded during
         // exploration (verification cost), plus the program's static WCET — the
@@ -1082,6 +1087,18 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
             }
         }
 
+        // Per-program WCET budget (#43): the static longest-path cycle bound
+        // must fit the profile's budget. The CFG is loop-free here (back
+        // edges rejected above), so the bound is meaningful. Relative cycle
+        // units pending A76 calibration.
+        let cycles = super::cost::wcet_cycles(insns, cfg);
+        if cycles > P::WCET_CYCLE_BUDGET {
+            return Err(VerifyError::WcetExceeded {
+                cycles,
+                budget: P::WCET_CYCLE_BUDGET,
+            });
+        }
+
         Ok(())
     }
 
@@ -1704,6 +1721,44 @@ mod tests {
         ];
         let result = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns);
         assert!(result.is_ok(), "got {:?}", result.err());
+    }
+
+    /// Embedded profile enforces the per-program WCET budget (#43): a program
+    /// whose static worst-case cycle bound exceeds `WCET_CYCLE_BUDGET` is
+    /// rejected at verification with `WcetExceeded` — the first time that
+    /// error is actually produced.
+    #[cfg(feature = "embedded-profile")]
+    #[test]
+    fn embedded_rejects_program_over_wcet_budget() {
+        use crate::cost_corpus::div_heavy;
+        use crate::profile::PhysicalProfile;
+
+        // 50k div instructions × COST_ALU_EXPENSIVE(4) ≈ 200k cycle units,
+        // over the embedded budget; the same shape at calibration size is
+        // well under it.
+        let (big, _) = div_heavy(50_000);
+        let result = Verifier::<ActiveProfile>::verify_with_config(
+            BpfProgType::SocketFilter,
+            &big,
+            VerifyConfig::default(),
+        );
+        assert!(
+            matches!(
+                result,
+                Err(VerifyError::WcetExceeded { cycles, budget })
+                    if cycles > budget && budget == ActiveProfile::WCET_CYCLE_BUDGET
+            ),
+            "a 50k-div program must exceed the embedded WCET budget, got {:?}",
+            result.err()
+        );
+
+        let (small, _) = div_heavy(1000);
+        Verifier::<ActiveProfile>::verify_with_config(
+            BpfProgType::SocketFilter,
+            &small,
+            VerifyConfig::default(),
+        )
+        .expect("a calibration-size div program is within budget");
     }
 
     /// A 64-bit MOV of the frame pointer must keep pointer typing, so the

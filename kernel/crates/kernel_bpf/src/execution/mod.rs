@@ -299,6 +299,10 @@ pub enum BpfError {
     /// The program failed signature authentication (untrusted signer, bad
     /// signature, tampered data, or unsigned while enforcement is enabled).
     SignatureRejected,
+
+    /// Attach refused: the hook's WCET admission capacity would be exceeded
+    /// (#43). The program is safe but not schedulable on this hook.
+    AdmissionRejected,
 }
 
 impl core::fmt::Display for BpfError {
@@ -314,6 +318,7 @@ impl core::fmt::Display for BpfError {
             Self::OutOfMemory => write!(f, "out of memory"),
             Self::VerificationFailed => write!(f, "program failed verification"),
             Self::SignatureRejected => write!(f, "program failed signature authentication"),
+            Self::AdmissionRejected => write!(f, "attach exceeds hook WCET admission capacity"),
         }
     }
 }

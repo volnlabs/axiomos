@@ -35,6 +35,7 @@
 //! - **Cloud**: Relaxed constraints, JIT hints, soft WCET
 //! - **Embedded**: Strict constraints, hard WCET, interrupt safety
 
+pub mod admission;
 mod alu;
 mod cfg;
 mod core;

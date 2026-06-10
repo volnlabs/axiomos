@@ -12,10 +12,9 @@ use kernel_bpf::bytecode::program::{BpfProgType, BpfProgram};
 use kernel_bpf::execution::{BpfContext, BpfError, BpfExecutor, Interpreter};
 use kernel_bpf::loader::BpfLoader;
 use kernel_bpf::maps::{ArrayMap, BpfMap, HashMap as BpfHashMap, RingBufMap, TimeSeriesMap};
-use kernel_bpf::profile::ActiveProfile;
-#[cfg(target_arch = "aarch64")]
-use kernel_bpf::profile::PhysicalProfile;
+use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
 use kernel_bpf::signing::{SignatureVerifier, TrustedKey};
+use kernel_bpf::verifier::admission::AdmissionLedger;
 use kernel_bpf::verifier::{Verifier, VerifyConfig};
 
 /// Context size used for load-time verification (#122).
@@ -78,7 +77,21 @@ pub struct BpfManager {
     /// to true for v0.1.x because no userspace signer ships yet; flip to false
     /// (via [`BpfManager::set_allow_unsigned`]) to enforce provenance.
     allow_unsigned: bool,
+    /// Static WCET cycle bound per loaded program, indexed by prog id —
+    /// `VerifyStats::wcet_cycles` captured at load (#43).
+    prog_wcet: Vec<u64>,
+    /// Per-hook WCET admission ledger: an attach is refused when the hook's
+    /// summed WCET would exceed `HOOK_WCET_CAPACITY` (#43).
+    admission: AdmissionLedger,
 }
+
+/// Per-hook WCET capacity, in the cost model's relative cycle units.
+///
+/// v1 policy: each hook can host programs whose summed WCET fits one
+/// per-program budget — many small programs or one maximal one. Retune with
+/// `WCET_CYCLE_BUDGET` once A76 calibration lands. (On the cloud profile the
+/// budget is `u64::MAX`, so admission never rejects there.)
+const HOOK_WCET_CAPACITY: u64 = <ActiveProfile as PhysicalProfile>::WCET_CYCLE_BUDGET;
 
 impl Default for BpfManager {
     fn default() -> Self {
@@ -95,6 +108,8 @@ impl BpfManager {
             pinned_maps: BTreeMap::new(),
             signature_verifier: SignatureVerifier::new(),
             allow_unsigned: true,
+            prog_wcet: Vec::new(),
+            admission: AdmissionLedger::new(HOOK_WCET_CAPACITY),
         }
     }
 
@@ -154,7 +169,7 @@ impl BpfManager {
             let insn_count = loaded_prog.insns().len();
             #[cfg(feature = "verifier-cost")]
             let start_cycles = read_cycles();
-            let (bpf_prog, _stats) = Verifier::<ActiveProfile>::verify_with_stats(
+            let (bpf_prog, stats) = Verifier::<ActiveProfile>::verify_with_stats(
                 loaded_prog.prog_type(),
                 loaded_prog.insns(),
                 self.verify_config(&map_value_sizes),
@@ -173,12 +188,13 @@ impl BpfManager {
                 kernel_bpf::cost_corpus::CostRecord {
                     prog_id: id,
                     insns: insn_count,
-                    states_explored: _stats.states_explored,
+                    states_explored: stats.states_explored,
                     cycles: verify_cycles,
-                    wcet_cycles: _stats.wcet_cycles,
+                    wcet_cycles: stats.wcet_cycles,
                 }
             );
             self.programs.push(bpf_prog);
+            self.prog_wcet.push(stats.wcet_cycles);
             Ok(id)
         } else {
             Err(BpfError::NotLoaded)
@@ -201,7 +217,7 @@ impl BpfManager {
         let insn_count = insns.len();
         #[cfg(feature = "verifier-cost")]
         let start_cycles = read_cycles();
-        let (bpf_prog, _stats) = Verifier::<ActiveProfile>::verify_with_stats(
+        let (bpf_prog, stats) = Verifier::<ActiveProfile>::verify_with_stats(
             BpfProgType::Unspec,
             &insns,
             self.verify_config(&map_value_sizes),
@@ -220,12 +236,13 @@ impl BpfManager {
             kernel_bpf::cost_corpus::CostRecord {
                 prog_id: id,
                 insns: insn_count,
-                states_explored: _stats.states_explored,
+                states_explored: stats.states_explored,
                 cycles: verify_cycles,
-                wcet_cycles: _stats.wcet_cycles,
+                wcet_cycles: stats.wcet_cycles,
             }
         );
         self.programs.push(bpf_prog);
+        self.prog_wcet.push(stats.wcet_cycles);
         log::info!(
             "BpfManager: Loaded raw program. Assigned id={}. Total programs={}",
             id,
@@ -250,9 +267,23 @@ impl BpfManager {
             return Err(BpfError::NotLoaded);
         }
 
-        let list = self.attachments.entry(attach_type).or_default();
-        if !list.contains(&prog_id) {
-            list.push(prog_id);
+        // WCET admission (#43): attaching commits the hook to paying this
+        // program's worst case on every fire; refuse if the hook's summed
+        // WCET would exceed its capacity. Safe-but-unschedulable is rejected.
+        let already_attached = self
+            .attachments
+            .get(&attach_type)
+            .is_some_and(|list| list.contains(&prog_id));
+        if !already_attached {
+            let wcet = self.prog_wcet.get(prog_id as usize).copied().unwrap_or(0);
+            if let Err(e) = self.admission.admit(attach_type, wcet) {
+                log::error!("BpfManager: {}", e);
+                return Err(BpfError::AdmissionRejected);
+            }
+            self.attachments
+                .entry(attach_type)
+                .or_default()
+                .push(prog_id);
         }
         Ok(())
     }
@@ -261,6 +292,9 @@ impl BpfManager {
         if let Some(list) = self.attachments.get_mut(&attach_type) {
             if let Some(pos) = list.iter().position(|&id| id == prog_id) {
                 list.remove(pos);
+                // Return the program's WCET to the hook's admission budget.
+                let wcet = self.prog_wcet.get(prog_id as usize).copied().unwrap_or(0);
+                self.admission.release(attach_type, wcet);
                 return Ok(());
             }
         }

@@ -107,6 +107,21 @@ pub trait PhysicalProfile: sealed::Sealed + 'static {
     /// - Embedded: false (restart may be catastrophic, recovery required)
     const RESTART_ACCEPTABLE: bool;
 
+    /// Per-program WCET budget in cycle units (#43).
+    ///
+    /// A program whose static worst-case execution cost
+    /// (`VerifyStats::wcet_cycles`, the longest path through the loop-free
+    /// CFG priced by `verifier::cost`) exceeds this budget is rejected at
+    /// verification with `WcetExceeded`. Units are the cost model's relative
+    /// cycle units, pending A76 calibration — retune this alongside the
+    /// `COST_*` constants once measured cycles/op exist.
+    ///
+    /// - Cloud: effectively unlimited (timing is not a cloud contract)
+    /// - Embedded: 100,000 units ≈ 100k cheap-ALU instructions, or ~6k map
+    ///   lookups — generous for real robot extensions (≪10k instructions)
+    ///   while still bounding adversarial helper-heavy programs.
+    const WCET_CYCLE_BUDGET: u64;
+
     /// Profile name for diagnostics and logging.
     const NAME: &'static str;
 }
@@ -152,6 +167,9 @@ impl PhysicalProfile for CloudProfile {
     /// Restart is normal recovery
     const RESTART_ACCEPTABLE: bool = true;
 
+    /// Timing is not a cloud contract; effectively unlimited.
+    const WCET_CYCLE_BUDGET: u64 = u64::MAX;
+
     const NAME: &'static str = "cloud";
 }
 
@@ -196,6 +214,9 @@ impl PhysicalProfile for EmbeddedProfile {
 
     /// Restart is forbidden - must use recovery partition
     const RESTART_ACCEPTABLE: bool = false;
+
+    /// Placeholder budget in relative cycle units, pending A76 calibration.
+    const WCET_CYCLE_BUDGET: u64 = 100_000;
 
     const NAME: &'static str = "embedded";
 }
