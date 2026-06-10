@@ -214,6 +214,18 @@ pub enum VerifyError {
         /// Instruction index where loop starts
         insn_idx: usize,
     },
+
+    /// A helper banned on the bounded RT fragment was called (embedded only).
+    /// `bpf_trace_printk` writes to the UART — serial-I/O-bound (~ms/line) and
+    /// unbounded in message length — so it cannot appear in a deadline-scheduled
+    /// hook (`docs/benchmarks.md §12`).
+    #[cfg(feature = "embedded-profile")]
+    HelperForbiddenOnRtFragment {
+        /// Instruction index of the offending call.
+        insn_idx: usize,
+        /// Raw helper id that is forbidden.
+        helper: i32,
+    },
 }
 
 impl fmt::Display for VerifyError {
@@ -358,6 +370,14 @@ impl fmt::Display for VerifyError {
             #[cfg(feature = "embedded-profile")]
             Self::WcetExceeded { cycles, budget } => {
                 write!(f, "WCET {} cycles exceeds budget {}", cycles, budget)
+            }
+            #[cfg(feature = "embedded-profile")]
+            Self::HelperForbiddenOnRtFragment { insn_idx, helper } => {
+                write!(
+                    f,
+                    "helper {} forbidden on the RT fragment at instruction {}",
+                    helper, insn_idx
+                )
             }
             #[cfg(feature = "embedded-profile")]
             Self::InterruptUnsafe { insn_idx, reason } => {

@@ -1084,6 +1084,18 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                 if ALLOC_HELPERS.contains(&insn.imm) {
                     return Err(VerifyError::DynamicAllocationAttempted { insn_idx: idx });
                 }
+
+                // Helpers banned on the bounded RT fragment. `bpf_trace_printk`
+                // is serial-I/O-bound and unbounded in message length, so it has
+                // no place in a deadline-scheduled hook (docs/benchmarks.md §12).
+                const FORBIDDEN_RT_HELPERS: &[i32] = &[super::HelperId::TracePrintk as i32];
+
+                if FORBIDDEN_RT_HELPERS.contains(&insn.imm) {
+                    return Err(VerifyError::HelperForbiddenOnRtFragment {
+                        insn_idx: idx,
+                        helper: insn.imm,
+                    });
+                }
             }
         }
 
@@ -1758,10 +1770,10 @@ mod tests {
         use crate::cost_corpus::div_heavy;
         use crate::profile::PhysicalProfile;
 
-        // 60k div instructions × COST_ALU_EXPENSIVE(2) ≈ 120k cycle units,
-        // comfortably over the 100k embedded budget; the same shape at
-        // calibration size is well under it.
-        let (big, _) = div_heavy(60_000);
+        // 90k div instructions × COST_ALU_EXPENSIVE(2) ≈ 180k cycle units,
+        // comfortably over the ~166k embedded budget (one 1 kHz control-loop
+        // period); the same shape at calibration size is well under it.
+        let (big, _) = div_heavy(90_000);
         let result = Verifier::<ActiveProfile>::verify_with_config(
             BpfProgType::SocketFilter,
             &big,
@@ -1784,6 +1796,31 @@ mod tests {
             VerifyConfig::default(),
         )
         .expect("a calibration-size div program is within budget");
+    }
+
+    /// Embedded profile bans `bpf_trace_printk` on the RT fragment (#43): it is
+    /// serial-I/O-bound, so a deadline-scheduled hook must not call it.
+    #[cfg(feature = "embedded-profile")]
+    #[test]
+    fn embedded_rejects_trace_printk_on_rt_fragment() {
+        let insns = [
+            BpfInsn::call(HelperId::TracePrintk as i32),
+            BpfInsn::exit(),
+        ];
+        let result = Verifier::<ActiveProfile>::verify_with_config(
+            BpfProgType::SocketFilter,
+            &insns,
+            VerifyConfig::default(),
+        );
+        assert!(
+            matches!(
+                result,
+                Err(VerifyError::HelperForbiddenOnRtFragment { insn_idx: 0, helper })
+                    if helper == HelperId::TracePrintk as i32
+            ),
+            "trace_printk must be rejected on the RT fragment, got {:?}",
+            result.err()
+        );
     }
 
     /// A 64-bit MOV of the frame pointer must keep pointer typing, so the

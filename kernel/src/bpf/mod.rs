@@ -80,18 +80,25 @@ pub struct BpfManager {
     /// Static WCET cycle bound per loaded program, indexed by prog id —
     /// `VerifyStats::wcet_cycles` captured at load (#43).
     prog_wcet: Vec<u64>,
-    /// Per-hook WCET admission ledger: an attach is refused when the hook's
-    /// summed WCET would exceed `HOOK_WCET_CAPACITY` (#43).
+    /// Utilization-form admission ledger: an attach is refused when the summed
+    /// `Σ WCETᵢ·freqᵢ` of all admitted programs would exceed the profile's CPU
+    /// utilization budget (#43).
     admission: AdmissionLedger,
 }
 
-/// Per-hook WCET capacity, in the cost model's relative cycle units.
-///
-/// v1 policy: each hook can host programs whose summed WCET fits one
-/// per-program budget — many small programs or one maximal one. Retune with
-/// `WCET_CYCLE_BUDGET` once A76 calibration lands. (On the cloud profile the
-/// budget is `u64::MAX`, so admission never rejects there.)
-const HOOK_WCET_CAPACITY: u64 = <ActiveProfile as PhysicalProfile>::WCET_CYCLE_BUDGET;
+/// Default fire frequency assumed for a hook, in Hz. Every hook is assumed to
+/// fire at the control-loop rate (`1e9 / RT_PERIOD_NS` = 1 kHz on embedded);
+/// per-hook-type and caller-declared frequencies are future work. On the cloud
+/// profile `RT_PERIOD_NS` is unbounded so this is 0 — combined with the
+/// unbounded utilization budget, admission never rejects there.
+fn hook_frequency_hz(_attach_type: u32) -> u64 {
+    let period = <ActiveProfile as PhysicalProfile>::RT_PERIOD_NS;
+    if period == 0 || period == u64::MAX {
+        0
+    } else {
+        1_000_000_000 / period
+    }
+}
 
 impl Default for BpfManager {
     fn default() -> Self {
@@ -109,7 +116,10 @@ impl BpfManager {
             signature_verifier: SignatureVerifier::new(),
             allow_unsigned: true,
             prog_wcet: Vec::new(),
-            admission: AdmissionLedger::new(HOOK_WCET_CAPACITY),
+            admission: AdmissionLedger::new(
+                <ActiveProfile as PhysicalProfile>::UTILIZATION_BUDGET_NS_PER_S,
+                <ActiveProfile as PhysicalProfile>::CYCLE_UNIT_NS,
+            ),
         }
     }
 
@@ -267,16 +277,18 @@ impl BpfManager {
             return Err(BpfError::NotLoaded);
         }
 
-        // WCET admission (#43): attaching commits the hook to paying this
-        // program's worst case on every fire; refuse if the hook's summed
-        // WCET would exceed its capacity. Safe-but-unschedulable is rejected.
+        // Utilization admission (#43): attaching commits the CPU to running
+        // this program on every fire; refuse if `Σ WCETᵢ·freqᵢ` across all
+        // admitted hooks would exceed the profile's utilization budget.
+        // Safe-but-unschedulable is rejected.
         let already_attached = self
             .attachments
             .get(&attach_type)
             .is_some_and(|list| list.contains(&prog_id));
         if !already_attached {
             let wcet = self.prog_wcet.get(prog_id as usize).copied().unwrap_or(0);
-            if let Err(e) = self.admission.admit(attach_type, wcet) {
+            let freq = hook_frequency_hz(attach_type);
+            if let Err(e) = self.admission.admit(attach_type, prog_id, wcet, freq) {
                 log::error!("BpfManager: {}", e);
                 return Err(BpfError::AdmissionRejected);
             }
@@ -292,9 +304,8 @@ impl BpfManager {
         if let Some(list) = self.attachments.get_mut(&attach_type) {
             if let Some(pos) = list.iter().position(|&id| id == prog_id) {
                 list.remove(pos);
-                // Return the program's WCET to the hook's admission budget.
-                let wcet = self.prog_wcet.get(prog_id as usize).copied().unwrap_or(0);
-                self.admission.release(attach_type, wcet);
+                // Return this attachment's utilization to the budget.
+                self.admission.release(attach_type, prog_id);
                 return Ok(());
             }
         }

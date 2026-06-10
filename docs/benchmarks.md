@@ -528,10 +528,11 @@ map 4.16→4.15, memory 0.41, straight 0.31), confirming the harness is stable.
 **`trace` (`bpf_trace_printk`) is deliberately not exec-calibrated:** it is
 serial-I/O-bound (~86.8 µs/byte ≈ 15k cycle units/byte at 115200 8N1), so even a
 short line costs hundreds of thousands of units, and the write would flood the
-very serial channel that carries the measurement. The right lever for keeping
-printk out of a bounded RT hook is a policy ban on the loop-free fragment, not a
-cycle weight (a baud-accurate weight would exceed the WCET budget and reject
-today's printk-using demos at load).
+very serial channel that carries the measurement. So instead of a cycle weight,
+printk is kept out of bounded RT hooks by **policy**: the embedded verifier
+rejects any `bpf_trace_printk` call on the loop-free fragment
+(`VerifyError::HelperForbiddenOnRtFragment`). The printk-using demos are
+cloud/x86 only, so nothing on the embedded target regresses.
 
 The model's **helper ordering is confirmed on silicon across all four compute
 helper classes**, in exactly the order the model ranks them: read (1.19) < copy
@@ -543,10 +544,24 @@ measured 1.1×) — retuned to 2 (keeps headroom). Predicted-vs-measured at
 `n=1000`: ktime 1.03×, map/memory 1.4×, copy 1.33×, ringbuf 1.55× (all safe),
 straight ~1.0× with the base term.
 
-**Gaps:** PREVAIL head-to-head not yet run (separate harness). All compute helper
-classes are now calibrated; `COST_HELPER_TRACE` is I/O-bound and handled by
-policy, not exec-calibration (see above). Utilization-form admission
-(`Σ WCETᵢ·freqᵢ ≤ U`) pending.
+## Calibrated WCET budget + utilization admission
+
+The calibration above closes the loop from static cost model to schedulability
+admission. Using `CYCLE_UNIT_NS = 6` (≈5.74 ns/unit, rounded up) and a 1 kHz
+control loop (`RT_PERIOD_NS = 1_000_000`):
+
+- **Per-program budget** `WCET_CYCLE_BUDGET = RT_PERIOD_NS / CYCLE_UNIT_NS ≈
+  166_666` units — a single hook invocation that cannot fit one period is
+  unschedulable at any frequency, so it is rejected at load.
+- **Utilization admission**: attaching commits the CPU to `wcet × CYCLE_UNIT_NS ×
+  freq` ns of work per second; the ledger keeps `Σ WCETᵢ·freqᵢ` under
+  `UTILIZATION_BUDGET_NS_PER_S = 5e8` (U = 0.5, half a core). This replaces the
+  earlier per-hook WCET-sum ledger with the EDF utilization test.
+- **printk RT-ban**: enforced at embedded verification (see TRACE above).
+
+**Gaps:** PREVAIL head-to-head not yet run (separate harness). Hook fire
+frequency is a single nominal control-loop rate (1 kHz) for every hook;
+per-hook-type and caller-declared frequencies are future work.
 
 # References
 

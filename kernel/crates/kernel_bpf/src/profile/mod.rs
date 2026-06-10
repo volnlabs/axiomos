@@ -117,10 +117,38 @@ pub trait PhysicalProfile: sealed::Sealed + 'static {
     /// `COST_*` constants once measured cycles/op exist.
     ///
     /// - Cloud: effectively unlimited (timing is not a cloud contract)
-    /// - Embedded: 100,000 units ≈ 100k cheap-ALU instructions, or ~6k map
-    ///   lookups — generous for real robot extensions (≪10k instructions)
-    ///   while still bounding adversarial helper-heavy programs.
+    /// - Embedded: one control-loop period's worth of cycle units
+    ///   (`RT_PERIOD_NS / CYCLE_UNIT_NS`) — a single hook invocation that cannot
+    ///   fit one period is unschedulable at any frequency, so it is rejected at
+    ///   load regardless of admission.
     const WCET_CYCLE_BUDGET: u64;
+
+    /// Calibrated cost of one WCET cycle unit, in nanoseconds, on this profile's
+    /// target. The Pi5 A76 JIT measured ~5.74 ns/unit (`docs/benchmarks.md §12`,
+    /// straight-line baseline); rounded up to 6 for a conservative bound. Used
+    /// to convert a program's `wcet_cycles` into wall-clock time for the
+    /// utilization admission test.
+    ///
+    /// - Cloud: 1 (timing is not a contract; the value never bites because the
+    ///   utilization budget is unbounded)
+    /// - Embedded: 6 ns/unit
+    const CYCLE_UNIT_NS: u64;
+
+    /// The control-loop period this profile schedules hooks against, in
+    /// nanoseconds. Sets the per-program WCET budget (one invocation must fit a
+    /// period) and the default hook fire frequency for admission.
+    ///
+    /// - Cloud: effectively unbounded
+    /// - Embedded: 1_000_000 ns (a 1 kHz control loop)
+    const RT_PERIOD_NS: u64;
+
+    /// CPU-time budget for *all* admitted BPF hooks, in nanoseconds of execution
+    /// per wall-clock second — the EDF utilization bound `U` expressed as
+    /// `U × 1e9`. The admission ledger keeps `Σ WCETᵢ·freqᵢ` (in ns/s) under it.
+    ///
+    /// - Cloud: unbounded (admission never rejects)
+    /// - Embedded: 500_000_000 (U = 0.5: at most half a core spent in BPF)
+    const UTILIZATION_BUDGET_NS_PER_S: u64;
 
     /// Profile name for diagnostics and logging.
     const NAME: &'static str;
@@ -170,6 +198,15 @@ impl PhysicalProfile for CloudProfile {
     /// Timing is not a cloud contract; effectively unlimited.
     const WCET_CYCLE_BUDGET: u64 = u64::MAX;
 
+    /// Nominal; never bites (utilization budget is unbounded).
+    const CYCLE_UNIT_NS: u64 = 1;
+
+    /// No control-loop deadline on the cloud profile.
+    const RT_PERIOD_NS: u64 = u64::MAX;
+
+    /// Unbounded: admission never rejects on the cloud profile.
+    const UTILIZATION_BUDGET_NS_PER_S: u64 = u64::MAX;
+
     const NAME: &'static str = "cloud";
 }
 
@@ -215,8 +252,19 @@ impl PhysicalProfile for EmbeddedProfile {
     /// Restart is forbidden - must use recovery partition
     const RESTART_ACCEPTABLE: bool = false;
 
-    /// Placeholder budget in relative cycle units, pending A76 calibration.
-    const WCET_CYCLE_BUDGET: u64 = 100_000;
+    /// One control-loop period's worth of cycle units
+    /// (`RT_PERIOD_NS / CYCLE_UNIT_NS` = 1_000_000 / 6 ≈ 166_666): a single hook
+    /// invocation that cannot fit one period is unschedulable at any frequency.
+    const WCET_CYCLE_BUDGET: u64 = Self::RT_PERIOD_NS / Self::CYCLE_UNIT_NS;
+
+    /// Pi5 A76 JIT: ~5.74 ns/unit measured, rounded up to 6 (docs/benchmarks.md §12).
+    const CYCLE_UNIT_NS: u64 = 6;
+
+    /// 1 kHz control loop.
+    const RT_PERIOD_NS: u64 = 1_000_000;
+
+    /// U = 0.5: at most half a core spent across all admitted BPF hooks.
+    const UTILIZATION_BUDGET_NS_PER_S: u64 = 500_000_000;
 
     const NAME: &'static str = "embedded";
 }
