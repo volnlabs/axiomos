@@ -275,11 +275,20 @@ impl ArgType {
                 matches!(reg_type, RegType::Scalar)
             }
             Self::PtrToMap => matches!(reg_type, RegType::ConstPtrToMap),
+            // Frame-pointer-derived pointers (`mov rX, r10` keeps `PtrToFp`)
+            // are stack pointers and accepted wherever one is — consistent
+            // with the `PtrToStack` arm below.
             Self::PtrToMapKey => {
-                matches!(reg_type, RegType::PtrToMapKey | RegType::PtrToStack)
+                matches!(
+                    reg_type,
+                    RegType::PtrToMapKey | RegType::PtrToStack | RegType::PtrToFp
+                )
             }
             Self::PtrToMapValue => {
-                matches!(reg_type, RegType::PtrToMapValue | RegType::PtrToStack)
+                matches!(
+                    reg_type,
+                    RegType::PtrToMapValue | RegType::PtrToStack | RegType::PtrToFp
+                )
             }
             Self::PtrToStack => matches!(reg_type, RegType::PtrToStack | RegType::PtrToFp),
             Self::PtrToMem => {

@@ -32,14 +32,88 @@ MARKER = re.compile(
     r"(?:\s+wcet=(?P<wcet>\d+))?"
 )
 
+# Execution-cost marker emitted by the feature-gated BPF_BENCH_EXEC command.
+EXEC_MARKER = re.compile(
+    r"AXIOM EXEC COST\s+"
+    r"prog_id=(?P<prog_id>\d+)\s+"
+    r"insns=(?P<insns>\d+)\s+"
+    r"runs=(?P<runs>\d+)\s+"
+    r"cycles=(?P<cycles>\d+)"
+)
+
+# Shape labels printed by the verifier_bench driver: "<shape> n=<n> prog_id=<id>".
+LABEL = re.compile(r"^(?P<shape>straight|memory|div|ktime|map)\s+n=(?P<n>\d+)\s+prog_id=(?P<prog_id>\d+)")
+
+# Measured-op count per shape (mirrors kernel_bpf::cost_corpus `ops`).
+SHAPE_OPS = {
+    "straight": lambda n: n - 2,
+    "memory": lambda n: n - 3,
+    "div": lambda n: n - 2,
+    "ktime": lambda n: n - 1,
+    "map": lambda n: (n - 4) // 4,
+}
+
+# The cost-model constant each shape calibrates (verifier/cost.rs).
+SHAPE_CONSTANT = {
+    "straight": "COST_DEFAULT",
+    "memory": "COST_MEMORY",
+    "div": "COST_ALU_EXPENSIVE",
+    "ktime": "COST_HELPER_READ",
+    "map": "COST_HELPER_MAP",
+}
+
 
 def parse(lines):
-    rows = []
+    rows, exec_rows, labels = [], [], {}
     for line in lines:
         m = MARKER.search(line)
         if m:
             rows.append({k: (int(v) if v is not None else 0) for k, v in m.groupdict().items()})
-    return rows
+            continue
+        m = EXEC_MARKER.search(line)
+        if m:
+            exec_rows.append({k: int(v) for k, v in m.groupdict().items()})
+            continue
+        m = LABEL.search(line.strip())
+        if m:
+            labels[int(m.group("prog_id"))] = (m.group("shape"), int(m.group("n")))
+    return rows, exec_rows, labels
+
+
+def summarize_exec(exec_rows, labels, cntfrq):
+    if not exec_rows:
+        return
+    print("\n=== Execution cost (BPF_BENCH_EXEC) ===")
+    width = "{:>10} {:>8} {:>8} {:>6} {:>14} {:>14} {:>12}"
+    print(width.format("shape", "prog_id", "insns", "runs", "cycles", "cyc/run", "cyc/op"))
+    # (shape) -> {n: cycles_per_run}
+    by_shape = {}
+    for r in exec_rows:
+        shape, n = labels.get(r["prog_id"], ("?", r["insns"]))
+        per_run = r["cycles"] / r["runs"] if r["runs"] else 0.0
+        ops = SHAPE_OPS.get(shape, lambda n: n)(n)
+        per_op = per_run / ops if ops else 0.0
+        by_shape.setdefault(shape, {})[n] = per_run
+        print(width.format(
+            shape, r["prog_id"], r["insns"], r["runs"], r["cycles"],
+            "{:.1f}".format(per_run), "{:.2f}".format(per_op),
+        ))
+    # Calibration: slope between the two largest sizes per shape cancels the
+    # fixed per-run overhead (interpreter entry/exit, timer reads).
+    print("\n=== Calibration estimates (slope between sizes) ===")
+    for shape, sizes in sorted(by_shape.items()):
+        if shape not in SHAPE_OPS or len(sizes) < 2:
+            continue
+        ns = sorted(sizes)
+        n1, n2 = ns[-2], ns[-1]
+        ops1, ops2 = SHAPE_OPS[shape](n1), SHAPE_OPS[shape](n2)
+        if ops2 == ops1:
+            continue
+        per_op = (sizes[n2] - sizes[n1]) / (ops2 - ops1)
+        line = "{:>10}: {:.2f} cycles/op -> {}".format(shape, per_op, SHAPE_CONSTANT[shape])
+        if cntfrq:
+            line += "  ({:.1f} ns/op)".format(per_op * 1e9 / cntfrq)
+        print(line)
 
 
 def write_csv(rows, path):
@@ -120,14 +194,24 @@ def main():
     args = ap.parse_args()
 
     src = sys.stdin if args.log == "-" else open(args.log)
-    rows = parse(src)
+    rows, exec_rows, labels = parse(src)
     if args.log != "-":
         src.close()
 
     summarize(rows, args.cntfrq)
+    summarize_exec(exec_rows, labels, args.cntfrq)
     if args.csv:
         write_csv(rows, args.csv)
         print("\nwrote {} rows to {}".format(len(rows), args.csv))
+        if exec_rows:
+            exec_csv = args.csv.replace(".csv", "-exec.csv")
+            with open(exec_csv, "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=["shape", "n", "prog_id", "insns", "runs", "cycles"])
+                w.writeheader()
+                for r in exec_rows:
+                    shape, n = labels.get(r["prog_id"], ("?", r["insns"]))
+                    w.writerow({"shape": shape, "n": n, **r})
+            print("wrote {} exec rows to {}".format(len(exec_rows), exec_csv))
     if args.plot:
         plot(rows, args.plot, args.height)
 

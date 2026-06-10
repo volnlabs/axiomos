@@ -549,6 +549,43 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
             });
         }
 
+        // Pointer-aware typing (64-bit only): a MOV of a pointer register
+        // copies the pointer state wholesale (type, offset, range), and
+        // ADD/SUB of an immediate on a pointer adjusts its offset — the
+        // sequence `mov r2, r10 ; r2 += -8` clang emits for every stack
+        // address. The deref and helper-arg checks already consume
+        // `ptr_offset`; without this arm every ALU result collapsed to a
+        // scalar, so no derived pointer could ever be dereferenced or passed
+        // to a helper. Any other ALU op on a pointer falls through to the
+        // scalar collapse below: the result is no longer a provable pointer
+        // and cannot be used as one (fail-safe).
+        if insn.is_alu64() {
+            match (alu_op, insn.source_type()) {
+                (AluOp::Mov, crate::bytecode::opcode::SourceType::Reg) => {
+                    let src = insn.src().expect("src register validated above");
+                    if state.reg(src).reg_type.is_pointer() {
+                        let copied = state.reg(src).clone();
+                        *state.reg_mut(dst) = copied;
+                        return Ok(());
+                    }
+                }
+                (AluOp::Add | AluOp::Sub, crate::bytecode::opcode::SourceType::Imm)
+                    if state.reg(dst).reg_type.is_pointer() =>
+                {
+                    let delta = i64::from(insn.imm);
+                    let signed = if matches!(alu_op, AluOp::Add) {
+                        delta
+                    } else {
+                        delta.wrapping_neg()
+                    };
+                    let dst_state = state.reg_mut(dst);
+                    dst_state.ptr_offset = dst_state.ptr_offset.wrapping_add(signed);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
         // Compute the rhs ScalarValue from either the source register or
         // the sign-extended immediate. tnum + interval flow through
         // `compute_alu_result`, replacing the prior unconditional collapse
@@ -838,8 +875,12 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                     });
                 }
 
+                // The frame pointer is readable like a stack pointer (the
+                // store arm below already treats it that way); without this a
+                // plain `r1 = *(u64*)(r10 - 8)` — the canonical clang stack
+                // read — was rejected while the matching store was accepted.
                 let src_state = state.reg(src);
-                if !src_state.reg_type.can_read() {
+                if !src_state.reg_type.can_read() && src_state.reg_type != RegType::PtrToFp {
                     return Err(VerifyError::InvalidMemoryAccess {
                         insn_idx: idx,
                         reason: "cannot read from this pointer type",
@@ -1180,6 +1221,7 @@ fn check_ranged_deref(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::verifier::HelperId;
 
     #[test]
     fn verify_empty_program() {
@@ -1662,6 +1704,60 @@ mod tests {
         ];
         let result = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns);
         assert!(result.is_ok(), "got {:?}", result.err());
+    }
+
+    /// A 64-bit MOV of the frame pointer must keep pointer typing, so the
+    /// canonical `mov r2, r10 ; r2 += -8 ; call map_lookup(map, r2)` sequence
+    /// (what clang emits for a stack key) passes helper-argument checks.
+    #[test]
+    fn mov_of_frame_pointer_stays_a_pointer_for_helper_args() {
+        let insns = [
+            BpfInsn::mov64_imm(1, 0),
+            BpfInsn::new(0x7b, 10, 1, -8, 0), // stx [r10-8], r1 (init key)
+            BpfInsn::mov64_imm(1, 0),         // r1 = map id 0
+            BpfInsn::mov64_reg(2, 10),        // r2 = r10
+            BpfInsn::add64_imm(2, -8),        // r2 += -8
+            BpfInsn::call(HelperId::MapLookupElem as i32),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ];
+        let config = VerifyConfig {
+            map_value_sizes: &[8],
+            ..VerifyConfig::default()
+        };
+        Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, config)
+            .expect("stack-key map lookup through a moved frame pointer must verify");
+    }
+
+    /// Fail-safe: a pointer pushed through any non-offset ALU op (here `mul`)
+    /// degrades to a scalar and is no longer accepted as a pointer argument.
+    #[test]
+    fn pointer_through_non_offset_alu_degrades_to_scalar() {
+        let insns = [
+            BpfInsn::mov64_imm(1, 0),
+            BpfInsn::new(0x7b, 10, 1, -8, 0),
+            BpfInsn::mov64_imm(1, 0),
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::mul64_imm(2, 1), // pointer * 1: no longer a provable pointer
+            BpfInsn::call(HelperId::MapLookupElem as i32),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ];
+        let config = VerifyConfig {
+            map_value_sizes: &[8],
+            ..VerifyConfig::default()
+        };
+        assert!(
+            matches!(
+                Verifier::<ActiveProfile>::verify_with_config(
+                    BpfProgType::SocketFilter,
+                    &insns,
+                    config
+                ),
+                Err(VerifyError::HelperArgType { arg_idx: 1, .. })
+            ),
+            "a multiplied pointer must not pass as a map-key pointer"
+        );
     }
 
     /// `verify_with_stats` reports the static WCET cycle bound (Track C / #43).

@@ -461,8 +461,15 @@ both `states_explored` and a `CNTVCT_EL0` cycle delta.
    (`cycles` = measured verification cost; `wcet` = the verifier's static WCET
    cycle bound for the program — captured here so the same run can calibrate the
    cost model, Track C).
-2. Run `/bin/verifier_bench`, which loads straight-line programs at sizes
-   `{10, 50, 100, 500, 1000}` (`kernel_bpf::cost_corpus::MEASUREMENT_SIZES`).
+2. Run `/bin/verifier_bench`, which (a) loads straight-line programs at sizes
+   `{10, 50, 100, 500, 1000}` (`kernel_bpf::cost_corpus::MEASUREMENT_SIZES`),
+   and (b) runs the execution-cost calibration corpus: shapes dominated by one
+   instruction class each (memory, div, ktime-helper, map-lookup-helper) at
+   sizes `{100, 1000}` (`CALIBRATION_SIZES`), each executed 64× back-to-back
+   via the feature-gated `BPF_BENCH_EXEC` command, emitting
+   `AXIOM EXEC COST prog_id=… insns=… runs=… cycles=…` markers. The script's
+   slope fit between the two sizes per shape yields measured cycles/op for each
+   cost-model constant in `verifier/cost.rs` — the brick-3 calibration input.
 3. Capture UART and reduce:
 
    ```

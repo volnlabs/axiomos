@@ -304,6 +304,46 @@ impl BpfManager {
         }
     }
 
+    /// Clone a loaded program by id (verifier-cost instrumentation only).
+    ///
+    /// The bench path clones and then executes *outside* the manager lock,
+    /// same as `run_hook_programs` — helpers like `bpf_map_lookup_elem`
+    /// re-acquire the lock and would deadlock if it were held during runs.
+    #[cfg(feature = "verifier-cost")]
+    pub fn get_program(&self, prog_id: u32) -> Option<BpfProgram<ActiveProfile>> {
+        self.programs.get(prog_id as usize).cloned()
+    }
+
+    /// Execute `program` `runs` times back-to-back against an empty context
+    /// and emit an `AXIOM EXEC COST` marker with the total CNTVCT_EL0 delta.
+    /// Timing wraps the production execution path (`execute_program`: JIT on
+    /// AArch64, interpreter elsewhere), so the measurement calibrates the cost
+    /// of what actually runs on the device. Must be called without the
+    /// manager lock held (see `get_program`).
+    #[cfg(feature = "verifier-cost")]
+    pub fn bench_execute(
+        program: &BpfProgram<ActiveProfile>,
+        prog_id: u32,
+        runs: u32,
+    ) -> Result<(), BpfError> {
+        let ctx = BpfContext::empty();
+        let start = read_cycles();
+        for _ in 0..runs {
+            Self::execute_program(program, &ctx)?;
+        }
+        let cycles = read_cycles().wrapping_sub(start);
+        crate::serial_println!(
+            "{}",
+            kernel_bpf::cost_corpus::ExecRecord {
+                prog_id,
+                insns: program.instructions().len(),
+                runs,
+                cycles,
+            }
+        );
+        Ok(())
+    }
+
     /// Collect cloned programs for a given attach type.
     ///
     /// Returns a Vec of (prog_id, cloned_program) pairs. This allows callers

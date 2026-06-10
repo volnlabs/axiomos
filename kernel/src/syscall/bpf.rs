@@ -579,6 +579,36 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
                 -1
             }
         }
+        // Verifier-cost instrumentation: time `runs` back-to-back executions
+        // of a loaded program and emit an `AXIOM EXEC COST` serial marker.
+        // Only compiled into measurement builds; absent the feature the
+        // command falls through to "unknown" below. The program is cloned and
+        // run with the manager lock released (helpers re-acquire it).
+        #[cfg(feature = "verifier-cost")]
+        kernel_abi::BPF_BENCH_EXEC => {
+            let attr = match copy_from_userspace::<BpfAttr>(attr_ptr) {
+                Ok(a) => a,
+                Err(_) => return -1,
+            };
+            let prog_id = attr.attach_prog_fd;
+            let runs = attr.attach_btf_id.max(1);
+
+            let Some(manager) = BPF_MANAGER.get() else {
+                return -1;
+            };
+            let Some(program) = manager.lock().get_program(prog_id) else {
+                log::error!("sys_bpf: BENCH_EXEC unknown prog id {}", prog_id);
+                return -1;
+            };
+            match crate::bpf::BpfManager::bench_execute(&program, prog_id, runs) {
+                Ok(()) => 0,
+                Err(e) => {
+                    log::error!("sys_bpf: BENCH_EXEC prog {} failed: {}", prog_id, e);
+                    -1
+                }
+            }
+        }
+
         _ => {
             log::warn!("sys_bpf: Unknown command {}", cmd);
             -1

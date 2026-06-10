@@ -22,23 +22,44 @@ use crate::bytecode::program::BpfProgType;
 /// `verifier_bench` userspace driver loads the same sizes on hardware.
 pub const MEASUREMENT_SIZES: [usize; 5] = [10, 50, 100, 500, 1000];
 
+/// Sizes for the execution-cost calibration shapes. Two sizes per shape so a
+/// slope can be fit between them — the per-op cycle estimate is
+/// `(cycles(n₂) − cycles(n₁)) / (ops(n₂) − ops(n₁))`, which cancels the fixed
+/// per-run overhead (interpreter entry/exit, timer reads).
+pub const CALIBRATION_SIZES: [usize; 2] = [100, 1000];
+
 /// Control-flow shape of a corpus program. Different shapes probe different
-/// parts of the cost model: straight-line is the single-path baseline; branch
-/// shapes drive the path-sensitive state growth the budget bounds.
+/// parts of the cost model: straight-line is the single-path baseline (and the
+/// cheap-ALU calibration shape); the `*Heavy` shapes are dominated by one
+/// instruction class each, so timing their execution calibrates that class's
+/// cost constant in `verifier::cost`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shape {
     /// One path, `n` instructions: `mov r0,0 ; (n-2)×(r0 += 1) ; exit`.
+    /// Calibrates `COST_DEFAULT` (cheap ALU).
     StraightLine,
+    /// Stack load/store chain. Calibrates `COST_MEMORY`.
+    MemoryHeavy,
+    /// `div64` chain. Calibrates `COST_ALU_EXPENSIVE`.
+    DivHeavy,
+    /// `bpf_ktime_get_ns` call chain. Calibrates `COST_HELPER_READ`.
+    HelperReadHeavy,
+    /// `bpf_map_lookup_elem` call chain. Calibrates `COST_HELPER_MAP`.
+    HelperMapHeavy,
 }
 
 /// A single benchmark program: its shape, declared size `n` (== instruction
-/// count), the program type to verify it under, and its bytecode.
+/// count), how many instructions of the measured class it contains, the
+/// program type to verify it under, and its bytecode.
 #[derive(Debug, Clone)]
 pub struct CorpusProgram {
     /// Control-flow shape.
     pub shape: Shape,
     /// Declared size — number of instructions.
     pub n: usize,
+    /// Number of instructions of the class this shape measures (the divisor in
+    /// the per-op calibration math).
+    pub ops: usize,
     /// Program type passed to the verifier.
     pub prog_type: BpfProgType,
     /// The bytecode.
@@ -99,11 +120,145 @@ pub fn scaling_corpus() -> Vec<CorpusProgram> {
         corpus.push(CorpusProgram {
             shape: Shape::StraightLine,
             n,
+            ops: n - 2,
             prog_type: BpfProgType::SocketFilter,
             insns: straight_line(n),
         });
     }
     corpus
+}
+
+/// Stack store/load chain of exactly `n` instructions:
+/// `mov r1,42 ; stx [r10-8],r1 ; (n-4)×(ldx/stx [r10-8]) ; mov r0,0 ; exit`.
+pub fn memory_heavy(n: usize) -> (Vec<BpfInsn>, usize) {
+    let mut v = Vec::with_capacity(n);
+    v.push(BpfInsn::mov64_imm(1, 42));
+    v.push(BpfInsn::new(0x7b, 10, 1, -8, 0)); // stx_dw [r10-8], r1
+    for i in 0..n.saturating_sub(4) {
+        if i % 2 == 0 {
+            v.push(BpfInsn::new(0x79, 1, 10, -8, 0)); // ldx_dw r1, [r10-8]
+        } else {
+            v.push(BpfInsn::new(0x7b, 10, 1, -8, 0)); // stx_dw [r10-8], r1
+        }
+    }
+    v.push(BpfInsn::mov64_imm(0, 0));
+    v.push(BpfInsn::exit());
+    let ops = n - 3; // the prologue store plus every chain load/store
+    (v, ops)
+}
+
+/// `div64` chain of exactly `n` instructions:
+/// `mov r0,1000000 ; (n-2)×(r0 /= 3) ; exit`.
+pub fn div_heavy(n: usize) -> (Vec<BpfInsn>, usize) {
+    let mut v = Vec::with_capacity(n);
+    v.push(BpfInsn::mov64_imm(0, 1_000_000));
+    for _ in 0..n.saturating_sub(2) {
+        v.push(BpfInsn::div64_imm(0, 3));
+    }
+    v.push(BpfInsn::exit());
+    (v, n - 2)
+}
+
+/// `bpf_ktime_get_ns` call chain of exactly `n` instructions:
+/// `(n-1)×(call ktime) ; exit` — the last call's return value is R0 at exit.
+pub fn helper_read_heavy(n: usize) -> (Vec<BpfInsn>, usize) {
+    let mut v = Vec::with_capacity(n);
+    for _ in 0..n.saturating_sub(1) {
+        v.push(BpfInsn::call(crate::verifier::HelperId::KtimeGetNs as i32));
+    }
+    v.push(BpfInsn::exit());
+    (v, n - 1)
+}
+
+/// `bpf_map_lookup_elem` call chain of exactly `n = 4 + 4k` instructions:
+/// key-init prologue, then `k` iterations of
+/// `mov r1,map_id ; mov r2,r10 ; add r2,-8 ; call map_lookup`, then
+/// `mov r0,0 ; exit`. Returns the bytecode and `k` (the call count).
+pub fn helper_map_heavy(n: usize, map_id: i32) -> (Vec<BpfInsn>, usize) {
+    let k = n.saturating_sub(4) / 4;
+    let mut v = Vec::with_capacity(n);
+    v.push(BpfInsn::mov64_imm(1, 0));
+    v.push(BpfInsn::new(0x7b, 10, 1, -8, 0)); // stx_dw [r10-8], r1 (init key)
+    for _ in 0..k {
+        v.push(BpfInsn::mov64_imm(1, map_id));
+        v.push(BpfInsn::mov64_reg(2, 10));
+        v.push(BpfInsn::add64_imm(2, -8));
+        v.push(BpfInsn::call(
+            crate::verifier::HelperId::MapLookupElem as i32,
+        ));
+    }
+    v.push(BpfInsn::mov64_imm(0, 0));
+    v.push(BpfInsn::exit());
+    (v, k)
+}
+
+/// The execution-cost calibration corpus: every `*Heavy` shape at every
+/// [`CALIBRATION_SIZES`]. `map_id` is the id of a pre-created 8-byte-key map
+/// the `HelperMapHeavy` programs look up (the bench driver creates it first).
+pub fn calibration_corpus(map_id: i32) -> Vec<CorpusProgram> {
+    let mut corpus = Vec::new();
+    for &n in CALIBRATION_SIZES.iter() {
+        let (insns, ops) = memory_heavy(n);
+        corpus.push(CorpusProgram {
+            shape: Shape::MemoryHeavy,
+            n,
+            ops,
+            prog_type: BpfProgType::SocketFilter,
+            insns,
+        });
+        let (insns, ops) = div_heavy(n);
+        corpus.push(CorpusProgram {
+            shape: Shape::DivHeavy,
+            n,
+            ops,
+            prog_type: BpfProgType::SocketFilter,
+            insns,
+        });
+        let (insns, ops) = helper_read_heavy(n);
+        corpus.push(CorpusProgram {
+            shape: Shape::HelperReadHeavy,
+            n,
+            ops,
+            prog_type: BpfProgType::SocketFilter,
+            insns,
+        });
+        let (insns, ops) = helper_map_heavy(n, map_id);
+        corpus.push(CorpusProgram {
+            shape: Shape::HelperMapHeavy,
+            n,
+            ops,
+            prog_type: BpfProgType::SocketFilter,
+            insns,
+        });
+    }
+    corpus
+}
+
+/// One execution-cost measurement: the kernel ran a loaded program `runs`
+/// times back-to-back and measured the total `CNTVCT_EL0` delta. Emitted by
+/// the feature-gated `BPF_BENCH_EXEC` command; parsed by
+/// `scripts/verifier-cost.py`. Like [`CostRecord`], the `Display` form is the
+/// on-wire contract, pinned by a unit test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecRecord {
+    /// Id of the executed program.
+    pub prog_id: u32,
+    /// Instruction count of the program.
+    pub insns: usize,
+    /// Number of back-to-back executions timed.
+    pub runs: u32,
+    /// Total architectural cycles across all runs.
+    pub cycles: u64,
+}
+
+impl core::fmt::Display for ExecRecord {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "AXIOM EXEC COST prog_id={} insns={} runs={} cycles={}",
+            self.prog_id, self.insns, self.runs, self.cycles
+        )
+    }
 }
 
 #[cfg(test)]
@@ -127,6 +282,68 @@ mod tests {
         assert_eq!(
             rec.to_string(),
             "AXIOM VERIFIER COST prog_id=7 insns=100 states=99 cycles=1234 wcet=140"
+        );
+    }
+
+    /// Every calibration shape must verify under the active profile — a shape
+    /// the verifier rejects can never be timed on hardware. Map shapes verify
+    /// against a one-map table (the bench driver creates that map first).
+    #[test]
+    fn calibration_corpus_verifies() {
+        let corpus = calibration_corpus(0);
+        assert!(
+            corpus.len() >= 2 * 4,
+            "expected 4 shapes x 2 sizes, got {}",
+            corpus.len()
+        );
+        for prog in &corpus {
+            let config = VerifyConfig {
+                map_value_sizes: &[8],
+                ..VerifyConfig::default()
+            };
+            let (_, stats) =
+                Verifier::<ActiveProfile>::verify_with_stats(prog.prog_type, &prog.insns, config)
+                    .unwrap_or_else(|e| {
+                        panic!("shape {:?} n={} must verify: {}", prog.shape, prog.n, e)
+                    });
+            assert_eq!(prog.insns.len(), prog.n, "declared n must match bytecode");
+            assert!(
+                prog.ops > 0 && prog.ops < prog.n,
+                "shape {:?}: measured-op count {} must be positive and below n={}",
+                prog.shape,
+                prog.ops,
+                prog.n
+            );
+            // Calibration programs are loop-free: cost scales with size.
+            assert!(stats.states_explored <= prog.n);
+        }
+        // Each shape appears at both calibration sizes, so a slope can be fit.
+        for shape in [
+            Shape::MemoryHeavy,
+            Shape::DivHeavy,
+            Shape::HelperReadHeavy,
+            Shape::HelperMapHeavy,
+        ] {
+            let sizes: Vec<usize> = corpus
+                .iter()
+                .filter(|p| p.shape == shape)
+                .map(|p| p.n)
+                .collect();
+            assert_eq!(sizes, CALIBRATION_SIZES, "shape {:?} sizes", shape);
+        }
+    }
+
+    #[test]
+    fn exec_record_formats_a_parseable_marker_line() {
+        let rec = ExecRecord {
+            prog_id: 3,
+            insns: 1000,
+            runs: 64,
+            cycles: 123456,
+        };
+        assert_eq!(
+            rec.to_string(),
+            "AXIOM EXEC COST prog_id=3 insns=1000 runs=64 cycles=123456"
         );
     }
 
