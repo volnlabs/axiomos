@@ -136,7 +136,9 @@ mod tests {
         let mut ledger = AdmissionLedger::new(1000, UNIT_NS);
 
         ledger.admit(1, 0, 100, 6).expect("600 ns/s fits"); // 100*1*6
-        ledger.admit(1, 1, 100, 4).expect("+400 = exactly 1000 fits"); // 100*1*4
+        ledger
+            .admit(1, 1, 100, 4)
+            .expect("+400 = exactly 1000 fits"); // 100*1*4
 
         let err = ledger
             .admit(1, 2, 1, 1)
@@ -160,7 +162,9 @@ mod tests {
         // load on different hooks competes for the same utilization budget.
         let mut ledger = AdmissionLedger::new(1000, UNIT_NS);
         ledger.admit(1, 0, 100, 5).expect("hook 1: 500 ns/s");
-        ledger.admit(2, 1, 100, 5).expect("hook 2: +500 = 1000 fits");
+        ledger
+            .admit(2, 1, 100, 5)
+            .expect("hook 2: +500 = 1000 fits");
         ledger
             .admit(3, 2, 1, 1)
             .expect_err("no utilization left on any hook");

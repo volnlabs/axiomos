@@ -1803,10 +1803,7 @@ mod tests {
     #[cfg(feature = "embedded-profile")]
     #[test]
     fn embedded_rejects_trace_printk_on_rt_fragment() {
-        let insns = [
-            BpfInsn::call(HelperId::TracePrintk as i32),
-            BpfInsn::exit(),
-        ];
+        let insns = [BpfInsn::call(HelperId::TracePrintk as i32), BpfInsn::exit()];
         let result = Verifier::<ActiveProfile>::verify_with_config(
             BpfProgType::SocketFilter,
             &insns,
