@@ -11,38 +11,15 @@ Axiom targets robotics and embedded systems where kernel logic should evolve wit
 - `kernel/crates` — modular kernel subsystems (BPF, VFS, etc.)
 - `userspace/` — userspace programs and libraries
 - `scripts/` — build system and deployment tools
-- `docs/` — architectural documentation and benchmarks or you can visit [docs](https://deepwiki.com/pro-utkarshM/axiom-ebpf)
+- `docs/` — architecture, benchmarks, protocols — or visit [docs](https://deepwiki.com/pro-utkarshM/axiom-ebpf)
 
 ---
 
 ## Why Axiom Exists
 
-**Problem:** Embedded systems deployed in the field need behavioral updates—new sensor fusion algorithms, modified control loops, updated safety policies. Traditional kernels require full reflash cycles, which are:
-- Risky in production environments
-- Slow (minutes of downtime)
-- Wasteful (megabytes to change kilobytes)
-- Dangerous (bricked devices on failed updates)
+Embedded systems deployed in the field need behavioral updates — new sensor fusion algorithms, modified control loops, updated safety policies. Traditional kernels require full reflash cycles: risky, slow, and capable of bricking devices. Axiom instead hot-loads verified eBPF programs onto kernel hooks (syscalls, timers, GPIO, PWM, IIO) at runtime, detachable on the fly.
 
-**Solution:** Runtime kernel extension through eBPF. Programs are:
-- Verified for safety before execution
-- Hot-loaded without reboot
-- Attached to kernel hooks (syscalls, timers, GPIO, PWM, IIO)
-- Detachable on-the-fly
-
-This is proven in Linux (where eBPF is used for tracing, networking, security), but Linux is unsuitable for hard real-time robotics due to unpredictable latency and resource overhead.
-
----
-
-## Core Design Decisions
-
-### 1. Bare Metal (No Host OS)
-
-Axiom boots directly on hardware with no underlying OS:
-- No Linux, no RTOS, no firmware runtime
-- Limine bootloader (x86_64) or device tree (AArch64)
-- Full control of CPU, memory, interrupts
-
-**Tradeoff analysis:**
+This is proven in Linux, but Linux is unsuitable for hard real-time robotics due to unpredictable latency and resource overhead:
 
 | Approach | Latency | Footprint | Control | Complexity |
 |----------|---------|-----------|---------|------------|
@@ -50,42 +27,18 @@ Axiom boots directly on hardware with no underlying OS:
 | RTOS + custom | <10,000ns | ~1MB | Partial | Medium |
 | **Axiom (Pi5)** | **211ns avg, single-core** | **~22MB** | **Total** | **Higher** |
 
-For robotics with sub-millisecond control loops, bare metal is the right target. The latency figure above is honest about its measurement boundary: hardware vector entry → BPF dispatch on a single core with no contention. P99 / P99.9 tail latency under multi-core load is tracked in [issue #74](https://github.com/pro-utkarshM/axiomOS/issues/74) and is not yet measured. See [docs/benchmarks.md](docs/benchmarks.md) for the full methodology.
+The latency figure is honest about its boundary: hardware vector entry → BPF dispatch, single core, no contention. Tail latency under load is not yet measured ([#74](https://github.com/pro-utkarshM/axiomOS/issues/74)). Full methodology in [docs/benchmarks.md](docs/benchmarks.md).
 
 ---
 
-### 2. Rust Core (`no_std`)
+## Design
 
-The kernel is ~95% Rust, `no_std`, with `panic=abort`:
-- Memory safety enforced by ownership/borrowing
-- Explicit `unsafe` boundaries (documented and audited)
-- Zero-cost abstractions
-- Assembly limited to boot stubs and exception vectors
+Three decisions define the kernel — detail and rationale in [docs/architecture.md](docs/architecture.md):
 
-**What this prevents:**
-```rust
-// Prevented at compile time:
-let ptr = allocate_buffer();
-free(ptr);
-use(ptr);  // ❌ use-after-free caught by borrow checker
+1. **Bare metal, monolithic.** No host OS, no RTOS. Limine bootloader (x86_64) or device tree (AArch64). Microkernel IPC overhead is unacceptable for control loops; Rust trait boundaries provide the modularity instead.
+2. **Rust core, `no_std`, `panic=abort`.** ~95% Rust; assembly limited to boot stubs and exception vectors. Memory-safety bug classes (use-after-free, double-free, data races) are eliminated at compile time; `unsafe` blocks are explicit and audited.
+3. **eBPF for runtime extension.** Programs are verified, then attached to hooks:
 
-// Prevented by explicit unsafe:
-fn modify_page_table(ptr: *mut PageTable) {
-    unsafe {  // Forced to acknowledge danger
-        (*ptr).entries[0] = new_entry;
-    }
-}
-```
-
-**Why not C:** C relies on programmer discipline. Rust encodes invariants in the type system. In kernel context, this eliminates entire bug classes (use-after-free, double-free, iterator invalidation, data races).
-
----
-
-### 3. eBPF for Runtime Extension
-
-eBPF programs extend kernel behavior without kernel recompilation:
-
-**Example: Custom GPIO interrupt handler**
 ```c
 // Loaded at runtime, verified, then attached to GPIO line 23
 BPF_PROG(gpio_handler, struct gpio_event *event) {
@@ -97,432 +50,41 @@ BPF_PROG(gpio_handler, struct gpio_event *event) {
 }
 ```
 
-**Verification guarantees (today):**
-- Bounded execution (no infinite loops)
-- Constrained stack usage (up to 512KB depending on profile)
-- Validated memory access (no arbitrary pointers)
-- Termination proof (static analysis of control flow)
-- Static WCET cycle bound per program (Pi5-calibrated cost model)
+**What the verifier guarantees today:** bounded execution, constrained stack, validated memory access, termination proof, and a static WCET cycle bound per program from a Pi5-calibrated cost model. The verifier gates the `sys_bpf` load path — programs that fail do not load. Loads are admission-controlled: a program that can't fit one control-loop period is rejected, and attaches commit `wcet × freq` against a utilization budget (EDF test, validated on hardware — [docs/benchmarks.md §12](docs/benchmarks.md)). Program provenance is authenticated on load (Ed25519, fail-closed; unsigned loads still allowed by default until a userspace signer ships). A libfuzzer harness runs on every PR and nightly.
 
-**Verifier hardening track (merged):** tnum bit-tracking, state pruning, range refinement, and per-instruction liveness ([state.rs](kernel/crates/kernel_bpf/src/verifier/state.rs), [pruner.rs](kernel/crates/kernel_bpf/src/verifier/pruner.rs), [refine.rs](kernel/crates/kernel_bpf/src/verifier/refine.rs), [liveness.rs](kernel/crates/kernel_bpf/src/verifier/liveness.rs)) are wired into `verify_alu`, `verify_jump`, and `verify_safety` ([#102](https://github.com/pro-utkarshM/axiomOS/issues/102)–[#105](https://github.com/pro-utkarshM/axiomOS/issues/105)), with width-correct 32-bit ALU semantics ([#114](https://github.com/pro-utkarshM/axiomOS/issues/114)), typed maybe-null map/ctx pointer bounds ([#115](https://github.com/pro-utkarshM/axiomOS/issues/115)), a bounded state budget, an explicit worklist, and sparse stack state. The verifier is load-bearing: it gates the `sys_bpf` load path ([#48](https://github.com/pro-utkarshM/axiomOS/issues/48)) — programs that fail verification do not load. Helper IDs are unified across verifier and interpreter ([#121](https://github.com/pro-utkarshM/axiomOS/issues/121)), load-time ctx size is bound to `BpfContext` ([#122](https://github.com/pro-utkarshM/axiomOS/issues/122)), and map value sizing is per-map precise ([#123](https://github.com/pro-utkarshM/axiomOS/issues/123)). A libfuzzer harness ([kernel_bpf/fuzz](kernel/crates/kernel_bpf/fuzz)) runs on every PR and nightly.
-
-**WCET admission (Track C):** the verifier computes a static worst-case cycle bound per program from a cost model calibrated on Pi 5 (Cortex-A76) hardware, including per-helper costs. A program whose WCET cannot fit one control-loop period (~166k cycle units at 1 kHz) is rejected at load, and each attach commits `wcet × freq` to a utilization ledger capped at U = 0.5 — the EDF utilization test, validated on silicon (an admission self-test on the Pi 5 shows the 15th attach of a dense program refused exactly where the budget predicts). `trace_printk` is banned on RT hooks. Verification cost itself is measured and near-linear (~80–94 cycles/insn on A76, Track B). See [docs/benchmarks.md §12](docs/benchmarks.md).
-
-**Signing:** the `sys_bpf` load path authenticates program provenance ([#20](https://github.com/pro-utkarshM/axiomOS/issues/20)): signed containers are verified (Ed25519) against a kernel-held trust store and fail closed on any bad signature. Unsigned loads are still accepted by default (`allow_unsigned = true`) until a userspace signer ships; flip via `set_allow_unsigned` to enforce.
-
-**Execution paths:**
-- **Interpreter:** Portable, ~50ns overhead per instruction (x86_64)
-- **JIT:** Native code generation, <5ns overhead (AArch64)
-
-**Profile selection:**
-```rust
-// Compile-time selection via sealed traits
-#[cfg(feature = "embedded-profile")]
-type BpfProfile = profile::EmbeddedProfile;  // 8KB stack, interpreter only
-
-#[cfg(feature = "cloud-profile")]
-type BpfProfile = profile::CloudProfile;  // 512KB stack, JIT enabled
-```
-
----
-
-## Architecture
-
-```mermaid
-graph TB
-    User[Userspace Processes<br/>ELF binaries, standard syscall ABI]
-    
-    User -->|syscall interface| PTM[Process/Task Manager<br/>• Per-process address spaces<br/>• Task scheduling work-stealing<br/>• File descriptor tables]
-    
-    PTM --> Sub[Subsystems Layer]
-    
-    Sub --> BPF[eBPF Runtime]
-    Sub --> VFS[VFS]
-    Sub --> Net[Network]
-    Sub --> IPC[IPC]
-    
-    BPF --> Mem
-    VFS --> Mem
-    Net --> Mem
-    IPC --> Mem
-    
-    Mem[Memory + Interrupt Layer<br/>• Physical frame allocator<br/>• Virtual memory per-process<br/>• Interrupt routing + handling]
-    
-    Mem --> HAL[Hardware Abstraction Layer<br/>trait Architecture<br/>fn init, switch_context, ...<br/>impl: x86_64, AArch64, RISC-V]
-    
-    HAL --> HW[Hardware<br/>CPUs, RAM, GPIO, Timers, Peripherals]
-
-    %% Dark theme styling
-    style User fill:#1e293b,stroke:#38bdf8,color:#e2e8f0
-    style PTM fill:#2a1f0f,stroke:#f59e0b,color:#f8fafc
-    style Sub fill:#1f2937,stroke:#94a3b8,color:#e5e7eb
-    style BPF fill:#0f2e1f,stroke:#22c55e,color:#dcfce7
-    style VFS fill:#0f2e1f,stroke:#22c55e,color:#dcfce7
-    style Net fill:#0f2e1f,stroke:#22c55e,color:#dcfce7
-    style IPC fill:#0f2e1f,stroke:#22c55e,color:#dcfce7
-    style Mem fill:#2a1f0f,stroke:#f59e0b,color:#fef3c7
-    style HAL fill:#2a1025,stroke:#ec4899,color:#fce7f3
-    style HW fill:#111827,stroke:#6b7280,color:#e5e7eb
-```
-
-**Monolithic justification:** Microkernel IPC overhead (100-1000ns per message) is unacceptable for control loops. Monolithic structure with Rust trait boundaries provides modularity without performance cost.
-
----
-
-## Execution Model
-
-### Process vs Task Separation
-
-```rust
-struct Process {
-    pid: ProcessId,
-    name: String,
-    address_space: RwLock<Option<AddressSpace>>,
-    file_descriptors: RwLock<BTreeMap<FdNum, FileDescriptor>>,
-    // Tasks reference the process via Arc<Process>
-}
-
-struct Task {
-    tid: TaskId,
-    process: Arc<Process>,
-    last_stack_ptr: Pin<Box<usize>>,
-    kstack: Option<HigherHalfStack>,
-    ustack: RwLock<Option<LowerHalfAllocation<Writable>>>,
-}
-```
-
-**Why separate:** Traditional UNIX model conflates resource container (process) with execution context (thread). Separation simplifies:
-- Multithreading (multiple tasks referencing one process)
-- Resource accounting (process-level, not per-thread)
-- Memory isolation (tasks within a process share an address space)
-
-### Scheduler
-
-**Global run queue:**
-The current implementation uses a single global MPSC (Multiple Producer, Single Consumer) queue for task scheduling across all CPUs.
-
-```
-Global Queue: [T1, T4, T7, T2, T5, T3, T6, T8]
-CPU 0: Pop → T1
-CPU 1: Pop → T4
-CPU 2: Pop → T7
-```
-
-**Preemption:** Timer interrupts (1ms quantum, configurable via APIC/GIC)
-**Cooperation:** `sched_yield()` syscall
-
-**Priority inversion handling:** Priority inheritance protocol (planned).
-
----
-
-## Syscall Flow
-
-```
-1. Userspace executes syscall instruction
-2. CPU switches to kernel mode → arch handler
-3. Context saved (registers, stack pointer)
-4. Syscall number dispatched
-   ├─→ BPF pre-hook runs (if attached)
-   ├─→ Syscall handler executes
-   └─→ BPF post-hook runs (if attached)
-5. Return value written to register
-6. Context restored → return to userspace
-```
-
-**Error convention:** Negative return values are `-errno`:
-```rust
-// In kernel:
-if allocation_failed {
-    return -ENOMEM;  // -12
-}
-
-// In userspace:
-int fd = open("/dev/null", O_RDONLY);
-if (fd < 0) {
-    // fd == -ENOENT (-2) if file not found
-}
-```
-
-**Supported syscalls:** `read`, `write`, `open`, `close`, `fork`, `exec`, `wait`, `sched_yield`, `bpf`, `ioctl`, ...
-
----
-
-## eBPF Deep Dive
-
-### Program Lifecycle
-
-```mermaid
-graph TD
-    User[Userspace<br/>BPF ELF]
-    
-    User -->|sys_bpf PROG_LOAD, ...| Verifier[Verifier<br/>• CFG analysis<br/>• Loop bounds check<br/>• Memory safety proof<br/>• Stack depth limit]
-    
-    Verifier -->|if valid| Store[BPF Program Store<br/>keyed by prog_fd]
-    
-    Verifier -.->|if invalid| Reject[Return error to userspace]
-    
-    Store -->|sys_bpf ATTACH, ...| Registry[Hook Registry<br/>syscall/gpio_23: P1<br/>timer_50hz: P2, P3]
-    
-    Registry --> Execute[Execute on trigger]
-
-    %% Dark theme styling (aligned with previous diagram)
-    style User fill:#1e293b,stroke:#38bdf8,color:#e2e8f0
-    style Verifier fill:#2a1f0f,stroke:#f59e0b,color:#fef3c7
-    style Store fill:#0f2e1f,stroke:#22c55e,color:#dcfce7
-    style Registry fill:#2a1025,stroke:#ec4899,color:#fce7f3
-    style Execute fill:#111827,stroke:#6b7280,color:#e5e7eb
-    style Reject fill:#2a0f0f,stroke:#ef4444,color:#fee2e2
-```
-
-### Verification Algorithm
-
-**Control Flow Graph Construction:**
-```rust
-fn verify_program(bytecode: &[u8]) -> Result<(), VerifyError> {
-    let cfg = build_cfg(bytecode)?;
-    
-    // 1. Ensure all paths terminate (no infinite loops)
-    for node in cfg.nodes() {
-        if has_backedge(node) && !has_bounded_iteration(node) {
-            return Err(VerifyError::UnboundedLoop);
-        }
-    }
-    
-    // 2. Check stack depth on all paths
-    let max_depth = cfg.compute_max_stack_depth();
-    if max_depth > STACK_LIMIT {
-        return Err(VerifyError::StackOverflow);
-    }
-    
-    // 3. Validate memory access
-    for instr in cfg.instructions() {
-        if let MemoryAccess { addr, size } = instr {
-            if !is_valid_access(addr, size) {
-                return Err(VerifyError::InvalidMemory);
-            }
-        }
-    }
-    
-    Ok(())
-}
-```
-
-### Attach Points
-
-| Hook | Trigger | Use Case |
-|------|---------|----------|
-| `SYSCALL_ENTER` | Before syscall handler | Audit, policy enforcement |
-| `SYSCALL_EXIT` | After syscall handler | Monitoring, stats |
-| `TIMER_<freq>` | Periodic timer tick | Control loops, sampling |
-| `GPIO_<line>` | GPIO interrupt | Event-driven responses |
-| `PWM_CYCLE` | PWM period complete | Motor control feedback |
-| `IIO_SAMPLE` | Sensor data ready | Sensor fusion pipelines |
-
----
-
-## Memory Management
-
-### Physical Memory
-
-**Frame allocator:** Sparse state-based tracking with `first_free` optimization.
-
-```rust
-pub struct PhysicalMemoryManager {
-    regions: Vec<MemoryRegion>,
-    first_free: Option<RegionFrameIndex>,
-}
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum FrameState {
-    Unusable,
-    Allocated,
-    Free,
-}
-```
-
-- **Stage 1:** Early bump allocator for boot-time structures.
-- **Stage 2:** Sparse manager tracking usable RAM regions.
-- **Optimization:** `first_free` pointer reduces search latency for free frames.
-
-### Virtual Memory
-
-**Per-process address spaces:**
-```
-Userspace:   0x0000_0000_0000 - 0x0000_7FFF_FFFF_FFFF (128TB on x86_64)
-Kernel:      0xFFFF_8000_0000 - 0xFFFF_FFFF_FFFF (higher half)
-```
-
-**Page table structure (4-level on x86_64):**
-```
-PML4 → PDPT → PD → PT → 4KB page
-```
-
-**TLB shootdown:** Cross-CPU invalidation via IPI (Inter-Processor Interrupts).
-
-### Kernel Heap
-
-**Allocator:** `linked-list-allocator` (first-fit), with dynamic sizing based on available RAM.
-
-```rust
-#[global_allocator]
-static ALLOCATOR: LockedHeap = LockedHeap::empty();
-
-// Allocated from kernel heap:
-let buf = Box::new([0u8; 1024]); 
-```
-
----
-
-## Hardware Abstraction
-
-**Portability via traits:**
-```rust
-pub trait Architecture {
-    fn early_init();
-    fn init();
-    fn enable_interrupts();
-    fn disable_interrupts();
-    fn are_interrupts_enabled() -> bool;
-    fn wait_for_interrupt();
-    fn shutdown() -> !;
-    fn reboot() -> !;
-}
-
-// Per-arch implementations:
-impl Architecture for aarch64::Aarch64 { ... }
-impl Architecture for riscv64::Riscv64 { ... }
-```
-
-**Conditional compilation:**
-```rust
-#[cfg(target_arch = "x86_64")]
-fn handle_interrupt(vector: u8) {
-    apic::send_eoi();
-}
-
-#[cfg(target_arch = "aarch64")]
-fn handle_interrupt(irq: u32) {
-    gic::write_eoir(irq);
-}
-```
+**Execution:** interpreter (portable, ~50ns/insn on x86_64) or JIT (AArch64, <5ns overhead), selected per compile-time profile (8KB-stack embedded → 512KB-stack cloud).
 
 ---
 
 ## Supported Platforms
 
-### x86_64
-- **Bootloader:** Limine (UEFI + BIOS)
-- **Interrupt controller:** APIC (xAPIC/x2APIC)
-- **Timer:** APIC timer + TSC
-- **Devices:** VirtIO (block, net, console)
-- **Testing:** QEMU, VMware, bare metal
-
-### AArch64
-- **Targets:** QEMU virt, Raspberry Pi 5
-- **Interrupt controller:** GICv2/v3
-- **Timer:** ARM Generic Timer
-- **Devices:**
-  - VirtIO (QEMU)
-  - RP1 peripherals (Pi 5): GPIO, UART, PWM
-- **Boot:** Device tree
-
-### RISC-V
-- **Status:** Early bring-up — boot only, no userspace
-- **Target:** QEMU virt
-- **Current support:** SBI console, trap stub, paging skeleton (~860 LoC in `kernel/src/arch/riscv64/`)
-- **Missing for parity with aarch64:** PLIC wiring, userspace syscall dispatch, fork/exec, real memory subsystem, BPF execution
-- Listed for completeness; not on the critical path
+| Arch | Targets | Status |
+|------|---------|--------|
+| x86_64 | QEMU, VMware, bare metal | Boot, userspace, VirtIO; Limine (UEFI+BIOS), APIC |
+| AArch64 | QEMU virt, **Raspberry Pi 5** | Primary hardware target; GICv2/v3, RP1 GPIO/UART/PWM, device tree boot |
+| RISC-V | QEMU virt | Early bring-up — boot only, no userspace; not on critical path |
 
 ---
 
-## Filesystem
+## Build & Run
 
-**Root filesystem:** ext2, built and embedded during compilation.
-```bash
-# Build system embeds the rootfs image into the kernel binary
-./scripts/build-rpi5.sh
-→ kernel8.img (includes embedded ext2 rootfs)
-```
+**Requirements:** Rust nightly, `cargo`, QEMU, cross targets (`x86_64-unknown-none`, `aarch64-unknown-none`).
 
-**VFS layer:**
-```rust
-trait FileSystem {
-    fn open(&mut self, path: &AbsolutePath) -> Result<FsHandle, OpenError>;
-    fn read(&mut self, handle: FsHandle, buf: &mut [u8], offset: usize) -> Result<usize, ReadError>;
-    // ...
-}
-
-impl FileSystem for VirtualExt2Fs { ... }
-```
-
-**Mount points:**
-```
-/ → ext2 (root)
-/dev → DevFS (devices)
-```
-
----
-
-## Build System
-
-**Requirements:**
-- Rust nightly
-- `cargo`
-- QEMU (for testing)
-- cross-compilation targets (`x86_64-unknown-none`, `aarch64-unknown-none`)
-
-**Quick start:**
 ```bash
 # Build and run in QEMU (x86_64)
 cargo run
 
-# RPi5 Build
+# RPi5 build (kernel8.img with embedded ext2 rootfs)
 ./scripts/build-rpi5.sh
 ```
 
 ---
 
-## Current Implementation Status
+## Implementation Status
 
-**Core kernel:**
-- [x] Boot (x86_64, AArch64)
-- [x] Virtual memory + paging
-- [x] Interrupt handling (APIC, GIC)
-- [x] Task scheduling (preemptive + cooperative)
-- [x] Syscall interface
-- [x] Physical memory allocation
-- [x] Kernel heap
+**Working:** boot (x86_64, AArch64); virtual memory + paging; interrupts (APIC, GIC); preemptive scheduling; syscalls; kernel heap; eBPF runtime (interpreter + AArch64 JIT); eBPF verifier gating the load path (CFG, bounds, tnum, pruning, liveness); WCET admission control; BPF signing (enforcement opt-in); VFS + ext2 (read-only); RPi5 GPIO/UART/PWM; VirtIO; shell + basic utilities.
 
-**Subsystems:**
-- [x] eBPF runtime (interpreter + JIT on AArch64)
-- [x] eBPF verifier (CFG, bounds, safety, tnum, pruning, liveness — gates the load path)
-- [x] WCET admission control (Pi5-calibrated cost model, EDF utilization test)
-- [x] BPF program signing (Ed25519 provenance on load; enforcement opt-in)
-- [x] VFS abstraction
-- [x] ext2 driver (read-only)
-- [x] Process/task separation
-
-**Hardware:**
-- [x] VirtIO (block, network, console)
-- [x] RPi5 GPIO (RP1 controller)
-- [x] RPi5 UART (PL011)
-- [x] RPi5 PWM
-- [ ] RPi5 SPI / I2C (planned)
-- [ ] USB (planned)
-- [ ] DMA (partial)
-
-**Userspace:**
-- [x] Basic syscall wrappers
-- [x] Shell (`/bin/sh`)
-- [x] Utilities (`ls`, `cat`, `echo`)
-- [ ] POSIX compatibility (partial)
-
-**RISC-V:**
-- [x] Boot on QEMU virt
-- [ ] MMU + Paging
-- [ ] SMP support
-- [ ] eBPF JIT
-- [ ] Real hardware testing
+**Not yet:** RPi5 SPI/I²C, USB, full DMA; POSIX compatibility (partial); RISC-V beyond boot.
 
 ---
 
@@ -559,9 +121,7 @@ The kernel boots and runs real BPF programs on a Raspberry Pi 5. Several load-be
 - **No hardware watchdog integration** ([#72](https://github.com/pro-utkarshM/axiomOS/issues/72))
 
 **Operations:**
-- **No persistent crash dump** ([#73](https://github.com/pro-utkarshM/axiomOS/issues/73))
-- **No A/B kernel slots / rollback** ([#75](https://github.com/pro-utkarshM/axiomOS/issues/75))
-- **No hardware-in-loop CI** — Pi5 testing is currently manual ([#76](https://github.com/pro-utkarshM/axiomOS/issues/76))
+- **No persistent crash dump** ([#73](https://github.com/pro-utkarshM/axiomOS/issues/73)), no A/B kernel slots / rollback ([#75](https://github.com/pro-utkarshM/axiomOS/issues/75)), no hardware-in-loop CI — Pi5 testing is manual ([#76](https://github.com/pro-utkarshM/axiomOS/issues/76))
 
 **Benchmark caveats:**
 - The 211 ns interrupt-latency headline is a single-core, single-program, no-contention measurement. Multi-core RT claims require the per-CPU run queue work in [#57](https://github.com/pro-utkarshM/axiomOS/issues/57) plus a 24h soak with P99 / P99.9 histograms ([#74](https://github.com/pro-utkarshM/axiomOS/issues/74)).
@@ -573,17 +133,8 @@ The full picture lives in [issue #81 — execution roadmap](https://github.com/p
 
 ## Design Philosophy
 
-Axiom is **not**:
-- A production kernel (yet)
-- POSIX-compliant (by design)
-- A Linux replacement
+Axiom is **not** a production kernel (yet), not POSIX-compliant (by design), and not a Linux replacement. It **is** a research platform for runtime kernel extension, exploring:
 
-Axiom **is**:
-- A research platform for runtime kernel extension
-- An exploration of Rust's viability for systems programming
-- A testbed for verified runtime behavior modification
-
-**Key questions being explored:**
 1. Can eBPF verification provide sufficient safety for kernel extensions?
 2. Does Rust's type system meaningfully reduce kernel bugs in practice?
 3. What's the performance overhead of safe abstractions in bare-metal contexts?
@@ -593,17 +144,9 @@ Axiom **is**:
 
 ## Contributing
 
-This is experimental research code. Contributions welcome, especially:
-- Architecture ports (ARM Cortex-M, RISC-V extensions)
-- Driver implementations (USB, DMA, network)
-- eBPF optimizations (JIT improvements, verifier enhancements)
-- Userspace POSIX compatibility
+This is experimental research code. Contributions welcome, especially architecture ports, drivers (USB, DMA, network), eBPF optimizations, and userspace POSIX compatibility.
 
-**Code standards:**
-- All `unsafe` blocks must have safety comments
-- Public APIs need documentation
-- Tests for verifiable components
-- Benchmark critical paths
+**Code standards:** all `unsafe` blocks need safety comments; public APIs need documentation; tests for verifiable components; benchmark critical paths.
 
 ---
 
@@ -620,8 +163,6 @@ Email: utkarsh@kernex.sbs
 ---
 
 **Further reading:**
-- `docs/benchmarks.md` — Authoritative hardware benchmarks (Pi5) and Linux comparison
-- `kernel/crates/kernel_bpf/docs/ARCHITECTURE.md` — eBPF runtime architecture
-- `kernel/crates/kernel_bpf/docs/SCHEDULING.md` — eBPF program scheduling
-- `kernel/crates/kernel_bpf/docs/VERIFICATION.md` — BPF verification algorithm
-- `kernel/crates/kernel_bpf/docs/PROFILES.md` — BPF physical reality profiles
+- [docs/architecture.md](docs/architecture.md) — system layers, execution model, syscall flow, eBPF deep dive, memory management, HAL
+- [docs/benchmarks.md](docs/benchmarks.md) — authoritative hardware benchmarks (Pi5) and Linux comparison
+- [kernel_bpf docs](kernel/crates/kernel_bpf/docs/) — eBPF runtime architecture, scheduling, verification, profiles
