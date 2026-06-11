@@ -102,10 +102,13 @@ BPF_PROG(gpio_handler, struct gpio_event *event) {
 - Constrained stack usage (up to 512KB depending on profile)
 - Validated memory access (no arbitrary pointers)
 - Termination proof (static analysis of control flow)
+- Static WCET cycle bound per program (Pi5-calibrated cost model)
 
-**Verifier hardening track:** the verifier ships with tnum bit-tracking, state pruning, range refinement, and per-instruction liveness as separate modules ([state.rs](kernel/crates/kernel_bpf/src/verifier/state.rs), [pruner.rs](kernel/crates/kernel_bpf/src/verifier/pruner.rs), [refine.rs](kernel/crates/kernel_bpf/src/verifier/refine.rs), [liveness.rs](kernel/crates/kernel_bpf/src/verifier/liveness.rs)). The integration of these modules into `verify_alu`, `verify_safety`, and `verify_jump` is tracked under [#102](https://github.com/pro-utkarshM/axiomOS/issues/102), [#103](https://github.com/pro-utkarshM/axiomOS/issues/103), [#104](https://github.com/pro-utkarshM/axiomOS/issues/104), [#105](https://github.com/pro-utkarshM/axiomOS/issues/105). A libfuzzer harness ([kernel_bpf/fuzz](kernel/crates/kernel_bpf/fuzz)) runs on every PR and nightly.
+**Verifier hardening track (merged):** tnum bit-tracking, state pruning, range refinement, and per-instruction liveness ([state.rs](kernel/crates/kernel_bpf/src/verifier/state.rs), [pruner.rs](kernel/crates/kernel_bpf/src/verifier/pruner.rs), [refine.rs](kernel/crates/kernel_bpf/src/verifier/refine.rs), [liveness.rs](kernel/crates/kernel_bpf/src/verifier/liveness.rs)) are wired into `verify_alu`, `verify_jump`, and `verify_safety` ([#102](https://github.com/pro-utkarshM/axiomOS/issues/102)–[#105](https://github.com/pro-utkarshM/axiomOS/issues/105)), with width-correct 32-bit ALU semantics ([#114](https://github.com/pro-utkarshM/axiomOS/issues/114)), typed maybe-null map/ctx pointer bounds ([#115](https://github.com/pro-utkarshM/axiomOS/issues/115)), a bounded state budget, an explicit worklist, and sparse stack state. The verifier is load-bearing: it gates the `sys_bpf` load path ([#48](https://github.com/pro-utkarshM/axiomOS/issues/48)) — programs that fail verification do not load. Helper IDs are unified across verifier and interpreter ([#121](https://github.com/pro-utkarshM/axiomOS/issues/121)), load-time ctx size is bound to `BpfContext` ([#122](https://github.com/pro-utkarshM/axiomOS/issues/122)), and map value sizing is per-map precise ([#123](https://github.com/pro-utkarshM/axiomOS/issues/123)). A libfuzzer harness ([kernel_bpf/fuzz](kernel/crates/kernel_bpf/fuzz)) runs on every PR and nightly.
 
-**Signing:** [kernel_bpf::signing](kernel/crates/kernel_bpf/src/signing) implements Ed25519 verification but the `sys_bpf` load path does not invoke it yet ([#20](https://github.com/pro-utkarshM/axiomOS/issues/20)). Until that lands, any valid BPF bytecode is accepted.
+**WCET admission (Track C):** the verifier computes a static worst-case cycle bound per program from a cost model calibrated on Pi 5 (Cortex-A76) hardware, including per-helper costs. A program whose WCET cannot fit one control-loop period (~166k cycle units at 1 kHz) is rejected at load, and each attach commits `wcet × freq` to a utilization ledger capped at U = 0.5 — the EDF utilization test, validated on silicon (an admission self-test on the Pi 5 shows the 15th attach of a dense program refused exactly where the budget predicts). `trace_printk` is banned on RT hooks. Verification cost itself is measured and near-linear (~80–94 cycles/insn on A76, Track B). See [docs/benchmarks.md §12](docs/benchmarks.md).
+
+**Signing:** the `sys_bpf` load path authenticates program provenance ([#20](https://github.com/pro-utkarshM/axiomOS/issues/20)): signed containers are verified (Ed25519) against a kernel-held trust store and fail closed on any bad signature. Unsigned loads are still accepted by default (`allow_unsigned = true`) until a userspace signer ships; flip via `set_allow_unsigned` to enforce.
 
 **Execution paths:**
 - **Interpreter:** Portable, ~50ns overhead per instruction (x86_64)
@@ -492,7 +495,9 @@ cargo run
 
 **Subsystems:**
 - [x] eBPF runtime (interpreter + JIT on AArch64)
-- [x] eBPF verifier (CFG, bounds, safety)
+- [x] eBPF verifier (CFG, bounds, safety, tnum, pruning, liveness — gates the load path)
+- [x] WCET admission control (Pi5-calibrated cost model, EDF utilization test)
+- [x] BPF program signing (Ed25519 provenance on load; enforcement opt-in)
 - [x] VFS abstraction
 - [x] ext2 driver (read-only)
 - [x] Process/task separation
@@ -540,10 +545,10 @@ The kernel boots and runs real BPF programs on a Raspberry Pi 5. Several load-be
 - **EDF scheduling exists for BPF programs only**, not for native OS tasks ([#61](https://github.com/pro-utkarshM/axiomOS/issues/61))
 
 **BPF subsystem:**
-- **Signing not wired** ([#20](https://github.com/pro-utkarshM/axiomOS/issues/20)) — any bytecode is accepted today
-- **Verifier stack-depth output discarded** at load ([#48](https://github.com/pro-utkarshM/axiomOS/issues/48))
+- **Unsigned loads accepted by default** — provenance enforcement is wired ([#20](https://github.com/pro-utkarshM/axiomOS/issues/20)) and fails closed on bad signatures, but `allow_unsigned = true` until a userspace signer ships
 - **BPF Manager guarded by one global mutex** — every map op / load / attach serializes ([#58](https://github.com/pro-utkarshM/axiomOS/issues/58))
 - **No BPF-to-BPF function calls** ([#87](https://github.com/pro-utkarshM/axiomOS/issues/87)), no BTF integration ([#90](https://github.com/pro-utkarshM/axiomOS/issues/90)), no Spectre mitigations ([#89](https://github.com/pro-utkarshM/axiomOS/issues/89))
+- **WCET admission assumes one nominal 1 kHz fire rate for every hook** — per-hook-type / caller-declared frequencies are future work; PREVAIL head-to-head comparison not yet run
 
 **Memory:**
 - **AddressSpace doesn't track per-frame ownership on Drop** — long-running systems with process churn slowly leak physical memory ([#69](https://github.com/pro-utkarshM/axiomOS/issues/69))
