@@ -559,6 +559,32 @@ control loop (`RT_PERIOD_NS = 1_000_000`):
   earlier per-hook WCET-sum ledger with the EDF utilization test.
 - **printk RT-ban**: enforced at embedded verification (see TRACE above).
 
+### On-hardware gate validation (Pi5, 2026-06-11)
+
+The `verifier_bench` admission self-test loads/attaches crafted programs and
+emits one `AXIOM ADMISSION <gate> rc=<n> PASS/FAIL` marker per case. Captured on
+Pi5 (`embedded-rpi5,verifier-cost`):
+
+| gate | case | result |
+|------|------|--------|
+| printk RT-ban | load `[call trace_printk; exit]` | `rc=-1 PASS` (rejected at load) |
+| control | load+attach `[mov r0,0; exit]` | `rc=0 PASS` (admitted) |
+| utilization admission | attach copies of the densest reachable program (copy-heavy, `wcet=5586`) to one hook until the budget bites | `attached=14 rc=-1 PASS` |
+
+The admission count is exact: `14 × 5586 × 6 ns × 1 kHz = 4.69e8 ns/s` committed,
+and a 15th attach (`+3.35e7`) would cross the `5e8` budget, so it is refused. This
+is the EDF utilization test firing on silicon, not a unit test.
+
+**Finding — the per-program WCET budget is unreachable via the syscall path.**
+`sys_bpf` caps a load at 4096 instructions, and the densest verifiable shape
+(back-to-back helper calls) tops out near `wcet ≈ 5.6k` units at the 1000-insn
+working size — two orders of magnitude below the `≈166_666` per-program budget. So
+no *loadable* program is rejected by the single-program WCET gate; the bound that
+actually constrains the system is the **cumulative** utilization budget, which a
+fleet of attachments reaches as shown above. The per-program budget remains a
+correct (if slack) structural reject and a guard against a future
+higher-instruction-limit load path.
+
 **Gaps:** PREVAIL head-to-head not yet run (separate harness). Hook fire
 frequency is a single nominal control-loop rate (1 kHz) for every hook;
 per-hook-type and caller-declared frequencies are future work.
@@ -574,6 +600,6 @@ per-hook-type and caller-declared frequencies are future work.
 
 **Document Status:** Hardware benchmarks (boot, memory, BPF load, interrupt latency) validated on Raspberry Pi 5
 
-**Last Updated:** 2026-06-11 (Track B/C verifier-cost + execution calibration, Pi5)
+**Last Updated:** 2026-06-11 (Track C admission gates validated on-device, Pi5)
 
-**Next Action:** Utilization-form admission; calibrate remaining helper classes.
+**Next Action:** Per-hook-type / caller-declared fire frequencies; PREVAIL head-to-head.

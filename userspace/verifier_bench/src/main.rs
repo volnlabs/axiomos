@@ -26,9 +26,17 @@ const MAX_INSNS: usize = 1000;
 const BPF_MAP_CREATE: i32 = 0;
 const BPF_MAP_UPDATE_ELEM: i32 = 2;
 const BPF_PROG_LOAD: i32 = 5;
+/// BPF_PROG_ATTACH (kernel_abi). Attach commits the hook's utilization, so it
+/// is where the admission gate fires.
+const BPF_PROG_ATTACH: i32 = 8;
 /// BPF_BENCH_EXEC: feature-gated kernel command — run a program N times and
 /// emit an `AXIOM EXEC COST` marker (kernel_abi::BPF_BENCH_EXEC).
 const BPF_BENCH_EXEC: i32 = 100;
+
+/// `bpf_trace_printk` helper id — banned on the embedded RT fragment.
+const HELPER_TRACE_PRINTK: i32 = 2;
+/// Attach type used for the admission self-test (ATTACH_TYPE_TIMER).
+const ATTACH_TYPE_TIMER: u32 = 1;
 
 /// Back-to-back executions per timing marker.
 const EXEC_RUNS: u32 = 64;
@@ -210,6 +218,60 @@ fn helper_ringbuf_heavy(buf: &mut [BpfInsn; MAX_INSNS], n: usize, rb_id: i32) ->
     i
 }
 
+// --- Admission self-test shapes (Track C gate check) ---
+
+/// `mov r1,0 ; call trace_printk ; mov r0,0 ; exit` — calls the helper banned on
+/// the embedded RT fragment, so the verifier rejects it at load there.
+fn trace_printk_prog(buf: &mut [BpfInsn; MAX_INSNS]) -> usize {
+    buf[0] = BpfInsn::new(0xb7, 1, 0, 0); // mov64 r1, 0
+    buf[1] = BpfInsn::new(0x85, 0, 0, HELPER_TRACE_PRINTK); // call trace_printk
+    buf[2] = BpfInsn::new(0xb7, 0, 0, 0); // mov64 r0, 0
+    buf[3] = BpfInsn::new(0x95, 0, 0, 0); // exit
+    4
+}
+
+/// `mov r0,0 ; exit` — minimal well-formed program with negligible WCET; used as
+/// the control that must both load and attach.
+fn tiny_prog(buf: &mut [BpfInsn; MAX_INSNS]) -> usize {
+    buf[0] = BpfInsn::new(0xb7, 0, 0, 0); // mov64 r0, 0
+    buf[1] = BpfInsn::new(0x95, 0, 0, 0); // exit
+    2
+}
+
+/// Attach `prog_id` to `attach_type`; returns 0 on admit or negative on reject.
+fn attach_prog(prog_id: i32, attach_type: u32) -> i32 {
+    let attr = BpfAttr {
+        attach_btf_id: attach_type,
+        attach_prog_fd: prog_id as u32,
+        ..Default::default()
+    };
+    bpf(
+        BPF_PROG_ATTACH,
+        &attr as *const _ as *const u8,
+        core::mem::size_of::<BpfAttr>() as i32,
+    )
+}
+
+/// Print a signed return code (`sys_bpf` collapses every error to -1).
+fn print_rc(rc: i32) {
+    if rc < 0 {
+        print("-");
+        print_num((-(rc as i64)) as u64);
+    } else {
+        print_num(rc as u64);
+    }
+}
+
+/// Emit one `AXIOM ADMISSION <name> rc=<rc> PASS|FAIL` line. `pass` encodes
+/// whether the observed rc matched the gate's expected polarity.
+fn selftest_case(name: &str, rc: i32, pass: bool) {
+    print("AXIOM ADMISSION ");
+    print(name);
+    print(" rc=");
+    print_rc(rc);
+    print(if pass { " PASS\n" } else { " FAIL\n" });
+}
+
 /// Load `len` instructions from `buf`; returns prog id or negative error.
 fn load_prog(buf: &[BpfInsn; MAX_INSNS], len: usize) -> i32 {
     let load_attr = BpfAttr {
@@ -356,6 +418,68 @@ pub extern "C" fn _start() -> ! {
             }
         }
     }
+
+    // Phase 3: admission self-test (Track C gate check). Errors collapse to
+    // rc=-1 in `sys_bpf`, so PASS is judged on the expected rc polarity; the
+    // kernel's log lines name the exact gate on the same serial stream.
+    //
+    // Note on the WCET budget: the syscall load path caps a program at 4096
+    // instructions, and the densest reachable shape (copy-heavy) tops out near
+    // ~5.6k WCET units at 1000 insns — far below the ~166k single-program WCET
+    // budget. So no *loadable* program trips that gate; the bound that actually
+    // bites on this profile is the *cumulative* utilization budget, which a
+    // single program also cannot reach alone (5.6k*6ns*1kHz ≈ 3.4e7 << 5e8 ns/s)
+    // but a fleet of attachments can. The self-test exercises the two reachable
+    // gates: the printk RT-ban (load time) and cumulative utilization (attach).
+    print("=== Admission Self-Test ===\n");
+
+    // printk-ban: loading a trace_printk caller is rejected on the RT fragment.
+    let len = trace_printk_prog(&mut buf);
+    let rc = load_prog(&buf, len);
+    selftest_case("printk-ban", rc, rc < 0);
+
+    // control: a negligible-WCET program both loads and attaches. Run before the
+    // saturation loop, while the utilization budget still has room.
+    let len = tiny_prog(&mut buf);
+    let load_rc = load_prog(&buf, len);
+    let attach_rc = if load_rc >= 0 {
+        attach_prog(load_rc, ATTACH_TYPE_TIMER)
+    } else {
+        -1 // load failed unexpectedly → force FAIL below
+    };
+    selftest_case("control", attach_rc, load_rc >= 0 && attach_rc == 0);
+
+    // admission (cumulative): attach copies of the densest reachable program
+    // (copy-heavy at the 1000-insn cap, wcet ≈ 5.6k → ≈3.4e7 ns/s each) to the
+    // same hook until the summed utilization crosses the 5e8 ns/s budget
+    // (~15 attachments). PASS = some attach succeeded and a later one was
+    // rejected, i.e. the budget bit.
+    let len = helper_copy_heavy(&mut buf, MAX_INSNS);
+    let mut attached: u32 = 0;
+    let mut reject_rc: i32 = 0;
+    let mut iter = 0;
+    while iter < 32 {
+        let pid = load_prog(&buf, len);
+        if pid < 0 {
+            break; // unexpected load failure → reject_rc stays 0 → FAIL
+        }
+        let arc = attach_prog(pid, ATTACH_TYPE_TIMER);
+        if arc < 0 {
+            reject_rc = arc;
+            break;
+        }
+        attached += 1;
+        iter += 1;
+    }
+    print("AXIOM ADMISSION admission attached=");
+    print_num(attached as u64);
+    print(" rc=");
+    print_rc(reject_rc);
+    print(if attached > 0 && reject_rc < 0 {
+        " PASS\n"
+    } else {
+        " FAIL\n"
+    });
 
     print("=== Verifier Cost Bench Done ===\n");
     exit(0);
