@@ -4,6 +4,18 @@
 **Status:** Active execution plan
 **Scope:** Kernel runtime programmability first, demoability second, optimization third
 
+> **Progress note (2026-06-11).** Landed since this plan was written:
+> the verifier is wired into the `sys_bpf` load path (#48) and hardened
+> (tnum/pruning/refinement/liveness, #102–#118); program provenance is
+> authenticated on load (#20); helper IDs are unified across verifier,
+> interpreter, and loader relocation (#121); verifier cost is measured on
+> Pi 5 (Track B) and a Pi5-calibrated WCET cost model with utilization-form
+> EDF admission gates loads and attaches (Track C, #43) — see
+> `docs/benchmarks.md` §12. The Phase 4 host transport shipped as the
+> UART-JSON protocol (`rk_uart_forwarder` + `rk-to-ros --input stdin`,
+> #125, `docs/rk_bridge_protocol.md`). Sections below describe the state
+> as of March and are kept for the plan's rationale and remaining phases.
+
 ---
 
 ## Purpose

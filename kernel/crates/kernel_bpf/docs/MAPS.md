@@ -41,17 +41,15 @@ assert_eq!(result, Some(value.to_vec()));
 - Cannot resize (embedded) or can resize (cloud)
 - Keys must be valid indices
 
-### HashMapMap (Planned)
+### HashMap
 
-Hash table with O(1) average access.
+Hash table with O(1) average access and arbitrary keys (`maps/hash.rs`).
 
 ```rust
-// Create hash map
-let map = HashMapMap::<ActiveProfile>::new(
-    key_size: 16,      // 16-byte keys
-    value_size: 64,    // 64-byte values
-    max_entries: 1000, // Max 1000 entries
-)?;
+use kernel_bpf::maps::{HashMap, MapDef};
+
+// Create from a MapDef (key size, value size, max entries)
+let map = HashMap::<ActiveProfile>::new(def)?;
 
 // Arbitrary keys
 let key = b"some-unique-key!";
@@ -59,21 +57,30 @@ let value = [0u8; 64];
 map.update(key, &value, 0)?;
 ```
 
-### LRU HashMap (Cloud Only)
+### RingBufMap
 
-Hash map with LRU eviction.
+Single-producer ring buffer for streaming events from BPF programs to
+userspace (`maps/ringbuf.rs`). Programs write via the `ringbuf_output` helper
+or the reserve/submit/discard helper triple; userspace drains records in
+order.
 
 ```rust
-#[cfg(feature = "cloud-profile")]
-{
-    let map = LruHashMap::new(key_size, value_size, max_entries)?;
+use kernel_bpf::maps::RingBufMap;
 
-    // When full, least recently used entry is evicted
-    for i in 0..max_entries + 100 {
-        map.update(&i.to_ne_bytes(), &value, 0)?;
-    }
-    // First 100 entries were evicted
-}
+let rb = RingBufMap::<ActiveProfile>::new(size_bytes)?;
+```
+
+### TimeSeriesMap
+
+Ring of timestamped samples (`maps/timeseries.rs`). Programs push via the
+`timeseries_push` helper; userspace reads the newest sample or drains the
+window. Backs the sensor/telemetry export path.
+
+```rust
+use kernel_bpf::maps::TimeSeriesMap;
+
+let ts = TimeSeriesMap::<ActiveProfile>::new(value_size, max_entries)?;
+let newest: Option<(u64, Vec<u8>)> = ts.newest();
 ```
 
 ## Map Operations
@@ -198,7 +205,6 @@ println!("Max entries: {}", def.max_entries);
 
 - Maps use heap allocation
 - `resize()` method available
-- LRU maps available
 - No strict memory limits
 
 ```rust
@@ -208,9 +214,6 @@ fn cloud_map_example() {
 
     // Can grow dynamically
     map.resize(10000)?;
-
-    // Can use LRU eviction
-    let lru = LruHashMap::new(16, 64, 1000)?;
 }
 ```
 
@@ -218,7 +221,6 @@ fn cloud_map_example() {
 
 - Maps use static pool allocation
 - No `resize()` method (compile-time erased)
-- No LRU maps
 - Strict memory limits from static pool
 
 ```rust
@@ -331,10 +333,8 @@ match map.update(&key, &value, 0) {
 |----------|-----------------|
 | Fixed index access | ArrayMap |
 | Arbitrary keys | HashMap |
-| Cache with eviction | LRU HashMap (cloud) |
-| Per-CPU counters | PerCpuArray |
-| Queue/FIFO | Queue |
-| Stack/LIFO | Stack |
+| Timestamped samples / telemetry | TimeSeriesMap |
+| Kernel→userspace event stream | RingBufMap |
 
 ### Memory Planning (Embedded)
 

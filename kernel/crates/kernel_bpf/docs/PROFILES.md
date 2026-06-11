@@ -53,6 +53,10 @@ Use `--features embedded-profile` when:
 | `MAX_INSN_COUNT` | 1,000,000 | 100,000 | Embedded needs bounded execution |
 | `JIT_ALLOWED` | true | false | JIT needs memory, unpredictable timing |
 | `RESTART_ACCEPTABLE` | true | false | Embedded systems must recover in-place |
+| `RT_PERIOD_NS` | unlimited | 1,000,000 | Embedded assumes a 1 kHz control loop |
+| `CYCLE_UNIT_NS` | 1 (nominal) | 6 | ns per WCET cycle unit, Pi5 A76 calibrated (benchmarks §12) |
+| `WCET_CYCLE_BUDGET` | unlimited | ≈166,666 | one period: `RT_PERIOD_NS / CYCLE_UNIT_NS`; over-budget programs rejected at load |
+| `UTILIZATION_BUDGET_NS_PER_S` | unlimited | 5×10⁸ | U = 0.5 — Σ wcet·freq across all attached programs capped at half a core |
 
 ### Associated Types
 

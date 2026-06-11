@@ -10,7 +10,11 @@ The verifier performs static analysis on BPF programs before execution to guaran
 - No infinite loops (bounded iteration)
 - No division by zero
 - No stack overflow
-- Profile-specific constraints are met
+- Profile-specific constraints are met, including a static WCET (worst-case
+  execution time) bound per program on the embedded profile
+
+The verifier is load-bearing: `sys_bpf` calls it on every program load (#48) —
+a program that fails verification does not load.
 
 ## Verification Pipeline
 
@@ -27,34 +31,59 @@ The verifier performs static analysis on BPF programs before execution to guaran
 
 ## Using the Verifier
 
+The entry points are associated functions on `Verifier<P>` taking raw
+instructions; on success they return the constructed `BpfProgram<P>`.
+
 ### Basic Usage
 
 ```rust
 use kernel_bpf::verifier::Verifier;
 use kernel_bpf::profile::ActiveProfile;
+use kernel_bpf::bytecode::program::BpfProgType;
 
-let verifier = Verifier::<ActiveProfile>::new();
-
-match verifier.verify(&program) {
-    Ok(()) => println!("Program verified successfully"),
-    Err(e) => println!("Verification failed: {}", e),
-}
+// Zero-config: ctx / map-value accesses are rejected because no region
+// sizes are known.
+let program = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns)?;
 ```
 
-### With Options
+### With Region Sizes (`VerifyConfig`)
+
+This is what the `sys_bpf` load path does: it supplies the context size and
+per-map value sizes so `PtrToCtx` / `PtrToMapValue` accesses can be
+bounds-checked precisely.
 
 ```rust
-use kernel_bpf::verifier::{Verifier, VerifyOptions};
+use kernel_bpf::verifier::{Verifier, VerifyConfig};
 
-let options = VerifyOptions {
-    max_iterations: 100_000,      // Max verification iterations
-    allow_loops: true,            // Allow bounded loops
-    strict_alignment: true,       // Enforce aligned access
+let config = VerifyConfig {
+    ctx_size: core::mem::size_of::<BpfContext>() as u32,
+    map_value_size: 64,        // fallback (e.g. ringbuf_reserve returns)
+    map_value_sizes: &[8, 64], // exact accessible bytes, indexed by map id
 };
 
-let verifier = Verifier::<ActiveProfile>::with_options(options);
-verifier.verify(&program)?;
+let program = Verifier::<ActiveProfile>::verify_with_config(
+    BpfProgType::SocketFilter, &insns, config)?;
 ```
+
+A `bpf_map_lookup_elem` whose map-id register holds a known constant `id`
+yields exactly `map_value_sizes[id]` accessible bytes; a known id outside the
+table is rejected; a dynamic id is bounded to the smallest entry (sound —
+never over-permits any reachable map).
+
+### With Cost Stats
+
+```rust
+let (program, stats) = Verifier::<ActiveProfile>::verify_with_stats(
+    BpfProgType::SocketFilter, &insns, config)?;
+
+stats.states_explored; // verification cost (distinct states)
+stats.wcet_cycles;     // static worst-case execution bound, cycle units
+```
+
+Verification runs in phases: basic checks → CFG construction → profile
+structural constraints (loop-freedom, helper allow-list, WCET budget — checked
+*before* path-sensitive exploration, so an over-budget program is refused
+without paying exploration cost) → path-sensitive safety exploration.
 
 ## Verification Checks
 
@@ -70,7 +99,7 @@ BpfInsn::mov64_imm(0, 42)  // 0xb7 - known opcode
 BpfInsn::new(0xFF, 0, 0, 0, 0)  // 0xFF - invalid opcode
 ```
 
-**Error:** `VerifyError::InvalidOpcode { pc: usize, opcode: u8 }`
+**Error:** `VerifyError::InvalidOpcode { insn_idx: usize, opcode: u8 }`
 
 ### 2. Register Initialization
 
@@ -91,7 +120,7 @@ let good_program = ProgramBuilder::new(BpfProgType::SocketFilter)
     .build()?;
 ```
 
-**Error:** `VerifyError::UninitializedRegister { pc: usize, reg: u8 }`
+**Error:** `VerifyError::UninitializedRegister { insn_idx: usize, reg: u8 }`
 
 ### 3. Frame Pointer Protection
 
@@ -105,7 +134,7 @@ let bad = ProgramBuilder::new(BpfProgType::SocketFilter)
     .build()?;
 ```
 
-**Error:** `VerifyError::WriteToR10 { pc: usize }`
+**Error:** `VerifyError::WriteToReadOnly { insn_idx: usize, reg: u8 }`
 
 ### 4. Division by Zero
 
@@ -120,7 +149,7 @@ let bad = ProgramBuilder::new(BpfProgType::SocketFilter)
     .build()?;
 ```
 
-**Error:** `VerifyError::DivisionByZero { pc: usize }`
+**Error:** `VerifyError::DivisionByZero { insn_idx: usize }`
 
 ### 5. Exit Requirement
 
@@ -140,7 +169,7 @@ let bad = ProgramBuilder::new(BpfProgType::SocketFilter)
     .build()?;
 ```
 
-**Error:** `VerifyError::NoExit`
+**Error:** `VerifyError::InfiniteLoop { insn_idx }` (jump-to-self) or `VerifyError::UnreachableInstruction { insn_idx }`
 
 ### 6. Bounded Iteration
 
@@ -160,7 +189,7 @@ let good = ProgramBuilder::new(BpfProgType::SocketFilter)
 
 The verifier tracks loop iterations and fails if the bound cannot be determined.
 
-**Error:** `VerifyError::UnboundedLoop { pc: usize }`
+**Error:** `VerifyError::UnboundedLoop { insn_idx: usize }`
 
 ### 7. Stack Bounds
 
@@ -179,7 +208,7 @@ let offset = -600_000;  // Way below stack limit
 // Error: StackOutOfBounds
 ```
 
-**Error:** `VerifyError::StackOutOfBounds { pc: usize, offset: i32 }`
+**Error:** `VerifyError::OutOfBoundsAccess { insn_idx, .. }` (bad offset) or `VerifyError::StackExceeded { needed, limit }` (depth over profile limit)
 
 ### 8. Memory Access
 
@@ -195,7 +224,7 @@ Pointer arithmetic and memory access are validated:
 // BAD: Misaligned access (if strict_alignment enabled)
 ```
 
-**Error:** `VerifyError::InvalidMemoryAccess { pc: usize, reason: String }`
+**Error:** `VerifyError::InvalidMemoryAccess { insn_idx, .. }` or `VerifyError::OutOfBoundsAccess { insn_idx, .. }`
 
 ## Control Flow Graph
 
@@ -204,7 +233,7 @@ The verifier builds a CFG to analyze all possible execution paths:
 ```rust
 use kernel_bpf::verifier::cfg::ControlFlowGraph;
 
-let cfg = ControlFlowGraph::build(&program)?;
+let cfg = ControlFlowGraph::build(&insns);
 
 // Analyze basic blocks
 for block in cfg.blocks() {
@@ -240,52 +269,59 @@ CFG:
 
 ## State Tracking
 
-The verifier tracks the state of registers and stack:
+The verifier tracks an abstract state per register and stack slot
+(`verifier/state.rs`). Each register's abstraction is a **tnum**
+(known-bits tracking) × **unsigned interval**, plus a register-type lattice
+(scalar, stack pointer, ctx pointer, map-value pointer — pointers from map
+lookups are *maybe-null* until a null check clears the flag). Stack state is
+sparse (#118): only touched slots cost memory.
 
-### Register States
+Supporting analyses, each its own module, are wired into the core paths:
 
-```rust
-pub enum RegState {
-    /// Register contains garbage (uninitialized)
-    Uninitialized,
+| Module | Wired into | Role |
+|---|---|---|
+| `state.rs` (tnum) | `verify_alu` (#102) | known-bits through ALU ops, width-correct 32-bit semantics (#114) |
+| `refine.rs` | `verify_jump` (#105) | branch-condition range refinement on both arms |
+| `pruner.rs` | `verify_safety` (#103) | state subsumption; recorded-state budget caps exploration (#116) |
+| `liveness.rs` | pruner subsumption (#104) | dead registers don't block pruning |
 
-    /// Register contains a known scalar value
-    Scalar {
-        value: Option<u64>,  // Known value, if determinable
-        min: u64,            // Minimum possible value
-        max: u64,            // Maximum possible value
-    },
+### Value Tracking Example
 
-    /// Register contains a pointer
-    Pointer {
-        base: PointerBase,   // What it points to
-        offset: Range<i64>,  // Offset range
-    },
-}
+```
+// Initial: R0 known to be 10
+R0: tnum=0b1010 exact, range [10, 10]
 
-pub enum PointerBase {
-    Stack,      // Points into stack
-    Map,        // Points into map
-    Context,    // Points into context
-    Packet,     // Points into packet data
-}
+// After: add64 r0, r1  (R1 in [0, 100])
+R0: range [10, 110]
+
+// After: if r0 < 50 goto ...
+// True branch:  R0 range [10, 49]
+// False branch: R0 range [50, 110]
 ```
 
-### Value Tracking
+## WCET Cost Model & Admission
 
-The verifier tracks value ranges through operations:
+Beyond safety, the verifier bounds *execution* cost (Track C, #43).
+`verifier/cost.rs` assigns each instruction a static cycle cost (per-helper
+costs included, calibrated on Pi 5 Cortex-A76 — `CYCLE_UNIT_NS = 6` ns/unit)
+and computes the program's WCET as the longest path through its loop-free CFG.
+The result lands in `VerifyStats::wcet_cycles`.
 
-```rust
-// Initial state
-R0: Scalar { value: Some(10), min: 10, max: 10 }
+Two enforcement points consume it on the embedded profile:
 
-// After: add64 r0, r1 (where R1 is 0..100)
-R0: Scalar { value: None, min: 10, max: 110 }
+- **Per-program budget (verifier):** WCET over `WCET_CYCLE_BUDGET`
+  (`RT_PERIOD_NS / CYCLE_UNIT_NS` = 1,000,000 / 6 ≈ 166,666 units — one 1 kHz
+  control-loop period) rejects with `WcetExceeded` before exploration.
+- **Utilization admission (kernel):** each attach commits
+  `wcet × CYCLE_UNIT_NS × freq` ns/s to an `AdmissionLedger`
+  (`verifier/admission.rs`); the sum across all attached programs is capped at
+  `UTILIZATION_BUDGET_NS_PER_S` = 5×10⁸ (U = 0.5, half a core). Over-budget
+  attaches are refused; detach returns the budget. This is the EDF utilization
+  test, validated on Pi 5 hardware (`docs/benchmarks.md` §12).
 
-// After: if r0 < 50, goto ...
-// True branch: R0: Scalar { min: 10, max: 49 }
-// False branch: R0: Scalar { min: 50, max: 110 }
-```
+`trace_printk` is banned on RT-fragment programs
+(`HelperForbiddenOnRtFragment`). See `docs/verifier-fragment.md` at the repo
+root for the bounded-fragment definition and cost bounds.
 
 ## Profile-Specific Verification
 
@@ -307,35 +343,47 @@ Additional checks for real-time safety:
 
 ```rust
 // Embedded has stricter limits
-const MAX_INSN: usize = 100_000;
-const MAX_STACK: usize = 8 * 1024;
+const MAX_STACK_SIZE: usize = 8 * 1024;
+const MAX_INSN_COUNT: usize = 100_000;
 
-// Additional checks:
-// - WCET budget verification
-// - No dynamic allocation
-// - Bounded iteration proof
+// Additional structural checks (run before path exploration):
+// - Loop-free CFG: any back edge rejects with UnboundedLoop
+// - Helper allow-list; trace_printk banned on the RT fragment
+// - WCET budget: longest CFG path must fit one control-loop period
 ```
 
 **Embedded-only errors:**
-- `VerifyError::WCETExceeded { estimated: u64, budget: u64 }`
-- `VerifyError::DynamicAllocation { pc: usize }`
+- `VerifyError::WcetExceeded { wcet_cycles, budget_cycles }`
+- `VerifyError::UnboundedLoop { insn_idx }`
+- `VerifyError::HelperForbiddenOnRtFragment { insn_idx, helper_id }`
+- `VerifyError::DynamicAllocationAttempted { insn_idx }`
+- `VerifyError::InterruptUnsafe { insn_idx }`
 
 ## Error Reference
+
+The full enum lives in `verifier/error.rs`. Common variants:
 
 | Error | Description | Fix |
 |-------|-------------|-----|
 | `InvalidOpcode` | Unknown instruction opcode | Use valid BPF opcodes |
+| `InvalidRegister` | Register number out of range | Use R0–R10 |
 | `UninitializedRegister` | Reading uninitialized register | Initialize before use |
-| `WriteToR10` | Attempting to modify frame pointer | Don't write to R10 |
-| `DivisionByZero` | Division/modulo by zero | Check divisor first |
-| `NoExit` | No reachable exit instruction | Add exit instruction |
-| `UnboundedLoop` | Loop without provable bound | Add loop counter check |
-| `StackOutOfBounds` | Stack access outside valid range | Check stack offset |
-| `InvalidMemoryAccess` | Bad pointer dereference | Validate pointer first |
-| `TooManyInstructions` | Program exceeds limit | Reduce program size |
-| `StackOverflow` | Stack usage exceeds limit | Reduce stack usage |
-| `OutOfBoundsJump` | Jump target outside program | Fix jump offset |
-| `UnreachableCode` | Dead code detected | Remove or fix branches |
+| `WriteToReadOnly` | Writing R10 or a read-only region | Don't write to R10 / ctx |
+| `DivisionByZero` | Division/modulo by provably-zero divisor | Check divisor first |
+| `InfiniteLoop` | Jump-to-self, no reachable exit | Add exit instruction |
+| `UnboundedLoop` | Back edge on embedded profile | Unroll; loops are outside the fragment |
+| `OutOfBoundsAccess` | Access outside stack/ctx/map-value bounds | Check pointer offset |
+| `InvalidMemoryAccess` | Dereference of non-pointer / maybe-null pointer | Null-check map lookups first |
+| `MisalignedAccess` | Unaligned load/store | Align accesses to size |
+| `StackExceeded` | Stack depth over profile limit | Reduce stack usage |
+| `InsnCountExceeded` | Program over `MAX_INSN_COUNT` | Reduce program size |
+| `InvalidJump` | Jump target outside program | Fix jump offset |
+| `UnreachableInstruction` | Dead code detected | Remove or fix branches |
+| `InvalidHelper` / `HelperNotAvailable` | Unknown helper / not in profile allow-list | Use allowed helpers |
+| `HelperArgCount` / `HelperArgType` | Helper signature mismatch | Match `get_helper_signature` |
+| `InvalidMapId` | Constant map id with no entry in `map_value_sizes` | Reference an existing map |
+| `StateLimitExceeded` | Exploration over the recorded-state budget | Simplify control flow |
+| `WcetExceeded` | Static WCET over per-program budget | Shorten the worst path |
 
 ## Best Practices
 
@@ -350,20 +398,20 @@ const MAX_STACK: usize = 8 * 1024;
 
 ## Debugging Verification Failures
 
-```rust
-// Enable verbose verification
-let options = VerifyOptions {
-    verbose: true,
-    ..Default::default()
-};
+Every `VerifyError` variant carries the failing `insn_idx` and implements
+`Display`:
 
-let verifier = Verifier::with_options(options);
-match verifier.verify(&program) {
-    Ok(()) => println!("OK"),
-    Err(e) => {
-        println!("Error at PC {}: {}", e.pc(), e);
-        println!("Register state: {:?}", e.state());
-        println!("Instruction: {}", program.insn_at(e.pc()));
+```rust
+match Verifier::<ActiveProfile>::verify_with_stats(prog_type, &insns, config) {
+    Ok((prog, stats)) => {
+        // stats.states_explored / stats.wcet_cycles for cost questions
     }
+    Err(e) => println!("verification failed: {e}"),
 }
 ```
+
+To measure verification cost on device, build the kernel with the
+`verifier-cost` feature: every BPF load then emits
+`AXIOM VERIFIER COST prog_id=… insns=… states=… cycles=… wcet=…` on the UART.
+The fuzz harness (`kernel_bpf/fuzz`) exercises the verifier on every PR and
+nightly.

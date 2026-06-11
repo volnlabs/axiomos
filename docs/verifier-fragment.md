@@ -69,24 +69,33 @@ DAG). Because the path is the *maximum* over branches, cost on a non-taken arm i
 excluded — WCET ≠ the naive instruction-cost total. The result is returned as
 `VerifyStats::wcet_cycles` and emitted in the `verifier-cost` marker (`wcet=`).
 
-Costs are **relative cycle units** pending Cortex-A76 calibration (the same
-hardware run that captures verifier cost measures per-opcode cycles to replace
-the constants). Two enforcement points consume the bound today:
+Costs are **calibrated cycle units**: the Pi 5 (Cortex-A76) calibration run
+measured per-class execution cost (ALU, memory, div, helper classes including
+copy and ringbuf) and fixed `PhysicalProfile::CYCLE_UNIT_NS = 6` (≈5.74 ns/unit
+measured, rounded up — `docs/benchmarks.md` §12). Two enforcement points
+consume the bound today:
 
 - **Per-program budget (verifier):** the embedded profile rejects a program
-  whose WCET exceeds `PhysicalProfile::WCET_CYCLE_BUDGET` with `WcetExceeded`.
-  The check runs with the other structural profile constraints *before*
+  whose WCET exceeds `WCET_CYCLE_BUDGET = RT_PERIOD_NS / CYCLE_UNIT_NS ≈
+  166_666` units (one 1 kHz control-loop period) with `WcetExceeded`. The
+  check runs with the other structural profile constraints *before*
   path-sensitive exploration, so an over-budget program is refused without
-  paying exploration cost.
-- **Per-hook admission (kernel):** `BpfManager::attach` consults an
-  `AdmissionLedger` (`verifier/admission.rs`) — attaching commits the hook to
-  paying the program's WCET on every fire, and an attach that would push the
-  hook's summed WCET past its capacity is refused with `AdmissionRejected`
-  (safe but not schedulable). Detach returns the budget.
+  paying exploration cost. Note this budget is currently unreachable through
+  the syscall path (4096-insn load cap keeps any loadable program two orders
+  of magnitude below it); it stands as a structural guard.
+- **Utilization admission (kernel):** `BpfManager::attach` consults an
+  `AdmissionLedger` (`verifier/admission.rs`) in **utilization form** — each
+  attach commits `wcet × CYCLE_UNIT_NS × freq` ns of CPU per second, and the
+  sum across all attached programs is capped at
+  `UTILIZATION_BUDGET_NS_PER_S = 5×10⁸` (U = 0.5, the EDF utilization test).
+  An attach that would cross the budget is refused (safe but not schedulable);
+  detach returns the budget. Validated on Pi 5 silicon: the admission
+  self-test shows the 15th attach of a dense program refused exactly where
+  the arithmetic predicts (`docs/benchmarks.md` §12).
 
-Both budgets are placeholders in relative units until calibration; the full
-utilization form (`Σ WCETᵢ·freqᵢ/budgetᵢ ≤ U` with per-hook fire frequencies)
-lands once cycle↔time is measured.
+The remaining approximation is the fire frequency: every hook is assumed to
+run at the nominal 1 kHz control-loop rate. Per-hook-type and caller-declared
+frequencies are future work.
 
 ## What makes the bound real in the implementation
 

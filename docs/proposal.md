@@ -9,6 +9,12 @@
 **Status:** Seeking collaborators, funding, and early adopters
 **Target:** AgenticOS2026 Workshop (ASPLOS), Startup Accelerators, Research Partnerships
 
+> **Note (2026-06):** this is the original pitch document, kept for the vision
+> and rationale. For the current, honest implementation state see the
+> [README](../README.md) (Limitations section), [benchmarks.md](benchmarks.md)
+> for measured numbers, and [implementation.md](implementation.md) for the
+> execution plan.
+
 ---
 
 ## Executive Summary

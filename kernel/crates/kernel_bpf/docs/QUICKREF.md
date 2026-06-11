@@ -23,7 +23,7 @@ use kernel_bpf::bytecode::insn::BpfInsn;
 use kernel_bpf::bytecode::program::{BpfProgram, BpfProgType, ProgramBuilder};
 use kernel_bpf::execution::{BpfContext, BpfExecutor, Interpreter};
 use kernel_bpf::verifier::Verifier;
-use kernel_bpf::maps::{ArrayMap, BpfMap};
+use kernel_bpf::maps::{ArrayMap, HashMap, RingBufMap, TimeSeriesMap, BpfMap};
 use kernel_bpf::scheduler::{BpfScheduler, BpfExecRequest, ProgId, ExecPriority};
 
 // Cloud-only
@@ -83,8 +83,15 @@ BpfInsn::nop()                   // no operation
 ## Verification
 
 ```rust
-let verifier = Verifier::<ActiveProfile>::new();
-verifier.verify(&program)?;
+// From raw instructions (associated fn; returns the program on success)
+let program = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns)?;
+
+// With region sizes (what the sys_bpf load path uses)
+let config = VerifyConfig { ctx_size, map_value_size, map_value_sizes: &sizes };
+let program = Verifier::<ActiveProfile>::verify_with_config(prog_type, &insns, config)?;
+
+// With cost stats (states_explored, wcet_cycles)
+let (program, stats) = Verifier::<ActiveProfile>::verify_with_stats(prog_type, &insns, config)?;
 ```
 
 ## Execution
@@ -157,6 +164,10 @@ scheduler.exec_count()
 | `MAX_INSN_COUNT` | 1,000,000 | 100,000 |
 | `JIT_ALLOWED` | true | false |
 | `RESTART_ACCEPTABLE` | true | false |
+| `WCET_CYCLE_BUDGET` | unlimited | ≈166,666 units (one 1 kHz period) |
+| `CYCLE_UNIT_NS` | 1 (nominal) | 6 (Pi5 A76 calibrated) |
+| `RT_PERIOD_NS` | unlimited | 1,000,000 (1 kHz) |
+| `UTILIZATION_BUDGET_NS_PER_S` | unlimited | 500,000,000 (U = 0.5) |
 
 ## Error Types
 
@@ -165,11 +176,12 @@ scheduler.exec_count()
 ProgramError::TooManyInstructions
 ProgramError::InvalidOpcode
 
-// Verification
-VerifyError::UninitializedRegister { pc, reg }
-VerifyError::WriteToR10 { pc }
-VerifyError::DivisionByZero { pc }
-VerifyError::NoExit
+// Verification (all carry insn_idx)
+VerifyError::UninitializedRegister { insn_idx, reg }
+VerifyError::WriteToReadOnly { insn_idx, reg }
+VerifyError::OutOfBoundsAccess { insn_idx, .. }
+VerifyError::WcetExceeded { wcet_cycles, budget_cycles }
+VerifyError::HelperForbiddenOnRtFragment { insn_idx, helper_id }
 
 // Execution
 BpfError::DivisionByZero
@@ -206,16 +218,8 @@ fn either_profile() { }
 
 ```rust
 fn run_bpf(bytecode: &[BpfInsn]) -> Result<u64, Box<dyn Error>> {
-    // Build
-    let mut builder = ProgramBuilder::<ActiveProfile>::new(BpfProgType::SocketFilter);
-    for insn in bytecode {
-        builder = builder.insn(*insn);
-    }
-    let program = builder.build()?;
-
-    // Verify
-    let verifier = Verifier::new();
-    verifier.verify(&program)?;
+    // Verify (builds the program and checks safety in one step)
+    let program = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, bytecode)?;
 
     // Execute
     let interpreter = Interpreter::new();
@@ -271,19 +275,35 @@ kernel/crates/kernel_bpf/
 │   │   ├── opcode.rs       # Opcodes
 │   │   ├── insn.rs         # BpfInsn
 │   │   └── program.rs      # BpfProgram
-│   ├── verifier/           # Safety verification
+│   ├── verifier/           # Safety verification + WCET + admission
 │   │   ├── mod.rs
-│   │   ├── state.rs        # State tracking
-│   │   ├── cfg.rs          # Control flow
-│   │   ├── core.rs         # Verification
+│   │   ├── core.rs         # Phased verification
+│   │   ├── state.rs        # tnum × interval × type state
+│   │   ├── cfg.rs          # Control flow (CSR successor table)
+│   │   ├── alu.rs          # ALU transfer functions
+│   │   ├── refine.rs       # Branch range refinement
+│   │   ├── pruner.rs       # State pruning + budget
+│   │   ├── liveness.rs     # Liveness for pruning
+│   │   ├── helpers.rs      # HelperId + signatures
+│   │   ├── cost.rs         # WCET cycle model (Pi5-calibrated)
+│   │   ├── admission.rs    # Utilization admission ledger
+│   │   ├── streaming.rs    # Streaming verifier (#107)
 │   │   └── error.rs        # Errors
+│   ├── loader/             # BPF ELF loading + relocation
+│   ├── signing/            # Ed25519 provenance (load-path gate)
+│   ├── attach/             # gpio/pwm/iio/kprobe/tracepoint hooks
+│   ├── cost_corpus.rs      # Shared shapes for cost measurement
 │   ├── execution/          # Execution engines
 │   │   ├── mod.rs          # BpfExecutor trait
 │   │   ├── interpreter.rs  # Interpreter
-│   │   └── jit/            # JIT (cloud-only)
+│   │   ├── jit/            # JIT (x86_64)
+│   │   └── jit_aarch64.rs  # AArch64 JIT
 │   ├── maps/               # BPF maps
 │   │   ├── mod.rs          # BpfMap trait
 │   │   ├── array.rs        # ArrayMap
+│   │   ├── hash.rs         # HashMap
+│   │   ├── ringbuf.rs      # RingBufMap
+│   │   ├── timeseries.rs   # TimeSeriesMap
 │   │   └── static_pool.rs  # StaticPool (embedded)
 │   └── scheduler/          # Program scheduling
 │       ├── mod.rs          # BpfScheduler

@@ -95,26 +95,81 @@ bytecode/
 
 ### Verifier Module
 
-Ensures program safety before execution.
+Ensures program safety before execution, and bounds both verification cost
+and program execution cost (WCET). Wired into the `sys_bpf` load path (#48).
 
 ```
 verifier/
-├── mod.rs          # Verifier<P> struct, public API
-├── state.rs        # RegState, StackState, VerifierState
-├── cfg.rs          # ControlFlowGraph, BasicBlock
-├── core.rs         # Core verification logic
+├── mod.rs          # Verifier<P> public API
+├── core.rs         # Phased verification: basic → CFG → profile → exploration
+├── state.rs        # Register/stack abstract state: tnum × interval × type
+├── cfg.rs          # ControlFlowGraph, BasicBlock (CSR successor table, O(n+E))
+├── alu.rs          # Width-correct ALU transfer functions (#114)
+├── refine.rs       # Branch-condition range refinement (#105)
+├── pruner.rs       # State subsumption + recorded-state budget (#103, #116)
+├── liveness.rs     # Per-instruction liveness for pruning (#104)
+├── helpers.rs      # HelperId (runtime ABI numbering), signatures, allow-lists
+├── cost.rs         # Static WCET cycle model, Pi5-calibrated (Track C)
+├── admission.rs    # AdmissionLedger: Σ wcet·freq utilization admission
+├── streaming.rs    # Streaming verifier (separate, parity tracked in #107)
 └── error.rs        # VerifyError enum
 ```
 
 **Verification Pipeline:**
 
 ```
-Program → Parse → Build CFG → Check Reachability → Verify Instructions → OK
-                      │              │                    │
-                      ▼              ▼                    ▼
-                 Detect loops  Find dead code    Check register types
-                                                 Check memory access
-                                                 Check stack bounds
+Parse → Build CFG → Profile constraints → Path-sensitive exploration → OK
+            │       (loop-freedom,            │
+            ▼        helper allow-list,       ▼
+       Detect loops, WCET budget —      Register types, tnum/range
+       dead code     pre-exploration)   tracking, memory + stack bounds,
+                                        state pruning w/ liveness
+```
+
+See `VERIFICATION.md` for the full guide and `docs/verifier-fragment.md` at
+the repo root for the bounded-cost fragment.
+
+### Loader Module
+
+Parses BPF ELF objects and relocates helper calls and map references.
+
+```
+loader/
+├── mod.rs          # Load entry points
+├── elf.rs          # ELF parsing
+├── object.rs       # Program/map object model
+├── reloc.rs        # Relocation incl. helper-name → HelperId (runtime ABI)
+└── error.rs        # LoadError
+```
+
+### Signing Module
+
+Ed25519 program provenance, enforced on the load path (#20): a `SignedProgram`
+container is verified against the kernel-held trust store and fails closed on
+any bad signature; unsigned loads pass only while `allow_unsigned = true`
+(default until a userspace signer ships).
+
+```
+signing/
+├── mod.rs          # Module root
+├── verifier.rs     # SignatureVerifier::authenticate gate
+├── signature.rs    # SignedProgram container
+├── hash.rs         # Program hashing
+└── error.rs        # SigningError
+```
+
+### Attach Module
+
+Hook-type-specific attach points.
+
+```
+attach/
+├── mod.rs          # Attach registry
+├── gpio.rs         # GPIO line interrupts
+├── pwm.rs          # PWM cycle hooks
+├── iio.rs          # Sensor-sample hooks
+├── kprobe.rs       # Kernel probe hooks
+└── tracepoint.rs   # Tracepoint hooks
 ```
 
 ### Execution Module
@@ -125,8 +180,8 @@ Provides execution engines for BPF programs.
 execution/
 ├── mod.rs          # BpfExecutor trait, BpfContext, default_executor()
 ├── interpreter.rs  # Interpreter<P> - bytecode interpreter
-└── jit/            # JIT compiler (cloud-only)
-    └── mod.rs      # JitExecutor, JitProgram
+├── jit/            # JIT compiler (x86_64)
+└── jit_aarch64.rs  # AArch64 JIT (native codegen on Pi 5)
 ```
 
 **Execution Flow:**
@@ -165,6 +220,9 @@ Provides shared data storage between BPF programs and userspace.
 maps/
 ├── mod.rs          # BpfMap trait, MapDef, MapError
 ├── array.rs        # ArrayMap<P> - O(1) lookup by index
+├── hash.rs         # HashMap<P> - arbitrary keys
+├── ringbuf.rs      # RingBufMap<P> - kernel→userspace event stream
+├── timeseries.rs   # TimeSeriesMap<P> - timestamped samples
 └── static_pool.rs  # StaticPool (embedded-only)
 ```
 
@@ -207,11 +265,14 @@ scheduler/
 ### Program Loading
 
 ```
-1. User provides bytecode
-2. ProgramBuilder parses instructions
-3. Verifier checks safety
-4. Program stored in BpfProgram<P>
-5. Program registered with scheduler
+1. User provides bytecode (raw insns or BPF ELF) via sys_bpf
+2. Signing gate authenticates provenance (signed container verified
+   against kernel trust store; fail-closed on bad signature)
+3. Loader parses ELF, relocates helper calls / map references
+4. Verifier checks safety + computes static WCET; over-budget rejects
+5. Program stored in BpfProgram<P>
+6. Attach passes the admission ledger (Σ wcet·freq ≤ utilization budget)
+   before the hook fires it
 ```
 
 ### Program Execution
