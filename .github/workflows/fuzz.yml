@@ -57,9 +57,6 @@ jobs:
         target:
           - verify_only
           - verify_then_exec
-          # streaming_match excluded from nightly until known-findings/streaming-divergence-001
-          # is triaged. Re-enable once the divergence is either fixed or the
-          # oracle is relaxed with explicit justification.
     steps:
       - uses: actions/checkout@v4
 

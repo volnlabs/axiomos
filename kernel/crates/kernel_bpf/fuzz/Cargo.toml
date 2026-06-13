@@ -34,10 +34,3 @@ path = "fuzz_targets/verify_then_exec.rs"
 test = false
 doc = false
 bench = false
-
-[[bin]]
-name = "streaming_match"
-path = "fuzz_targets/streaming_match.rs"
-test = false
-doc = false
-bench = false
