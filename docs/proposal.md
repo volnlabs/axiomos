@@ -277,9 +277,9 @@ The heart of Axiom's programmability:
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    │
 │  │   Loader    │───▶│  Verifier   │───▶│  Executor   │    │
 │  │             │    │             │    │             │    │
-│  │  ELF parse  │    │  Streaming  │    │ Interpreter │    │
-│  │  No libbpf  │    │  O(n) mem   │    │ + JIT       │    │
-│  │  50KB       │    │  50KB peak  │    │             │    │
+│  │  ELF parse  │    │ Path-sens.  │    │ Interpreter │    │
+│  │  No libbpf  │    │ states<=n   │    │ + JIT       │    │
+│  │  50KB       │    │ +WCET bound │    │             │    │
 │  └─────────────┘    └─────────────┘    └─────────────┘    │
 │                            │                               │
 │                     ┌──────┴──────┐                       │
@@ -294,13 +294,18 @@ The heart of Axiom's programmability:
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Streaming Verifier:**
+**Verifier:**
 
-Standard BPF verifiers hold entire program state in memory (50-100MB for complex programs). Our streaming verifier processes in a single forward pass:
+A single path-sensitive verifier gates every program load. On the embedded
+real-time fragment — loop-free by profile constraint — verification cost is
+bounded by program size: Track B measured `states_explored == n` on hardware
+(see `docs/benchmarks.md` §12). The verifier also carries a static WCET cycle
+bound per program and admits loads against a schedulability budget (#143/#144):
 
 ```
-Standard:  O(instructions × registers × paths) = ~100MB
-Axiom:     O(registers × basic_block_depth)    = ~50KB
+Verification states (loop-free RT fragment):  states_explored == n
+Per-program WCET:                             static longest-path cycle bound
+Admission:                                     Σ WCETᵢ·freqᵢ ≤ U  (load-time)
 ```
 
 **Profile System:**
@@ -397,7 +402,7 @@ Tier 0: Kernel Core
 | Syscalls | ⚠️ Partial | 200 | 8 of 41 implemented |
 | ELF Loader | ✅ Complete | 200 | Loads userspace binaries |
 | **BPF Subsystem** | ✅ Complete | ~8K | Full implementation |
-| Streaming Verifier | ✅ Complete | 1500 | O(n) memory usage |
+| Verifier | ✅ Complete | — | Path-sensitive, WCET admission (#143/#144), load-bearing |
 | Interpreter | ✅ Complete | 800 | All instructions |
 | x86_64 JIT | ✅ Complete | 600 | Full instruction set |
 | ARM64 JIT | ✅ Complete | 1200 | Full instruction set |
@@ -467,7 +472,7 @@ axiom-ebpf/
 │   │
 │   └── crates/                  # Kernel subsystems
 │       ├── kernel_bpf/          # BPF subsystem (8K lines)
-│       │   ├── verifier/        # Streaming verifier
+│       │   ├── verifier/        # Path-sensitive verifier
 │       │   ├── execution/       # Interpreter + JIT
 │       │   ├── maps/            # All map types
 │       │   ├── loader/          # ELF parser
@@ -694,9 +699,10 @@ axiom-ebpf/
    - First kernel designed around verified program loading
    - Novel trust model for kernel extensibility
 
-2. **Streaming BPF verification**
-   - O(n) memory algorithm for embedded systems
-   - Formal analysis of accepted program class
+2. **Bounded-resource BPF verification**
+   - Path-sensitive verifier with measured linear state growth on the
+     loop-free real-time fragment (states_explored == n, Track B)
+   - WCET-carrying, load-time schedulability admission (#143/#144)
 
 3. **Kernel-level safety enforcement for robotics**
    - Safety interlocks that can't be bypassed
