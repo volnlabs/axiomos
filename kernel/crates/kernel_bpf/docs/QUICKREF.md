@@ -287,7 +287,6 @@ kernel/crates/kernel_bpf/
 │   │   ├── helpers.rs      # HelperId + signatures
 │   │   ├── cost.rs         # WCET cycle model (Pi5-calibrated)
 │   │   ├── admission.rs    # Utilization admission ledger
-│   │   ├── streaming.rs    # Streaming verifier (#107)
 │   │   └── error.rs        # Errors
 │   ├── loader/             # BPF ELF loading + relocation
 │   ├── signing/            # Ed25519 provenance (load-path gate)

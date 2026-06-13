@@ -111,7 +111,6 @@ verifier/
 ├── helpers.rs      # HelperId (runtime ABI numbering), signatures, allow-lists
 ├── cost.rs         # Static WCET cycle model, Pi5-calibrated (Track C)
 ├── admission.rs    # AdmissionLedger: Σ wcet·freq utilization admission
-├── streaming.rs    # Streaming verifier (separate, parity tracked in #107)
 └── error.rs        # VerifyError enum
 ```
 

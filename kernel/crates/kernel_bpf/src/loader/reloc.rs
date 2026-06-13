@@ -139,7 +139,7 @@ impl<'a> Relocator<'a> {
             insns[insn_idx].imm = helper_id;
         }
         // Otherwise, it's a BPF-to-BPF call which needs different handling
-        // (not implemented in streaming verifier)
+        // (BPF-to-BPF calls are not yet implemented)
 
         Ok(())
     }
