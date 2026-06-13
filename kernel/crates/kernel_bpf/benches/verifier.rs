@@ -14,12 +14,7 @@ fn bench_small_programs(c: &mut Criterion) {
     let minimal = vec![BpfInsn::mov64_imm(0, 0), BpfInsn::exit()];
 
     group.bench_function("minimal", |b| {
-        b.iter(|| {
-            Verifier::<ActiveProfile>::verify(
-                BpfProgType::SocketFilter,
-                black_box(&minimal),
-            )
-        })
+        b.iter(|| Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, black_box(&minimal)))
     });
 
     // Simple arithmetic
@@ -33,10 +28,7 @@ fn bench_small_programs(c: &mut Criterion) {
 
     group.bench_function("arithmetic", |b| {
         b.iter(|| {
-            Verifier::<ActiveProfile>::verify(
-                BpfProgType::SocketFilter,
-                black_box(&arithmetic),
-            )
+            Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, black_box(&arithmetic))
         })
     });
 
@@ -66,10 +58,7 @@ fn bench_scaling(c: &mut Criterion) {
             &insn_count,
             |b, _| {
                 b.iter(|| {
-                    Verifier::<ActiveProfile>::verify(
-                        BpfProgType::SocketFilter,
-                        black_box(&insns),
-                    )
+                    Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, black_box(&insns))
                 })
             },
         );
@@ -93,12 +82,7 @@ fn bench_control_flow(c: &mut Criterion) {
     ];
 
     group.bench_function("linear", |b| {
-        b.iter(|| {
-            Verifier::<ActiveProfile>::verify(
-                BpfProgType::SocketFilter,
-                black_box(&linear),
-            )
-        })
+        b.iter(|| Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, black_box(&linear)))
     });
 
     // Single branch using jeq_imm
@@ -113,10 +97,7 @@ fn bench_control_flow(c: &mut Criterion) {
 
     group.bench_function("single_branch", |b| {
         b.iter(|| {
-            Verifier::<ActiveProfile>::verify(
-                BpfProgType::SocketFilter,
-                black_box(&single_branch),
-            )
+            Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, black_box(&single_branch))
         })
     });
 
@@ -134,10 +115,7 @@ fn bench_control_flow(c: &mut Criterion) {
 
     group.bench_function("multi_branch", |b| {
         b.iter(|| {
-            Verifier::<ActiveProfile>::verify(
-                BpfProgType::SocketFilter,
-                black_box(&multi_branch),
-            )
+            Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, black_box(&multi_branch))
         })
     });
 
