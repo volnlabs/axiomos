@@ -46,7 +46,6 @@ mod liveness;
 mod pruner;
 mod refine;
 mod state;
-mod streaming;
 
 pub use core::{Verifier, VerifyConfig, VerifyStats};
 
@@ -58,4 +57,3 @@ pub use liveness::{Liveness, RegSet};
 pub use pruner::{PruneDecision, StatePruner, StateSubsumes};
 pub use refine::{RefinedScalar, refine_scalar};
 pub use state::{RegState, RegType, StackSlot, VerifierState};
-pub use streaming::StreamingVerifier;
