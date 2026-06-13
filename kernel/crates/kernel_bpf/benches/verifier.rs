@@ -4,7 +4,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, 
 use kernel_bpf::bytecode::insn::BpfInsn;
 use kernel_bpf::bytecode::program::BpfProgType;
 use kernel_bpf::profile::ActiveProfile;
-use kernel_bpf::verifier::StreamingVerifier;
+use kernel_bpf::verifier::Verifier;
 
 /// Benchmark verification of small programs.
 fn bench_small_programs(c: &mut Criterion) {
@@ -15,7 +15,7 @@ fn bench_small_programs(c: &mut Criterion) {
 
     group.bench_function("minimal", |b| {
         b.iter(|| {
-            StreamingVerifier::<ActiveProfile>::verify(
+            Verifier::<ActiveProfile>::verify(
                 BpfProgType::SocketFilter,
                 black_box(&minimal),
             )
@@ -33,7 +33,7 @@ fn bench_small_programs(c: &mut Criterion) {
 
     group.bench_function("arithmetic", |b| {
         b.iter(|| {
-            StreamingVerifier::<ActiveProfile>::verify(
+            Verifier::<ActiveProfile>::verify(
                 BpfProgType::SocketFilter,
                 black_box(&arithmetic),
             )
@@ -66,7 +66,7 @@ fn bench_scaling(c: &mut Criterion) {
             &insn_count,
             |b, _| {
                 b.iter(|| {
-                    StreamingVerifier::<ActiveProfile>::verify(
+                    Verifier::<ActiveProfile>::verify(
                         BpfProgType::SocketFilter,
                         black_box(&insns),
                     )
@@ -94,7 +94,7 @@ fn bench_control_flow(c: &mut Criterion) {
 
     group.bench_function("linear", |b| {
         b.iter(|| {
-            StreamingVerifier::<ActiveProfile>::verify(
+            Verifier::<ActiveProfile>::verify(
                 BpfProgType::SocketFilter,
                 black_box(&linear),
             )
@@ -113,7 +113,7 @@ fn bench_control_flow(c: &mut Criterion) {
 
     group.bench_function("single_branch", |b| {
         b.iter(|| {
-            StreamingVerifier::<ActiveProfile>::verify(
+            Verifier::<ActiveProfile>::verify(
                 BpfProgType::SocketFilter,
                 black_box(&single_branch),
             )
@@ -134,7 +134,7 @@ fn bench_control_flow(c: &mut Criterion) {
 
     group.bench_function("multi_branch", |b| {
         b.iter(|| {
-            StreamingVerifier::<ActiveProfile>::verify(
+            Verifier::<ActiveProfile>::verify(
                 BpfProgType::SocketFilter,
                 black_box(&multi_branch),
             )

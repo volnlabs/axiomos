@@ -206,7 +206,7 @@ BPF program load overhead is effectively **negligible** in interpreter mode.
 
 # 5. Host Microbenchmarks (Verifier)
 
-Host-side Criterion benchmarks measure verifier scaling.
+Host-side Criterion benchmarks measure load-path `Verifier` scaling. These benchmarks call `Verifier::verify` — the same code the kernel invokes on every `BPF_PROG_LOAD` (`kernel/src/bpf/mod.rs`).
 
 ## Test Environment
 
@@ -218,24 +218,26 @@ cargo bench -p kernel_bpf --bench verifier --features embedded-profile
 ```
 
 * **Tool:** Criterion.rs
-* **Date:** 2026-03-06
+* **Date:** 2026-06-13
 
 ---
 
 ## Results
 
-| Benchmark                           | Time (95% CI) |
-| ----------------------------------- | ------------- |
-| verifier/small/minimal              | 218-220 ns    |
-| verifier/small/arithmetic           | 265-268 ns    |
-| verifier/instructions/10            | 273-274 ns    |
-| verifier/instructions/50            | 474-476 ns    |
-| verifier/instructions/100           | 747-753 ns    |
-| verifier/instructions/500           | 2.69-2.73 µs  |
-| verifier/instructions/1000          | 5.11-5.12 µs  |
-| verifier/control_flow/linear        | 232-233 ns    |
-| verifier/control_flow/single_branch | 906-909 ns    |
-| verifier/control_flow/multi_branch  | 974-976 ns    |
+| Benchmark                                  | Time (95% CI)       |
+| ------------------------------------------ | ------------------- |
+| verifier/small/minimal                     | 738-743 ns          |
+| verifier/small/arithmetic                  | 1.279-1.284 µs      |
+| verifier/scaling/instructions/10           | 2.272-2.288 µs      |
+| verifier/scaling/instructions/50           | 11.164-11.203 µs    |
+| verifier/scaling/instructions/100          | 23.148-23.390 µs    |
+| verifier/scaling/instructions/500          | 143.20-144.63 µs    |
+| verifier/scaling/instructions/1000         | 311.71-314.96 µs    |
+| verifier/control_flow/linear               | 1.530-1.534 µs      |
+| verifier/control_flow/single_branch        | 1.798-1.803 µs      |
+| verifier/control_flow/multi_branch         | 2.542-2.549 µs      |
+
+These measure the full path-sensitive `Verifier` — the same verifier the load path runs (`kernel/src/bpf/mod.rs`) and the same one §12 measures on-device.
 
 ---
 
@@ -479,8 +481,7 @@ both `states_explored` and a `CNTVCT_EL0` cycle delta.
    ```
 
 The same shapes/sizes run on the host (`cargo bench … bench_scaling`, §5) and in
-the `cost_corpus` unit tests, so the on-device cycle curve, the host wall-clock
-curve, and the host `states_explored` curve all describe identical programs.
+the `cost_corpus` unit tests. §5 and §12 now measure the **same** verifier (`Verifier`), so the host wall-clock curve, the host `states_explored` curve, and the on-device cycle curve all describe the same verifier over identical programs.
 
 ## Results (Hardware) — Pi5, 2026-06-11
 
