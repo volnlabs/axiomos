@@ -112,6 +112,12 @@ pub enum VerifyError {
         required: LoadCaller,
     },
 
+    /// Unprivileged program returns a pointer (kernel-address leak) (#88).
+    PointerLeakUnprivileged {
+        /// Instruction index of the EXIT
+        insn_idx: usize,
+    },
+
     /// Helper not available in current profile
     HelperNotAvailable {
         /// Instruction index
@@ -316,6 +322,10 @@ impl fmt::Display for VerifyError {
             } => write!(
                 f,
                 "helper {helper_id} requires {required:?} privilege at instruction {insn_idx}"
+            ),
+            Self::PointerLeakUnprivileged { insn_idx } => write!(
+                f,
+                "unprivileged program leaks a pointer via its return value at instruction {insn_idx}"
             ),
             Self::HelperNotAvailable {
                 insn_idx,

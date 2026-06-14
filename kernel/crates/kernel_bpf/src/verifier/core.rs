@@ -449,6 +449,11 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                     reg: Register::R0,
                 });
             }
+            if self.config.caller == LoadCaller::Unprivileged
+                && state.reg(Register::R0).reg_type.is_pointer()
+            {
+                return Err(VerifyError::PointerLeakUnprivileged { insn_idx: idx });
+            }
             return Ok(InsnResult::Exit);
         }
 
@@ -2028,6 +2033,30 @@ mod tests {
         assert!(
             verify_as(BpfProgType::SocketFilter, &insns, LoadCaller::Unprivileged).is_ok(),
             "ordinary helper must be callable unprivileged"
+        );
+    }
+
+    // ── M2: unprivileged programs must not return a pointer in R0 (#88) ─────
+
+    #[test]
+    fn pointer_return_rejected_unprivileged() {
+        // R0 = R10 (frame pointer) → R0 is a pointer at EXIT.
+        let insns = alloc::vec![BpfInsn::mov64_reg(0, 10), BpfInsn::exit()];
+        let res = verify_as(BpfProgType::SocketFilter, &insns, LoadCaller::Unprivileged);
+        assert!(
+            matches!(res, Err(VerifyError::PointerLeakUnprivileged { .. })),
+            "unprivileged pointer return must be rejected, got {res:?}"
+        );
+    }
+
+    #[test]
+    fn pointer_return_allowed_privileged() {
+        let insns = alloc::vec![BpfInsn::mov64_reg(0, 10), BpfInsn::exit()];
+        let res = verify_as(BpfProgType::SocketFilter, &insns, LoadCaller::Privileged);
+        // Privileged is not blocked by the leak rule.
+        assert!(
+            !matches!(res, Err(VerifyError::PointerLeakUnprivileged { .. })),
+            "privileged pointer return must not trip the leak rule, got {res:?}"
         );
     }
 }
