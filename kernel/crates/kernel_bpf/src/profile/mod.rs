@@ -152,6 +152,21 @@ pub trait PhysicalProfile: sealed::Sealed + 'static {
 
     /// Profile name for diagnostics and logging.
     const NAME: &'static str;
+
+    /// Absolute PWM duty-cycle ceiling (percent) the actuation monitor enforces.
+    /// - Cloud: `u32::MAX` (clamp is a no-op; timing/output are not cloud contracts)
+    /// - Embedded: 90 (never command full power)
+    const ACT_DUTY_MAX: u32;
+
+    /// Maximum change in PWM duty per `ACT_RATE_WINDOW_NS` (slew-rate limit).
+    /// - Cloud: `u32::MAX` (no slew limit)
+    /// - Embedded: 20 (bounded acceleration)
+    const ACT_DUTY_MAX_STEP: u32;
+
+    /// Slew-rate window in nanoseconds. 0 disables slew limiting.
+    /// - Cloud: 0 (disabled)
+    /// - Embedded: 1_000_000 (one 1 kHz control period)
+    const ACT_RATE_WINDOW_NS: u64;
 }
 
 /// Cloud profile: elastic resources, soft bounds, restart acceptable.
@@ -208,6 +223,9 @@ impl PhysicalProfile for CloudProfile {
     const UTILIZATION_BUDGET_NS_PER_S: u64 = u64::MAX;
 
     const NAME: &'static str = "cloud";
+    const ACT_DUTY_MAX: u32 = u32::MAX;
+    const ACT_DUTY_MAX_STEP: u32 = u32::MAX;
+    const ACT_RATE_WINDOW_NS: u64 = 0;
 }
 
 /// Embedded profile: static resources, hard bounds, recovery required.
@@ -267,6 +285,9 @@ impl PhysicalProfile for EmbeddedProfile {
     const UTILIZATION_BUDGET_NS_PER_S: u64 = 500_000_000;
 
     const NAME: &'static str = "embedded";
+    const ACT_DUTY_MAX: u32 = 90;
+    const ACT_DUTY_MAX_STEP: u32 = 20;
+    const ACT_RATE_WINDOW_NS: u64 = 1_000_000;
 }
 
 // Type alias for the active profile based on feature flags.
@@ -319,5 +340,19 @@ mod tests {
     fn embedded_profile_forbids_jit() {
         assert!(!EmbeddedProfile::JIT_ALLOWED);
         assert!(!EmbeddedProfile::RESTART_ACCEPTABLE);
+    }
+
+    #[test]
+    fn actuation_consts_embedded() {
+        assert_eq!(EmbeddedProfile::ACT_DUTY_MAX, 90);
+        assert_eq!(EmbeddedProfile::ACT_DUTY_MAX_STEP, 20);
+        assert_eq!(EmbeddedProfile::ACT_RATE_WINDOW_NS, 1_000_000);
+    }
+
+    #[test]
+    fn actuation_consts_cloud_are_noops() {
+        assert_eq!(CloudProfile::ACT_DUTY_MAX, u32::MAX);
+        assert_eq!(CloudProfile::ACT_DUTY_MAX_STEP, u32::MAX);
+        assert_eq!(CloudProfile::ACT_RATE_WINDOW_NS, 0);
     }
 }
