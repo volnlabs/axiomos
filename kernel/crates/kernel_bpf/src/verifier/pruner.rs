@@ -179,6 +179,11 @@ pub struct StatePruner {
     /// per-pc subsumption work: without a cap a loop whose states never subsume
     /// records without bound. See [`Self::DEFAULT_MAX_STATES`].
     max_states: usize,
+    /// Maximum states retained per pc. Bounds the subsumption walk to O(this),
+    /// so total verification work is linear in explored states. FIFO-evicted
+    /// when exceeded; eviction only loses pruning precision (sound). See
+    /// [`Self::DEFAULT_MAX_STATES_PER_PC`].
+    max_states_per_pc: usize,
 }
 
 impl StatePruner {
@@ -195,11 +200,18 @@ impl StatePruner {
     /// loop-free embedded fragment never approaches this.
     pub const DEFAULT_MAX_STATES: usize = 8192;
 
+    /// Default per-pc retained-state cap. Generous — real loops converge to a
+    /// few state shapes per pc — while bounding the per-pc subsumption walk to
+    /// ≤64 comparisons. Tunable; the loop-free embedded fragment keeps ≤1 state
+    /// per pc and never reaches it.
+    pub const DEFAULT_MAX_STATES_PER_PC: usize = 64;
+
     pub fn new() -> Self {
         Self {
             by_pc: alloc::collections::BTreeMap::new(),
             count: 0,
             max_states: Self::DEFAULT_MAX_STATES,
+            max_states_per_pc: Self::DEFAULT_MAX_STATES_PER_PC,
         }
     }
 
@@ -219,6 +231,13 @@ impl StatePruner {
     #[cfg(test)]
     pub fn set_max_states(&mut self, max: usize) {
         self.max_states = max;
+    }
+
+    /// Override the per-pc cap. Test-only so a unit test can exercise eviction
+    /// without recording 64+ states.
+    #[cfg(test)]
+    pub fn set_max_states_per_pc(&mut self, c: usize) {
+        self.max_states_per_pc = c;
     }
 
     /// Consult the pruner with the current `state` at program counter
@@ -241,13 +260,24 @@ impl StatePruner {
         state: &VerifierState,
         live: RegSet,
     ) -> PruneDecision {
+        // Read the cap before the mutable `by_pc` borrow below.
+        let cap = self.max_states_per_pc;
         let entries = self.by_pc.entry(pc).or_default();
         for prior in entries.iter() {
             if prior.subsumes_with_liveness(state, live) {
                 return PruneDecision::Prune;
             }
         }
+        // Bound the retained per-pc set so the walk above stays O(cap), making
+        // total verification work linear in explored states. Eviction only
+        // discards an already-recorded state: at worst we re-explore something
+        // we could have pruned (sound — never prunes a real bug).
+        if entries.len() >= cap {
+            entries.remove(0); // FIFO: drop the oldest
+        }
         entries.push(state.clone());
+        // `count` is cumulative (every Continue), independent of eviction, so it
+        // still climbs to `max_states` → `at_capacity()` → reject (termination).
         self.count += 1;
         PruneDecision::Continue
     }
@@ -262,6 +292,12 @@ impl StatePruner {
     /// Total number of recorded states across all pcs. Diagnostic only.
     pub fn recorded(&self) -> usize {
         self.count
+    }
+
+    /// Number of states currently retained at `pc` (after eviction). Test-only.
+    #[cfg(test)]
+    pub fn per_pc_len(&self, pc: usize) -> usize {
+        self.by_pc.get(&pc).map_or(0, alloc::vec::Vec::len)
     }
 }
 
@@ -394,5 +430,79 @@ mod tests {
         pruner.clear();
         assert!(!pruner.at_capacity());
         assert_eq!(pruner.recorded(), 0);
+    }
+
+    // Build N mutually-non-subsuming states by giving R0 distinct stack-pointer
+    // offsets; `subsumes` requires equal `ptr_offset`, so none subsumes another.
+    fn distinct_ptr_state(off: i64) -> VerifierState {
+        let mut s = entry_state();
+        s.regs[Register::R0 as usize] = RegState::stack_ptr(off);
+        s
+    }
+
+    #[test]
+    fn per_pc_list_is_capped() {
+        let mut pruner = StatePruner::new();
+        pruner.set_max_states_per_pc(3);
+
+        // 5 mutually-non-subsuming states at the same pc.
+        for off in 1..=5 {
+            assert_eq!(
+                pruner.check_or_record(0, &distinct_ptr_state(-8 * off)),
+                PruneDecision::Continue
+            );
+        }
+
+        // Retained set capped at 3; cumulative count still 5 (every insert was a Continue).
+        assert_eq!(pruner.per_pc_len(0), 3);
+        assert_eq!(pruner.recorded(), 5);
+    }
+
+    #[test]
+    fn fifo_evicts_oldest_state() {
+        let mut pruner = StatePruner::new();
+        pruner.set_max_states_per_pc(2);
+
+        // Oldest entry G: r0 = unknown scalar (general).
+        let mut g = entry_state();
+        g.regs[Register::R0 as usize] = RegState::scalar(Some(ScalarValue::unknown()));
+        assert_eq!(pruner.check_or_record(0, &g), PruneDecision::Continue);
+
+        // A specific query is pruned while G is still present.
+        let mut specific = entry_state();
+        specific.regs[Register::R0 as usize] = RegState::scalar(Some(ScalarValue::constant(7)));
+        assert_eq!(pruner.check_or_record(0, &specific), PruneDecision::Prune);
+
+        // Push 2 more non-subsuming states → cap 2 evicts the oldest (G).
+        assert_eq!(
+            pruner.check_or_record(0, &distinct_ptr_state(-8)),
+            PruneDecision::Continue
+        );
+        assert_eq!(
+            pruner.check_or_record(0, &distinct_ptr_state(-16)),
+            PruneDecision::Continue
+        );
+
+        // G is gone, so the same specific query is no longer pruned.
+        assert_eq!(
+            pruner.check_or_record(0, &specific),
+            PruneDecision::Continue
+        );
+    }
+
+    #[test]
+    fn count_drives_capacity_even_when_per_pc_capped() {
+        let mut pruner = StatePruner::new();
+        pruner.set_max_states_per_pc(2);
+        pruner.set_max_states(4);
+
+        // 5 non-subsuming states at ONE pc: per-pc list stays ≤2, but cumulative
+        // count climbs to the global budget so termination still triggers.
+        for off in 1..=5 {
+            pruner.check_or_record(0, &distinct_ptr_state(-8 * off));
+        }
+        assert_eq!(pruner.per_pc_len(0), 2);
+        assert_eq!(pruner.recorded(), 5);
+        assert!(pruner.at_capacity());
     }
 }
