@@ -371,12 +371,26 @@ pub struct HelperSignature {
     pub args: &'static [ArgType],
     /// Return type
     pub ret: ReturnType,
+    /// Minimum caller tier permitted to call this helper (#88). Defaults to
+    /// `Unprivileged` (callable by all); privileged-only helpers raise it.
+    pub min_tier: super::LoadCaller,
 }
 
 impl HelperSignature {
     /// Create a new helper signature.
     const fn new(id: HelperId, args: &'static [ArgType], ret: ReturnType) -> Self {
-        Self { id, args, ret }
+        Self {
+            id,
+            args,
+            ret,
+            min_tier: super::LoadCaller::Unprivileged,
+        }
+    }
+
+    /// Mark this helper as requiring at least caller tier `t`.
+    const fn with_min_tier(mut self, t: super::LoadCaller) -> Self {
+        self.min_tier = t;
+        self
     }
 
     /// Number of arguments.
@@ -430,7 +444,8 @@ pub fn get_helper_signature(id: HelperId) -> HelperSignature {
             id,
             &[ArgType::PtrToStack, ArgType::MemSize, ArgType::AnyPtr],
             ReturnType::Integer,
-        ),
+        )
+        .with_min_tier(super::LoadCaller::Privileged),
 
         // Process helpers
         HelperId::GetCurrentPidTgid => HelperSignature::new(id, &[], ReturnType::Integer),
@@ -445,9 +460,12 @@ pub fn get_helper_signature(id: HelperId) -> HelperSignature {
 
         // Kernel introspection helpers (interpreter injects ctx; no BPF args)
         HelperId::GetInterruptLatencyNs => HelperSignature::new(id, &[], ReturnType::Integer),
-        HelperId::GetBootTimeMs => HelperSignature::new(id, &[], ReturnType::Integer),
-        HelperId::GetKernelHeapKb => HelperSignature::new(id, &[], ReturnType::Integer),
-        HelperId::GetKernelImageMb => HelperSignature::new(id, &[], ReturnType::Integer),
+        HelperId::GetBootTimeMs => HelperSignature::new(id, &[], ReturnType::Integer)
+            .with_min_tier(super::LoadCaller::Privileged),
+        HelperId::GetKernelHeapKb => HelperSignature::new(id, &[], ReturnType::Integer)
+            .with_min_tier(super::LoadCaller::Privileged),
+        HelperId::GetKernelImageMb => HelperSignature::new(id, &[], ReturnType::Integer)
+            .with_min_tier(super::LoadCaller::Privileged),
 
         // Ring buffer helpers
         HelperId::RingbufReserve => HelperSignature::new(

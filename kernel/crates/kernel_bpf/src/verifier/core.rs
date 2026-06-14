@@ -777,6 +777,13 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
         // Validate helper call using the registry
         match validate_helper_call(helper_id, &arg_types) {
             HelperValidation::Valid(sig) => {
+                if self.config.caller < sig.min_tier {
+                    return Err(VerifyError::HelperRequiresPrivilege {
+                        insn_idx: idx,
+                        helper_id,
+                        required: sig.min_tier,
+                    });
+                }
                 // Determine R0's region size *before* clobbering caller-saved
                 // registers, since a map lookup's value size depends on the map
                 // id still held in R1 (#123).
@@ -1954,5 +1961,62 @@ mod tests {
                 stats.states_explored
             );
         }
+    }
+
+    // ── M1: per-helper minimum privilege tier (#88) ──────────────────────────
+
+    /// Tier-aware verification helper. Defined here once; Task 4 reuses it.
+    fn verify_as(
+        prog_type: BpfProgType,
+        insns: &[BpfInsn],
+        caller: LoadCaller,
+    ) -> VerifyResult<BpfProgram<ActiveProfile>> {
+        let cfg = VerifyConfig {
+            caller,
+            ..VerifyConfig::default()
+        };
+        Verifier::<ActiveProfile>::verify_with_config(prog_type, insns, cfg)
+    }
+
+    // No-arg privileged helper (GetKernelHeapKb takes `&[]`), so the test is
+    // about the tier gate, not arg-type validation.
+    fn priv_helper_then_exit() -> alloc::vec::Vec<BpfInsn> {
+        alloc::vec![
+            BpfInsn::call(HelperId::GetKernelHeapKb as i32),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ]
+    }
+
+    #[test]
+    fn privileged_helper_rejected_unprivileged() {
+        let insns = priv_helper_then_exit();
+        let res = verify_as(BpfProgType::SocketFilter, &insns, LoadCaller::Unprivileged);
+        assert!(
+            matches!(res, Err(VerifyError::HelperRequiresPrivilege { .. })),
+            "unprivileged privileged-helper call must be rejected, got {res:?}"
+        );
+    }
+
+    #[test]
+    fn privileged_helper_accepted_privileged() {
+        let insns = priv_helper_then_exit();
+        assert!(
+            verify_as(BpfProgType::SocketFilter, &insns, LoadCaller::Privileged).is_ok(),
+            "privileged-tier call to a privileged helper must verify"
+        );
+    }
+
+    #[test]
+    fn ordinary_helper_allowed_unprivileged() {
+        let insns = alloc::vec![
+            BpfInsn::call(HelperId::KtimeGetNs as i32),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ];
+        assert!(
+            verify_as(BpfProgType::SocketFilter, &insns, LoadCaller::Unprivileged).is_ok(),
+            "ordinary helper must be callable unprivileged"
+        );
     }
 }

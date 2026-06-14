@@ -4,6 +4,7 @@
 
 use core::fmt;
 
+use super::LoadCaller;
 use crate::bytecode::registers::Register;
 
 /// Errors that can occur during BPF program verification.
@@ -99,6 +100,16 @@ pub enum VerifyError {
         insn_idx: usize,
         /// Helper ID
         helper_id: i32,
+    },
+
+    /// Helper requires a higher caller privilege tier than the loader has (#88).
+    HelperRequiresPrivilege {
+        /// Instruction index
+        insn_idx: usize,
+        /// Helper ID (raw)
+        helper_id: i32,
+        /// Minimum tier required
+        required: LoadCaller,
     },
 
     /// Helper not available in current profile
@@ -298,6 +309,14 @@ impl fmt::Display for VerifyError {
                     helper_id, insn_idx
                 )
             }
+            Self::HelperRequiresPrivilege {
+                insn_idx,
+                helper_id,
+                required,
+            } => write!(
+                f,
+                "helper {helper_id} requires {required:?} privilege at instruction {insn_idx}"
+            ),
             Self::HelperNotAvailable {
                 insn_idx,
                 helper_name,
