@@ -25,10 +25,10 @@
 //!
 //! ## Wiring status
 //!
-//! The pruner is implemented and tested but not yet consumed by
-//! `core::Verifier::verify_safety`. The integration is intentionally a
-//! separate change so we can validate the pruner in isolation first.
-//! Tracked in #83.
+//! `core::Verifier::verify_safety` consults the pruner on every explored
+//! instruction via `check_or_record_with_liveness` (liveness-aware, #104).
+//! The per-pc retained set is bounded (see `DEFAULT_MAX_STATES_PER_PC`), so the
+//! subsumption walk stays linear in the number of explored states.
 
 use alloc::vec::Vec;
 
@@ -192,12 +192,10 @@ impl StatePruner {
     /// Now that [`VerifierState`] stacks are sparse (`StackState` stores only
     /// the touched slots, not a full 512 KiB image), each recorded state costs
     /// ~1 KiB instead of ~1 MiB, so memory is no longer the binding constraint
-    /// — 8192 states is ~8 MiB. The new ceiling is the pruner's per-pc linear
-    /// subsumption walk, which is O(states²) on a loop that never converges;
-    /// 8192 keeps worst-case verification time well under a second. Raising
-    /// this further wants a sub-quadratic pruner (hash/bucket the per-pc
-    /// states, like Linux's `is_state_visited`) — tracked as a follow-up. The
-    /// loop-free embedded fragment never approaches this.
+    /// — 8192 states is ~8 MiB. The per-pc subsumption walk is bounded to
+    /// [`Self::DEFAULT_MAX_STATES_PER_PC`] retained states, so total
+    /// verification work is linear in the number of explored states (no longer
+    /// O(states²)). The loop-free embedded fragment never approaches this.
     pub const DEFAULT_MAX_STATES: usize = 8192;
 
     /// Default per-pc retained-state cap. Generous — real loops converge to a
@@ -248,7 +246,7 @@ impl StatePruner {
         self.check_or_record_with_liveness(pc, state, RegSet::ALL)
     }
 
-    /// Liveness-aware variant of [`check_or_record`].
+    /// Liveness-aware variant of [`Self::check_or_record`].
     ///
     /// Subsumption ignores registers not in `live`. Two states that
     /// disagree only on dead registers are equivalent for pruning, which
@@ -289,7 +287,10 @@ impl StatePruner {
         self.count = 0;
     }
 
-    /// Total number of recorded states across all pcs. Diagnostic only.
+    /// Cumulative states explored — every `Continue` increments it. This is the
+    /// exploration-cost / budget counter that drives [`Self::at_capacity`], not
+    /// the size of the currently-retained set (per-pc FIFO eviction caps that at
+    /// [`Self::DEFAULT_MAX_STATES_PER_PC`]). Diagnostic.
     pub fn recorded(&self) -> usize {
         self.count
     }
