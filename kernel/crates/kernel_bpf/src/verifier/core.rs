@@ -2008,6 +2008,17 @@ mod tests {
     }
 
     #[test]
+    fn privileged_helper_accepted_trusted() {
+        // Trusted >= Privileged, so the gate (caller < min_tier) must not fire.
+        // Pins the comparison direction against accidental inversion.
+        let insns = priv_helper_then_exit();
+        assert!(
+            verify_as(BpfProgType::SocketFilter, &insns, LoadCaller::Trusted).is_ok(),
+            "trusted-tier call to a privileged helper must verify"
+        );
+    }
+
+    #[test]
     fn ordinary_helper_allowed_unprivileged() {
         let insns = alloc::vec![
             BpfInsn::call(HelperId::KtimeGetNs as i32),

@@ -458,7 +458,10 @@ pub fn get_helper_signature(id: HelperId) -> HelperSignature {
             ReturnType::Integer,
         ),
 
-        // Kernel introspection helpers (interpreter injects ctx; no BPF args)
+        // Kernel introspection helpers (interpreter injects ctx; no BPF args).
+        // GetInterruptLatencyNs stays Unprivileged (timing data, not memory
+        // layout — useful for unprivileged RT monitoring); the layout-revealing
+        // helpers below (heap/image size, boot time) are raised to Privileged.
         HelperId::GetInterruptLatencyNs => HelperSignature::new(id, &[], ReturnType::Integer),
         HelperId::GetBootTimeMs => HelperSignature::new(id, &[], ReturnType::Integer)
             .with_min_tier(super::LoadCaller::Privileged),
