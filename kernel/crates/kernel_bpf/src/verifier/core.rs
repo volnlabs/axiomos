@@ -9,6 +9,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
+use super::LoadCaller;
 use super::alu::{compute_alu_result_width, scalar_from_imm};
 use super::cfg::ControlFlowGraph;
 use super::error::{VerifyError, VerifyResult};
@@ -44,6 +45,11 @@ pub struct VerifyConfig<'a> {
     /// smallest entry (sound: never over-permits any reachable map). Empty means
     /// the caller supplied no per-map info and `map_value_size` is used.
     pub map_value_sizes: &'a [u32],
+    /// Privilege tier of the loading caller (#88). Gates the unprivileged-only
+    /// restrictions. Defaults (via `LoadCaller::default()`) to `Privileged`, so
+    /// `verify()` / `VerifyConfig::default()` and existing callers see no new
+    /// rule.
+    pub caller: LoadCaller,
 }
 
 /// Accessible byte size for a map-value pointer returned by a map-lookup helper
@@ -1250,7 +1256,12 @@ fn check_ranged_deref(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::verifier::HelperId;
+    use crate::verifier::{HelperId, LoadCaller};
+
+    #[test]
+    fn verify_config_default_caller_is_privileged() {
+        assert_eq!(VerifyConfig::default().caller, LoadCaller::Privileged);
+    }
 
     #[test]
     fn verify_empty_program() {
@@ -1461,6 +1472,7 @@ mod tests {
             ctx_size: 64,
             map_value_size: 0,
             map_value_sizes: &[],
+            ..VerifyConfig::default()
         };
         let result =
             Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, cfg);
@@ -1479,6 +1491,7 @@ mod tests {
             ctx_size: 64,
             map_value_size: 0,
             map_value_sizes: &[],
+            ..VerifyConfig::default()
         };
         let result =
             Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, cfg);
@@ -1501,6 +1514,7 @@ mod tests {
             ctx_size,
             map_value_size: 0,
             map_value_sizes: &[],
+            ..VerifyConfig::default()
         };
 
         // Read the final 8 bytes of the context: in bounds.
@@ -1544,6 +1558,7 @@ mod tests {
             ctx_size: 0,
             map_value_size: 64,
             map_value_sizes: &[],
+            ..VerifyConfig::default()
         };
         let r1 = RegState::scalar(Some(ScalarValue::constant(7)));
         assert_eq!(map_lookup_value_size(&r1, &cfg), Ok(64));
@@ -1556,6 +1571,7 @@ mod tests {
             ctx_size: 0,
             map_value_size: 999,
             map_value_sizes: &[8, 16, 32],
+            ..VerifyConfig::default()
         };
         let r1 = RegState::scalar(Some(ScalarValue::constant(1)));
         assert_eq!(map_lookup_value_size(&r1, &cfg), Ok(16));
@@ -1568,6 +1584,7 @@ mod tests {
             ctx_size: 0,
             map_value_size: 999,
             map_value_sizes: &[8, 16],
+            ..VerifyConfig::default()
         };
         let r1 = RegState::scalar(Some(ScalarValue::constant(5)));
         assert_eq!(map_lookup_value_size(&r1, &cfg), Err(5));
@@ -1581,6 +1598,7 @@ mod tests {
             ctx_size: 0,
             map_value_size: 999,
             map_value_sizes: &[32, 8, 16],
+            ..VerifyConfig::default()
         };
         // Unknown scalar value => dynamic id.
         let r1 = RegState::scalar(Some(ScalarValue::unknown()));

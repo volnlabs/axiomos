@@ -15,7 +15,7 @@ use kernel_bpf::maps::{ArrayMap, BpfMap, HashMap as BpfHashMap, RingBufMap, Time
 use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
 use kernel_bpf::signing::{SignatureVerifier, TrustedKey};
 use kernel_bpf::verifier::admission::AdmissionLedger;
-use kernel_bpf::verifier::{Verifier, VerifyConfig};
+use kernel_bpf::verifier::{LoadCaller, Verifier, VerifyConfig};
 
 /// Context size used for load-time verification (#122).
 ///
@@ -153,6 +153,10 @@ impl BpfManager {
             ctx_size: VERIFY_CTX_SIZE,
             map_value_size: VERIFY_MAP_VALUE_SIZE,
             map_value_sizes: sizes,
+            // No process-credential system yet: every load comes from the
+            // privileged init context. TODO: derive Trusted from signature
+            // authentication (#20) and Unprivileged from caller UID (#67).
+            caller: LoadCaller::Privileged,
         }
     }
 
