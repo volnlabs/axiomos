@@ -37,6 +37,7 @@
 
 pub mod admission;
 mod alu;
+mod caller;
 mod cfg;
 mod core;
 pub mod cost;
@@ -50,6 +51,7 @@ mod state;
 pub use core::{Verifier, VerifyConfig, VerifyStats};
 
 pub use alu::{compute_alu_result, compute_alu_result_width, scalar_from_imm};
+pub use caller::LoadCaller;
 pub use cfg::ControlFlowGraph;
 pub use error::VerifyError;
 pub use helpers::{ArgType, HelperId, HelperSignature, get_helper_signature, validate_helper_call};
