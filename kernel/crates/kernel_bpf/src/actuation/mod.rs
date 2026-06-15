@@ -280,4 +280,29 @@ mod tests {
         // PWM chip 2 does not exist
         assert_eq!(m.decide(pwm(2, 1, 10), T0), Decision::Reject(RejectReason::UnknownChannel));
     }
+
+    #[test]
+    fn slew_clamps_a_fast_jump() {
+        let mut m = Monitor::<EmbeddedProfile>::new();
+        // establish baseline last_output = 10 (first call at T0 is not slew-limited)
+        assert_eq!(m.decide(pwm(0, 1, 10), T0), Decision::Allow(10));
+        // 0.5 ms later (< 1 ms window): jump to 80 -> clamp to 10 + max_step(20) = 30
+        assert_eq!(m.decide(pwm(0, 1, 80), T0 + 500_000), Decision::Clamp(30));
+    }
+
+    #[test]
+    fn slew_allows_after_window_elapses() {
+        let mut m = Monitor::<EmbeddedProfile>::new();
+        assert_eq!(m.decide(pwm(0, 1, 10), T0), Decision::Allow(10));
+        // 2 ms later (>= 1 ms window): full jump to 80 permitted (still <= max 90)
+        assert_eq!(m.decide(pwm(0, 1, 80), T0 + 2_000_000), Decision::Allow(80));
+    }
+
+    #[test]
+    fn backward_time_applies_strictest_slew() {
+        let mut m = Monitor::<EmbeddedProfile>::new();
+        assert_eq!(m.decide(pwm(0, 1, 10), T0), Decision::Allow(10));
+        // now_ns moves backward: elapsed saturates to 0 (< window) -> slew clamp applies
+        assert_eq!(m.decide(pwm(0, 1, 80), T0 - 1), Decision::Clamp(30));
+    }
 }
