@@ -119,6 +119,112 @@ impl ChannelState {
     };
 }
 
+use core::marker::PhantomData;
+
+/// Number of GPIO pins addressable on RP1 bank 0 (mirrors `Rp1Gpio::NUM_PINS`).
+const GPIO_PINS: usize = 28;
+
+/// The actuation reference monitor. Holds per-channel state for the two PWM
+/// controllers (2 channels each) and the GPIO output pins.
+pub struct Monitor<P: PhysicalProfile> {
+    /// `[chip 0..2][channel 0..2]` where index = channel_number - 1.
+    pwm: [[ChannelState; 2]; 2],
+    /// `[pin 0..28]`.
+    gpio: [ChannelState; GPIO_PINS],
+    _profile: PhantomData<fn() -> P>,
+}
+
+impl<P: PhysicalProfile> Monitor<P> {
+    /// Create an empty monitor with every channel at the safe default.
+    pub const fn new() -> Self {
+        Self {
+            pwm: [[ChannelState::DEFAULT; 2]; 2],
+            gpio: [ChannelState::DEFAULT; GPIO_PINS],
+            _profile: PhantomData,
+        }
+    }
+
+    /// The envelope for a channel, or `None` if the channel is unknown.
+    fn envelope(&self, ch: ChannelId) -> Option<Envelope> {
+        if self.slot_index(ch).is_some() {
+            Some(Envelope::from_profile::<P>(ch.kind))
+        } else {
+            None
+        }
+    }
+
+    /// Validate a channel and return its `(is_pwm, i, j)` index, or `None`.
+    fn slot_index(&self, ch: ChannelId) -> Option<(bool, usize, usize)> {
+        match ch.kind {
+            ActuationKind::PwmDuty => {
+                if ch.chip < 2 && (1..=2).contains(&ch.channel) {
+                    Some((true, ch.chip as usize, (ch.channel - 1) as usize))
+                } else {
+                    None
+                }
+            }
+            ActuationKind::GpioLevel => {
+                if ch.chip == 0 && (ch.channel as usize) < GPIO_PINS {
+                    Some((false, ch.channel as usize, 0))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn slot_mut(&mut self, ch: ChannelId) -> Option<&mut ChannelState> {
+        let (is_pwm, i, j) = self.slot_index(ch)?;
+        Some(if is_pwm { &mut self.pwm[i][j] } else { &mut self.gpio[i] })
+    }
+
+    /// Decide the fate of one actuation request.
+    ///
+    /// `now_ns` MUST be monotonically non-decreasing per channel; slew semantics
+    /// are otherwise undefined. The implementation is defensive — `elapsed` is a
+    /// `saturating_sub`, so backward time collapses to 0 (strictest slew limit),
+    /// never widening the allowance.
+    pub fn decide(&mut self, req: ActuationRequest, now_ns: u64) -> Decision {
+        let Some(env) = self.envelope(req.ch) else {
+            return Decision::Reject(RejectReason::UnknownChannel);
+        };
+        let slot = self.slot_mut(req.ch).expect("known channel has a slot");
+        let st = *slot;
+
+        if st.safe_hold {
+            slot.last_output = env.min;
+            slot.last_update_ns = now_ns;
+            return Decision::Safe(env.min);
+        }
+
+        let mut v = req.value.clamp(env.min, env.max);
+        let mut clamped = v != req.value;
+
+        if env.window_ns > 0 && st.last_update_ns != 0 {
+            let elapsed = now_ns.saturating_sub(st.last_update_ns);
+            if elapsed < env.window_ns {
+                let lo = st.last_output.saturating_sub(env.max_step).max(env.min);
+                let hi = st.last_output.saturating_add(env.max_step).min(env.max);
+                let nv = v.clamp(lo, hi);
+                if nv != v {
+                    clamped = true;
+                    v = nv;
+                }
+            }
+        }
+
+        slot.last_output = v;
+        slot.last_update_ns = now_ns;
+        if clamped { Decision::Clamp(v) } else { Decision::Allow(v) }
+    }
+}
+
+impl<P: PhysicalProfile> Default for Monitor<P> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +248,31 @@ mod tests {
         assert_eq!(Decision::Clamp(90).apply(), (90, 0));
         assert_eq!(Decision::Safe(0).apply(), (0, -1));
         assert_eq!(Decision::Reject(RejectReason::UnknownChannel).apply(), (0, -1));
+    }
+
+    fn pwm(chip: u8, channel: u8, value: u32) -> ActuationRequest {
+        ActuationRequest { ch: ChannelId { kind: ActuationKind::PwmDuty, chip, channel }, value }
+    }
+
+    #[test]
+    fn in_range_request_is_allowed() {
+        let mut m = Monitor::<EmbeddedProfile>::new();
+        assert_eq!(m.decide(pwm(0, 1, 50), 0), Decision::Allow(50));
+    }
+
+    #[test]
+    fn over_max_is_clamped() {
+        let mut m = Monitor::<EmbeddedProfile>::new();
+        // 100 > ACT_DUTY_MAX (90) -> clamp to 90
+        assert_eq!(m.decide(pwm(0, 1, 100), 0), Decision::Clamp(90));
+    }
+
+    #[test]
+    fn unknown_channel_is_rejected() {
+        let mut m = Monitor::<EmbeddedProfile>::new();
+        // PWM channel 3 does not exist (valid channels are 1,2)
+        assert_eq!(m.decide(pwm(0, 3, 10), 0), Decision::Reject(RejectReason::UnknownChannel));
+        // PWM chip 2 does not exist
+        assert_eq!(m.decide(pwm(2, 1, 10), 0), Decision::Reject(RejectReason::UnknownChannel));
     }
 }
