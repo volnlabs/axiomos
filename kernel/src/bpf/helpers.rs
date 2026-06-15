@@ -107,26 +107,7 @@ pub extern "C" fn bpf_gpio_read(pin: u32) -> i64 {
 /// but validates inputs (pin numbers) to prevent invalid access.
 #[unsafe(no_mangle)]
 pub extern "C" fn bpf_gpio_write(pin: u32, value: u32) -> i64 {
-    #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
-    {
-        if pin >= 28 {
-            return -1;
-        }
-        // SAFETY: Creating a temporary GPIO interface to access hardware registers.
-        // Safe because we are on RPi5 (checked by feature) and access is stateless/exclusive.
-        let gpio = unsafe { crate::arch::aarch64::platform::rpi5::gpio::Rp1Gpio::new() };
-        if value != 0 {
-            gpio.set_high(pin as u8);
-        } else {
-            gpio.set_low(pin as u8);
-        }
-        0
-    }
-    #[cfg(not(all(target_arch = "aarch64", feature = "rpi5")))]
-    {
-        let _ = (pin, value);
-        -1
-    }
+    crate::actuation::guard_gpio(pin as u8, value)
 }
 
 /// BPF helper: Toggle GPIO pin
@@ -246,33 +227,7 @@ pub extern "C" fn bpf_motor_emergency_stop(reason: u32) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn bpf_pwm_write(pwm_id: u32, channel: u32, duty_percent: u32) -> i64 {
-    #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
-    {
-        use crate::arch::aarch64::platform::rpi5::pwm::{PWM0, PWM1};
-
-        if !(1..=2).contains(&channel) {
-            return -1;
-        }
-
-        match pwm_id {
-            0 => {
-                let pwm = PWM0.lock();
-                pwm.set_duty_cycle(channel as u8, duty_percent);
-                0
-            }
-            1 => {
-                let pwm = PWM1.lock();
-                pwm.set_duty_cycle(channel as u8, duty_percent);
-                0
-            }
-            _ => -1,
-        }
-    }
-    #[cfg(not(all(target_arch = "aarch64", feature = "rpi5")))]
-    {
-        let _ = (pwm_id, channel, duty_percent);
-        -1
-    }
+    crate::actuation::guard_pwm(pwm_id as u8, channel as u8, duty_percent)
 }
 
 /// # Safety

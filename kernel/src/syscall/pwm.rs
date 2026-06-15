@@ -32,23 +32,7 @@ pub fn sys_pwm_config(pwm_id: usize, freq_hz: usize) -> isize {
 /// - `channel`: 1 or 2
 /// - `duty_percent`: 0-100 (percentage)
 pub fn sys_pwm_write(pwm_id: usize, channel: usize, duty_percent: usize) -> isize {
-    if !(1..=2).contains(&channel) {
-        return -1;
-    }
-
-    match pwm_id {
-        0 => {
-            let pwm = PWM0.lock();
-            pwm.set_duty_cycle(channel as u8, duty_percent as u32);
-            0
-        }
-        1 => {
-            let pwm = PWM1.lock();
-            pwm.set_duty_cycle(channel as u8, duty_percent as u32);
-            0
-        }
-        _ => -1,
-    }
+    crate::actuation::guard_pwm(pwm_id as u8, channel as u8, duty_percent as u32) as isize
 }
 
 /// Enable/Disable PWM channel
