@@ -99,6 +99,7 @@ compile_error!(
      Use `--features cloud-profile` or `--features embedded-profile` when building."
 );
 
+pub mod actuation;
 pub mod attach;
 pub mod bytecode;
 pub mod cost_corpus;
