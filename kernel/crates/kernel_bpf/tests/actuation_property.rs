@@ -3,7 +3,13 @@
 //! the channel envelope and never slews faster than `max_step` within a window.
 //! This is the direct evidence for the "0 escapes" claim.
 
-#![cfg(any(feature = "cloud-profile", feature = "embedded-profile"))]
+// Skipped under Miri: proptest (256 cases × many `decide` calls) is far too slow
+// under Miri's interpreter and needs entropy Miri's isolation blocks. The host
+// `cargo test` run provides the 0-escapes coverage; Miri checks the other tests.
+#![cfg(all(
+    not(miri),
+    any(feature = "cloud-profile", feature = "embedded-profile")
+))]
 
 use kernel_bpf::actuation::{
     ActuationKind, ActuationRequest, ChannelId, Decision, Envelope, Monitor,
