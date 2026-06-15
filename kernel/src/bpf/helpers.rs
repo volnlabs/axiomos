@@ -119,6 +119,11 @@ pub extern "C" fn bpf_gpio_write(pin: u32, value: u32) -> i64 {
 ///
 /// This function is an entry point for BPF programs. It accesses hardware registers
 /// but validates inputs (pin numbers) to prevent invalid access.
+///
+/// NOTE: not exposed to the BPF helper ABI (no `HelperId`, not in the relocation
+/// table or interpreter/JIT dispatch). It therefore bypasses the ARM-A actuation
+/// monitor. If ever exposed to BPF, route its output through
+/// `crate::actuation::guard_gpio` first so it cannot escape the safety envelope.
 #[unsafe(no_mangle)]
 pub extern "C" fn bpf_gpio_toggle(pin: u32) -> i64 {
     #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
@@ -153,6 +158,11 @@ pub extern "C" fn bpf_gpio_toggle(pin: u32) -> i64 {
 ///
 /// This function is an entry point for BPF programs. It accesses hardware registers
 /// but validates inputs (pin numbers) to prevent invalid access.
+///
+/// NOTE: not exposed to the BPF helper ABI (no `HelperId`, not in the relocation
+/// table or interpreter/JIT dispatch). It therefore bypasses the ARM-A actuation
+/// monitor. If ever exposed to BPF, route its level write through
+/// `crate::actuation::guard_gpio` first so it cannot escape the safety envelope.
 #[unsafe(no_mangle)]
 pub extern "C" fn bpf_gpio_set_output(pin: u32, initial_high: u32) -> i64 {
     #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
