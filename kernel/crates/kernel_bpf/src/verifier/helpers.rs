@@ -83,8 +83,6 @@ pub enum HelperId {
     RingbufDiscard = 42,
 
     // ===== rkBPF Robotics Helpers (1000+) =====
-    /// Emergency stop all motors
-    MotorEmergencyStop = 1000,
     /// Get last timestamp from sensor
     SensorLastTimestamp = 1002,
     /// Set GPIO pin state
@@ -123,7 +121,6 @@ impl HelperId {
             40 => Some(Self::RingbufReserve),
             41 => Some(Self::RingbufSubmit),
             42 => Some(Self::RingbufDiscard),
-            1000 => Some(Self::MotorEmergencyStop),
             1002 => Some(Self::SensorLastTimestamp),
             1003 => Some(Self::GpioSet),
             1004 => Some(Self::GpioGet),
@@ -156,7 +153,6 @@ impl HelperId {
             Self::RingbufSubmit => "bpf_ringbuf_submit",
             Self::RingbufDiscard => "bpf_ringbuf_discard",
             Self::RingbufOutput => "bpf_ringbuf_output",
-            Self::MotorEmergencyStop => "bpf_motor_emergency_stop",
             Self::TimeseriesPush => "bpf_timeseries_push",
             Self::SensorLastTimestamp => "bpf_sensor_last_timestamp",
             Self::GpioSet => "bpf_gpio_set",
@@ -205,7 +201,6 @@ impl HelperId {
             Self::RingbufOutput => true,
 
             // Robotics helpers - all available
-            Self::MotorEmergencyStop => true,
             Self::TimeseriesPush => true,
             Self::SensorLastTimestamp => true,
             Self::GpioSet => true,
@@ -501,10 +496,6 @@ pub fn get_helper_signature(id: HelperId) -> HelperSignature {
         ),
 
         // Robotics helpers
-        HelperId::MotorEmergencyStop => {
-            HelperSignature::new(id, &[ArgType::Scalar], ReturnType::Integer)
-        }
-
         HelperId::TimeseriesPush => HelperSignature::new(
             id,
             &[
@@ -617,7 +608,7 @@ mod tests {
     fn helper_id_from_raw() {
         assert_eq!(HelperId::from_raw(1), Some(HelperId::KtimeGetNs));
         assert_eq!(HelperId::from_raw(5), Some(HelperId::MapLookupElem));
-        assert_eq!(HelperId::from_raw(1000), Some(HelperId::MotorEmergencyStop));
+        assert_eq!(HelperId::from_raw(1000), None);
         assert_eq!(HelperId::from_raw(9999), None);
     }
 
@@ -719,11 +710,9 @@ mod tests {
     #[test]
     fn robotics_helpers_available() {
         // Robotics helpers should be defined
-        assert!(HelperId::from_raw(1000).is_some());
+        assert_eq!(HelperId::from_raw(1000), None);
         assert_eq!(HelperId::from_raw(9), Some(HelperId::TimeseriesPush));
-
-        let sig = get_helper_signature(HelperId::MotorEmergencyStop);
-        assert_eq!(sig.args.len(), 1);
-        assert_eq!(sig.args[0], ArgType::Scalar);
+        assert_eq!(HelperId::from_raw(1003), Some(HelperId::GpioSet));
+        assert_eq!(HelperId::from_raw(1005), Some(HelperId::PwmWrite));
     }
 }

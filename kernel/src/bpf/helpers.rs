@@ -197,44 +197,6 @@ pub extern "C" fn bpf_gpio_set_output(pin: u32, initial_high: u32) -> i64 {
 /// This function is an entry point for BPF programs. It accesses hardware registers
 /// but validates inputs (pwm_id, channel) to prevent invalid access.
 /// BPF helper: Emergency motor stop
-///
-/// Immediately stops all motor PWM outputs.
-/// Arguments:
-/// - reason: A numeric code indicating the reason for the stop
-///
-/// Returns 0 on success, -1 on failure.
-///
-/// # Safety
-///
-/// This function is an entry point for BPF programs. It accesses hardware registers
-/// to disable motor outputs in an emergency.
-#[no_mangle]
-pub extern "C" fn bpf_motor_emergency_stop(reason: u32) -> i64 {
-    log::error!("EMERGENCY STOP TRIGGERED! Reason: {}", reason);
-    #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
-    {
-        use crate::arch::aarch64::platform::rpi5::pwm::{PWM0, PWM1};
-
-        {
-            let pwm0 = PWM0.lock();
-            pwm0.set_duty_cycle(1, 0);
-            pwm0.set_duty_cycle(2, 0);
-        }
-
-        {
-            let pwm1 = PWM1.lock();
-            pwm1.set_duty_cycle(1, 0);
-            pwm1.set_duty_cycle(2, 0);
-        }
-        0
-    }
-    #[cfg(not(all(target_arch = "aarch64", feature = "rpi5")))]
-    {
-        let _ = reason;
-        -1
-    }
-}
-
 #[no_mangle]
 pub extern "C" fn bpf_pwm_write(pwm_id: u32, channel: u32, duty_percent: u32) -> i64 {
     crate::actuation::guard_pwm(pwm_id as u8, channel as u8, duty_percent)

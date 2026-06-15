@@ -111,12 +111,6 @@ pub extern "C" fn bpf_timeseries_push(_map_id: u32, _key: *const u8, _value: *co
     0
 }
 
-// SAFETY: Test stub for BPF helper.
-#[unsafe(no_mangle)]
-pub extern "C" fn bpf_motor_emergency_stop(_reason: u32) -> i64 {
-    0
-}
-
 /// Helper to create an interpreter for the active profile.
 fn interpreter() -> Interpreter<ActiveProfile> {
     Interpreter::new()

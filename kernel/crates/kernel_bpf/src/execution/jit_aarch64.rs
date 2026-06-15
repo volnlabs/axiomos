@@ -1033,7 +1033,6 @@ impl<P: PhysicalProfile> Arm64JitCompiler<P> {
             // Robotics Helpers
             fn bpf_gpio_read(pin: u32) -> i64;
             fn bpf_gpio_write(pin: u32, value: u32) -> i64;
-            fn bpf_motor_emergency_stop(reason: u32) -> i64;
             fn bpf_pwm_write(pwm_id: u32, channel: u32, duty: u32) -> i64;
         }
 
@@ -1046,7 +1045,6 @@ impl<P: PhysicalProfile> Arm64JitCompiler<P> {
             6 => Ok(bpf_ringbuf_output as *const () as u64),
             1001 => Ok(bpf_timeseries_push as *const () as u64),
             // Robotics Helpers
-            1000 => Ok(bpf_motor_emergency_stop as *const () as u64),
             1003 => Ok(bpf_gpio_write as *const () as u64),
             1004 => Ok(bpf_gpio_read as *const () as u64),
             1005 => Ok(bpf_pwm_write as *const () as u64),

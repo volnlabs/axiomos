@@ -90,8 +90,7 @@ pub fn helper_cost(helper_id: i32) -> u32 {
         | HelperId::GpioGet
         | HelperId::PwmWrite
         | HelperId::IioRead
-        | HelperId::CanSend
-        | HelperId::MotorEmergencyStop => COST_HELPER_COPY,
+        | HelperId::CanSend => COST_HELPER_COPY,
 
         HelperId::RingbufOutput
         | HelperId::RingbufReserve

@@ -124,11 +124,6 @@ pub mod helpers_stub {
         0
     }
 
-    #[unsafe(no_mangle)]
-    pub extern "C" fn bpf_motor_emergency_stop(_reason: u32) -> i64 {
-        0
-    }
-
     pub fn get_test_map_value() -> u64 {
         TEST_MAP_VALUE.load(Ordering::SeqCst)
     }

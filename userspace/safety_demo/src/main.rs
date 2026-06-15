@@ -14,7 +14,6 @@ const MOTOR_DUTY: i32 = 50; // 50% duty cycle simulates running motor
 
 // === BPF Helper IDs (from interpreter/JIT dispatch tables) ===
 const HELPER_TRACE_PRINTK: i32 = 2;
-const HELPER_MOTOR_STOP: i32 = 1000;
 const HELPER_PWM_WRITE: i32 = 1005;
 
 // === BPF commands ===
@@ -169,7 +168,7 @@ pub extern "C" fn _start() -> ! {
     // Step 2: Create E-Stop BPF program for GPIO interrupt
     //
     // When the limit switch fires (rising edge on LIMIT_SWITCH_PIN):
-    //   1. Call bpf_motor_emergency_stop(reason=1)
+    //   1. Call bpf_pwm_write(PWM0, Ch1, 0)
     //   2. Call bpf_trace_printk("SAFETY: Motor stopped by limit switch!")
     //   3. Return 0
     //
@@ -189,11 +188,15 @@ pub extern "C" fn _start() -> ! {
     // s=115 t=116 o=111 p=112 p=112 e=101 d=100 !=33 \0=0
 
     let estop_insns = [
-        // --- 1. Call bpf_motor_emergency_stop(reason=1) ---
-        // R1 = 1 (reason: limit switch triggered)
-        BpfInsn::mov64_imm(1, 1),
-        // call bpf_motor_emergency_stop
-        BpfInsn::call(HELPER_MOTOR_STOP),
+        // --- 1. Stop the monitored PWM channel ---
+        // R1 = PWM_CHIP (0)
+        BpfInsn::mov64_imm(1, PWM_CHIP as i32),
+        // R2 = PWM_CHANNEL (1)
+        BpfInsn::mov64_imm(2, PWM_CHANNEL as i32),
+        // R3 = duty (0%)
+        BpfInsn::mov64_imm(3, 0),
+        // call bpf_pwm_write(chip, channel, duty)
+        BpfInsn::call(HELPER_PWM_WRITE),
         // --- 2. Build trace message on stack and call bpf_trace_printk ---
         // Store "SAFETY: Motor stopped!\0" at R10-24
         BpfInsn::st_b(10, -24, b'S' as i32),
@@ -247,7 +250,7 @@ pub extern "C" fn _start() -> ! {
     print("  E-Stop program loaded (ID: ");
     print_num(estop_id as u64);
     print(")\n");
-    print("  Actions: bpf_motor_emergency_stop + bpf_trace_printk\n\n");
+    print("  Actions: bpf_pwm_write(0%) + bpf_trace_printk\n\n");
 
     // ---------------------------------------------------------
     // Step 3: Attach E-Stop to GPIO (limit switch pin, rising edge)
@@ -285,11 +288,11 @@ pub extern "C" fn _start() -> ! {
     //
     // The BPF programs are now in the kernel:
     //   - Motor program: timer hook -> PWM at 50%
-    //   - E-Stop program: GPIO interrupt -> motor emergency stop
+    //   - E-Stop program: GPIO interrupt -> PWM duty 0%
     //
     // After this process exits:
     //   - Programs PERSIST in the kernel's BpfManager
-    //   - GPIO interrupt -> BPF execute -> bpf_motor_emergency_stop
+    //   - GPIO interrupt -> BPF execute -> bpf_pwm_write(0%)
     //   - This entire path is in kernel interrupt context
     //   - ZERO userspace dependency
     //
@@ -300,7 +303,7 @@ pub extern "C" fn _start() -> ! {
     print("  Motor:     PWM0 Ch1 @ 50% (via timer BPF hook)\n");
     print("  E-Stop:    GPIO ");
     print_num(LIMIT_SWITCH_PIN as u64);
-    print(" rising edge -> bpf_motor_emergency_stop\n");
+    print(" rising edge -> bpf_pwm_write(0%)\n");
     print("  Trace:     Kernel log will show 'SAFETY: Motor stop!'\n");
     print("\n");
     print("  >> Userspace will now EXIT. <<\n");

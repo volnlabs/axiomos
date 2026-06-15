@@ -172,7 +172,6 @@ impl<'a> Relocator<'a> {
             "bpf_ringbuf_submit" => HelperId::RingbufSubmit,
             "bpf_ringbuf_discard" => HelperId::RingbufDiscard,
             // rkBPF robotics-specific helpers
-            "bpf_motor_emergency_stop" => HelperId::MotorEmergencyStop,
             "bpf_timeseries_push" => HelperId::TimeseriesPush,
             "bpf_sensor_last_timestamp" => HelperId::SensorLastTimestamp,
             _ => return None,
@@ -206,7 +205,7 @@ mod tests {
         );
         assert_eq!(
             Relocator::helper_name_to_id("bpf_motor_emergency_stop"),
-            Some(HelperId::MotorEmergencyStop as i32)
+            None
         );
         assert_eq!(Relocator::helper_name_to_id("unknown_helper"), None);
     }
@@ -233,7 +232,6 @@ mod tests {
             "bpf_ringbuf_reserve",
             "bpf_ringbuf_submit",
             "bpf_ringbuf_discard",
-            "bpf_motor_emergency_stop",
             "bpf_timeseries_push",
             "bpf_sensor_last_timestamp",
         ] {
