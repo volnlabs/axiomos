@@ -137,6 +137,14 @@ pub fn bpf(cmd: c_int, attr: *const u8, size: c_int) -> c_int {
     syscall3(50, cmd as usize, attr as usize, size as usize) as i32
 }
 
+pub fn estop_trigger() -> c_int {
+    syscall1(61, 1) as i32
+}
+
+pub fn estop_release() -> c_int {
+    syscall1(61, 2) as i32
+}
+
 // --- Time ---
 
 #[repr(C)]

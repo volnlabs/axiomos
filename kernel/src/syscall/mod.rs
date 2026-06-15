@@ -51,6 +51,7 @@ fn hlt() {
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 mod access;
 pub mod bpf;
+mod estop;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 mod process;
 #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
@@ -185,6 +186,7 @@ pub fn dispatch_syscall(
         kernel_abi::SYS_EXECVE => dispatch_sys_execve(ctx, arg1, arg2, arg3),
         kernel_abi::SYS_WAITPID => dispatch_sys_waitpid(arg1, arg2, arg3),
         kernel_abi::SYS_DEBUG => dispatch_sys_debug(arg1, arg2),
+        kernel_abi::SYS_ESTOP => dispatch_sys_estop(arg1),
         _ => {
             error!("unimplemented syscall: {} ({n})", syscall_name(n));
             loop {
@@ -248,6 +250,15 @@ fn dispatch_sys_debug(op: usize, value: usize) -> Result<usize, Errno> {
             }
         }
         _ => Err(EINVAL),
+    }
+}
+
+fn dispatch_sys_estop(action: usize) -> Result<usize, Errno> {
+    let ret = estop::sys_estop(action);
+    if ret < 0 {
+        Err(EINVAL)
+    } else {
+        Ok(ret as usize)
     }
 }
 

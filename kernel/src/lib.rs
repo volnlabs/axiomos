@@ -53,6 +53,7 @@ unsafe impl core::alloc::GlobalAlloc for DummyAllocator {
 pub mod sse;
 pub mod syscall;
 pub mod time;
+pub mod watchdog;
 
 pub static BOOT_TIME_SECONDS: OnceCell<u64> = OnceCell::uninit();
 

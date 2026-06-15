@@ -5,8 +5,8 @@
 //! monitor and the MMIO application.
 
 use kernel_bpf::actuation::{
-    ActuationKind, ActuationRequest, AuditSource, Authority, ChannelId, Monitor, ReleaseResult,
-    SafeDrive,
+    ActuationKind, ActuationRequest, AuditSource, Authority, ChannelId, EstopAction,
+    EstopCommandResult, Monitor, ReleaseResult, SafeDrive,
 };
 use kernel_bpf::profile::ActiveProfile;
 use spin::Mutex;
@@ -97,12 +97,7 @@ pub fn guard_pwm(chip: u8, channel: u8, duty: u32) -> i64 {
 /// Route a GPIO output-level request through ARM-A and apply it. The only
 /// *monitored* writer of GPIO output level.
 pub fn guard_gpio(pin: u8, level: u32) -> i64 {
-    guard_gpio_with(
-        pin,
-        level,
-        Authority::Learned,
-        AuditSource::LearnedBehavior,
-    )
+    guard_gpio_with(pin, level, Authority::Learned, AuditSource::LearnedBehavior)
 }
 
 pub fn guard_gpio_with(pin: u8, level: u32, authority: Authority, source: AuditSource) -> i64 {
@@ -115,7 +110,12 @@ pub fn guard_gpio_with(pin: u8, level: u32, authority: Authority, source: AuditS
     let now = crate::time::get_kernel_time_ns();
     let (value, code) = ACTUATION_MONITOR
         .lock()
-        .decide(ActuationRequest { ch, value: level }, authority, source, now)
+        .decide(
+            ActuationRequest { ch, value: level },
+            authority,
+            source,
+            now,
+        )
         .apply();
 
     apply_gpio_value(pin, value);
@@ -133,7 +133,34 @@ pub fn trigger_estop(source: AuditSource) -> i64 {
     0
 }
 
+pub fn operator_estop(action: EstopAction) -> i64 {
+    let _apply = APPLY_LOCK.lock();
+    let now = crate::time::get_kernel_time_ns();
+    let result = ACTUATION_MONITOR.lock().operator_estop(action, now);
+    match result {
+        EstopCommandResult::Triggered(drives) => {
+            for drive in drives.iter() {
+                apply_safe_drive(drive);
+            }
+            0
+        }
+        EstopCommandResult::Released => 0,
+        EstopCommandResult::Denied => -1,
+    }
+}
+
+pub fn watchdog_estop_trigger() -> i64 {
+    let _apply = APPLY_LOCK.lock();
+    let now = crate::time::get_kernel_time_ns();
+    let drives = ACTUATION_MONITOR.lock().watchdog_estop_trigger(now);
+    for drive in drives.iter() {
+        apply_safe_drive(drive);
+    }
+    0
+}
+
 pub fn release_estop(authority: Authority, source: AuditSource) -> i64 {
+    let _apply = APPLY_LOCK.lock();
     let now = crate::time::get_kernel_time_ns();
     match ACTUATION_MONITOR
         .lock()

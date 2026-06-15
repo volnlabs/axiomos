@@ -98,9 +98,9 @@ pub extern "C" fn _start() -> ! {
     print("  Axiom Safety Interlock Demo\n");
     print("========================================\n");
     print("\n");
-    print("This demo proves: kernel-level BPF safety interlocks\n");
+    print("This demo proves: kernel-level BPF safety behaviors\n");
     print("survive userspace exit. The interrupt -> BPF -> hardware\n");
-    print("path has ZERO userspace dependency.\n");
+    print("path has ZERO userspace dependency. Hard e-stop lives in SYS_ESTOP/watchdog.\n");
     print("\n");
 
     // ---------------------------------------------------------
@@ -165,7 +165,7 @@ pub extern "C" fn _start() -> ! {
     print("  Motor running on timer hook. PWM active.\n\n");
 
     // ---------------------------------------------------------
-    // Step 2: Create E-Stop BPF program for GPIO interrupt
+    // Step 2: Create limit-switch BPF behavior for GPIO interrupt
     //
     // When the limit switch fires (rising edge on LIMIT_SWITCH_PIN):
     //   1. Call bpf_pwm_write(PWM0, Ch1, 0)
@@ -175,7 +175,7 @@ pub extern "C" fn _start() -> ! {
     // The trace_printk message will appear in kernel log, proving
     // the BPF program executed in kernel interrupt context.
     // ---------------------------------------------------------
-    print("[2/4] Loading E-Stop BPF program...\n");
+    print("[2/4] Loading limit-switch BPF behavior...\n");
 
     // Build the trace message on the BPF stack.
     // Message: "SAFETY: Motor stopped!\0" (22 bytes including NUL)
@@ -244,23 +244,23 @@ pub extern "C" fn _start() -> ! {
         core::mem::size_of::<BpfAttr>() as i32,
     );
     if estop_id < 0 {
-        print("  ERROR: Failed to load E-Stop program\n");
+        print("  ERROR: Failed to load limit-switch behavior\n");
         exit(1);
     }
-    print("  E-Stop program loaded (ID: ");
+    print("  Limit-switch behavior loaded (ID: ");
     print_num(estop_id as u64);
     print(")\n");
     print("  Actions: bpf_pwm_write(0%) + bpf_trace_printk\n\n");
 
     // ---------------------------------------------------------
-    // Step 3: Attach E-Stop to GPIO (limit switch pin, rising edge)
+    // Step 3: Attach limit-switch behavior to GPIO (limit switch pin, rising edge)
     //
     // The kernel's BPF_PROG_ATTACH handler for GPIO type will:
     //   - Configure the pin as input
     //   - Enable rising edge interrupt on the pin
     //   - Register the BPF program for GPIO hook execution
     // ---------------------------------------------------------
-    print("[3/4] Attaching E-Stop to GPIO ");
+    print("[3/4] Attaching limit-switch behavior to GPIO ");
     print_num(LIMIT_SWITCH_PIN as u64);
     print(" (rising edge)...\n");
 
@@ -278,10 +278,10 @@ pub extern "C" fn _start() -> ! {
         core::mem::size_of::<BpfAttr>() as i32,
     );
     if res < 0 {
-        print("  ERROR: Failed to attach E-Stop to GPIO\n");
+        print("  ERROR: Failed to attach limit-switch behavior to GPIO\n");
         exit(1);
     }
-    print("  E-Stop attached. GPIO interrupt armed.\n\n");
+    print("  Limit-switch behavior attached. GPIO interrupt armed.\n\n");
 
     // ---------------------------------------------------------
     // Step 4: EXIT — proving the safety thesis
@@ -298,10 +298,10 @@ pub extern "C" fn _start() -> ! {
     //
     // Trigger the limit switch on GPIO 17 to verify.
     // ---------------------------------------------------------
-    print("[4/4] Safety interlock ARMED.\n");
+    print("[4/4] Behavior demo armed.\n");
     print("\n");
     print("  Motor:     PWM0 Ch1 @ 50% (via timer BPF hook)\n");
-    print("  E-Stop:    GPIO ");
+    print("  Behavior:  GPIO ");
     print_num(LIMIT_SWITCH_PIN as u64);
     print(" rising edge -> bpf_pwm_write(0%)\n");
     print("  Trace:     Kernel log will show 'SAFETY: Motor stop!'\n");

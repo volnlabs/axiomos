@@ -6,8 +6,9 @@
 //! "0 escapes" safety invariant is proven by host tests; the kernel binary
 //! crate maps a `Decision` onto RP1 MMIO (see `kernel/src/actuation.rs`).
 
-use crate::profile::PhysicalProfile;
 use core::sync::atomic::{AtomicU64, Ordering};
+
+use crate::profile::PhysicalProfile;
 
 /// What kind of actuator a request targets. Determines the safe state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -125,6 +126,19 @@ pub enum DecisionTag {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReleaseResult {
+    Released,
+    Denied,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EstopAction {
+    Trigger,
+    Release,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EstopCommandResult {
+    Triggered(SafeDriveSet),
     Released,
     Denied,
 }
@@ -651,6 +665,24 @@ impl<P: PhysicalProfile> Monitor<P> {
         result
     }
 
+    pub fn operator_estop(&mut self, action: EstopAction, now_ns: u64) -> EstopCommandResult {
+        match action {
+            EstopAction::Trigger => {
+                EstopCommandResult::Triggered(self.estop_trigger(AuditSource::Operator, now_ns))
+            }
+            EstopAction::Release => {
+                match self.estop_release(Authority::Operator, AuditSource::Operator, now_ns) {
+                    ReleaseResult::Released => EstopCommandResult::Released,
+                    ReleaseResult::Denied => EstopCommandResult::Denied,
+                }
+            }
+        }
+    }
+
+    pub fn watchdog_estop_trigger(&mut self, now_ns: u64) -> SafeDriveSet {
+        self.estop_trigger(AuditSource::Watchdog, now_ns)
+    }
+
     pub const fn is_latched(&self) -> bool {
         self.latched
     }
@@ -876,6 +908,85 @@ mod tests {
     }
 
     #[test]
+    fn operator_estop_command_triggers_releases_and_stamps_operator_source() {
+        let mut m = Monitor::<EmbeddedProfile>::new();
+        let ch = pwm(0, 1, 60).ch;
+        assert_eq!(
+            m.decide(
+                pwm(0, 1, 60),
+                Authority::Learned,
+                AuditSource::LearnedBehavior,
+                T0
+            ),
+            Decision::Allow(60)
+        );
+
+        let EstopCommandResult::Triggered(safe) = m.operator_estop(EstopAction::Trigger, T0 + 1)
+        else {
+            panic!("operator trigger should return safe-drive set");
+        };
+        assert!(m.is_latched());
+        assert!(safe.contains(ch, 0));
+
+        assert_eq!(
+            m.operator_estop(EstopAction::Release, T0 + 2),
+            EstopCommandResult::Released
+        );
+        assert!(!m.is_latched());
+
+        let mut out = [AuditRecord::EMPTY; 4];
+        let count = m.audit_snapshot(&mut out);
+        assert_eq!(count, 3);
+        assert_eq!(out[1].decision, DecisionTag::EstopTrigger);
+        assert_eq!(out[1].source, AuditSource::Operator);
+        assert_eq!(out[1].authority, Authority::Safety);
+        assert_eq!(out[2].decision, DecisionTag::EstopRelease);
+        assert_eq!(out[2].source, AuditSource::Operator);
+        assert_eq!(out[2].authority, Authority::Operator);
+    }
+
+    #[test]
+    fn watchdog_estop_trigger_stamps_watchdog_and_operator_release_is_required() {
+        let mut m = Monitor::<EmbeddedProfile>::new();
+        let ch = pwm(0, 1, 70).ch;
+        assert_eq!(
+            m.decide(
+                pwm(0, 1, 70),
+                Authority::Learned,
+                AuditSource::LearnedBehavior,
+                T0
+            ),
+            Decision::Allow(70)
+        );
+
+        let safe = m.watchdog_estop_trigger(T0 + 1);
+        assert!(m.is_latched());
+        assert!(safe.contains(ch, 0));
+
+        assert_eq!(
+            m.estop_release(Authority::Safety, AuditSource::Watchdog, T0 + 2),
+            ReleaseResult::Denied
+        );
+        assert!(m.is_latched());
+
+        assert_eq!(
+            m.operator_estop(EstopAction::Release, T0 + 3),
+            EstopCommandResult::Released
+        );
+        assert!(!m.is_latched());
+
+        let mut out = [AuditRecord::EMPTY; 5];
+        let count = m.audit_snapshot(&mut out);
+        assert_eq!(count, 4);
+        assert_eq!(out[1].decision, DecisionTag::EstopTrigger);
+        assert_eq!(out[1].source, AuditSource::Watchdog);
+        assert_eq!(out[2].decision, DecisionTag::ReleaseDenied);
+        assert_eq!(out[2].source, AuditSource::Watchdog);
+        assert_eq!(out[3].decision, DecisionTag::EstopRelease);
+        assert_eq!(out[3].source, AuditSource::Operator);
+    }
+
+    #[test]
     fn in_range_request_is_allowed() {
         let mut m = Monitor::<EmbeddedProfile>::new();
         assert_eq!(decide(&mut m, pwm(0, 1, 50), T0), Decision::Allow(50));
@@ -931,10 +1042,7 @@ mod tests {
         let mut m = Monitor::<EmbeddedProfile>::new();
         assert_eq!(decide(&mut m, pwm(0, 1, 10), T0), Decision::Allow(10));
         // now_ns moves backward: elapsed saturates to 0 (< window) -> slew clamp applies
-        assert_eq!(
-            decide(&mut m, pwm(0, 1, 80), T0 - 1),
-            Decision::Clamp(30)
-        );
+        assert_eq!(decide(&mut m, pwm(0, 1, 80), T0 - 1), Decision::Clamp(30));
     }
 
     #[test]
