@@ -34,6 +34,26 @@ pub struct ActuationRequest {
     pub value: u32,
 }
 
+/// Trusted authority stamped by kernel call-sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Authority {
+    Learned,
+    Mission,
+    Operator,
+    Safety,
+}
+
+/// Trusted source attribution stamped by kernel call-sites for audit records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AuditSource {
+    Operator,
+    Watchdog,
+    GpioHook,
+    LearnedBehavior,
+    Mission,
+    SyscallPwm,
+}
+
 /// The safety envelope for a channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Envelope {
@@ -72,6 +92,22 @@ impl Envelope {
 pub enum RejectReason {
     /// No envelope exists for this channel (deny-by-default).
     UnknownChannel,
+}
+
+/// Audit reason code shape shared by governance and ARM-A decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasonCode {
+    None,
+    UnknownChannel,
+    Governance,
+}
+
+impl From<RejectReason> for ReasonCode {
+    fn from(reason: RejectReason) -> Self {
+        match reason {
+            RejectReason::UnknownChannel => ReasonCode::UnknownChannel,
+        }
+    }
 }
 
 /// The monitor's decision — four distinguishable outcomes so audit logs,
@@ -188,7 +224,13 @@ impl<P: PhysicalProfile> Monitor<P> {
     /// are otherwise undefined. The implementation is defensive — `elapsed` is a
     /// `saturating_sub`, so backward time collapses to 0 (strictest slew limit),
     /// never widening the allowance.
-    pub fn decide(&mut self, req: ActuationRequest, now_ns: u64) -> Decision {
+    pub fn decide(
+        &mut self,
+        req: ActuationRequest,
+        _authority: Authority,
+        _source: AuditSource,
+        now_ns: u64,
+    ) -> Decision {
         let Some(env) = self.envelope(req.ch) else {
             return Decision::Reject(RejectReason::UnknownChannel);
         };
@@ -304,22 +346,52 @@ mod tests {
         }
     }
 
+    fn decide(m: &mut Monitor<EmbeddedProfile>, req: ActuationRequest, now_ns: u64) -> Decision {
+        m.decide(
+            req,
+            Authority::Learned,
+            AuditSource::LearnedBehavior,
+            now_ns,
+        )
+    }
+
     /// A timestamp far enough past 0 that a fresh channel's first decision is not
     /// slew-limited: elapsed from the default last_update_ns=0 exceeds the 1 ms
     /// window, so magnitude clamping is tested in isolation.
     const T0: u64 = 10_000_000; // 10 ms >> 1 ms window
 
     #[test]
+    fn authority_ordering_is_total_safety_highest() {
+        assert!(Authority::Learned < Authority::Mission);
+        assert!(Authority::Mission < Authority::Operator);
+        assert!(Authority::Operator < Authority::Safety);
+    }
+
+    #[test]
+    fn decide_requires_authority_and_source_without_behavior_change() {
+        let mut m = Monitor::<EmbeddedProfile>::new();
+        assert_eq!(
+            m.decide(
+                pwm(0, 1, 50),
+                Authority::Learned,
+                AuditSource::LearnedBehavior,
+                T0
+            ),
+            Decision::Allow(50)
+        );
+    }
+
+    #[test]
     fn in_range_request_is_allowed() {
         let mut m = Monitor::<EmbeddedProfile>::new();
-        assert_eq!(m.decide(pwm(0, 1, 50), T0), Decision::Allow(50));
+        assert_eq!(decide(&mut m, pwm(0, 1, 50), T0), Decision::Allow(50));
     }
 
     #[test]
     fn over_max_is_clamped() {
         let mut m = Monitor::<EmbeddedProfile>::new();
         // 100 > ACT_DUTY_MAX (90) -> clamp to 90
-        assert_eq!(m.decide(pwm(0, 1, 100), T0), Decision::Clamp(90));
+        assert_eq!(decide(&mut m, pwm(0, 1, 100), T0), Decision::Clamp(90));
     }
 
     #[test]
@@ -327,12 +399,12 @@ mod tests {
         let mut m = Monitor::<EmbeddedProfile>::new();
         // PWM channel 3 does not exist (valid channels are 1,2)
         assert_eq!(
-            m.decide(pwm(0, 3, 10), T0),
+            decide(&mut m, pwm(0, 3, 10), T0),
             Decision::Reject(RejectReason::UnknownChannel)
         );
         // PWM chip 2 does not exist
         assert_eq!(
-            m.decide(pwm(2, 1, 10), T0),
+            decide(&mut m, pwm(2, 1, 10), T0),
             Decision::Reject(RejectReason::UnknownChannel)
         );
     }
@@ -341,25 +413,34 @@ mod tests {
     fn slew_clamps_a_fast_jump() {
         let mut m = Monitor::<EmbeddedProfile>::new();
         // establish baseline last_output = 10 (first call at T0 is not slew-limited)
-        assert_eq!(m.decide(pwm(0, 1, 10), T0), Decision::Allow(10));
+        assert_eq!(decide(&mut m, pwm(0, 1, 10), T0), Decision::Allow(10));
         // 0.5 ms later (< 1 ms window): jump to 80 -> clamp to 10 + max_step(20) = 30
-        assert_eq!(m.decide(pwm(0, 1, 80), T0 + 500_000), Decision::Clamp(30));
+        assert_eq!(
+            decide(&mut m, pwm(0, 1, 80), T0 + 500_000),
+            Decision::Clamp(30)
+        );
     }
 
     #[test]
     fn slew_allows_after_window_elapses() {
         let mut m = Monitor::<EmbeddedProfile>::new();
-        assert_eq!(m.decide(pwm(0, 1, 10), T0), Decision::Allow(10));
+        assert_eq!(decide(&mut m, pwm(0, 1, 10), T0), Decision::Allow(10));
         // 2 ms later (>= 1 ms window): full jump to 80 permitted (still <= max 90)
-        assert_eq!(m.decide(pwm(0, 1, 80), T0 + 2_000_000), Decision::Allow(80));
+        assert_eq!(
+            decide(&mut m, pwm(0, 1, 80), T0 + 2_000_000),
+            Decision::Allow(80)
+        );
     }
 
     #[test]
     fn backward_time_applies_strictest_slew() {
         let mut m = Monitor::<EmbeddedProfile>::new();
-        assert_eq!(m.decide(pwm(0, 1, 10), T0), Decision::Allow(10));
+        assert_eq!(decide(&mut m, pwm(0, 1, 10), T0), Decision::Allow(10));
         // now_ns moves backward: elapsed saturates to 0 (< window) -> slew clamp applies
-        assert_eq!(m.decide(pwm(0, 1, 80), T0 - 1), Decision::Clamp(30));
+        assert_eq!(
+            decide(&mut m, pwm(0, 1, 80), T0 - 1),
+            Decision::Clamp(30)
+        );
     }
 
     #[test]
@@ -371,10 +452,13 @@ mod tests {
             channel: 1,
         };
         m.hold_safe(ch);
-        assert_eq!(m.decide(pwm(0, 1, 80), T0), Decision::Safe(0));
+        assert_eq!(decide(&mut m, pwm(0, 1, 80), T0), Decision::Safe(0));
         m.release(ch);
         // a full window later so the post-release command is not slew-limited
-        assert_eq!(m.decide(pwm(0, 1, 50), T0 + 2_000_000), Decision::Allow(50));
+        assert_eq!(
+            decide(&mut m, pwm(0, 1, 50), T0 + 2_000_000),
+            Decision::Allow(50)
+        );
     }
 
     #[test]

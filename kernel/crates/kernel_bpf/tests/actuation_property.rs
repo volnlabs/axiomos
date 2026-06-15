@@ -12,7 +12,7 @@
 ))]
 
 use kernel_bpf::actuation::{
-    ActuationKind, ActuationRequest, ChannelId, Decision, Envelope, Monitor,
+    ActuationKind, ActuationRequest, AuditSource, Authority, ChannelId, Decision, Envelope, Monitor,
 };
 use kernel_bpf::profile::EmbeddedProfile;
 use proptest::prelude::*;
@@ -46,7 +46,12 @@ proptest! {
         let mut prev = 0u32; // matches ChannelState default last_output
         for (value, dt) in steps {
             now = now.saturating_add(dt);
-            let out = applied(m.decide(ActuationRequest { ch, value }, now));
+            let out = applied(m.decide(
+                ActuationRequest { ch, value },
+                Authority::Learned,
+                AuditSource::LearnedBehavior,
+                now,
+            ));
 
             // Invariant 1: output always within [min, max].
             prop_assert!(out >= env.min && out <= env.max, "out {} outside [{},{}]", out, env.min, env.max);
