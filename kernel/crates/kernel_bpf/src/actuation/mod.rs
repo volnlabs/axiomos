@@ -200,7 +200,7 @@ impl<P: PhysicalProfile> Monitor<P> {
         let mut v = req.value.clamp(env.min, env.max);
         let mut clamped = v != req.value;
 
-        if env.window_ns > 0 && st.last_update_ns != 0 {
+        if env.window_ns > 0 {
             let elapsed = now_ns.saturating_sub(st.last_update_ns);
             if elapsed < env.window_ns {
                 let lo = st.last_output.saturating_sub(env.max_step).max(env.min);
@@ -254,25 +254,30 @@ mod tests {
         ActuationRequest { ch: ChannelId { kind: ActuationKind::PwmDuty, chip, channel }, value }
     }
 
+    /// A timestamp far enough past 0 that a fresh channel's first decision is not
+    /// slew-limited: elapsed from the default last_update_ns=0 exceeds the 1 ms
+    /// window, so magnitude clamping is tested in isolation.
+    const T0: u64 = 10_000_000; // 10 ms >> 1 ms window
+
     #[test]
     fn in_range_request_is_allowed() {
         let mut m = Monitor::<EmbeddedProfile>::new();
-        assert_eq!(m.decide(pwm(0, 1, 50), 0), Decision::Allow(50));
+        assert_eq!(m.decide(pwm(0, 1, 50), T0), Decision::Allow(50));
     }
 
     #[test]
     fn over_max_is_clamped() {
         let mut m = Monitor::<EmbeddedProfile>::new();
         // 100 > ACT_DUTY_MAX (90) -> clamp to 90
-        assert_eq!(m.decide(pwm(0, 1, 100), 0), Decision::Clamp(90));
+        assert_eq!(m.decide(pwm(0, 1, 100), T0), Decision::Clamp(90));
     }
 
     #[test]
     fn unknown_channel_is_rejected() {
         let mut m = Monitor::<EmbeddedProfile>::new();
         // PWM channel 3 does not exist (valid channels are 1,2)
-        assert_eq!(m.decide(pwm(0, 3, 10), 0), Decision::Reject(RejectReason::UnknownChannel));
+        assert_eq!(m.decide(pwm(0, 3, 10), T0), Decision::Reject(RejectReason::UnknownChannel));
         // PWM chip 2 does not exist
-        assert_eq!(m.decide(pwm(2, 1, 10), 0), Decision::Reject(RejectReason::UnknownChannel));
+        assert_eq!(m.decide(pwm(2, 1, 10), T0), Decision::Reject(RejectReason::UnknownChannel));
     }
 }
