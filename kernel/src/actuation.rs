@@ -5,35 +5,17 @@
 //! monitor and the MMIO application.
 
 use kernel_bpf::actuation::{
-    ActuationKind, ActuationRequest, AuditSource, Authority, ChannelId, Monitor,
+    ActuationKind, ActuationRequest, AuditSource, Authority, ChannelId, Monitor, ReleaseResult,
+    SafeDrive,
 };
 use kernel_bpf::profile::ActiveProfile;
 use spin::Mutex;
 
 /// The single global actuation reference monitor.
 pub static ACTUATION_MONITOR: Mutex<Monitor<ActiveProfile>> = Mutex::new(Monitor::new());
+static APPLY_LOCK: Mutex<()> = Mutex::new(());
 
-/// Route a PWM-duty request through ARM-A and apply the result to RP1 MMIO.
-/// Returns 0 when motion proceeds (Allow/Clamp), -1 when policy intervened or
-/// the request was invalid (Safe/Reject). The only *monitored* writer of PWM duty.
-pub fn guard_pwm_with(
-    chip: u8,
-    channel: u8,
-    duty: u32,
-    authority: Authority,
-    source: AuditSource,
-) -> i64 {
-    let ch = ChannelId {
-        kind: ActuationKind::PwmDuty,
-        chip,
-        channel,
-    };
-    let now = crate::time::get_kernel_time_ns();
-    let (value, code) = ACTUATION_MONITOR
-        .lock()
-        .decide(ActuationRequest { ch, value: duty }, authority, source, now)
-        .apply();
-
+fn apply_pwm_value(chip: u8, channel: u8, value: u32) {
     #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
     {
         use crate::arch::aarch64::platform::rpi5::pwm::{PWM0, PWM1};
@@ -46,7 +28,58 @@ pub fn guard_pwm_with(
         }
     }
     #[cfg(not(all(target_arch = "aarch64", feature = "rpi5")))]
-    let _ = value;
+    let _ = (chip, channel, value);
+}
+
+fn apply_gpio_value(pin: u8, value: u32) {
+    #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+    {
+        if pin < crate::arch::aarch64::platform::rpi5::gpio::Rp1Gpio::NUM_PINS {
+            // SAFETY: validated pin; kernel has exclusive GPIO access.
+            let gpio = unsafe { crate::arch::aarch64::platform::rpi5::gpio::Rp1Gpio::new() };
+            if value != 0 {
+                gpio.set_high(pin);
+            } else {
+                gpio.set_low(pin);
+            }
+        }
+    }
+    #[cfg(not(all(target_arch = "aarch64", feature = "rpi5")))]
+    let _ = (pin, value);
+}
+
+fn apply_safe_drive(drive: SafeDrive) {
+    match drive.channel.kind {
+        ActuationKind::PwmDuty => {
+            apply_pwm_value(drive.channel.chip, drive.channel.channel, drive.safe_value)
+        }
+        ActuationKind::GpioLevel => apply_gpio_value(drive.channel.channel, drive.safe_value),
+    }
+}
+
+/// Route a PWM-duty request through ARM-A and apply the result to RP1 MMIO.
+/// Returns 0 when motion proceeds (Allow/Clamp), -1 when policy intervened or
+/// the request was invalid (Safe/Reject). The only *monitored* writer of PWM duty.
+pub fn guard_pwm_with(
+    chip: u8,
+    channel: u8,
+    duty: u32,
+    authority: Authority,
+    source: AuditSource,
+) -> i64 {
+    let _apply = APPLY_LOCK.lock();
+    let ch = ChannelId {
+        kind: ActuationKind::PwmDuty,
+        chip,
+        channel,
+    };
+    let now = crate::time::get_kernel_time_ns();
+    let (value, code) = ACTUATION_MONITOR
+        .lock()
+        .decide(ActuationRequest { ch, value: duty }, authority, source, now)
+        .apply();
+
+    apply_pwm_value(chip, channel, value);
 
     code
 }
@@ -73,6 +106,7 @@ pub fn guard_gpio(pin: u8, level: u32) -> i64 {
 }
 
 pub fn guard_gpio_with(pin: u8, level: u32, authority: Authority, source: AuditSource) -> i64 {
+    let _apply = APPLY_LOCK.lock();
     let ch = ChannelId {
         kind: ActuationKind::GpioLevel,
         chip: 0,
@@ -84,20 +118,28 @@ pub fn guard_gpio_with(pin: u8, level: u32, authority: Authority, source: AuditS
         .decide(ActuationRequest { ch, value: level }, authority, source, now)
         .apply();
 
-    #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
-    {
-        if pin < crate::arch::aarch64::platform::rpi5::gpio::Rp1Gpio::NUM_PINS {
-            // SAFETY: validated pin; kernel has exclusive GPIO access.
-            let gpio = unsafe { crate::arch::aarch64::platform::rpi5::gpio::Rp1Gpio::new() };
-            if value != 0 {
-                gpio.set_high(pin);
-            } else {
-                gpio.set_low(pin);
-            }
-        }
-    }
-    #[cfg(not(all(target_arch = "aarch64", feature = "rpi5")))]
-    let _ = value;
+    apply_gpio_value(pin, value);
 
     code
+}
+
+pub fn trigger_estop(source: AuditSource) -> i64 {
+    let _apply = APPLY_LOCK.lock();
+    let now = crate::time::get_kernel_time_ns();
+    let drives = ACTUATION_MONITOR.lock().estop_trigger(source, now);
+    for drive in drives.iter() {
+        apply_safe_drive(drive);
+    }
+    0
+}
+
+pub fn release_estop(authority: Authority, source: AuditSource) -> i64 {
+    let now = crate::time::get_kernel_time_ns();
+    match ACTUATION_MONITOR
+        .lock()
+        .estop_release(authority, source, now)
+    {
+        ReleaseResult::Released => 0,
+        ReleaseResult::Denied => -1,
+    }
 }

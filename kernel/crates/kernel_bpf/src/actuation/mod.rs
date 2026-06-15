@@ -123,6 +123,12 @@ pub enum DecisionTag {
     ReleaseDenied,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseResult {
+    Released,
+    Denied,
+}
+
 /// The monitor's decision — four distinguishable outcomes so audit logs,
 /// authority decisions, and incident replay (Spec 2) can tell them apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,6 +289,61 @@ impl<const N: usize> Default for AuditRing<N> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SafeDrive {
+    pub channel: ChannelId,
+    pub safe_value: u32,
+}
+
+impl SafeDrive {
+    pub const EMPTY: Self = Self {
+        channel: EMPTY_CHANNEL,
+        safe_value: 0,
+    };
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SafeDriveSet {
+    entries: [SafeDrive; MAX_KNOWN_CHANNELS],
+    len: usize,
+}
+
+impl SafeDriveSet {
+    pub const fn new() -> Self {
+        Self {
+            entries: [SafeDrive::EMPTY; MAX_KNOWN_CHANNELS],
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, channel: ChannelId, safe_value: u32) {
+        if self.len < MAX_KNOWN_CHANNELS {
+            self.entries[self.len] = SafeDrive {
+                channel,
+                safe_value,
+            };
+            self.len += 1;
+        }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = SafeDrive> + '_ {
+        self.entries[..self.len].iter().copied()
+    }
+
+    pub fn contains(&self, channel: ChannelId, safe_value: u32) -> bool {
+        self.iter()
+            .any(|entry| entry.channel == channel && entry.safe_value == safe_value)
+    }
+}
+
 /// Per-channel mutable state. Modeled explicitly: slew-rate limiting,
 /// auditability, and Spec 2 extensions all depend on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -305,6 +366,9 @@ use core::marker::PhantomData;
 
 /// Number of GPIO pins addressable on RP1 bank 0 (mirrors `Rp1Gpio::NUM_PINS`).
 const GPIO_PINS: usize = 28;
+const PWM_CHIPS: usize = 2;
+const PWM_CHANNELS: usize = 2;
+const MAX_KNOWN_CHANNELS: usize = PWM_CHIPS * PWM_CHANNELS + GPIO_PINS;
 pub const AUDIT_CAPACITY: usize = 128;
 
 /// The actuation reference monitor. Holds per-channel state for the two PWM
@@ -314,6 +378,12 @@ pub struct Monitor<P: PhysicalProfile> {
     pwm: [[ChannelState; 2]; 2],
     /// `[pin 0..28]`.
     gpio: [ChannelState; GPIO_PINS],
+    known_pwm: [[bool; PWM_CHANNELS]; PWM_CHIPS],
+    pwm_safe: [[u32; PWM_CHANNELS]; PWM_CHIPS],
+    known_gpio: [bool; GPIO_PINS],
+    gpio_safe: [u32; GPIO_PINS],
+    latched: bool,
+    latch_epoch: u64,
     audit: AuditRing<AUDIT_CAPACITY>,
     _profile: PhantomData<fn() -> P>,
 }
@@ -324,6 +394,12 @@ impl<P: PhysicalProfile> Monitor<P> {
         Self {
             pwm: [[ChannelState::DEFAULT; 2]; 2],
             gpio: [ChannelState::DEFAULT; GPIO_PINS],
+            known_pwm: [[false; PWM_CHANNELS]; PWM_CHIPS],
+            pwm_safe: [[0; PWM_CHANNELS]; PWM_CHIPS],
+            known_gpio: [false; GPIO_PINS],
+            gpio_safe: [0; GPIO_PINS],
+            latched: false,
+            latch_epoch: 0,
             audit: AuditRing::new(),
             _profile: PhantomData,
         }
@@ -367,6 +443,14 @@ impl<P: PhysicalProfile> Monitor<P> {
         })
     }
 
+    fn registered_safe_value(&self, ch: ChannelId, fallback: u32) -> u32 {
+        match self.slot_index(ch) {
+            Some((true, i, j)) if self.known_pwm[i][j] => self.pwm_safe[i][j],
+            Some((false, i, _)) if self.known_gpio[i] => self.gpio_safe[i],
+            _ => fallback,
+        }
+    }
+
     /// Decide the fate of one actuation request.
     ///
     /// `now_ns` MUST be monotonically non-decreasing per channel; slew semantics
@@ -385,6 +469,19 @@ impl<P: PhysicalProfile> Monitor<P> {
             self.audit_decision(req, authority, source, now_ns, decision);
             return decision;
         };
+        self.register_channel(req.ch, env.min);
+
+        if self.latched {
+            let safe = self.registered_safe_value(req.ch, env.min);
+            if let Some(slot) = self.slot_mut(req.ch) {
+                slot.last_output = safe;
+                slot.last_update_ns = now_ns;
+            }
+            let decision = Decision::Safe(safe);
+            self.audit_decision(req, authority, source, now_ns, decision);
+            return decision;
+        }
+
         let slot = self.slot_mut(req.ch).expect("known channel has a slot");
         let st = *slot;
 
@@ -449,6 +546,117 @@ impl<P: PhysicalProfile> Monitor<P> {
 
     pub fn audit_dropped_since(&self, last_seq: u64) -> u64 {
         self.audit.dropped_since(last_seq)
+    }
+
+    pub fn register_channel(&mut self, ch: ChannelId, safe_value: u32) {
+        match self.slot_index(ch) {
+            Some((true, i, j)) => {
+                self.known_pwm[i][j] = true;
+                self.pwm_safe[i][j] = safe_value;
+            }
+            Some((false, i, _)) => {
+                self.known_gpio[i] = true;
+                self.gpio_safe[i] = safe_value;
+            }
+            None => {}
+        }
+    }
+
+    pub fn known_channels(&self) -> SafeDriveSet {
+        let mut set = SafeDriveSet::new();
+        let mut chip = 0;
+        while chip < PWM_CHIPS {
+            let mut channel = 0;
+            while channel < PWM_CHANNELS {
+                if self.known_pwm[chip][channel] {
+                    set.push(
+                        ChannelId {
+                            kind: ActuationKind::PwmDuty,
+                            chip: chip as u8,
+                            channel: (channel + 1) as u8,
+                        },
+                        self.pwm_safe[chip][channel],
+                    );
+                }
+                channel += 1;
+            }
+            chip += 1;
+        }
+
+        let mut pin = 0;
+        while pin < GPIO_PINS {
+            if self.known_gpio[pin] {
+                set.push(
+                    ChannelId {
+                        kind: ActuationKind::GpioLevel,
+                        chip: 0,
+                        channel: pin as u8,
+                    },
+                    self.gpio_safe[pin],
+                );
+            }
+            pin += 1;
+        }
+
+        set
+    }
+
+    pub fn estop_trigger(&mut self, source: AuditSource, now_ns: u64) -> SafeDriveSet {
+        self.latched = true;
+        self.latch_epoch = self.latch_epoch.wrapping_add(1);
+        let drive = self.known_channels();
+        self.audit.emit(AuditRecord {
+            seq: 0,
+            t_ns: now_ns,
+            source,
+            channel: EMPTY_CHANNEL,
+            authority: Authority::Safety,
+            req_value: 0,
+            decision: DecisionTag::EstopTrigger,
+            reason: ReasonCode::Governance,
+        });
+        drive
+    }
+
+    pub fn estop_release(
+        &mut self,
+        authority: Authority,
+        source: AuditSource,
+        now_ns: u64,
+    ) -> ReleaseResult {
+        let (decision, reason, result) = if authority == Authority::Operator {
+            self.latched = false;
+            (
+                DecisionTag::EstopRelease,
+                ReasonCode::None,
+                ReleaseResult::Released,
+            )
+        } else {
+            (
+                DecisionTag::ReleaseDenied,
+                ReasonCode::Governance,
+                ReleaseResult::Denied,
+            )
+        };
+        self.audit.emit(AuditRecord {
+            seq: 0,
+            t_ns: now_ns,
+            source,
+            channel: EMPTY_CHANNEL,
+            authority,
+            req_value: 0,
+            decision,
+            reason,
+        });
+        result
+    }
+
+    pub const fn is_latched(&self) -> bool {
+        self.latched
+    }
+
+    pub const fn latch_epoch(&self) -> u64 {
+        self.latch_epoch
     }
 
     /// Latch a channel into safe-hold; subsequent `decide` calls return
@@ -609,6 +817,62 @@ mod tests {
         assert_eq!(out[1].seq, 2);
         assert_eq!(out[1].req_value, 30);
         assert_eq!(ring.dropped_since(0), 1);
+    }
+
+    #[test]
+    fn estop_trigger_latches_and_returns_safe_drive_set_for_known_channels() {
+        let mut m = Monitor::<EmbeddedProfile>::new();
+        let ch = pwm(0, 1, 80).ch;
+        assert_eq!(
+            m.decide(
+                pwm(0, 1, 80),
+                Authority::Learned,
+                AuditSource::LearnedBehavior,
+                T0
+            ),
+            Decision::Allow(80)
+        );
+
+        let safe = m.estop_trigger(AuditSource::Operator, T0);
+
+        assert!(m.is_latched());
+        assert_eq!(safe.len(), 1);
+        assert!(safe.contains(ch, 0));
+        assert_eq!(
+            m.decide(
+                pwm(0, 1, 80),
+                Authority::Learned,
+                AuditSource::LearnedBehavior,
+                T0 + 1
+            ),
+            Decision::Safe(0)
+        );
+    }
+
+    #[test]
+    fn estop_release_is_operator_only_and_audited_with_source() {
+        let mut m = Monitor::<EmbeddedProfile>::new();
+        m.estop_trigger(AuditSource::Watchdog, T0);
+
+        assert_eq!(
+            m.estop_release(Authority::Safety, AuditSource::Watchdog, T0 + 1),
+            ReleaseResult::Denied
+        );
+        assert!(m.is_latched());
+
+        assert_eq!(
+            m.estop_release(Authority::Operator, AuditSource::Operator, T0 + 2),
+            ReleaseResult::Released
+        );
+        assert!(!m.is_latched());
+
+        let mut out = [AuditRecord::EMPTY; 4];
+        let count = m.audit_snapshot(&mut out);
+        assert_eq!(count, 3);
+        assert_eq!(out[1].decision, DecisionTag::ReleaseDenied);
+        assert_eq!(out[1].source, AuditSource::Watchdog);
+        assert_eq!(out[2].decision, DecisionTag::EstopRelease);
+        assert_eq!(out[2].source, AuditSource::Operator);
     }
 
     #[test]
