@@ -7,6 +7,7 @@
 //! crate maps a `Decision` onto RP1 MMIO (see `kernel/src/actuation.rs`).
 
 use crate::profile::PhysicalProfile;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// What kind of actuator a request targets. Determines the safe state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -110,6 +111,18 @@ impl From<RejectReason> for ReasonCode {
     }
 }
 
+/// Compact decision tag for fixed-size audit records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecisionTag {
+    Allow,
+    Clamp,
+    Safe,
+    Reject,
+    EstopTrigger,
+    EstopRelease,
+    ReleaseDenied,
+}
+
 /// The monitor's decision — four distinguishable outcomes so audit logs,
 /// authority decisions, and incident replay (Spec 2) can tell them apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +138,25 @@ pub enum Decision {
 }
 
 impl Decision {
+    fn tag(self) -> DecisionTag {
+        match self {
+            Decision::Allow(_) => DecisionTag::Allow,
+            Decision::Clamp(_) => DecisionTag::Clamp,
+            Decision::Safe(_) => DecisionTag::Safe,
+            Decision::Reject(_) => DecisionTag::Reject,
+        }
+    }
+
+    fn reason(self) -> ReasonCode {
+        match self {
+            Decision::Reject(reason) => reason.into(),
+            Decision::Safe(_) => ReasonCode::Governance,
+            Decision::Allow(_) | Decision::Clamp(_) => ReasonCode::None,
+        }
+    }
+}
+
+impl Decision {
     /// Map a decision to `(mmio_value_to_write, return_code_for_caller)`.
     /// `Reject` writes the universal safe value 0 (an unknown channel must not be
     /// wired to a live actuator). `Safe` returns -1 to signal policy intervention.
@@ -134,6 +166,120 @@ impl Decision {
             Decision::Safe(v) => (v, -1),
             Decision::Reject(_) => (0, -1),
         }
+    }
+}
+
+const EMPTY_CHANNEL: ChannelId = ChannelId {
+    kind: ActuationKind::PwmDuty,
+    chip: 0,
+    channel: 0,
+};
+
+/// Fixed-size audit record emitted by the actuation monitor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuditRecord {
+    pub seq: u64,
+    pub t_ns: u64,
+    pub source: AuditSource,
+    pub channel: ChannelId,
+    pub authority: Authority,
+    pub req_value: u32,
+    pub decision: DecisionTag,
+    pub reason: ReasonCode,
+}
+
+impl AuditRecord {
+    pub const EMPTY: Self = Self {
+        seq: 0,
+        t_ns: 0,
+        source: AuditSource::LearnedBehavior,
+        channel: EMPTY_CHANNEL,
+        authority: Authority::Learned,
+        req_value: 0,
+        decision: DecisionTag::Allow,
+        reason: ReasonCode::None,
+    };
+}
+
+pub struct AuditSlot {
+    seq: AtomicU64,
+    body: AuditRecord,
+}
+
+impl AuditSlot {
+    pub const fn new() -> Self {
+        Self {
+            seq: AtomicU64::new(u64::MAX),
+            body: AuditRecord::EMPTY,
+        }
+    }
+}
+
+/// Single-writer, overwrite-oldest audit ring.
+pub struct AuditRing<const N: usize> {
+    buf: [AuditSlot; N],
+    head: AtomicU64,
+}
+
+impl<const N: usize> AuditRing<N> {
+    pub const fn new() -> Self {
+        Self {
+            buf: [const { AuditSlot::new() }; N],
+            head: AtomicU64::new(0),
+        }
+    }
+
+    pub fn emit(&mut self, mut record: AuditRecord) {
+        let seq = self.head.load(Ordering::Relaxed);
+        record.seq = seq;
+        if N > 0 {
+            let idx = (seq as usize) % N;
+            self.buf[idx].body = record;
+            self.buf[idx].seq.store(seq, Ordering::Release);
+        }
+        self.head.store(seq.wrapping_add(1), Ordering::Release);
+    }
+
+    pub fn snapshot(&self, out: &mut [AuditRecord]) -> usize {
+        if N == 0 || out.is_empty() {
+            return 0;
+        }
+
+        let head = self.head.load(Ordering::Acquire);
+        let start = head.saturating_sub(N as u64);
+        let mut copied = 0;
+
+        for seq in start..head {
+            if copied == out.len() {
+                break;
+            }
+            let idx = (seq as usize) % N;
+            let slot = &self.buf[idx];
+            let before = slot.seq.load(Ordering::Acquire);
+            if before != seq {
+                continue;
+            }
+            let body = slot.body;
+            let after = slot.seq.load(Ordering::Acquire);
+            if before == after && body.seq == seq {
+                out[copied] = body;
+                copied += 1;
+            }
+        }
+
+        copied
+    }
+
+    pub fn dropped_since(&self, last_seq: u64) -> u64 {
+        let head = self.head.load(Ordering::Acquire);
+        let oldest_live = head.saturating_sub(N as u64);
+        oldest_live.saturating_sub(last_seq)
+    }
+}
+
+impl<const N: usize> Default for AuditRing<N> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -159,6 +305,7 @@ use core::marker::PhantomData;
 
 /// Number of GPIO pins addressable on RP1 bank 0 (mirrors `Rp1Gpio::NUM_PINS`).
 const GPIO_PINS: usize = 28;
+pub const AUDIT_CAPACITY: usize = 128;
 
 /// The actuation reference monitor. Holds per-channel state for the two PWM
 /// controllers (2 channels each) and the GPIO output pins.
@@ -167,6 +314,7 @@ pub struct Monitor<P: PhysicalProfile> {
     pwm: [[ChannelState; 2]; 2],
     /// `[pin 0..28]`.
     gpio: [ChannelState; GPIO_PINS],
+    audit: AuditRing<AUDIT_CAPACITY>,
     _profile: PhantomData<fn() -> P>,
 }
 
@@ -176,6 +324,7 @@ impl<P: PhysicalProfile> Monitor<P> {
         Self {
             pwm: [[ChannelState::DEFAULT; 2]; 2],
             gpio: [ChannelState::DEFAULT; GPIO_PINS],
+            audit: AuditRing::new(),
             _profile: PhantomData,
         }
     }
@@ -227,12 +376,14 @@ impl<P: PhysicalProfile> Monitor<P> {
     pub fn decide(
         &mut self,
         req: ActuationRequest,
-        _authority: Authority,
-        _source: AuditSource,
+        authority: Authority,
+        source: AuditSource,
         now_ns: u64,
     ) -> Decision {
         let Some(env) = self.envelope(req.ch) else {
-            return Decision::Reject(RejectReason::UnknownChannel);
+            let decision = Decision::Reject(RejectReason::UnknownChannel);
+            self.audit_decision(req, authority, source, now_ns, decision);
+            return decision;
         };
         let slot = self.slot_mut(req.ch).expect("known channel has a slot");
         let st = *slot;
@@ -240,7 +391,9 @@ impl<P: PhysicalProfile> Monitor<P> {
         if st.safe_hold {
             slot.last_output = env.min;
             slot.last_update_ns = now_ns;
-            return Decision::Safe(env.min);
+            let decision = Decision::Safe(env.min);
+            self.audit_decision(req, authority, source, now_ns, decision);
+            return decision;
         }
 
         let mut v = req.value.clamp(env.min, env.max);
@@ -261,11 +414,41 @@ impl<P: PhysicalProfile> Monitor<P> {
 
         slot.last_output = v;
         slot.last_update_ns = now_ns;
-        if clamped {
+        let decision = if clamped {
             Decision::Clamp(v)
         } else {
             Decision::Allow(v)
-        }
+        };
+        self.audit_decision(req, authority, source, now_ns, decision);
+        decision
+    }
+
+    fn audit_decision(
+        &mut self,
+        req: ActuationRequest,
+        authority: Authority,
+        source: AuditSource,
+        now_ns: u64,
+        decision: Decision,
+    ) {
+        self.audit.emit(AuditRecord {
+            seq: 0,
+            t_ns: now_ns,
+            source,
+            channel: req.ch,
+            authority,
+            req_value: req.value,
+            decision: decision.tag(),
+            reason: decision.reason(),
+        });
+    }
+
+    pub fn audit_snapshot(&self, out: &mut [AuditRecord]) -> usize {
+        self.audit.snapshot(out)
+    }
+
+    pub fn audit_dropped_since(&self, last_seq: u64) -> u64 {
+        self.audit.dropped_since(last_seq)
     }
 
     /// Latch a channel into safe-hold; subsequent `decide` calls return
@@ -379,6 +562,53 @@ mod tests {
             ),
             Decision::Allow(50)
         );
+    }
+
+    #[test]
+    fn decide_emits_attributed_audit_record() {
+        let mut m = Monitor::<EmbeddedProfile>::new();
+        let req = pwm(0, 1, 50);
+        assert_eq!(
+            m.decide(req, Authority::Operator, AuditSource::SyscallPwm, T0),
+            Decision::Allow(50)
+        );
+
+        let mut out = [AuditRecord::EMPTY; 4];
+        assert_eq!(m.audit_snapshot(&mut out), 1);
+        assert_eq!(out[0].seq, 0);
+        assert_eq!(out[0].source, AuditSource::SyscallPwm);
+        assert_eq!(out[0].authority, Authority::Operator);
+        assert_eq!(out[0].channel, req.ch);
+        assert_eq!(out[0].req_value, 50);
+        assert_eq!(out[0].decision, DecisionTag::Allow);
+        assert_eq!(out[0].reason, ReasonCode::None);
+    }
+
+    #[test]
+    fn audit_ring_keeps_live_window_and_derives_dropped() {
+        let mut ring = AuditRing::<2>::new();
+        let mut record = AuditRecord {
+            source: AuditSource::LearnedBehavior,
+            authority: Authority::Learned,
+            channel: pwm(0, 1, 0).ch,
+            decision: DecisionTag::Allow,
+            ..AuditRecord::EMPTY
+        };
+
+        record.req_value = 10;
+        ring.emit(record);
+        record.req_value = 20;
+        ring.emit(record);
+        record.req_value = 30;
+        ring.emit(record);
+
+        let mut out = [AuditRecord::EMPTY; 2];
+        assert_eq!(ring.snapshot(&mut out), 2);
+        assert_eq!(out[0].seq, 1);
+        assert_eq!(out[0].req_value, 20);
+        assert_eq!(out[1].seq, 2);
+        assert_eq!(out[1].req_value, 30);
+        assert_eq!(ring.dropped_since(0), 1);
     }
 
     #[test]
