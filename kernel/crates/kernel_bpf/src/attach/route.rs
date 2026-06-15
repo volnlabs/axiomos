@@ -20,12 +20,17 @@ pub struct GpioRouteTable {
 
 impl GpioRouteTable {
     pub const fn new() -> Self {
-        Self { routes: BTreeMap::new() }
+        Self {
+            routes: BTreeMap::new(),
+        }
     }
 
     /// Record that `prog_id` is attached to `(chip, pin)` for `edge`.
     pub fn insert(&mut self, chip: u8, pin: u8, edge: GpioEdge, prog_id: u32) {
-        self.routes.entry((chip, pin)).or_default().push((edge, prog_id));
+        self.routes
+            .entry((chip, pin))
+            .or_default()
+            .push((edge, prog_id));
     }
 
     /// Program ids whose attached edge matches `fired`. `Both` matches either

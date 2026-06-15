@@ -7,6 +7,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use kernel_abi::{BpfObjectInfo, BPF_OBJECT_KIND_MAP};
+use kernel_bpf::attach::{GpioEdge, GpioRouteTable};
 use kernel_bpf::bytecode::insn::BpfInsn;
 use kernel_bpf::bytecode::program::{BpfProgType, BpfProgram};
 use kernel_bpf::execution::{BpfContext, BpfError, BpfExecutor, Interpreter};
@@ -14,7 +15,6 @@ use kernel_bpf::loader::BpfLoader;
 use kernel_bpf::maps::{ArrayMap, BpfMap, HashMap as BpfHashMap, RingBufMap, TimeSeriesMap};
 use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
 use kernel_bpf::signing::{SignatureVerifier, TrustedKey};
-use kernel_bpf::attach::{GpioEdge, GpioRouteTable};
 use kernel_bpf::verifier::admission::AdmissionLedger;
 use kernel_bpf::verifier::{LoadCaller, Verifier, VerifyConfig};
 

@@ -175,7 +175,11 @@ impl<P: PhysicalProfile> Monitor<P> {
 
     fn slot_mut(&mut self, ch: ChannelId) -> Option<&mut ChannelState> {
         let (is_pwm, i, j) = self.slot_index(ch)?;
-        Some(if is_pwm { &mut self.pwm[i][j] } else { &mut self.gpio[i] })
+        Some(if is_pwm {
+            &mut self.pwm[i][j]
+        } else {
+            &mut self.gpio[i]
+        })
     }
 
     /// Decide the fate of one actuation request.
@@ -215,7 +219,11 @@ impl<P: PhysicalProfile> Monitor<P> {
 
         slot.last_output = v;
         slot.last_update_ns = now_ns;
-        if clamped { Decision::Clamp(v) } else { Decision::Allow(v) }
+        if clamped {
+            Decision::Clamp(v)
+        } else {
+            Decision::Allow(v)
+        }
     }
 
     /// Latch a channel into safe-hold; subsequent `decide` calls return
@@ -249,13 +257,29 @@ mod tests {
     #[test]
     fn pwm_envelope_from_embedded_profile() {
         let e = Envelope::from_profile::<EmbeddedProfile>(ActuationKind::PwmDuty);
-        assert_eq!(e, Envelope { min: 0, max: 90, max_step: 20, window_ns: 1_000_000 });
+        assert_eq!(
+            e,
+            Envelope {
+                min: 0,
+                max: 90,
+                max_step: 20,
+                window_ns: 1_000_000
+            }
+        );
     }
 
     #[test]
     fn gpio_envelope_is_fixed() {
         let e = Envelope::from_profile::<CloudProfile>(ActuationKind::GpioLevel);
-        assert_eq!(e, Envelope { min: 0, max: 1, max_step: 1, window_ns: 0 });
+        assert_eq!(
+            e,
+            Envelope {
+                min: 0,
+                max: 1,
+                max_step: 1,
+                window_ns: 0
+            }
+        );
     }
 
     #[test]
@@ -263,11 +287,21 @@ mod tests {
         assert_eq!(Decision::Allow(42).apply(), (42, 0));
         assert_eq!(Decision::Clamp(90).apply(), (90, 0));
         assert_eq!(Decision::Safe(0).apply(), (0, -1));
-        assert_eq!(Decision::Reject(RejectReason::UnknownChannel).apply(), (0, -1));
+        assert_eq!(
+            Decision::Reject(RejectReason::UnknownChannel).apply(),
+            (0, -1)
+        );
     }
 
     fn pwm(chip: u8, channel: u8, value: u32) -> ActuationRequest {
-        ActuationRequest { ch: ChannelId { kind: ActuationKind::PwmDuty, chip, channel }, value }
+        ActuationRequest {
+            ch: ChannelId {
+                kind: ActuationKind::PwmDuty,
+                chip,
+                channel,
+            },
+            value,
+        }
     }
 
     /// A timestamp far enough past 0 that a fresh channel's first decision is not
@@ -292,9 +326,15 @@ mod tests {
     fn unknown_channel_is_rejected() {
         let mut m = Monitor::<EmbeddedProfile>::new();
         // PWM channel 3 does not exist (valid channels are 1,2)
-        assert_eq!(m.decide(pwm(0, 3, 10), T0), Decision::Reject(RejectReason::UnknownChannel));
+        assert_eq!(
+            m.decide(pwm(0, 3, 10), T0),
+            Decision::Reject(RejectReason::UnknownChannel)
+        );
         // PWM chip 2 does not exist
-        assert_eq!(m.decide(pwm(2, 1, 10), T0), Decision::Reject(RejectReason::UnknownChannel));
+        assert_eq!(
+            m.decide(pwm(2, 1, 10), T0),
+            Decision::Reject(RejectReason::UnknownChannel)
+        );
     }
 
     #[test]
@@ -325,7 +365,11 @@ mod tests {
     #[test]
     fn safe_hold_forces_safe_then_releases() {
         let mut m = Monitor::<EmbeddedProfile>::new();
-        let ch = ChannelId { kind: ActuationKind::PwmDuty, chip: 0, channel: 1 };
+        let ch = ChannelId {
+            kind: ActuationKind::PwmDuty,
+            chip: 0,
+            channel: 1,
+        };
         m.hold_safe(ch);
         assert_eq!(m.decide(pwm(0, 1, 80), T0), Decision::Safe(0));
         m.release(ch);
@@ -337,6 +381,10 @@ mod tests {
     fn hold_safe_on_unknown_channel_is_a_noop() {
         let mut m = Monitor::<EmbeddedProfile>::new();
         // must not panic on an invalid channel
-        m.hold_safe(ChannelId { kind: ActuationKind::PwmDuty, chip: 9, channel: 9 });
+        m.hold_safe(ChannelId {
+            kind: ActuationKind::PwmDuty,
+            chip: 9,
+            channel: 9,
+        });
     }
 }

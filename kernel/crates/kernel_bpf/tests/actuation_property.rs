@@ -5,8 +5,10 @@
 
 #![cfg(any(feature = "cloud-profile", feature = "embedded-profile"))]
 
-use kernel_bpf::actuation::{ActuationKind, ActuationRequest, ChannelId, Decision, Envelope, Monitor};
-use kernel_bpf::profile::{ActiveProfile, EmbeddedProfile};
+use kernel_bpf::actuation::{
+    ActuationKind, ActuationRequest, ChannelId, Decision, Envelope, Monitor,
+};
+use kernel_bpf::profile::EmbeddedProfile;
 use proptest::prelude::*;
 
 /// The output a decision applies to hardware (None for Reject, which writes the
@@ -27,8 +29,11 @@ proptest! {
         // a sequence of (requested_value, time_delta_ns)
         steps in proptest::collection::vec((0u32..200, 0u64..3_000_000), 1..64),
     ) {
+        // Pin both the envelope and the monitor to EmbeddedProfile so the test
+        // exercises real clamping under either CI profile (the cloud profile
+        // disables clamping, so its envelope is unbounded and proves nothing).
         let env = Envelope::from_profile::<EmbeddedProfile>(ActuationKind::PwmDuty);
-        let mut m = Monitor::<ActiveProfile>::new();
+        let mut m = Monitor::<EmbeddedProfile>::new();
         let ch = ChannelId { kind: ActuationKind::PwmDuty, chip, channel };
 
         let mut now: u64 = 0;

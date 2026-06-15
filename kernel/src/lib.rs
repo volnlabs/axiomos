@@ -15,9 +15,9 @@ use crate::limine::BOOT_TIME;
 
 #[cfg(target_arch = "x86_64")]
 mod acpi;
+pub mod actuation;
 #[cfg(target_arch = "x86_64")]
 mod apic;
-pub mod actuation;
 pub mod arch;
 pub mod backtrace;
 pub mod bpf;
