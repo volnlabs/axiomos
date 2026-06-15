@@ -217,6 +217,22 @@ impl<P: PhysicalProfile> Monitor<P> {
         slot.last_update_ns = now_ns;
         if clamped { Decision::Clamp(v) } else { Decision::Allow(v) }
     }
+
+    /// Latch a channel into safe-hold; subsequent `decide` calls return
+    /// `Safe(min)`. A no-op on an unknown channel. (Spec 2 wires the production
+    /// callers: the kernel e-stop latch and authority veto.)
+    pub fn hold_safe(&mut self, ch: ChannelId) {
+        if let Some(slot) = self.slot_mut(ch) {
+            slot.safe_hold = true;
+        }
+    }
+
+    /// Release a safe-hold. A no-op on an unknown channel.
+    pub fn release(&mut self, ch: ChannelId) {
+        if let Some(slot) = self.slot_mut(ch) {
+            slot.safe_hold = false;
+        }
+    }
 }
 
 impl<P: PhysicalProfile> Default for Monitor<P> {
@@ -304,5 +320,23 @@ mod tests {
         assert_eq!(m.decide(pwm(0, 1, 10), T0), Decision::Allow(10));
         // now_ns moves backward: elapsed saturates to 0 (< window) -> slew clamp applies
         assert_eq!(m.decide(pwm(0, 1, 80), T0 - 1), Decision::Clamp(30));
+    }
+
+    #[test]
+    fn safe_hold_forces_safe_then_releases() {
+        let mut m = Monitor::<EmbeddedProfile>::new();
+        let ch = ChannelId { kind: ActuationKind::PwmDuty, chip: 0, channel: 1 };
+        m.hold_safe(ch);
+        assert_eq!(m.decide(pwm(0, 1, 80), T0), Decision::Safe(0));
+        m.release(ch);
+        // a full window later so the post-release command is not slew-limited
+        assert_eq!(m.decide(pwm(0, 1, 50), T0 + 2_000_000), Decision::Allow(50));
+    }
+
+    #[test]
+    fn hold_safe_on_unknown_channel_is_a_noop() {
+        let mut m = Monitor::<EmbeddedProfile>::new();
+        // must not panic on an invalid channel
+        m.hold_safe(ChannelId { kind: ActuationKind::PwmDuty, chip: 9, channel: 9 });
     }
 }
