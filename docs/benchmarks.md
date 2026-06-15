@@ -590,6 +590,60 @@ higher-instruction-limit load path.
 frequency is a single nominal control-loop rate (1 kHz) for every hook;
 per-hook-type and caller-declared frequencies are future work.
 
+# 13. ARM-A Actuation Reference Monitor (v0.3 Spec 1)
+
+## Status
+
+Merged in branch `v0.3-spec1-real-io-arm-a`. Every PWM-duty and GPIO-level
+actuation proposed by a BPF program is clamped to a per-profile safety
+envelope **before** reaching RP1 MMIO:
+
+| Profile | Constraint |
+|---------|-----------|
+| embedded (`embedded-profile`) | Duty ceiling 90%, max slew 20%/1 ms, safe-hold at 0% |
+| cloud | Envelope consts are no-ops (unconstrained) |
+
+GPIO dispatch is per-(chip, pin, edge) via `GpioRouteTable`; each
+(chip, pin, edge) triple is routed to its own registered BPF program set,
+so distinct edge directions fire independently and cross-firing between pins
+is impossible.
+
+## Host-proven safety ("0 escapes" invariant)
+
+The invariant that **no out-of-envelope actuation can reach hardware** is
+established by a combination of:
+
+* **12 actuation unit tests** — clamp, slew, safe-hold, unknown-channel
+  rejection, backward-time, and GPIO envelope; all in
+  `kernel/crates/kernel_bpf/src/actuation/mod.rs`.
+* **proptest (256 cases)** — `tests/actuation_property.rs` generates
+  arbitrary `(PwmRequest, prior_state)` pairs and asserts every `Decision`
+  leaves duty ≤ `ACT_MAX_DUTY_PCT` and slew ≤ `ACT_MAX_SLEW_PCT` within
+  `ACT_SLEW_WINDOW_MS`.
+* **4 GPIO routing tests** — `attach::route::tests` verifies distinct pins
+  do not cross-fire, rising/falling edges attach independently, and route
+  removal drops only the correct programs.
+
+Test command:
+
+```
+cargo test -p kernel_bpf --features embedded-profile
+```
+
+Result (host, 2026-06-15): **327 unit tests + 1 proptest (256 cases) + 75
+integration/semantic/routing tests — all pass; 0 failures.**
+
+## On-device numbers (pending)
+
+Edge→PWM-low actuation latency and ARM-A per-call overhead on Raspberry Pi 5
+are **not yet measured**. These are Task 11 (hardware-gated), deferred to
+on-device bringup. Numbers will be added here when captured; do not infer
+or extrapolate from the §11 timer-interrupt latency (203–351 ns) — the
+actuation path traverses different code (monitor → RP1 MMIO) and has not
+been instrumented.
+
+**Last Updated:** 2026-06-15
+
 # References
 
 * Axiom Proposal (`docs/proposal.md`)
