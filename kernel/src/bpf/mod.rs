@@ -14,6 +14,7 @@ use kernel_bpf::loader::BpfLoader;
 use kernel_bpf::maps::{ArrayMap, BpfMap, HashMap as BpfHashMap, RingBufMap, TimeSeriesMap};
 use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
 use kernel_bpf::signing::{SignatureVerifier, TrustedKey};
+use kernel_bpf::attach::{GpioEdge, GpioRouteTable};
 use kernel_bpf::verifier::admission::AdmissionLedger;
 use kernel_bpf::verifier::{LoadCaller, Verifier, VerifyConfig};
 
@@ -84,6 +85,10 @@ pub struct BpfManager {
     /// `Σ WCETᵢ·freqᵢ` of all admitted programs would exceed the profile's CPU
     /// utilization budget (#43).
     admission: AdmissionLedger,
+    /// Per-(chip,pin,edge) GPIO attachment routing. The type-keyed `attachments`
+    /// map drives non-GPIO hooks; GPIO dispatch uses this so each program runs
+    /// only for its own pin and edge.
+    gpio_routes: GpioRouteTable,
 }
 
 /// Default fire frequency assumed for a hook, in Hz. Every hook is assumed to
@@ -120,6 +125,7 @@ impl BpfManager {
                 <ActiveProfile as PhysicalProfile>::UTILIZATION_BUDGET_NS_PER_S,
                 <ActiveProfile as PhysicalProfile>::CYCLE_UNIT_NS,
             ),
+            gpio_routes: GpioRouteTable::new(),
         }
     }
 
@@ -310,6 +316,7 @@ impl BpfManager {
                 list.remove(pos);
                 // Return this attachment's utilization to the budget.
                 self.admission.release(attach_type, prog_id);
+                self.gpio_routes.remove(prog_id);
                 return Ok(());
             }
         }
@@ -406,6 +413,30 @@ impl BpfManager {
                 if let Some(program) = self.programs.get(prog_id as usize) {
                     result.push((prog_id, program.clone()));
                 }
+            }
+        }
+        result
+    }
+
+    /// Record a GPIO attachment route. Called from `BPF_PROG_ATTACH` after the
+    /// pin IRQ is armed.
+    pub fn register_gpio_route(&mut self, chip: u8, pin: u8, edge: GpioEdge, prog_id: u32) {
+        self.gpio_routes.insert(chip, pin, edge, prog_id);
+    }
+
+    /// Cloned programs attached to a fired GPIO `(chip, pin, edge)`. Mirrors
+    /// `get_hook_programs` (clone + release lock before executing so helpers can
+    /// re-acquire the manager lock).
+    pub fn gpio_programs(
+        &self,
+        chip: u8,
+        pin: u8,
+        fired: GpioEdge,
+    ) -> Vec<(u32, BpfProgram<ActiveProfile>)> {
+        let mut result = Vec::new();
+        for prog_id in self.gpio_routes.programs_for(chip, pin, fired) {
+            if let Some(program) = self.programs.get(prog_id as usize) {
+                result.push((prog_id, program.clone()));
             }
         }
         result

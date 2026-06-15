@@ -281,7 +281,8 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
             let prog_id = attr.attach_prog_fd;
 
             if let Some(manager) = BPF_MANAGER.get() {
-                match manager.lock().attach(attach_type, prog_id) {
+                let attach_result = manager.lock().attach(attach_type, prog_id);
+                match attach_result {
                     Ok(_) => {
                         log::info!("sys_bpf: attached prog {} to type {}", prog_id, attach_type);
 
@@ -324,6 +325,12 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
                                     pin,
                                     rising,
                                     falling
+                                );
+                                manager.lock().register_gpio_route(
+                                    0,
+                                    pin,
+                                    kernel_bpf::attach::GpioEdge::from_flags(edge_flags),
+                                    prog_id,
                                 );
                             } else {
                                 log::warn!("sys_bpf: invalid GPIO pin {} (must be 0-27)", pin);
