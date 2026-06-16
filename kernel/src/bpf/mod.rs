@@ -7,6 +7,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use kernel_abi::{BpfObjectInfo, BPF_OBJECT_KIND_MAP};
+use kernel_bpf::actuation::EnvelopeMap;
 use kernel_bpf::attach::{GpioEdge, GpioRouteTable};
 use kernel_bpf::bytecode::insn::BpfInsn;
 use kernel_bpf::bytecode::program::{BpfProgType, BpfProgram};
@@ -16,7 +17,7 @@ use kernel_bpf::maps::{ArrayMap, BpfMap, HashMap as BpfHashMap, RingBufMap, Time
 use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
 use kernel_bpf::signing::{SignatureVerifier, TrustedKey};
 use kernel_bpf::verifier::admission::AdmissionLedger;
-use kernel_bpf::verifier::{LoadCaller, Verifier, VerifyConfig};
+use kernel_bpf::verifier::{LoadCaller, MapPerm, Verifier, VerifyConfig};
 
 /// Context size used for load-time verification (#122).
 ///
@@ -66,10 +67,14 @@ pub const ATTACH_TYPE_SYS_ENTER: u32 = ATTACH_TYPE_SYSCALL;
 pub const ATTACH_TYPE_SYS_EXIT: u32 = 6;
 pub const ATTACH_TYPE_SCHED_SWITCH: u32 = 7;
 
+pub const ENVELOPE_MAP_ID: u32 = 0;
+pub const RESERVED_MAP_COUNT: u32 = 1;
+
 pub struct BpfManager {
     programs: Vec<BpfProgram<ActiveProfile>>,
     attachments: BTreeMap<u32, Vec<u32>>,
     maps: Vec<Box<dyn BpfMap<ActiveProfile>>>,
+    map_perms: Vec<MapPerm>,
     pinned_maps: BTreeMap<String, u32>,
     /// Trust store for program provenance (#20). A program is authentic if it
     /// is an RBPF [`SignedProgram`] signed by a key in here.
@@ -113,10 +118,11 @@ impl Default for BpfManager {
 
 impl BpfManager {
     pub fn new() -> Self {
-        Self {
+        let mut manager = Self {
             programs: Vec::new(),
             attachments: BTreeMap::new(),
             maps: Vec::new(),
+            map_perms: Vec::new(),
             pinned_maps: BTreeMap::new(),
             signature_verifier: SignatureVerifier::new(),
             allow_unsigned: true,
@@ -126,7 +132,15 @@ impl BpfManager {
                 <ActiveProfile as PhysicalProfile>::CYCLE_UNIT_NS,
             ),
             gpio_routes: GpioRouteTable::new(),
-        }
+        };
+        let envelope = EnvelopeMap::<ActiveProfile>::init_from_profile();
+        crate::actuation::ACTUATION_MONITOR
+            .lock()
+            .init_envelope_cache(&envelope);
+        let envelope_id = manager.register_map(Box::new(envelope), MapPerm::ReadOnly);
+        debug_assert_eq!(envelope_id, ENVELOPE_MAP_ID);
+        debug_assert_eq!(manager.maps.len() as u32, RESERVED_MAP_COUNT);
+        manager
     }
 
     /// Register a trusted signing key (the kernel-held root of trust). Keys come
@@ -144,21 +158,38 @@ impl BpfManager {
         self.allow_unsigned = allow;
     }
 
+    fn register_map(&mut self, map: Box<dyn BpfMap<ActiveProfile>>, perm: MapPerm) -> u32 {
+        debug_assert_eq!(self.maps.len(), self.map_perms.len());
+        let id = self.maps.len() as u32;
+        self.maps.push(map);
+        self.map_perms.push(perm);
+        id
+    }
+
     /// Per-map value sizes indexed by map id (#123). A map's id is its index in
     /// `self.maps` (see [`create_map`](Self::create_map)), so this Vec, indexed
     /// by the constant map id a `bpf_map_lookup_elem` loads, gives that map's
     /// exact value size for the verifier to bound dereferences with.
     fn map_value_sizes(&self) -> Vec<u32> {
+        debug_assert_eq!(self.maps.len(), self.map_perms.len());
         self.maps.iter().map(|m| m.def().value_size).collect()
+    }
+
+    /// Per-map write permissions indexed by map id. This is the single source
+    /// used by both load-time verification and runtime mutation guards.
+    pub fn map_perms(&self) -> Vec<MapPerm> {
+        debug_assert_eq!(self.maps.len(), self.map_perms.len());
+        self.map_perms.clone()
     }
 
     /// Build the verifier config for a load. Borrows `sizes` (built by
     /// [`map_value_sizes`](Self::map_value_sizes)) for the duration of the call.
-    fn verify_config<'a>(&self, sizes: &'a [u32]) -> VerifyConfig<'a> {
+    fn verify_config<'a>(&self, sizes: &'a [u32], perms: &'a [MapPerm]) -> VerifyConfig<'a> {
         VerifyConfig {
             ctx_size: VERIFY_CTX_SIZE,
             map_value_size: VERIFY_MAP_VALUE_SIZE,
             map_value_sizes: sizes,
+            map_perms: perms,
             // No process-credential system yet: every load comes from the
             // privileged init context. TODO: derive Trusted from signature
             // authentication (#20) and Unprivileged from caller UID (#67).
@@ -185,6 +216,7 @@ impl BpfManager {
             // Verify before accepting: rejects unsafe bytecode and computes the
             // real stack usage (no longer the hardcoded 0). #48.
             let map_value_sizes = self.map_value_sizes();
+            let map_perms = self.map_perms();
             #[cfg(feature = "verifier-cost")]
             let insn_count = loaded_prog.insns().len();
             #[cfg(feature = "verifier-cost")]
@@ -192,7 +224,7 @@ impl BpfManager {
             let (bpf_prog, stats) = Verifier::<ActiveProfile>::verify_with_stats(
                 loaded_prog.prog_type(),
                 loaded_prog.insns(),
-                self.verify_config(&map_value_sizes),
+                self.verify_config(&map_value_sizes, &map_perms),
             )
             .map_err(|e| {
                 log::error!("BpfManager: ELF program rejected by verifier: {}", e);
@@ -233,6 +265,7 @@ impl BpfManager {
         // load-bearing — unsafe bytecode is rejected and the real stack usage is
         // computed rather than trusting a hardcoded 0. #48.
         let map_value_sizes = self.map_value_sizes();
+        let map_perms = self.map_perms();
         #[cfg(feature = "verifier-cost")]
         let insn_count = insns.len();
         #[cfg(feature = "verifier-cost")]
@@ -240,7 +273,7 @@ impl BpfManager {
         let (bpf_prog, stats) = Verifier::<ActiveProfile>::verify_with_stats(
             BpfProgType::Unspec,
             &insns,
-            self.verify_config(&map_value_sizes),
+            self.verify_config(&map_value_sizes, &map_perms),
         )
         .map_err(|e| {
             log::error!("BpfManager: raw program rejected by verifier: {}", e);
@@ -536,8 +569,7 @@ impl BpfManager {
             }
         };
 
-        let id = self.maps.len() as u32;
-        self.maps.push(map);
+        let id = self.register_map(map, MapPerm::ReadWrite);
         log::info!(
             "Created map id={} type={} key_size={} value_size={} max_entries={}",
             id,
@@ -564,6 +596,18 @@ impl BpfManager {
         unsafe { self.maps.get(map_id as usize)?.lookup_ptr(key) }
     }
 
+    fn ensure_map_writable(&self, map_id: u32) -> Result<(), BpfError> {
+        match self
+            .map_perms
+            .get(map_id as usize)
+            .copied()
+            .ok_or(BpfError::NotLoaded)?
+        {
+            MapPerm::ReadWrite => Ok(()),
+            MapPerm::ReadOnly => Err(BpfError::ReadOnlyMap),
+        }
+    }
+
     pub fn map_update(
         &self,
         map_id: u32,
@@ -571,12 +615,14 @@ impl BpfManager {
         value: &[u8],
         flags: u64,
     ) -> Result<(), BpfError> {
+        self.ensure_map_writable(map_id)?;
         let map = self.maps.get(map_id as usize).ok_or(BpfError::NotLoaded)?;
         map.update(key, value, flags)
             .map_err(|_| BpfError::OutOfMemory)
     }
 
     pub fn map_delete(&self, map_id: u32, key: &[u8]) -> Result<(), BpfError> {
+        self.ensure_map_writable(map_id)?;
         let map = self.maps.get(map_id as usize).ok_or(BpfError::NotLoaded)?;
         map.delete(key).map_err(|_| BpfError::NotLoaded)
     }
@@ -625,10 +671,73 @@ impl BpfManager {
     /// This is used by the bpf_ringbuf_output helper. For ringbuf maps,
     /// the key is ignored and value is the event data.
     pub fn ringbuf_output(&self, map_id: u32, data: &[u8], flags: u64) -> Result<(), BpfError> {
+        self.ensure_map_writable(map_id)?;
         let map = self.maps.get(map_id as usize).ok_or(BpfError::NotLoaded)?;
 
         // Ring buffer maps use update() with empty key to output data
         map.update(&[], data, flags)
             .map_err(|_| BpfError::OutOfMemory)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use kernel_bpf::maps::MapType;
+    use kernel_bpf::verifier::MapPerm;
+
+    use super::*;
+
+    #[test]
+    fn reserves_envelope_map_id_before_user_maps() {
+        let mut manager = BpfManager::new();
+
+        assert_eq!(ENVELOPE_MAP_ID, 0);
+        assert_eq!(
+            manager.map_perms()[ENVELOPE_MAP_ID as usize],
+            MapPerm::ReadOnly
+        );
+        assert!(manager.get_map_def(ENVELOPE_MAP_ID).is_some());
+
+        let user_map = manager
+            .create_map(MapType::Array as u32, 4, 8, 1)
+            .expect("create user map");
+
+        assert_eq!(user_map, RESERVED_MAP_COUNT);
+        assert_ne!(user_map, ENVELOPE_MAP_ID);
+    }
+
+    #[test]
+    fn map_value_sizes_and_perms_align_across_full_id_space() {
+        let mut manager = BpfManager::new();
+        let _ = manager
+            .create_map(MapType::Array as u32, 4, 8, 1)
+            .expect("create user map");
+
+        let sizes = manager.map_value_sizes();
+        let perms = manager.map_perms();
+
+        assert_eq!(sizes.len(), perms.len());
+        assert_eq!(perms[ENVELOPE_MAP_ID as usize], MapPerm::ReadOnly);
+        assert_eq!(perms[RESERVED_MAP_COUNT as usize], MapPerm::ReadWrite);
+    }
+
+    #[test]
+    fn runtime_guard_rejects_read_only_envelope_writes() {
+        let manager = BpfManager::new();
+        let key = 0u32.to_ne_bytes();
+        let value = [0u8; 16];
+
+        assert_eq!(
+            manager.map_update(ENVELOPE_MAP_ID, &key, &value, 0),
+            Err(BpfError::ReadOnlyMap)
+        );
+        assert_eq!(
+            manager.map_delete(ENVELOPE_MAP_ID, &key),
+            Err(BpfError::ReadOnlyMap)
+        );
+        assert_eq!(
+            manager.ringbuf_output(ENVELOPE_MAP_ID, &value, 0),
+            Err(BpfError::ReadOnlyMap)
+        );
     }
 }

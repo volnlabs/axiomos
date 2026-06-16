@@ -13,11 +13,11 @@ use super::LoadCaller;
 use super::alu::{compute_alu_result_width, scalar_from_imm};
 use super::cfg::ControlFlowGraph;
 use super::error::{VerifyError, VerifyResult};
-use super::helpers::{HelperValidation, ReturnType, validate_helper_call};
+use super::helpers::{HelperId, HelperValidation, ReturnType, validate_helper_call};
 use super::liveness::{Liveness, RegSet};
 use super::pruner::{PruneDecision, StatePruner};
 use super::refine::refine_scalar;
-use super::state::{RegState, RegType, ScalarValue, StackSlot, VerifierState};
+use super::state::{MapWritability, RegState, RegType, ScalarValue, StackSlot, VerifierState};
 use crate::bytecode::insn::BpfInsn;
 use crate::bytecode::opcode::{AluOp, OpcodeClass};
 use crate::bytecode::program::{BpfProgType, BpfProgram};
@@ -30,6 +30,12 @@ use crate::profile::{ActiveProfile, PhysicalProfile};
 /// size of a map value returned by `bpf_map_lookup_elem`. Both default to 0,
 /// under which the verifier **rejects** ctx/map dereferences — it will not
 /// assume a region size it was not given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapPerm {
+    ReadOnly,
+    ReadWrite,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct VerifyConfig<'a> {
     /// Bytes accessible through the context pointer (R1) at program entry.
@@ -45,6 +51,9 @@ pub struct VerifyConfig<'a> {
     /// smallest entry (sound: never over-permits any reachable map). Empty means
     /// the caller supplied no per-map info and `map_value_size` is used.
     pub map_value_sizes: &'a [u32],
+    /// Per-map write permissions, indexed by map id. Empty means legacy all-RW.
+    /// When non-empty, writes require a known entry whose permission is RW.
+    pub map_perms: &'a [MapPerm],
     /// Privilege tier of the loading caller (#88). Gates the unprivileged-only
     /// restrictions. Defaults (via `LoadCaller::default()`) to `Privileged`, so
     /// `verify()` / `VerifyConfig::default()` and existing callers see no new
@@ -71,6 +80,52 @@ fn map_lookup_value_size(map_id_reg: &RegState, config: &VerifyConfig) -> Result
             .ok_or(id),
         // Dynamic map id: bound to the smallest reachable map value (sound).
         None => Ok(table.iter().copied().min().unwrap_or(0)),
+    }
+}
+
+fn map_lookup_writability(map_id_reg: &RegState, config: &VerifyConfig) -> MapWritability {
+    let known_id = map_id_reg
+        .scalar_value
+        .and_then(|s| s.value)
+        .and_then(|id| u32::try_from(id).ok());
+
+    if config.map_perms.is_empty() {
+        return MapWritability::ReadWrite(known_id);
+    }
+
+    let Some(id) = known_id else {
+        return MapWritability::Unprovable;
+    };
+    let Some(perm) = usize::try_from(id)
+        .ok()
+        .and_then(|idx| config.map_perms.get(idx))
+    else {
+        return MapWritability::Unprovable;
+    };
+
+    match perm {
+        MapPerm::ReadOnly => MapWritability::ReadOnly(id),
+        MapPerm::ReadWrite => MapWritability::ReadWrite(Some(id)),
+    }
+}
+
+fn check_map_write_writability(writability: MapWritability, insn_idx: usize) -> VerifyResult<()> {
+    match writability {
+        MapWritability::ReadWrite(_) => Ok(()),
+        MapWritability::ReadOnly(map_id) => {
+            Err(VerifyError::WriteToReadOnlyMap { insn_idx, map_id })
+        }
+        MapWritability::Unprovable => Err(VerifyError::WriteMapNotProvablyWritable { insn_idx }),
+    }
+}
+
+fn mutating_helper_map_arg(helper: HelperId) -> Option<Register> {
+    match helper {
+        HelperId::MapUpdateElem
+        | HelperId::MapDeleteElem
+        | HelperId::RingbufOutput
+        | HelperId::TimeseriesPush => Some(Register::R1),
+        _ => None,
     }
 }
 
@@ -789,6 +844,10 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                         required: sig.min_tier,
                     });
                 }
+                if let Some(map_arg) = mutating_helper_map_arg(sig.id) {
+                    let writability = map_lookup_writability(state.reg(map_arg), &self.config);
+                    check_map_write_writability(writability, idx)?;
+                }
                 // Determine R0's region size *before* clobbering caller-saved
                 // registers, since a map lookup's value size depends on the map
                 // id still held in R1 (#123).
@@ -799,7 +858,9 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                                 insn_idx: idx,
                                 map_id,
                             })?;
-                        RegState::map_value(size, true)
+                        let writability =
+                            map_lookup_writability(state.reg(Register::R1), &self.config);
+                        RegState::map_value_with_writability(size, true, writability)
                     }
                     // Non-map allocation returns (e.g. ringbuf_reserve) and
                     // scalar/void returns keep the single configured size.
@@ -965,6 +1026,9 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                         reason: "cannot write to this pointer type",
                     });
                 }
+                if dst_state.reg_type == RegType::PtrToMapValue {
+                    check_map_write_writability(dst_state.map_writability, idx)?;
+                }
 
                 // Update stack state if writing to stack; otherwise bounds-
                 // check the write against the pointer's tracked region (map
@@ -1010,6 +1074,9 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                         insn_idx: idx,
                         reason: "cannot write to this pointer type",
                     });
+                }
+                if dst_state.reg_type == RegType::PtrToMapValue {
+                    check_map_write_writability(dst_state.map_writability, idx)?;
                 }
 
                 // Bounds-check the immediate store, same as Stx.
@@ -1268,7 +1335,7 @@ fn check_ranged_deref(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::verifier::{HelperId, LoadCaller};
+    use crate::verifier::{HelperId, LoadCaller, MapPerm};
 
     #[test]
     fn verify_config_default_caller_is_privileged() {
@@ -1618,6 +1685,262 @@ mod tests {
         // A register with no tracked scalar value is also dynamic.
         let r1_none = RegState::scalar(None);
         assert_eq!(map_lookup_value_size(&r1_none, &cfg), Ok(8));
+    }
+
+    fn lookup_then_store_prog(map_id_insn: BpfInsn) -> alloc::vec::Vec<BpfInsn> {
+        alloc::vec![
+            BpfInsn::mov64_imm(1, 0),
+            BpfInsn::new(0x7b, 10, 1, -8, 0), // *(u64 *)(r10 - 8) = r1 (key)
+            map_id_insn,
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::add64_imm(2, -8),
+            BpfInsn::call(HelperId::MapLookupElem as i32),
+            BpfInsn::jeq_imm(0, 0, 2), // if lookup returned null, skip store
+            BpfInsn::new(0x7a, 0, 0, 0, 1), // *(u64 *)(r0 + 0) = 1
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ]
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn store_through_read_only_map_lookup_is_rejected() {
+        let cfg = VerifyConfig {
+            map_value_sizes: &[8],
+            map_perms: &[MapPerm::ReadOnly],
+            ..VerifyConfig::default()
+        };
+        let insns = lookup_then_store_prog(BpfInsn::mov64_imm(1, 0));
+
+        let result =
+            Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, cfg);
+
+        assert!(
+            matches!(
+                result,
+                Err(VerifyError::WriteToReadOnlyMap {
+                    insn_idx: 7,
+                    map_id: 0
+                })
+            ),
+            "store through RO map lookup must be rejected, got {result:?}"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn store_through_read_write_map_lookup_is_accepted() {
+        let cfg = VerifyConfig {
+            map_value_sizes: &[8],
+            map_perms: &[MapPerm::ReadWrite],
+            ..VerifyConfig::default()
+        };
+        let insns = lookup_then_store_prog(BpfInsn::mov64_imm(1, 0));
+
+        Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, cfg)
+            .expect("store through a proven-RW map lookup must verify");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn store_through_dynamic_map_lookup_is_rejected_when_perms_are_authoritative() {
+        let cfg = VerifyConfig {
+            ctx_size: core::mem::size_of::<crate::execution::BpfContext>() as u32,
+            map_value_sizes: &[8, 8],
+            map_perms: &[MapPerm::ReadWrite, MapPerm::ReadWrite],
+            ..VerifyConfig::default()
+        };
+        let insns = alloc::vec![
+            BpfInsn::mov64_imm(2, 0),
+            BpfInsn::new(0x7b, 10, 2, -8, 0), // *(u64 *)(r10 - 8) = r2 (key)
+            BpfInsn::new(0x79, 1, 1, 0, 0),   // r1 = *(u64 *)(ctx + 0), dynamic map id
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::add64_imm(2, -8),
+            BpfInsn::call(HelperId::MapLookupElem as i32),
+            BpfInsn::jeq_imm(0, 0, 2),
+            BpfInsn::new(0x7a, 0, 0, 0, 1),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ];
+
+        let result =
+            Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, cfg);
+
+        assert!(
+            matches!(
+                result,
+                Err(VerifyError::WriteMapNotProvablyWritable { insn_idx: 7 })
+            ),
+            "dynamic map-id store must be rejected under authoritative perms, got {result:?}"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn read_through_read_only_and_dynamic_map_lookup_is_accepted() {
+        let cfg = VerifyConfig {
+            ctx_size: core::mem::size_of::<crate::execution::BpfContext>() as u32,
+            map_value_sizes: &[8, 8],
+            map_perms: &[MapPerm::ReadOnly, MapPerm::ReadWrite],
+            ..VerifyConfig::default()
+        };
+        let insns = alloc::vec![
+            BpfInsn::mov64_imm(2, 0),
+            BpfInsn::new(0x7b, 10, 2, -8, 0),
+            BpfInsn::new(0x79, 1, 1, 0, 0), // dynamic map id from ctx
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::add64_imm(2, -8),
+            BpfInsn::call(HelperId::MapLookupElem as i32),
+            BpfInsn::jeq_imm(0, 0, 1),
+            BpfInsn::new(0x79, 0, 0, 0, 0), // r0 = *(u64 *)(r0 + 0)
+            BpfInsn::exit(),
+        ];
+
+        Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, cfg)
+            .expect("RO/dynamic map lookups remain readable when bounded by map_value_sizes");
+    }
+
+    fn mutating_helper_prog(helper: HelperId, map_id_insn: BpfInsn) -> alloc::vec::Vec<BpfInsn> {
+        let mut insns = alloc::vec![
+            BpfInsn::mov64_imm(5, 0),
+            BpfInsn::new(0x7b, 10, 5, -8, 0),  // key/timestamp slot
+            BpfInsn::new(0x7b, 10, 5, -16, 0), // value/data slot
+            map_id_insn,
+        ];
+
+        match helper {
+            HelperId::MapUpdateElem => {
+                insns.extend_from_slice(&[
+                    BpfInsn::mov64_reg(2, 10),
+                    BpfInsn::add64_imm(2, -8),
+                    BpfInsn::mov64_reg(3, 10),
+                    BpfInsn::add64_imm(3, -16),
+                    BpfInsn::mov64_imm(4, 0),
+                    BpfInsn::call(helper as i32),
+                ]);
+            }
+            HelperId::MapDeleteElem => {
+                insns.extend_from_slice(&[
+                    BpfInsn::mov64_reg(2, 10),
+                    BpfInsn::add64_imm(2, -8),
+                    BpfInsn::call(helper as i32),
+                ]);
+            }
+            HelperId::RingbufOutput => {
+                insns.extend_from_slice(&[
+                    BpfInsn::mov64_reg(2, 10),
+                    BpfInsn::add64_imm(2, -16),
+                    BpfInsn::mov64_imm(3, 8),
+                    BpfInsn::mov64_imm(4, 0),
+                    BpfInsn::call(helper as i32),
+                ]);
+            }
+            HelperId::TimeseriesPush => {
+                insns.extend_from_slice(&[
+                    BpfInsn::mov64_reg(2, 10),
+                    BpfInsn::add64_imm(2, -8),
+                    BpfInsn::mov64_reg(3, 10),
+                    BpfInsn::add64_imm(3, -16),
+                    BpfInsn::call(helper as i32),
+                ]);
+            }
+            _ => unreachable!("test only builds mutating map helpers"),
+        }
+
+        insns.extend_from_slice(&[BpfInsn::mov64_imm(0, 0), BpfInsn::exit()]);
+        insns
+    }
+
+    #[test]
+    fn map_mutating_helper_table_covers_current_mutating_dispatch() {
+        for helper in [
+            HelperId::MapUpdateElem,
+            HelperId::MapDeleteElem,
+            HelperId::RingbufOutput,
+            HelperId::TimeseriesPush,
+        ] {
+            assert_eq!(mutating_helper_map_arg(helper), Some(Register::R1));
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn mutating_helpers_reject_read_only_map_ids() {
+        let cfg = VerifyConfig {
+            map_perms: &[MapPerm::ReadOnly],
+            ..VerifyConfig::default()
+        };
+
+        for helper in [
+            HelperId::MapUpdateElem,
+            HelperId::MapDeleteElem,
+            HelperId::RingbufOutput,
+            HelperId::TimeseriesPush,
+        ] {
+            let insns = mutating_helper_prog(helper, BpfInsn::mov64_imm(1, 0));
+            let result = Verifier::<ActiveProfile>::verify_with_config(
+                BpfProgType::SocketFilter,
+                &insns,
+                cfg,
+            );
+
+            assert!(
+                matches!(
+                    result,
+                    Err(VerifyError::WriteToReadOnlyMap { map_id: 0, .. })
+                ),
+                "{helper:?} to RO map must be rejected, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn mutating_helpers_accept_read_write_map_ids() {
+        let cfg = VerifyConfig {
+            map_perms: &[MapPerm::ReadWrite],
+            ..VerifyConfig::default()
+        };
+
+        for helper in [
+            HelperId::MapUpdateElem,
+            HelperId::MapDeleteElem,
+            HelperId::RingbufOutput,
+            HelperId::TimeseriesPush,
+        ] {
+            let insns = mutating_helper_prog(helper, BpfInsn::mov64_imm(1, 0));
+            Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, cfg)
+                .unwrap_or_else(|e| panic!("{helper:?} to RW map must verify: {e}"));
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn mutating_helpers_reject_dynamic_map_ids_when_perms_are_authoritative() {
+        let cfg = VerifyConfig {
+            ctx_size: core::mem::size_of::<crate::execution::BpfContext>() as u32,
+            map_perms: &[MapPerm::ReadWrite, MapPerm::ReadWrite],
+            ..VerifyConfig::default()
+        };
+
+        for helper in [
+            HelperId::MapUpdateElem,
+            HelperId::MapDeleteElem,
+            HelperId::RingbufOutput,
+            HelperId::TimeseriesPush,
+        ] {
+            let insns = mutating_helper_prog(helper, BpfInsn::new(0x79, 1, 1, 0, 0));
+            let result = Verifier::<ActiveProfile>::verify_with_config(
+                BpfProgType::SocketFilter,
+                &insns,
+                cfg,
+            );
+
+            assert!(
+                matches!(result, Err(VerifyError::WriteMapNotProvablyWritable { .. })),
+                "{helper:?} with dynamic map id must be rejected, got {result:?}"
+            );
+        }
     }
 
     /// Acceptance for the ALU32 width fix.

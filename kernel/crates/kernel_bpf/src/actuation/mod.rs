@@ -6,8 +6,11 @@
 //! "0 escapes" safety invariant is proven by host tests; the kernel binary
 //! crate maps a `Decision` onto RP1 MMIO (see `kernel/src/actuation.rs`).
 
+use alloc::vec::Vec;
+use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use crate::maps::{BpfMap, MapDef, MapError, MapResult, MapType};
 use crate::profile::PhysicalProfile;
 
 /// What kind of actuator a request targets. Determines the safe state.
@@ -71,7 +74,7 @@ impl Envelope {
     /// Build the Spec-1 envelope for a channel kind. `PwmDuty` reads the profile
     /// constants; `GpioLevel` is the fixed `{0,1,1,0}` envelope (slew is not
     /// meaningful on a binary line).
-    pub fn from_profile<P: PhysicalProfile>(kind: ActuationKind) -> Self {
+    pub const fn from_profile<P: PhysicalProfile>(kind: ActuationKind) -> Self {
         match kind {
             ActuationKind::PwmDuty => Envelope {
                 min: 0,
@@ -85,6 +88,48 @@ impl Envelope {
                 max_step: 1,
                 window_ns: 0,
             },
+        }
+    }
+}
+
+pub const ENVELOPE_VERSION: u32 = 0;
+
+/// One immutable actuation-envelope entry exposed through the reserved RO map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct EnvelopeEntry {
+    pub min: u32,
+    pub max: u32,
+    pub max_step: u32,
+    pub reserved: u32,
+    pub window_ns: u64,
+}
+
+impl EnvelopeEntry {
+    pub const ZERO: Self = Self {
+        min: 0,
+        max: 0,
+        max_step: 0,
+        reserved: 0,
+        window_ns: 0,
+    };
+
+    pub const fn from_envelope(envelope: Envelope) -> Self {
+        Self {
+            min: envelope.min,
+            max: envelope.max,
+            max_step: envelope.max_step,
+            reserved: 0,
+            window_ns: envelope.window_ns,
+        }
+    }
+
+    pub const fn to_envelope(self) -> Envelope {
+        Envelope {
+            min: self.min,
+            max: self.max,
+            max_step: self.max_step,
+            window_ns: self.window_ns,
         }
     }
 }
@@ -376,14 +421,167 @@ impl ChannelState {
     };
 }
 
-use core::marker::PhantomData;
-
 /// Number of GPIO pins addressable on RP1 bank 0 (mirrors `Rp1Gpio::NUM_PINS`).
 const GPIO_PINS: usize = 28;
 const PWM_CHIPS: usize = 2;
 const PWM_CHANNELS: usize = 2;
 const MAX_KNOWN_CHANNELS: usize = PWM_CHIPS * PWM_CHANNELS + GPIO_PINS;
 pub const AUDIT_CAPACITY: usize = 128;
+
+pub const fn envelope_channel_index(ch: ChannelId) -> Option<usize> {
+    match ch.kind {
+        ActuationKind::PwmDuty => {
+            if ch.chip < PWM_CHIPS as u8 && ch.channel >= 1 && ch.channel <= PWM_CHANNELS as u8 {
+                Some(ch.chip as usize * PWM_CHANNELS + (ch.channel as usize - 1))
+            } else {
+                None
+            }
+        }
+        ActuationKind::GpioLevel => {
+            if ch.chip == 0 && (ch.channel as usize) < GPIO_PINS {
+                Some(PWM_CHIPS * PWM_CHANNELS + ch.channel as usize)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct EnvelopeMapLayout {
+    pub version: u32,
+    pub entries: [EnvelopeEntry; MAX_KNOWN_CHANNELS],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EnvelopeCache {
+    version: u32,
+    entries: [EnvelopeEntry; MAX_KNOWN_CHANNELS],
+}
+
+impl EnvelopeCache {
+    pub const fn from_profile<P: PhysicalProfile>() -> Self {
+        let mut entries = [EnvelopeEntry::ZERO; MAX_KNOWN_CHANNELS];
+        let pwm = EnvelopeEntry::from_envelope(Envelope::from_profile::<P>(ActuationKind::PwmDuty));
+        let gpio =
+            EnvelopeEntry::from_envelope(Envelope::from_profile::<P>(ActuationKind::GpioLevel));
+
+        let mut i = 0;
+        while i < PWM_CHIPS * PWM_CHANNELS {
+            entries[i] = pwm;
+            i += 1;
+        }
+        while i < MAX_KNOWN_CHANNELS {
+            entries[i] = gpio;
+            i += 1;
+        }
+
+        Self {
+            version: ENVELOPE_VERSION,
+            entries,
+        }
+    }
+
+    fn from_map<P: PhysicalProfile>(map: &EnvelopeMap<P>) -> Self {
+        Self {
+            version: map.layout.version,
+            entries: map.layout.entries,
+        }
+    }
+
+    fn get(&self, ch: ChannelId) -> Option<EnvelopeEntry> {
+        self.entries.get(envelope_channel_index(ch)?).copied()
+    }
+}
+
+/// Kernel-owned, read-only actuation envelope map.
+pub struct EnvelopeMap<P: PhysicalProfile> {
+    def: MapDef,
+    layout: EnvelopeMapLayout,
+    _profile: PhantomData<fn() -> P>,
+}
+
+impl<P: PhysicalProfile> EnvelopeMap<P> {
+    pub fn init_from_profile() -> Self {
+        let cache = EnvelopeCache::from_profile::<P>();
+        Self {
+            def: MapDef::new(
+                MapType::Array,
+                4,
+                core::mem::size_of::<EnvelopeEntry>() as u32,
+                MAX_KNOWN_CHANNELS as u32,
+            ),
+            layout: EnvelopeMapLayout {
+                version: cache.version,
+                entries: cache.entries,
+            },
+            _profile: PhantomData,
+        }
+    }
+
+    pub const fn version(&self) -> u32 {
+        self.layout.version
+    }
+
+    pub fn get(&self, ch: ChannelId) -> Option<EnvelopeEntry> {
+        self.layout
+            .entries
+            .get(envelope_channel_index(ch)?)
+            .copied()
+    }
+
+    pub const fn layout(&self) -> &EnvelopeMapLayout {
+        &self.layout
+    }
+
+    fn index_from_key(key: &[u8]) -> Option<usize> {
+        if key.len() != 4 {
+            return None;
+        }
+        let idx = u32::from_ne_bytes(key.try_into().ok()?) as usize;
+        (idx < MAX_KNOWN_CHANNELS).then_some(idx)
+    }
+}
+
+impl<P: PhysicalProfile> BpfMap<P> for EnvelopeMap<P> {
+    fn lookup(&self, key: &[u8]) -> Option<Vec<u8>> {
+        let idx = Self::index_from_key(key)?;
+        let entry = self.layout.entries.get(idx)?;
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                entry as *const EnvelopeEntry as *const u8,
+                core::mem::size_of::<EnvelopeEntry>(),
+            )
+        };
+        Some(bytes.to_vec())
+    }
+
+    fn update(&self, _key: &[u8], _value: &[u8], _flags: u64) -> MapResult<()> {
+        Err(MapError::NotSupported)
+    }
+
+    fn delete(&self, _key: &[u8]) -> MapResult<()> {
+        Err(MapError::NotSupported)
+    }
+
+    fn def(&self) -> &MapDef {
+        &self.def
+    }
+
+    unsafe fn lookup_ptr(&self, key: &[u8]) -> Option<*mut u8> {
+        let idx = Self::index_from_key(key)?;
+        self.layout
+            .entries
+            .get(idx)
+            .map(|entry| entry as *const EnvelopeEntry as *mut u8)
+    }
+
+    #[cfg(feature = "cloud-profile")]
+    fn resize(&mut self, _new_max_entries: u32) -> MapResult<()> {
+        Err(MapError::NotSupported)
+    }
+}
 
 /// The actuation reference monitor. Holds per-channel state for the two PWM
 /// controllers (2 channels each) and the GPIO output pins.
@@ -396,6 +594,7 @@ pub struct Monitor<P: PhysicalProfile> {
     pwm_safe: [[u32; PWM_CHANNELS]; PWM_CHIPS],
     known_gpio: [bool; GPIO_PINS],
     gpio_safe: [u32; GPIO_PINS],
+    envelope_cache: EnvelopeCache,
     latched: bool,
     latch_epoch: u64,
     audit: AuditRing<AUDIT_CAPACITY>,
@@ -412,6 +611,7 @@ impl<P: PhysicalProfile> Monitor<P> {
             pwm_safe: [[0; PWM_CHANNELS]; PWM_CHIPS],
             known_gpio: [false; GPIO_PINS],
             gpio_safe: [0; GPIO_PINS],
+            envelope_cache: EnvelopeCache::from_profile::<P>(),
             latched: false,
             latch_epoch: 0,
             audit: AuditRing::new(),
@@ -422,7 +622,19 @@ impl<P: PhysicalProfile> Monitor<P> {
     /// The envelope for a channel, or `None` if the channel is unknown.
     fn envelope(&self, ch: ChannelId) -> Option<Envelope> {
         if self.slot_index(ch).is_some() {
-            Some(Envelope::from_profile::<P>(ch.kind))
+            self.envelope_cache.get(ch).map(EnvelopeEntry::to_envelope)
+        } else {
+            None
+        }
+    }
+
+    pub fn init_envelope_cache(&mut self, map: &EnvelopeMap<P>) {
+        self.envelope_cache = EnvelopeCache::from_map(map);
+    }
+
+    pub fn cached_envelope(&self, ch: ChannelId) -> Option<Envelope> {
+        if self.slot_index(ch).is_some() {
+            self.envelope_cache.get(ch).map(EnvelopeEntry::to_envelope)
         } else {
             None
         }
@@ -717,6 +929,7 @@ impl<P: PhysicalProfile> Default for Monitor<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::maps::{BpfMap, MapError};
     use crate::profile::{CloudProfile, EmbeddedProfile};
 
     #[test]
@@ -744,6 +957,85 @@ mod tests {
                 max_step: 1,
                 window_ns: 0
             }
+        );
+    }
+
+    fn all_known_channels() -> alloc::vec::Vec<ChannelId> {
+        let mut channels = alloc::vec::Vec::new();
+        for chip in 0..PWM_CHIPS {
+            for channel in 1..=PWM_CHANNELS {
+                channels.push(ChannelId {
+                    kind: ActuationKind::PwmDuty,
+                    chip: chip as u8,
+                    channel: channel as u8,
+                });
+            }
+        }
+        for pin in 0..GPIO_PINS {
+            channels.push(ChannelId {
+                kind: ActuationKind::GpioLevel,
+                chip: 0,
+                channel: pin as u8,
+            });
+        }
+        channels
+    }
+
+    #[test]
+    fn envelope_map_seed_matches_profile_for_all_known_channels() {
+        let map = EnvelopeMap::<EmbeddedProfile>::init_from_profile();
+
+        assert_eq!(map.version(), ENVELOPE_VERSION);
+        assert_eq!(
+            map.def().value_size,
+            core::mem::size_of::<EnvelopeEntry>() as u32
+        );
+        assert_eq!(map.def().max_entries, MAX_KNOWN_CHANNELS as u32);
+        for ch in all_known_channels() {
+            assert_eq!(
+                map.get(ch).map(EnvelopeEntry::to_envelope),
+                Some(Envelope::from_profile::<EmbeddedProfile>(ch.kind)),
+                "seed mismatch for {ch:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn envelope_map_bpf_interface_is_read_only() {
+        let map = EnvelopeMap::<EmbeddedProfile>::init_from_profile();
+        let key = 0u32.to_ne_bytes();
+        let value = [0u8; core::mem::size_of::<EnvelopeEntry>()];
+
+        assert!(map.lookup(&key).is_some());
+        assert_eq!(map.update(&key, &value, 0), Err(MapError::NotSupported));
+        assert_eq!(map.delete(&key), Err(MapError::NotSupported));
+    }
+
+    #[test]
+    fn monitor_cache_matches_envelope_map_and_preserves_decisions() {
+        let map = EnvelopeMap::<EmbeddedProfile>::init_from_profile();
+        let mut cached = Monitor::<EmbeddedProfile>::new();
+        cached.init_envelope_cache(&map);
+
+        for ch in all_known_channels() {
+            let map_envelope = map.get(ch).map(EnvelopeEntry::to_envelope);
+            assert_eq!(cached.cached_envelope(ch), map_envelope);
+        }
+
+        let mut baseline = Monitor::<EmbeddedProfile>::new();
+        assert_eq!(
+            cached.decide(
+                pwm(0, 1, 100),
+                Authority::Learned,
+                AuditSource::LearnedBehavior,
+                T0
+            ),
+            baseline.decide(
+                pwm(0, 1, 100),
+                Authority::Learned,
+                AuditSource::LearnedBehavior,
+                T0
+            )
         );
     }
 

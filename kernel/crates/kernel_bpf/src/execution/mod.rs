@@ -298,6 +298,9 @@ pub enum BpfError {
     /// Attach refused: the hook's WCET admission capacity would be exceeded
     /// (#43). The program is safe but not schedulable on this hook.
     AdmissionRejected,
+
+    /// A map mutation targeted a kernel-marked read-only map.
+    ReadOnlyMap,
 }
 
 impl core::fmt::Display for BpfError {
@@ -314,6 +317,7 @@ impl core::fmt::Display for BpfError {
             Self::VerificationFailed => write!(f, "program failed verification"),
             Self::SignatureRejected => write!(f, "program failed signature authentication"),
             Self::AdmissionRejected => write!(f, "attach exceeds hook WCET admission capacity"),
+            Self::ReadOnlyMap => write!(f, "map is read-only"),
         }
     }
 }

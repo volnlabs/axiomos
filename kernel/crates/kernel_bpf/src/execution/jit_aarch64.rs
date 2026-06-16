@@ -50,6 +50,7 @@ use crate::bytecode::opcode::{AluOp, JmpOp, MemSize, OpcodeClass, SourceType};
 use crate::bytecode::program::BpfProgram;
 use crate::execution::{BpfContext, BpfExecutor, BpfResult};
 use crate::profile::{ActiveProfile, PhysicalProfile};
+use crate::verifier::HelperId;
 
 // External kernel functions provided by the main kernel crate
 #[cfg(not(test))]
@@ -1036,18 +1037,18 @@ impl<P: PhysicalProfile> Arm64JitCompiler<P> {
             fn bpf_pwm_write(pwm_id: u32, channel: u32, duty: u32) -> i64;
         }
 
-        match helper_id {
-            1 => Ok(bpf_ktime_get_ns as *const () as u64),
-            2 => Ok(bpf_trace_printk as *const () as u64),
-            3 => Ok(bpf_map_lookup_elem as *const () as u64),
-            4 => Ok(bpf_map_update_elem as *const () as u64),
-            5 => Ok(bpf_map_delete_elem as *const () as u64),
-            6 => Ok(bpf_ringbuf_output as *const () as u64),
-            1001 => Ok(bpf_timeseries_push as *const () as u64),
+        match HelperId::from_raw(helper_id) {
+            Some(HelperId::KtimeGetNs) => Ok(bpf_ktime_get_ns as *const () as u64),
+            Some(HelperId::TracePrintk) => Ok(bpf_trace_printk as *const () as u64),
+            Some(HelperId::MapLookupElem) => Ok(bpf_map_lookup_elem as *const () as u64),
+            Some(HelperId::MapUpdateElem) => Ok(bpf_map_update_elem as *const () as u64),
+            Some(HelperId::MapDeleteElem) => Ok(bpf_map_delete_elem as *const () as u64),
+            Some(HelperId::RingbufOutput) => Ok(bpf_ringbuf_output as *const () as u64),
+            Some(HelperId::TimeseriesPush) => Ok(bpf_timeseries_push as *const () as u64),
             // Robotics Helpers
-            1003 => Ok(bpf_gpio_write as *const () as u64),
-            1004 => Ok(bpf_gpio_read as *const () as u64),
-            1005 => Ok(bpf_pwm_write as *const () as u64),
+            Some(HelperId::GpioSet) => Ok(bpf_gpio_write as *const () as u64),
+            Some(HelperId::GpioGet) => Ok(bpf_gpio_read as *const () as u64),
+            Some(HelperId::PwmWrite) => Ok(bpf_pwm_write as *const () as u64),
             _ => Err(Arm64JitError::UnsupportedInstruction),
         }
     }
@@ -1255,6 +1256,7 @@ mod tests {
     use super::*;
     use crate::bytecode::insn::BpfInsn;
     use crate::bytecode::program::{BpfProgType, ProgramBuilder};
+    use crate::verifier::HelperId;
 
     #[test]
     fn test_register_mapping() {
@@ -1381,6 +1383,56 @@ mod tests {
         let compiler = Arm64JitCompiler::<ActiveProfile>::new();
         let result = compiler.compile(&program);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn helper_resolver_uses_shared_helper_ids() {
+        unsafe extern "C" {
+            fn bpf_map_lookup_elem(map_id: u32, key: *const u8) -> *mut u8;
+            fn bpf_map_update_elem(
+                map_id: u32,
+                key: *const u8,
+                value: *const u8,
+                flags: u64,
+            ) -> i32;
+            fn bpf_map_delete_elem(map_id: u32, key: *const u8) -> i32;
+            fn bpf_ringbuf_output(map_id: u32, data: *const u8, size: u64, flags: u64) -> i64;
+            fn bpf_timeseries_push(map_id: u32, key: *const u8, value: *const u8) -> i64;
+        }
+
+        let compiler = Arm64JitCompiler::<ActiveProfile>::new();
+        let cases = [
+            (
+                HelperId::MapLookupElem,
+                bpf_map_lookup_elem as *const () as u64,
+            ),
+            (
+                HelperId::MapUpdateElem,
+                bpf_map_update_elem as *const () as u64,
+            ),
+            (
+                HelperId::MapDeleteElem,
+                bpf_map_delete_elem as *const () as u64,
+            ),
+            (
+                HelperId::RingbufOutput,
+                bpf_ringbuf_output as *const () as u64,
+            ),
+            (
+                HelperId::TimeseriesPush,
+                bpf_timeseries_push as *const () as u64,
+            ),
+        ];
+
+        for (helper, expected_addr) in cases {
+            let actual = compiler
+                .get_helper_address(helper as i32)
+                .unwrap_or_else(|_| panic!("{helper:?} must resolve in the AArch64 JIT"));
+            assert_eq!(
+                actual, expected_addr,
+                "{helper:?} resolved to the wrong helper symbol"
+            );
+        }
     }
 
     #[test]

@@ -84,6 +84,33 @@ impl RegType {
     }
 }
 
+/// Verifier proof that a map-value pointer may be written.
+///
+/// `ReadWrite(None)` is the legacy/all-RW case: no `map_perms` table was
+/// supplied, so every reachable map is writable by policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapWritability {
+    ReadWrite(Option<u32>),
+    ReadOnly(u32),
+    Unprovable,
+}
+
+impl MapWritability {
+    #[inline]
+    pub const fn is_read_write(self) -> bool {
+        matches!(self, Self::ReadWrite(_))
+    }
+
+    #[inline]
+    pub const fn map_id(self) -> Option<u32> {
+        match self {
+            Self::ReadWrite(id) => id,
+            Self::ReadOnly(id) => Some(id),
+            Self::Unprovable => None,
+        }
+    }
+}
+
 /// State of a single register during verification.
 #[derive(Debug, Clone)]
 pub struct RegState {
@@ -110,6 +137,9 @@ pub struct RegState {
     /// Dereferencing a maybe-null pointer is rejected until a null check
     /// (`if r != 0`) proves it non-null on that branch.
     pub maybe_null: bool,
+
+    /// For `PtrToMapValue`: proof that stores through this pointer are allowed.
+    pub map_writability: MapWritability,
 }
 
 impl RegState {
@@ -122,6 +152,7 @@ impl RegState {
             map_id: None,
             mem_range: None,
             maybe_null: false,
+            map_writability: MapWritability::Unprovable,
         }
     }
 
@@ -134,6 +165,7 @@ impl RegState {
             map_id: None,
             mem_range: None,
             maybe_null: false,
+            map_writability: MapWritability::Unprovable,
         }
     }
 
@@ -146,6 +178,7 @@ impl RegState {
             map_id: None,
             mem_range: None,
             maybe_null: false,
+            map_writability: MapWritability::Unprovable,
         }
     }
 
@@ -158,6 +191,7 @@ impl RegState {
             map_id: None,
             mem_range: None,
             maybe_null: false,
+            map_writability: MapWritability::Unprovable,
         }
     }
 
@@ -173,6 +207,7 @@ impl RegState {
             map_id: None,
             mem_range: None,
             maybe_null: false,
+            map_writability: MapWritability::Unprovable,
         }
     }
 
@@ -181,13 +216,23 @@ impl RegState {
     /// `maybe_null` reflects that `bpf_map_lookup_elem` can return NULL; the
     /// verifier rejects dereferences until a null check clears it.
     pub fn map_value(size: u32, maybe_null: bool) -> Self {
+        Self::map_value_with_writability(size, maybe_null, MapWritability::ReadWrite(None))
+    }
+
+    /// Create a map-value pointer state with an explicit writability proof.
+    pub fn map_value_with_writability(
+        size: u32,
+        maybe_null: bool,
+        map_writability: MapWritability,
+    ) -> Self {
         Self {
             reg_type: RegType::PtrToMapValue,
             scalar_value: None,
             ptr_offset: 0,
-            map_id: None,
+            map_id: map_writability.map_id(),
             mem_range: Some(size),
             maybe_null,
+            map_writability,
         }
     }
 

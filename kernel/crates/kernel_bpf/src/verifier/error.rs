@@ -134,6 +134,20 @@ pub enum VerifyError {
         map_id: u64,
     },
 
+    /// A program tried to write a map the loader marked read-only.
+    WriteToReadOnlyMap {
+        /// Instruction index
+        insn_idx: usize,
+        /// The read-only map id.
+        map_id: u32,
+    },
+
+    /// A program tried to write through a map id that is not provably RW.
+    WriteMapNotProvablyWritable {
+        /// Instruction index
+        insn_idx: usize,
+    },
+
     /// Wrong number of arguments to helper
     HelperArgCount {
         /// Instruction index
@@ -342,6 +356,20 @@ impl fmt::Display for VerifyError {
                     f,
                     "map lookup references nonexistent map id {} at instruction {}",
                     map_id, insn_idx
+                )
+            }
+            Self::WriteToReadOnlyMap { insn_idx, map_id } => {
+                write!(
+                    f,
+                    "write to read-only map id {} at instruction {}",
+                    map_id, insn_idx
+                )
+            }
+            Self::WriteMapNotProvablyWritable { insn_idx } => {
+                write!(
+                    f,
+                    "map write target is not provably writable at instruction {}",
+                    insn_idx
                 )
             }
             Self::HelperArgCount {
