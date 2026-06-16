@@ -181,6 +181,10 @@ pub enum EstopAction {
     Release,
 }
 
+// `Triggered` carries the fixed-capacity `SafeDriveSet`; the other variants are
+// unit. The type is `Copy` (no_std, no alloc), so boxing the large variant is not
+// an option — the size difference is intentional.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EstopCommandResult {
     Triggered(SafeDriveSet),
@@ -280,6 +284,12 @@ impl AuditSlot {
     }
 }
 
+impl Default for AuditSlot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Single-writer, overwrite-oldest audit ring.
 pub struct AuditRing<const N: usize> {
     buf: [AuditSlot; N],
@@ -365,6 +375,12 @@ impl SafeDrive {
 pub struct SafeDriveSet {
     entries: [SafeDrive; MAX_KNOWN_CHANNELS],
     len: usize,
+}
+
+impl Default for SafeDriveSet {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SafeDriveSet {

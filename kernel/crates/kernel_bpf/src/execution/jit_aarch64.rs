@@ -1385,7 +1385,13 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    // Skipped under Miri: this asserts the JIT resolver returns the *same* symbol
+    // address as the caller's `extern "C"` helper declaration. The helper fns are
+    // defined in the `kernel` crate (not linked into the `kernel_bpf` test binary),
+    // so address identity is a real-linker property; Miri has no linker and cannot
+    // model extern-fn addresses, making the comparison meaningless under Miri.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn helper_resolver_uses_shared_helper_ids() {
         unsafe extern "C" {
             fn bpf_map_lookup_elem(map_id: u32, key: *const u8) -> *mut u8;
