@@ -364,8 +364,17 @@ pub fn handle_interrupt() {
             // edge straight to the kernel-owned e-stop instead of dispatching.
             #[cfg(feature = "bench")]
             if pin == crate::bench::ESTOP_BUTTON_PIN {
+                // Resolve press vs release. With the external pull-up, pressed =
+                // pin low (falling edge). Edge 3 (both edges / bounce) is
+                // ambiguous, so fall back to the current pin level — a real press
+                // must never be dropped just because a release edge was coalesced.
+                let pressed = match edge {
+                    2 => true,            // falling: pressed
+                    1 => false,           // rising: released
+                    _ => !gpio.read(pin), // ambiguous: low level == pressed
+                };
                 gpio.clear_interrupt(pin);
-                crate::bench::handle_estop_button(edge as u32);
+                crate::bench::handle_estop_button(pressed);
                 continue;
             }
 
@@ -413,4 +422,10 @@ pub fn handle_interrupt() {
             }
         }
     }
+
+    // Bench (Task 11): bound the IRQ-entry stamp strictly to this interrupt. If no
+    // actuation consumed it (e.g. an edge on a pin with no attached program), drop
+    // it so it can never produce a bogus M-C line on a later, unrelated actuation.
+    #[cfg(feature = "bench")]
+    crate::bench::take_gpio_irq_entry();
 }

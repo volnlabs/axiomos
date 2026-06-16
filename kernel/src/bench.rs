@@ -72,10 +72,17 @@ pub fn cycles_to_ns(delta: u64) -> u64 {
     secs * 1_000_000_000 + (rem * 1_000_000_000) / f
 }
 
-/// Stamp the counter at GPIO interrupt entry (start point for M-C).
+/// Stamp the counter at GPIO interrupt entry (start point for M-C and M-B).
 #[inline]
 pub fn mark_gpio_irq_entry() {
     GPIO_IRQ_ENTRY.store(now_cycles(), Ordering::Relaxed);
+}
+
+/// Read and clear the GPIO IRQ-entry stamp (0 if none). Ensures the stamp is
+/// consumed exactly once so it can never leak into a later actuation's report.
+#[inline]
+pub fn take_gpio_irq_entry() -> u64 {
+    GPIO_IRQ_ENTRY.swap(0, Ordering::Relaxed)
 }
 
 /// Report monitor decision overhead (M-A). Logged on every guarded actuation.
@@ -91,7 +98,7 @@ pub fn report_monitor_overhead(decide_cycles: u64) {
 /// No-op outside a GPIO IRQ (when no entry stamp is set); consumes the stamp so
 /// a later non-IRQ actuation cannot reuse it.
 pub fn report_edge_to_actuate(kind: &str, channel: u8, value: u32) {
-    let start = GPIO_IRQ_ENTRY.swap(0, Ordering::Relaxed);
+    let start = take_gpio_irq_entry();
     if start == 0 {
         return;
     }
@@ -105,23 +112,23 @@ pub fn report_edge_to_actuate(kind: &str, channel: u8, value: u32) {
     );
 }
 
-/// Handle the physical e-stop button edge (M-B), called from the GPIO IRQ
-/// handler. Falling edge (2) = pressed = operator trigger; rising edge (1) =
-/// released = operator release. Routes through the kernel-owned e-stop, the same
-/// path as `sys_estop`.
-pub fn handle_estop_button(edge: u32) {
+/// Handle the physical e-stop button (M-B), called from the GPIO IRQ handler
+/// with `pressed` already resolved from the edge/level. Pressed => operator
+/// trigger; released => operator release. Routes through the kernel-owned e-stop,
+/// the same path as `sys_estop`. M-B is timed from IRQ entry to "all channels
+/// safe", and the IRQ-entry stamp is consumed here either way so it cannot leak
+/// into a later actuation's M-C line.
+pub fn handle_estop_button(pressed: bool) {
     use kernel_bpf::actuation::EstopAction;
-    match edge {
-        2 => {
-            let detect = now_cycles();
-            crate::actuation::operator_estop(EstopAction::Trigger);
-            let ns = cycles_to_ns(now_cycles().wrapping_sub(detect));
-            log::info!("[bench] M-B estop button->safe latency_ns={}", ns);
+    let entry = take_gpio_irq_entry();
+    if pressed {
+        crate::actuation::operator_estop(EstopAction::Trigger);
+        if entry != 0 {
+            let ns = cycles_to_ns(now_cycles().wrapping_sub(entry));
+            log::info!("[bench] M-B estop irq-entry->safe latency_ns={}", ns);
         }
-        1 => {
-            crate::actuation::operator_estop(EstopAction::Release);
-        }
-        _ => {}
+    } else {
+        crate::actuation::operator_estop(EstopAction::Release);
     }
 }
 
