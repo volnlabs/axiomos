@@ -78,3 +78,9 @@ embedded-rpi5 = ["embedded-profile"]
 # production images. Enable alongside a profile to capture the verifier-cost
 # curve, e.g. `--features embedded-rpi5,verifier-cost`.
 verifier-cost = []
+
+# v0.3 HW bench (Task 11): on-chip latency instrumentation (M-A/M-B/M-C),
+# the physical e-stop button IRQ path, and an auto-loaded GPIO->stop reflex.
+# Off by default — measurement/demo instrumentation, not for production images.
+# Enable alongside a profile, e.g. `--features embedded-rpi5,bench`.
+bench = []

@@ -74,12 +74,18 @@ pub fn guard_pwm_with(
         channel,
     };
     let now = crate::time::get_kernel_time_ns();
+    #[cfg(feature = "bench")]
+    let bench_t0 = crate::bench::now_cycles();
     let (value, code) = ACTUATION_MONITOR
         .lock()
         .decide(ActuationRequest { ch, value: duty }, authority, source, now)
         .apply();
+    #[cfg(feature = "bench")]
+    crate::bench::report_monitor_overhead(crate::bench::now_cycles().wrapping_sub(bench_t0));
 
     apply_pwm_value(chip, channel, value);
+    #[cfg(feature = "bench")]
+    crate::bench::report_edge_to_actuate("pwm", channel, value);
 
     code
 }
@@ -108,6 +114,8 @@ pub fn guard_gpio_with(pin: u8, level: u32, authority: Authority, source: AuditS
         channel: pin,
     };
     let now = crate::time::get_kernel_time_ns();
+    #[cfg(feature = "bench")]
+    let bench_t0 = crate::bench::now_cycles();
     let (value, code) = ACTUATION_MONITOR
         .lock()
         .decide(
@@ -117,8 +125,12 @@ pub fn guard_gpio_with(pin: u8, level: u32, authority: Authority, source: AuditS
             now,
         )
         .apply();
+    #[cfg(feature = "bench")]
+    crate::bench::report_monitor_overhead(crate::bench::now_cycles().wrapping_sub(bench_t0));
 
     apply_gpio_value(pin, value);
+    #[cfg(feature = "bench")]
+    crate::bench::report_edge_to_actuate("gpio", pin, value);
 
     code
 }

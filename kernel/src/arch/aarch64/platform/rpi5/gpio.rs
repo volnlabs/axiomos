@@ -332,6 +332,10 @@ pub fn handle_interrupt() {
 
     // Get timestamp at interrupt entry for accurate timing
     let timestamp = counter_to_ns(read_timer_counter());
+    // Bench (Task 11): stamp the cycle counter at IRQ entry so the actuation
+    // seam can report edge->actuate latency (M-C).
+    #[cfg(feature = "bench")]
+    crate::bench::mark_gpio_irq_entry();
 
     // Scan all pins for events
     for pin in 0..Rp1Gpio::NUM_PINS {
@@ -355,6 +359,15 @@ pub fn handle_interrupt() {
                     continue;
                 }
             };
+
+            // Bench (Task 11): the e-stop button is not a BPF attach — route its
+            // edge straight to the kernel-owned e-stop instead of dispatching.
+            #[cfg(feature = "bench")]
+            if pin == crate::bench::ESTOP_BUTTON_PIN {
+                gpio.clear_interrupt(pin);
+                crate::bench::handle_estop_button(edge as u32);
+                continue;
+            }
 
             // Read current pin value
             let value = if gpio.read(pin) { 1 } else { 0 };

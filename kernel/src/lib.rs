@@ -20,6 +20,8 @@ pub mod actuation;
 mod apic;
 pub mod arch;
 pub mod backtrace;
+#[cfg(feature = "bench")]
+pub mod bench;
 pub mod bpf;
 pub mod driver;
 pub mod file;
@@ -123,6 +125,13 @@ pub fn init() {
     });
     dbg_mark(0x68); // 'h'
     info!("BPF subsystem initialized");
+
+    #[cfg(feature = "bench")]
+    {
+        info!("Initializing v0.3 HW bench (Task 11)...");
+        bench::init();
+        info!("HW bench initialized");
+    }
 
     info!("Initializing backtrace...");
     backtrace::init();
