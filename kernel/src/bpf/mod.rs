@@ -34,6 +34,36 @@ use kernel_bpf::verifier::{LoadCaller, MapPerm, Verifier, VerifyConfig};
 /// verifier), which is the info-leak this closes.
 const VERIFY_CTX_SIZE: u32 = core::mem::size_of::<BpfContext>() as u32;
 
+const VERIFY_CTX_DATA_SIZE_NONE: u32 = 0;
+const VERIFY_CTX_DATA_SIZE_GPIO: u32 = core::mem::size_of::<kernel_bpf::attach::GpioEvent>() as u32;
+const VERIFY_CTX_DATA_SIZE_PWM: u32 = core::mem::size_of::<kernel_bpf::attach::PwmEvent>() as u32;
+const VERIFY_CTX_DATA_SIZE_IIO: u32 = core::mem::size_of::<kernel_bpf::attach::IioEvent>() as u32;
+const VERIFY_CTX_DATA_SIZE_SYS_ENTER: u32 =
+    core::mem::size_of::<kernel_bpf::execution::SyscallTraceContext>() as u32;
+const VERIFY_CTX_DATA_SIZE_SYS_EXIT: u32 =
+    core::mem::size_of::<kernel_bpf::execution::SyscallExitContext>() as u32;
+const VERIFY_CTX_DATA_SIZE_SCHED_SWITCH: u32 =
+    core::mem::size_of::<kernel_bpf::execution::SchedSwitchContext>() as u32;
+
+const fn max_u32(a: u32, b: u32) -> u32 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+const VERIFY_CTX_DATA_SIZE_MAX: u32 = max_u32(
+    VERIFY_CTX_DATA_SIZE_SYS_ENTER,
+    max_u32(
+        VERIFY_CTX_DATA_SIZE_SCHED_SWITCH,
+        max_u32(
+            VERIFY_CTX_DATA_SIZE_PWM,
+            max_u32(VERIFY_CTX_DATA_SIZE_IIO, VERIFY_CTX_DATA_SIZE_GPIO),
+        ),
+    ),
+);
+
 /// Fallback map-value size, used only when no per-map sizes are available
 /// (e.g. a `bpf_ringbuf_reserve` allocation return, or a program loaded before
 /// any map exists). Precise per-map bounds come from [`map_value_sizes`] (#123).
@@ -107,6 +137,19 @@ fn hook_frequency_hz(_attach_type: u32) -> u64 {
         0
     } else {
         1_000_000_000 / period
+    }
+}
+
+const fn attach_ctx_data_size(attach_type: u32) -> u32 {
+    match attach_type {
+        ATTACH_TYPE_TIMER => VERIFY_CTX_DATA_SIZE_NONE,
+        ATTACH_TYPE_GPIO => VERIFY_CTX_DATA_SIZE_GPIO,
+        ATTACH_TYPE_PWM => VERIFY_CTX_DATA_SIZE_PWM,
+        ATTACH_TYPE_IIO => VERIFY_CTX_DATA_SIZE_IIO,
+        ATTACH_TYPE_SYS_ENTER => VERIFY_CTX_DATA_SIZE_SYS_ENTER,
+        ATTACH_TYPE_SYS_EXIT => VERIFY_CTX_DATA_SIZE_SYS_EXIT,
+        ATTACH_TYPE_SCHED_SWITCH => VERIFY_CTX_DATA_SIZE_SCHED_SWITCH,
+        _ => VERIFY_CTX_DATA_SIZE_NONE,
     }
 }
 
@@ -196,8 +239,18 @@ impl BpfManager {
     /// Build the verifier config for a load. Borrows `sizes` (built by
     /// [`map_value_sizes`](Self::map_value_sizes)) for the duration of the call.
     fn verify_config<'a>(&self, sizes: &'a [u32], perms: &'a [MapPerm]) -> VerifyConfig<'a> {
+        self.verify_config_with_ctx_data(sizes, perms, VERIFY_CTX_DATA_SIZE_MAX)
+    }
+
+    fn verify_config_with_ctx_data<'a>(
+        &self,
+        sizes: &'a [u32],
+        perms: &'a [MapPerm],
+        ctx_data_size: u32,
+    ) -> VerifyConfig<'a> {
         VerifyConfig {
             ctx_size: VERIFY_CTX_SIZE,
+            ctx_data_size,
             map_value_size: VERIFY_MAP_VALUE_SIZE,
             map_value_sizes: sizes,
             map_perms: perms,
@@ -330,6 +383,25 @@ impl BpfManager {
             );
             return Err(BpfError::NotLoaded);
         }
+
+        let map_value_sizes = self.map_value_sizes();
+        let map_perms = self.map_perms();
+        let ctx_data_size = attach_ctx_data_size(attach_type);
+        let program = &self.programs[prog_id as usize];
+        Verifier::<ActiveProfile>::verify_with_stats(
+            program.prog_type(),
+            program.instructions(),
+            self.verify_config_with_ctx_data(&map_value_sizes, &map_perms, ctx_data_size),
+        )
+        .map_err(|e| {
+            log::error!(
+                "BpfManager: attach rejected by verifier for type={} ctx_data_size={}: {}",
+                attach_type,
+                ctx_data_size,
+                e
+            );
+            BpfError::VerificationFailed
+        })?;
 
         // Utilization admission (#43): attaching commits the CPU to running
         // this program on every fire; refuse if `Σ WCETᵢ·freqᵢ` across all

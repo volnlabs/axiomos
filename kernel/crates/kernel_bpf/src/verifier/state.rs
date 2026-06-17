@@ -211,6 +211,23 @@ impl RegState {
         }
     }
 
+    /// Create a read-only pointer to the bytes behind `BpfContext::data`.
+    ///
+    /// This intentionally uses `PtrToCtx`, not `PtrToPacket`: hook payloads are
+    /// kernel-owned event structs and must be readable/passable to helpers, but
+    /// stores through them are not allowed.
+    pub fn ctx_data_ptr(size: u32) -> Self {
+        Self {
+            reg_type: RegType::PtrToCtx,
+            scalar_value: None,
+            ptr_offset: 0,
+            map_id: None,
+            mem_range: Some(size),
+            maybe_null: false,
+            map_writability: MapWritability::Unprovable,
+        }
+    }
+
     /// Create a map-value pointer state with a known accessible size.
     ///
     /// `maybe_null` reflects that `bpf_map_lookup_elem` can return NULL; the
