@@ -1169,7 +1169,6 @@ dependencies = [
  "ovmf-prebuilt",
  "pwm_demo",
  "rk_uart_forwarder",
- "safety_demo",
  "sched_switch_bridge_demo",
  "sched_switch_demo",
  "sched_switch_export_demo",
