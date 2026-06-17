@@ -7,7 +7,7 @@ kernel/crates/kernel_bpf/target/
 
 # Claude Code settings
 .claude/
-
+.codex/
 # Added by cargo
 #
 # already existing elements were commented out
@@ -16,6 +16,7 @@ kernel/crates/kernel_bpf/target/
 *.txt
 *.log
 .planning/
+disk.img
 
 # Debugger configs
 debug.lldb
