@@ -14,6 +14,12 @@ use kernel_vfs::{
 };
 use spin::RwLock;
 
+static EXT2_READ_PROBE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn should_log_ext2_read_probe(seq: u64) -> bool {
+    seq < 8 || seq % 256 == 0
+}
+
 pub struct VirtualExt2Fs<T> {
     ext2fs: Ext2Fs<T>,
     handles: BTreeMap<FsHandle, Arc<(AbsoluteOwnedPath, RwLock<VirtualExt2Inode>)>>,
@@ -83,16 +89,39 @@ where
         buf: &mut [u8],
         offset: usize,
     ) -> Result<usize, ReadError> {
-        let inode = &self.handles.get(&handle).ok_or(FsError::InvalidHandle)?.1;
-
-        let guard = inode.read();
-        match &guard.inner {
-            Inner::RegularFile(file) => self
-                .ext2fs
-                .read_from_file(file, offset, buf)
-                .map_err(|_| ReadError::ReadFailed),
-            Inner::Directory(_) => Err(ReadError::NotReadable),
+        let seq = EXT2_READ_PROBE_SEQ.fetch_add(1, Relaxed);
+        let log_probe = should_log_ext2_read_probe(seq);
+        if log_probe {
+            log::info!(
+                "ext2 read enter seq={} handle={:?} offset={} len={}",
+                seq,
+                handle,
+                offset,
+                buf.len()
+            );
         }
+
+        let result: Result<usize, ReadError> = (|| {
+            let inode = &self.handles.get(&handle).ok_or(FsError::InvalidHandle)?.1;
+
+            let guard = inode.read();
+            match &guard.inner {
+                Inner::RegularFile(file) => self
+                    .ext2fs
+                    .read_from_file(file, offset, buf)
+                    .map_err(|_| ReadError::ReadFailed),
+                Inner::Directory(_) => Err(ReadError::NotReadable),
+            }
+        })();
+
+        if log_probe {
+            match &result {
+                Ok(read) => log::info!("ext2 read exit seq={} read={}", seq, read),
+                Err(error) => log::warn!("ext2 read error seq={} error={:?}", seq, error),
+            }
+        }
+
+        result
     }
 
     fn write(

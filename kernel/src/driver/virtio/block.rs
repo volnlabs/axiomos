@@ -2,6 +2,8 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::error::Error;
 use core::fmt::{Debug, Formatter};
+use core::sync::atomic::AtomicU64;
+use core::sync::atomic::Ordering::Relaxed;
 
 use kernel_device::block::{BlockBuf, BlockDevice};
 use kernel_device::Device;
@@ -27,6 +29,14 @@ use crate::driver::virtio::hal::transport;
 use crate::driver::virtio::hal::HalImpl;
 use crate::driver::KernelDeviceId;
 use crate::U64Ext;
+
+#[allow(dead_code)]
+static VIRTIO_READ_SECTOR_PROBE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+#[allow(dead_code)]
+fn should_log_virtio_read_probe(seq: u64) -> bool {
+    seq < 8 || seq % 256 == 0
+}
 
 #[cfg(target_arch = "x86_64")]
 #[distributed_slice(PCI_DRIVERS)]
@@ -175,11 +185,32 @@ impl filesystem::BlockDevice for VirtioBlockDevice {
     }
 
     fn read_sector(&self, sector_index: usize, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        self.inner
+        let seq = VIRTIO_READ_SECTOR_PROBE_SEQ.fetch_add(1, Relaxed);
+        let log_probe = should_log_virtio_read_probe(seq);
+        if log_probe {
+            log::info!(
+                "virtio-blk read_sector enter seq={} sector={} len={}",
+                seq,
+                sector_index,
+                buf.len()
+            );
+        }
+
+        let result = self
+            .inner
             .lock()
             .read_blocks(sector_index, buf)
             .map(|()| buf.len())
-            .map_err(|_| ())
+            .map_err(|_| ());
+
+        if log_probe {
+            match &result {
+                Ok(read) => log::info!("virtio-blk read_sector exit seq={} read={}", seq, read),
+                Err(()) => log::warn!("virtio-blk read_sector error seq={}", seq),
+            }
+        }
+
+        result
     }
 
     fn write_sector(&mut self, sector_index: usize, buf: &[u8]) -> Result<usize, Self::Error> {

@@ -14,6 +14,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use conquer_once::spin::OnceCell;
 use kernel_elfloader::{ElfFile, ElfLoader};
 use kernel_memapi::{Allocation, Guarded, Location, MemoryApi, UserAccessible};
+use kernel_vfs::node::VfsNode;
 use kernel_vfs::path::{AbsoluteOwnedPath, AbsolutePath, ROOT};
 use kernel_vfs::Stat;
 use kernel_virtual_memory::VirtualMemoryManager;
@@ -415,16 +416,7 @@ impl Process {
         // TODO: This might be too large for kernel heap.
         // For now, we assume reasonable executable sizes.
         let mut file_content = alloc::vec![0u8; stat.size];
-        let mut offset = 0;
-        loop {
-            let read = node
-                .read(&mut file_content[offset..], offset)
-                .map_err(|_| "Failed to read executable")?;
-            if read == 0 {
-                break;
-            }
-            offset += read;
-        }
+        read_executable_file_into(&node, &mut file_content, stat.size, "execve")?;
 
         // 2. Clear existing process state
 
@@ -571,6 +563,103 @@ pub enum CreateProcessError {
     StackAllocationError(#[from] StackAllocationError),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutableReadProgress {
+    Continue(usize),
+    Complete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutableReadProgressError {
+    ZeroReadBeforeComplete {
+        offset: usize,
+        expected_size: usize,
+    },
+    ReadPastExpectedSize {
+        offset: usize,
+        read: usize,
+        expected_size: usize,
+    },
+}
+
+fn advance_executable_read_progress(
+    offset: usize,
+    read: usize,
+    expected_size: usize,
+) -> Result<ExecutableReadProgress, ExecutableReadProgressError> {
+    if offset >= expected_size {
+        return Ok(ExecutableReadProgress::Complete);
+    }
+
+    if read == 0 {
+        return Err(ExecutableReadProgressError::ZeroReadBeforeComplete {
+            offset,
+            expected_size,
+        });
+    }
+
+    let Some(next_offset) = offset.checked_add(read) else {
+        return Err(ExecutableReadProgressError::ReadPastExpectedSize {
+            offset,
+            read,
+            expected_size,
+        });
+    };
+
+    if next_offset > expected_size {
+        return Err(ExecutableReadProgressError::ReadPastExpectedSize {
+            offset,
+            read,
+            expected_size,
+        });
+    }
+
+    if next_offset == expected_size {
+        Ok(ExecutableReadProgress::Complete)
+    } else {
+        Ok(ExecutableReadProgress::Continue(next_offset))
+    }
+}
+
+fn read_executable_file_into(
+    node: &VfsNode,
+    buf: &mut [u8],
+    expected_size: usize,
+    log_label: &str,
+) -> Result<(), &'static str> {
+    if buf.len() < expected_size {
+        return Err("Executable buffer shorter than stat size");
+    }
+
+    let mut offset = 0;
+    while offset < expected_size {
+        log::info!(
+            "{}: executable read request offset={} remaining={}",
+            log_label,
+            offset,
+            expected_size - offset
+        );
+        let read = node
+            .read(&mut buf[offset..expected_size], offset)
+            .map_err(|_| "Failed to read executable")?;
+        log::info!(
+            "{}: executable read returned offset={} read={}",
+            log_label,
+            offset,
+            read
+        );
+
+        match advance_executable_read_progress(offset, read, expected_size)
+            .map_err(|_| "Executable read made no progress or exceeded stat size")?
+        {
+            ExecutableReadProgress::Continue(next_offset) => offset = next_offset,
+            ExecutableReadProgress::Complete => break,
+        }
+    }
+
+    Ok(())
+}
+
 extern "C" fn trampoline(_arg: *mut c_void) {
     #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
     if !TRAMPOLINE_MARKER_SENT.swap(true, Ordering::Relaxed) {
@@ -632,30 +721,14 @@ extern "C" fn trampoline(_arg: *mut c_void) {
     #[cfg(target_arch = "aarch64")]
     with_process_address_space_active(&current_process, || {
         let buf = executable_file_allocation.as_mut();
-        let mut offset = 0;
-        loop {
-            let read = node
-                .read(&mut buf[offset..], offset)
-                .expect("should be able to read");
-            if read == 0 {
-                break;
-            }
-            offset += read;
-        }
+        read_executable_file_into(&node, buf, stat.size, "Trampoline")
+            .expect("should be able to read executable file");
     });
     #[cfg(not(target_arch = "aarch64"))]
     {
         let buf = executable_file_allocation.as_mut();
-        let mut offset = 0;
-        loop {
-            let read = node
-                .read(&mut buf[offset..], offset)
-                .expect("should be able to read");
-            if read == 0 {
-                break;
-            }
-            offset += read;
-        }
+        read_executable_file_into(&node, buf, stat.size, "Trampoline")
+            .expect("should be able to read executable file");
     }
     log::info!("Trampoline: executable read into memory");
     #[cfg(feature = "rpi5")]
@@ -879,5 +952,47 @@ extern "C" fn trampoline(_arg: *mut c_void) {
 
             crate::arch::aarch64::context::enter_userspace(code_ptr, ustack_rsp.as_u64() as usize);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        advance_executable_read_progress, ExecutableReadProgress, ExecutableReadProgressError,
+    };
+
+    #[test]
+    fn executable_read_progress_advances_until_expected_size() {
+        assert_eq!(
+            advance_executable_read_progress(0, 128, 512),
+            Ok(ExecutableReadProgress::Continue(128))
+        );
+        assert_eq!(
+            advance_executable_read_progress(384, 128, 512),
+            Ok(ExecutableReadProgress::Complete)
+        );
+    }
+
+    #[test]
+    fn executable_read_progress_rejects_zero_before_expected_size() {
+        assert_eq!(
+            advance_executable_read_progress(256, 0, 512),
+            Err(ExecutableReadProgressError::ZeroReadBeforeComplete {
+                offset: 256,
+                expected_size: 512,
+            })
+        );
+    }
+
+    #[test]
+    fn executable_read_progress_rejects_read_past_expected_size() {
+        assert_eq!(
+            advance_executable_read_progress(400, 128, 512),
+            Err(ExecutableReadProgressError::ReadPastExpectedSize {
+                offset: 400,
+                read: 128,
+                expected_size: 512,
+            })
+        );
     }
 }
