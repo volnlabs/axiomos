@@ -90,17 +90,17 @@ impl BpfInsn {
     }
 }
 
-// SAFETY: Entry point for the safety interlock demo. Called by the startup code.
+// SAFETY: Entry point for the legacy BPF reflex demo. Called by the startup code.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     print("\n");
     print("========================================\n");
-    print("  Axiom Safety Interlock Demo\n");
+    print("  Axiom Legacy BPF Reflex Demo\n");
     print("========================================\n");
     print("\n");
-    print("This demo proves: kernel-level BPF safety behaviors\n");
-    print("survive userspace exit. The interrupt -> BPF -> hardware\n");
-    print("path has ZERO userspace dependency. Hard e-stop lives in SYS_ESTOP/watchdog.\n");
+    print("This demo shows a monitored BPF reflex path.\n");
+    print("It is not the hard e-stop path.\n");
+    print("Use SYS_ESTOP/watchdog/GPIO24 bench path for hard stop.\n");
     print("\n");
 
     // ---------------------------------------------------------
@@ -165,25 +165,25 @@ pub extern "C" fn _start() -> ! {
     print("  Motor running on timer hook. PWM active.\n\n");
 
     // ---------------------------------------------------------
-    // Step 2: Create limit-switch BPF behavior for GPIO interrupt
+    // Step 2: Create limit-switch BPF reflex for GPIO interrupt
     //
     // When the limit switch fires (rising edge on LIMIT_SWITCH_PIN):
     //   1. Call bpf_pwm_write(PWM0, Ch1, 0)
-    //   2. Call bpf_trace_printk("SAFETY: Motor stopped by limit switch!")
+    //   2. Call bpf_trace_printk("REFLEX: Motor stopped by limit switch!")
     //   3. Return 0
     //
     // The trace_printk message will appear in kernel log, proving
     // the BPF program executed in kernel interrupt context.
     // ---------------------------------------------------------
-    print("[2/4] Loading limit-switch BPF behavior...\n");
+    print("[2/4] Loading limit-switch BPF reflex...\n");
 
     // Build the trace message on the BPF stack.
-    // Message: "SAFETY: Motor stopped!\0" (22 bytes including NUL)
+    // Message: "REFLEX: Motor stopped!\0" (22 bytes including NUL)
     // We store it byte-by-byte using ST_B (store immediate byte).
     // Stack layout: R10-32 .. R10-11 = message (22 bytes)
     //
-    // "SAFETY: Motor stopped!\0"
-    // S=83 A=65 F=70 E=69 T=84 Y=89 :=58  =32
+    // "REFLEX: Motor stopped!\0"
+    // R=82 E=69 F=70 L=76 E=69 X=88 :=58  =32
     // M=77 o=111 t=116 o=111 r=114  =32
     // s=115 t=116 o=111 p=112 p=112 e=101 d=100 !=33 \0=0
 
@@ -198,13 +198,13 @@ pub extern "C" fn _start() -> ! {
         // call bpf_pwm_write(chip, channel, duty)
         BpfInsn::call(HELPER_PWM_WRITE),
         // --- 2. Build trace message on stack and call bpf_trace_printk ---
-        // Store "SAFETY: Motor stopped!\0" at R10-24
-        BpfInsn::st_b(10, -24, b'S' as i32),
-        BpfInsn::st_b(10, -23, b'A' as i32),
+        // Store "REFLEX: Motor stopped!\0" at R10-24
+        BpfInsn::st_b(10, -24, b'R' as i32),
+        BpfInsn::st_b(10, -23, b'E' as i32),
         BpfInsn::st_b(10, -22, b'F' as i32),
-        BpfInsn::st_b(10, -21, b'E' as i32),
-        BpfInsn::st_b(10, -20, b'T' as i32),
-        BpfInsn::st_b(10, -19, b'Y' as i32),
+        BpfInsn::st_b(10, -21, b'L' as i32),
+        BpfInsn::st_b(10, -20, b'E' as i32),
+        BpfInsn::st_b(10, -19, b'X' as i32),
         BpfInsn::st_b(10, -18, b':' as i32),
         BpfInsn::st_b(10, -17, b' ' as i32),
         BpfInsn::st_b(10, -16, b'M' as i32),
@@ -222,7 +222,7 @@ pub extern "C" fn _start() -> ! {
         // R1 = pointer to string (R10 - 24)
         BpfInsn::mov64_reg(1, 10),
         BpfInsn::add64_imm(1, -24),
-        // R2 = size (20 = length of "SAFETY: Motor stop!" + NUL)
+        // R2 = size (20 = length of "REFLEX: Motor stop!" + NUL)
         BpfInsn::mov64_imm(2, 20),
         // call bpf_trace_printk
         BpfInsn::call(HELPER_TRACE_PRINTK),
@@ -244,23 +244,23 @@ pub extern "C" fn _start() -> ! {
         core::mem::size_of::<BpfAttr>() as i32,
     );
     if estop_id < 0 {
-        print("  ERROR: Failed to load limit-switch behavior\n");
+        print("  ERROR: Failed to load limit-switch reflex\n");
         exit(1);
     }
-    print("  Limit-switch behavior loaded (ID: ");
+    print("  Limit-switch reflex loaded (ID: ");
     print_num(estop_id as u64);
     print(")\n");
     print("  Actions: bpf_pwm_write(0%) + bpf_trace_printk\n\n");
 
     // ---------------------------------------------------------
-    // Step 3: Attach limit-switch behavior to GPIO (limit switch pin, rising edge)
+    // Step 3: Attach limit-switch reflex to GPIO (limit switch pin, rising edge)
     //
     // The kernel's BPF_PROG_ATTACH handler for GPIO type will:
     //   - Configure the pin as input
     //   - Enable rising edge interrupt on the pin
     //   - Register the BPF program for GPIO hook execution
     // ---------------------------------------------------------
-    print("[3/4] Attaching limit-switch behavior to GPIO ");
+    print("[3/4] Attaching limit-switch reflex to GPIO ");
     print_num(LIMIT_SWITCH_PIN as u64);
     print(" (rising edge)...\n");
 
@@ -278,17 +278,17 @@ pub extern "C" fn _start() -> ! {
         core::mem::size_of::<BpfAttr>() as i32,
     );
     if res < 0 {
-        print("  ERROR: Failed to attach limit-switch behavior to GPIO\n");
+        print("  ERROR: Failed to attach limit-switch reflex to GPIO\n");
         exit(1);
     }
-    print("  Limit-switch behavior attached. GPIO interrupt armed.\n\n");
+    print("  Limit-switch reflex attached. GPIO interrupt armed.\n\n");
 
     // ---------------------------------------------------------
-    // Step 4: EXIT — proving the safety thesis
+    // Step 4: EXIT — proving the monitored reflex persists
     //
     // The BPF programs are now in the kernel:
     //   - Motor program: timer hook -> PWM at 50%
-    //   - E-Stop program: GPIO interrupt -> PWM duty 0%
+    //   - Reflex program: GPIO interrupt -> monitored PWM duty 0%
     //
     // After this process exits:
     //   - Programs PERSIST in the kernel's BpfManager
@@ -298,16 +298,16 @@ pub extern "C" fn _start() -> ! {
     //
     // Trigger the limit switch on GPIO 17 to verify.
     // ---------------------------------------------------------
-    print("[4/4] Behavior demo armed.\n");
+    print("[4/4] Legacy reflex demo armed.\n");
     print("\n");
     print("  Motor:     PWM0 Ch1 @ 50% (via timer BPF hook)\n");
-    print("  Behavior:  GPIO ");
+    print("  Reflex:    GPIO ");
     print_num(LIMIT_SWITCH_PIN as u64);
     print(" rising edge -> bpf_pwm_write(0%)\n");
-    print("  Trace:     Kernel log will show 'SAFETY: Motor stop!'\n");
+    print("  Trace:     Kernel log will show 'REFLEX: Motor stop!'\n");
     print("\n");
     print("  >> Userspace will now EXIT. <<\n");
-    print("  >> Safety interlock remains active in the kernel. <<\n");
+    print("  >> Legacy BPF reflex remains active in the kernel. <<\n");
     print("  >> Trigger limit switch on GPIO ");
     print_num(LIMIT_SWITCH_PIN as u64);
     print(" to stop motor. <<\n");

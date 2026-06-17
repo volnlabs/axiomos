@@ -613,8 +613,9 @@ is impossible.
 The invariant that **no out-of-envelope actuation can reach hardware** is
 established by a combination of:
 
-* **12 actuation unit tests** — clamp, slew, safe-hold, unknown-channel
-  rejection, backward-time, and GPIO envelope; all in
+* **actuation unit tests** — clamp, slew, safe-hold, unknown-channel
+  rejection, backward-time, GPIO envelope, audit attribution, e-stop latch,
+  authority ordering, and envelope-required authority; all in
   `kernel/crates/kernel_bpf/src/actuation/mod.rs`.
 * **proptest (256 cases)** — `tests/actuation_property.rs` generates
   arbitrary `(PwmRequest, prior_state)` pairs and asserts every `Decision`
@@ -630,19 +631,46 @@ Test command:
 cargo test -p kernel_bpf --features embedded-profile
 ```
 
-Result (host, 2026-06-15): **327 unit tests + 1 proptest (256 cases) + 75
-integration/semantic/routing tests — all pass; 0 failures.**
+Result (host, 2026-06-17): `cargo test -p kernel_bpf --features
+embedded-profile` passes, including 350 unit tests, the actuation property
+suite, and GPIO/PWM/semantic integration tests.
 
 ## On-device numbers (pending)
 
 Edge→PWM-low actuation latency and ARM-A per-call overhead on Raspberry Pi 5
-are **not yet measured**. These are Task 11 (hardware-gated), deferred to
-on-device bringup. Numbers will be added here when captured; do not infer
-or extrapolate from the §11 timer-interrupt latency (203–351 ns) — the
-actuation path traverses different code (monitor → RP1 MMIO) and has not
-been instrumented.
+are **not yet measured**. Task 11 instrumentation now exists behind
+`--features embedded-rpi5,bench`, and `scripts/analyze-v03-bench.py`
+enforces the release thresholds from the captured serial log and logic
+analyzer CSV.
 
-**Last Updated:** 2026-06-15
+Required capture files:
+
+```
+bench.log   # serial log with [bench] M-A/M-B/M-C lines
+logic.csv   # columns: time_s,input_gpio23,pwm_ena_gpio12,estop_gpio24
+```
+
+Analysis command:
+
+```
+scripts/analyze-v03-bench.py --serial bench.log --logic logic.csv
+```
+
+Release thresholds enforced by the analyzer:
+
+| Metric | Required evidence |
+|--------|-------------------|
+| M-A monitor overhead | max < 5,000 ns |
+| M-B e-stop latency | max < 1,000,000 ns |
+| M-C serial IRQ-entry→PWM-apply | N ≥ 10,000, median < 500 ns target or < 1,000 ns fallback |
+| Logic analyzer GPIO23 input-edge→GPIO12/PWM output-edge | N ≥ 10,000, median < 500 ns target or < 1,000 ns fallback |
+
+Numbers will be added here when captured; do not infer or extrapolate from
+the §11 timer-interrupt latency (203–351 ns). The release gate requires the
+bench capture plus physical confirmation that PWM reaches the L298N ENA pin
+under load.
+
+**Last Updated:** 2026-06-17
 
 # References
 

@@ -48,6 +48,26 @@ pub enum Authority {
     Safety,
 }
 
+impl Authority {
+    pub const fn envelope_code(self) -> u32 {
+        match self {
+            Authority::Learned => 0,
+            Authority::Mission => 1,
+            Authority::Operator => 2,
+            Authority::Safety => 3,
+        }
+    }
+
+    pub const fn from_envelope_code(code: u32) -> Self {
+        match code {
+            1 => Authority::Mission,
+            2 => Authority::Operator,
+            3 => Authority::Safety,
+            _ => Authority::Learned,
+        }
+    }
+}
+
 /// Trusted source attribution stamped by kernel call-sites for audit records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AuditSource {
@@ -122,6 +142,15 @@ impl EnvelopeEntry {
             reserved: 0,
             window_ns: envelope.window_ns,
         }
+    }
+
+    pub const fn with_required_authority(mut self, authority: Authority) -> Self {
+        self.reserved = authority.envelope_code();
+        self
+    }
+
+    pub const fn required_authority(self) -> Authority {
+        Authority::from_envelope_code(self.reserved)
     }
 
     pub const fn to_envelope(self) -> Envelope {
@@ -547,6 +576,18 @@ impl<P: PhysicalProfile> EnvelopeMap<P> {
             .copied()
     }
 
+    pub fn set_required_authority(&mut self, ch: ChannelId, authority: Authority) -> bool {
+        let Some(idx) = envelope_channel_index(ch) else {
+            return false;
+        };
+        if let Some(entry) = self.layout.entries.get_mut(idx) {
+            *entry = entry.with_required_authority(authority);
+            true
+        } else {
+            false
+        }
+    }
+
     pub const fn layout(&self) -> &EnvelopeMapLayout {
         &self.layout
     }
@@ -635,10 +676,9 @@ impl<P: PhysicalProfile> Monitor<P> {
         }
     }
 
-    /// The envelope for a channel, or `None` if the channel is unknown.
-    fn envelope(&self, ch: ChannelId) -> Option<Envelope> {
+    fn envelope_entry(&self, ch: ChannelId) -> Option<EnvelopeEntry> {
         if self.slot_index(ch).is_some() {
-            self.envelope_cache.get(ch).map(EnvelopeEntry::to_envelope)
+            self.envelope_cache.get(ch)
         } else {
             None
         }
@@ -706,12 +746,24 @@ impl<P: PhysicalProfile> Monitor<P> {
         source: AuditSource,
         now_ns: u64,
     ) -> Decision {
-        let Some(env) = self.envelope(req.ch) else {
+        let Some(entry) = self.envelope_entry(req.ch) else {
             let decision = Decision::Reject(RejectReason::UnknownChannel);
             self.audit_decision(req, authority, source, now_ns, decision);
             return decision;
         };
+        let env = entry.to_envelope();
         self.register_channel(req.ch, env.min);
+
+        if authority < entry.required_authority() {
+            let safe = self.registered_safe_value(req.ch, env.min);
+            if let Some(slot) = self.slot_mut(req.ch) {
+                slot.last_output = safe;
+                slot.last_update_ns = now_ns;
+            }
+            let decision = Decision::Safe(safe);
+            self.audit_decision(req, authority, source, now_ns, decision);
+            return decision;
+        }
 
         if self.latched {
             let safe = self.registered_safe_value(req.ch, env.min);
@@ -1110,6 +1162,34 @@ mod tests {
             ),
             Decision::Allow(50)
         );
+    }
+
+    #[test]
+    fn envelope_required_authority_blocks_lower_authority_requests() {
+        let req = pwm(0, 1, 50);
+        let mut map = EnvelopeMap::<EmbeddedProfile>::init_from_profile();
+        assert!(map.set_required_authority(req.ch, Authority::Operator));
+
+        let mut m = Monitor::<EmbeddedProfile>::new();
+        m.init_envelope_cache(&map);
+
+        let learned = m.decide(req, Authority::Learned, AuditSource::LearnedBehavior, T0);
+        assert_eq!(learned, Decision::Safe(0));
+
+        let operator = m.decide(
+            req,
+            Authority::Operator,
+            AuditSource::SyscallPwm,
+            T0 + 1_000_000,
+        );
+        assert!(matches!(operator, Decision::Allow(_) | Decision::Clamp(_)));
+
+        let mut out = [AuditRecord::EMPTY; 4];
+        assert_eq!(m.audit_snapshot(&mut out), 2);
+        assert_eq!(out[0].decision, DecisionTag::Safe);
+        assert_eq!(out[0].reason, ReasonCode::Governance);
+        assert_eq!(out[0].authority, Authority::Learned);
+        assert_eq!(out[1].authority, Authority::Operator);
     }
 
     #[test]
