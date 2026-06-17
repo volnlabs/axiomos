@@ -7,7 +7,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use kernel_abi::{BpfObjectInfo, BPF_OBJECT_KIND_MAP};
-use kernel_bpf::actuation::EnvelopeMap;
+use kernel_bpf::actuation::{ActuationKind, Authority, ChannelId, EnvelopeMap};
 use kernel_bpf::attach::{GpioEdge, GpioRouteTable};
 use kernel_bpf::bytecode::insn::BpfInsn;
 use kernel_bpf::bytecode::program::{BpfProgType, BpfProgram};
@@ -133,7 +133,18 @@ impl BpfManager {
             ),
             gpio_routes: GpioRouteTable::new(),
         };
-        let envelope = EnvelopeMap::<ActiveProfile>::init_from_profile();
+        let mut envelope = EnvelopeMap::<ActiveProfile>::init_from_profile();
+        // v0.3 bench output: GPIO12 / PWM0 channel 1 is physically actuated.
+        // Learned BPF may still force the trusted safe value, but nonzero output
+        // on this channel must come from Operator-or-higher authority.
+        let _ = envelope.set_required_authority(
+            ChannelId {
+                kind: ActuationKind::PwmDuty,
+                chip: 0,
+                channel: 1,
+            },
+            Authority::Operator,
+        );
         crate::actuation::ACTUATION_MONITOR
             .lock()
             .init_envelope_cache(&envelope);
