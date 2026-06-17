@@ -11,6 +11,7 @@
 //! Pin assignments (BCM/GPIO numbering, i.e. the numbers the kernel uses):
 //!   - GPIO23 = sensor trigger (reflex fires on its rising edge)
 //!   - GPIO24 = e-stop button (external 10k pull-up to 3V3; press pulls to GND)
+//!   - GPIO12 = PWM0 channel 1 physical output to motor-A speed/enable
 //!   - PWM0 channel 1 = motor-A speed/enable (driver enable pin)
 
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -23,6 +24,8 @@ pub const ESTOP_BUTTON_PIN: u8 = 24;
 pub const BENCH_PWM_CHIP: u32 = 0;
 /// PWM channel the reflex and demo drive (channel 1).
 pub const BENCH_PWM_CHANNEL: u32 = 1;
+/// Header GPIO routed to PWM0 channel 1 for the v0.3 bench.
+pub const BENCH_PWM_PIN: u8 = 12;
 
 /// Cycle stamp captured at GPIO IRQ entry; read at the actuation apply point to
 /// compute edge->actuate latency (M-C). 0 means "no GPIO IRQ in flight".
@@ -138,11 +141,12 @@ pub fn handle_estop_button(pressed: bool) {
 pub fn init() {
     use kernel_bpf::attach::GpioEdge;
 
-    use crate::arch::aarch64::platform::rpi5::gpio::Rp1Gpio;
+    use crate::arch::aarch64::platform::rpi5::gpio::{GpioFunction, Rp1Gpio};
     use crate::bpf::ATTACH_TYPE_GPIO;
 
     // SAFETY: the kernel owns the RP1 GPIO block; this runs once at boot.
     let gpio = unsafe { Rp1Gpio::new() };
+    gpio.set_function(BENCH_PWM_PIN, GpioFunction::Alt0);
     gpio.configure_input(REFLEX_SENSOR_PIN);
     gpio.configure_input(ESTOP_BUTTON_PIN);
     // Sensor: rising edge only. Button: both edges (press + release).
@@ -164,11 +168,12 @@ pub fn init() {
             }
             mgr.register_gpio_route(0, REFLEX_SENSOR_PIN, GpioEdge::Rising, prog_id);
             log::info!(
-                "[bench] reflex loaded id={} -> (gpiochip0, pin {}, rising) stops PWM{} ch{}",
+                "[bench] reflex loaded id={} -> (gpiochip0, pin {}, rising) stops PWM{} ch{} on GPIO{}",
                 prog_id,
                 REFLEX_SENSOR_PIN,
                 BENCH_PWM_CHIP,
-                BENCH_PWM_CHANNEL
+                BENCH_PWM_CHANNEL,
+                BENCH_PWM_PIN
             );
         }
         Err(e) => log::error!("[bench] reflex load rejected: {:?}", e),
