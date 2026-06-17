@@ -7,6 +7,9 @@
 #
 # The disk image (ext2 rootfs with userspace binaries) is embedded
 # directly into the kernel binary via include_bytes!().
+#
+# Usage: ./scripts/build-rpi5.sh [release|debug] [kernel_features]
+# Example: ./scripts/build-rpi5.sh release embedded-rpi5,bench
 
 set -e
 
@@ -14,9 +17,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 TARGET="aarch64-unknown-none"
 PROFILE="${1:-release}"
+FEATURES="${2:-embedded-rpi5}"
 
 echo "=== Building axiom-ebpf for Raspberry Pi 5 ==="
 echo "Profile: $PROFILE"
+echo "Kernel features: $FEATURES"
 echo ""
 
 cd "$PROJECT_DIR"
@@ -55,10 +60,10 @@ touch "$DISK_PATH"
 export AXIOM_DISK_IMAGE="$PROJECT_DIR/$DISK_PATH"
 echo "Building kernel (AXIOM_DISK_IMAGE=$AXIOM_DISK_IMAGE)..."
 if [ "$PROFILE" = "release" ]; then
-    cargo build --target "$TARGET" --features embedded-rpi5 --release -p kernel
+    cargo build --target "$TARGET" --features "$FEATURES" --release -p kernel
     BUILD_DIR="target/$TARGET/release"
 else
-    cargo build --target "$TARGET" --features embedded-rpi5 -p kernel
+    cargo build --target "$TARGET" --features "$FEATURES" -p kernel
     BUILD_DIR="target/$TARGET/debug"
 fi
 
