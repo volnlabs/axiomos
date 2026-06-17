@@ -290,7 +290,18 @@ impl Process {
     {
         let guard = self.address_space.read();
         let as_ref = guard.as_ref().unwrap_or(AddressSpace::kernel());
-        f(as_ref)
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            // x86_64 page-table operations use the recursive mapping, which only
+            // points at the process page tables while that CR3 is active.
+            as_ref.with_active(f)
+        }
+
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            f(as_ref)
+        }
     }
 
     pub fn vmm(self: &Arc<Self>) -> impl VirtualMemoryAllocator {
