@@ -17,7 +17,7 @@ use spin::RwLock;
 static EXT2_READ_PROBE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn should_log_ext2_read_probe(seq: u64) -> bool {
-    seq < 8 || seq % 256 == 0
+    seq < 8 || seq.is_multiple_of(256)
 }
 
 pub struct VirtualExt2Fs<T> {
