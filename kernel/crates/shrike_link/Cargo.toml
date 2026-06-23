@@ -1,0 +1,7 @@
+[package]
+name = "shrike_link"
+version = "0.1.0"
+edition = "2021"
+description = "Pi5 <-> Shrike-lite UART control-link frame codec (no_std, zero-dep)"
+
+[dependencies]
