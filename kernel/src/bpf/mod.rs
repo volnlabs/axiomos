@@ -4,6 +4,7 @@ pub mod jit_memory;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use kernel_abi::{BpfObjectInfo, BPF_OBJECT_KIND_MAP};
@@ -101,7 +102,10 @@ pub const ENVELOPE_MAP_ID: u32 = 0;
 pub const RESERVED_MAP_COUNT: u32 = 1;
 
 pub struct BpfManager {
-    programs: Vec<BpfProgram<ActiveProfile>>,
+    // Arc so the hot dispatch path (gpio_programs_into/get_hook_programs) clones
+    // a refcount, not the whole instruction Vec — the IRQ handler runs this per
+    // edge at up to ~200k/s (#65), where a deep BpfProgram::clone drops edges.
+    programs: Vec<Arc<BpfProgram<ActiveProfile>>>,
     attachments: BTreeMap<u32, Vec<u32>>,
     maps: Vec<Box<dyn BpfMap<ActiveProfile>>>,
     map_perms: Vec<MapPerm>,
@@ -309,7 +313,7 @@ impl BpfManager {
                     wcet_cycles: stats.wcet_cycles,
                 }
             );
-            self.programs.push(bpf_prog);
+            self.programs.push(Arc::new(bpf_prog));
             self.prog_wcet.push(stats.wcet_cycles);
             Ok(id)
         } else {
@@ -358,7 +362,7 @@ impl BpfManager {
                 wcet_cycles: stats.wcet_cycles,
             }
         );
-        self.programs.push(bpf_prog);
+        self.programs.push(Arc::new(bpf_prog));
         self.prog_wcet.push(stats.wcet_cycles);
         log::info!(
             "BpfManager: Loaded raw program. Assigned id={}. Total programs={}",
@@ -482,7 +486,7 @@ impl BpfManager {
     /// same as `run_hook_programs` — helpers like `bpf_map_lookup_elem`
     /// re-acquire the lock and would deadlock if it were held during runs.
     #[cfg(feature = "verifier-cost")]
-    pub fn get_program(&self, prog_id: u32) -> Option<BpfProgram<ActiveProfile>> {
+    pub fn get_program(&self, prog_id: u32) -> Option<Arc<BpfProgram<ActiveProfile>>> {
         self.programs.get(prog_id as usize).cloned()
     }
 
@@ -522,7 +526,7 @@ impl BpfManager {
     /// to release the BpfManager lock before executing programs, preventing
     /// deadlocks when BPF helpers (like bpf_ringbuf_output) need to re-acquire
     /// the lock to access maps.
-    pub fn get_hook_programs(&self, attach_type: u32) -> Vec<(u32, BpfProgram<ActiveProfile>)> {
+    pub fn get_hook_programs(&self, attach_type: u32) -> Vec<(u32, Arc<BpfProgram<ActiveProfile>>)> {
         let mut result = Vec::new();
         if let Some(progs) = self.attachments.get(&attach_type) {
             for &prog_id in progs {
@@ -540,22 +544,35 @@ impl BpfManager {
         self.gpio_routes.insert(chip, pin, edge, prog_id);
     }
 
-    /// Cloned programs attached to a fired GPIO `(chip, pin, edge)`. Mirrors
-    /// `get_hook_programs` (clone + release lock before executing so helpers can
-    /// re-acquire the manager lock).
-    pub fn gpio_programs(
+    /// Resolve the programs attached to a fired GPIO `(chip, pin, edge)` into a
+    /// caller-provided stack buffer, returning how many slots were filled.
+    ///
+    /// Zero heap allocation: the GPIO IRQ handler calls this per edge at up to
+    /// ~200k/s (#65), and the global allocator is a spin-locked free list
+    /// (`mem/heap.rs`), so a Vec here would serialize every edge on the heap
+    /// lock and drop edges. Each entry is an `Arc` refcount clone (no bytecode
+    /// copy). Matches past the buffer length are dropped — `out` must be sized
+    /// for the worst-case fan-out per pin (bounded per-edge work is also what
+    /// the WCET model wants). Caller clones + drops the lock before executing so
+    /// helpers can re-acquire the manager lock without deadlocking.
+    pub fn gpio_programs_into(
         &self,
         chip: u8,
         pin: u8,
         fired: GpioEdge,
-    ) -> Vec<(u32, BpfProgram<ActiveProfile>)> {
-        let mut result = Vec::new();
-        for prog_id in self.gpio_routes.programs_for(chip, pin, fired) {
-            if let Some(program) = self.programs.get(prog_id as usize) {
-                result.push((prog_id, program.clone()));
+        out: &mut [Option<(u32, Arc<BpfProgram<ActiveProfile>>)>],
+    ) -> usize {
+        let mut n = 0;
+        self.gpio_routes.for_each_program(chip, pin, fired, |prog_id| {
+            if n >= out.len() {
+                return;
             }
-        }
-        result
+            if let Some(program) = self.programs.get(prog_id as usize) {
+                out[n] = Some((prog_id, program.clone()));
+                n += 1;
+            }
+        });
+        n
     }
 
     pub fn run_hook_programs(

@@ -47,6 +47,19 @@ impl GpioRouteTable {
         out
     }
 
+    /// Visit each matching program id without allocating. The GPIO IRQ handler
+    /// runs this per edge (up to ~200k/s, #65); the `programs_for` Vec form would
+    /// hit the spin-locked global heap on every edge, so the hot path uses this.
+    pub fn for_each_program(&self, chip: u8, pin: u8, fired: GpioEdge, mut f: impl FnMut(u32)) {
+        if let Some(list) = self.routes.get(&(chip, pin)) {
+            for &(edge, id) in list {
+                if edge == fired || edge == GpioEdge::Both || fired == GpioEdge::Both {
+                    f(id);
+                }
+            }
+        }
+    }
+
     /// Remove all routes for a program (used on detach).
     pub fn remove(&mut self, prog_id: u32) {
         for list in self.routes.values_mut() {

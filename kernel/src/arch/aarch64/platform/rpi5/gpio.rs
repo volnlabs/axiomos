@@ -409,14 +409,29 @@ pub fn handle_interrupt() {
             // helpers (e.g. bpf_gpio_write, bpf_ringbuf_output) can re-acquire
             // the manager lock without deadlocking.
             if let Some(manager) = crate::BPF_MANAGER.get() {
+                use alloc::sync::Arc;
+                use kernel_bpf::bytecode::program::BpfProgram;
+                use kernel_bpf::profile::ActiveProfile;
+
+                // Resolve into a stack buffer so the IRQ handler never touches
+                // the spin-locked global heap on the edge path (#65, ~200k/s).
+                // 8 programs/pin is far above any real wiring; excess routes are
+                // dropped by gpio_programs_into (bounded per-edge work).
+                // ponytail: cap is a local const; if attach ever allows >8 routes
+                // per pin, enforce the same cap at register_gpio_route (fail-closed
+                // load-time reject) so a 9th route can't silently never fire.
                 let fired = kernel_bpf::attach::GpioEdge::from_flags(edge as u32);
-                let programs = manager.lock().gpio_programs(0, pin as u8, fired);
-                for (prog_id, program) in &programs {
-                    match crate::bpf::BpfManager::execute_program(program, &ctx) {
-                        Ok(_res) => {
-                            log::info!("GPIO BPF Hook [id={}] pin={} edge={}", prog_id, pin, edge);
+                let mut buf: [Option<(u32, Arc<BpfProgram<ActiveProfile>>)>; 8] =
+                    core::array::from_fn(|_| None);
+                let n = manager.lock().gpio_programs_into(0, pin as u8, fired, &mut buf);
+                // Manager lock dropped above; helpers may re-acquire it.
+                for slot in buf[..n].iter() {
+                    if let Some((prog_id, program)) = slot {
+                        // No per-edge success log: at 200k edges/s the logger
+                        // lock alone would drop edges. Errors are rare; kept.
+                        if let Err(e) = crate::bpf::BpfManager::execute_program(program, &ctx) {
+                            log::error!("GPIO BPF Hook [id={}] failed: {:?}", prog_id, e);
                         }
-                        Err(e) => log::error!("GPIO BPF Hook [id={}] failed: {:?}", prog_id, e),
                     }
                 }
             }
