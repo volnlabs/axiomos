@@ -1,0 +1,315 @@
+//! Shrike-side link safety state machine.
+//!
+//! The codec ([`crate`]) turns bytes into [`Msg`]s; this turns a stream of
+//! Pi5->Shrike messages into a motor [`Output`] that is **fail-safe by
+//! construction**:
+//!
+//! - **Link silence:** if no fresh Pi5 command/heartbeat arrives within
+//!   `timeout` ticks, the output is [`Output::SafeStop`]. Pi5 MUST send >=1
+//!   frame per timeout window (the hard liveness guarantee — the soft `seq`
+//!   check below never substitutes for it).
+//! - **E-stop latch:** a soft `Estop{assert:true}` latches `SafeStop` until an
+//!   explicit `Estop{assert:false}` — assert dominates everything, including a
+//!   simultaneously-fresh setpoint. (The hard e-stop is still the independent
+//!   FPGA line; this is defense in depth.)
+//! - **Anti-replay:** a `MotorSetpoint` whose `seq` is not newer than the last
+//!   accepted one is rejected — it neither updates the setpoint nor refreshes
+//!   liveness, so a replayed/stale frame cannot keep a dead link "alive".
+//! - **Cold start:** before the first fresh setpoint, the output is `SafeStop`.
+//!
+//! Time is caller-supplied monotonic `u64` ticks (ns, us, ms — your choice, as
+//! long as `now` and `timeout` share a unit). Pure logic, no clock, no alloc.
+
+use crate::Msg;
+
+/// What the motors should do right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Output {
+    /// Drive at this signed per-mille duty (NOT clamped here — the kernel
+    /// actuation monitor / FPGA envelope clamp).
+    Drive { left: i16, right: i16 },
+    /// Force motors to neutral/off.
+    SafeStop,
+}
+
+/// Shrike-side link watchdog. Feed it Pi5->Shrike messages with timestamps;
+/// ask it for the [`Output`] at any later time.
+#[derive(Debug, Clone, Copy)]
+pub struct Watchdog {
+    timeout: u64,
+    deadline: u64,
+    /// Have we ever accepted a setpoint? Gates the anti-replay seq compare and
+    /// persists across an e-stop so a pre-estop seq cannot be replayed after.
+    seq_valid: bool,
+    last_seq: u8,
+    left: i16,
+    right: i16,
+    /// Is there a usable, post-any-estop setpoint to drive on? Cleared on
+    /// e-stop assert and only re-set by a setpoint accepted while NOT latched,
+    /// so releasing an e-stop never resumes a stale pre-estop command.
+    setpoint_armed: bool,
+    estop_latched: bool,
+}
+
+impl Watchdog {
+    /// `timeout` = max ticks between fresh Pi5 frames before failing safe.
+    #[must_use]
+    pub const fn new(timeout: u64) -> Self {
+        Self {
+            timeout,
+            deadline: 0,
+            seq_valid: false,
+            last_seq: 0,
+            left: 0,
+            right: 0,
+            setpoint_armed: false,
+            estop_latched: false,
+        }
+    }
+
+    /// Feed one decoded Pi5->Shrike message observed at `now`.
+    ///
+    /// Returns `true` if it was accepted as a fresh, liveness-refreshing frame
+    /// (setpoint, e-stop, or heartbeat). Shrike->Pi5 messages and stale/replayed
+    /// setpoints return `false` and change nothing.
+    pub fn on_msg(&mut self, msg: &Msg, now: u64) -> bool {
+        match *msg {
+            Msg::MotorSetpoint { seq, left, right } => {
+                if self.seq_valid && !seq_newer(seq, self.last_seq) {
+                    return false; // stale / replay: no update, no liveness refresh
+                }
+                self.seq_valid = true;
+                self.last_seq = seq;
+                self.left = left;
+                self.right = right;
+                // Only a setpoint received while NOT latched arms driving; this
+                // is what forces a *fresh* setpoint after an e-stop release
+                // rather than resuming a possibly-ancient stored command.
+                self.setpoint_armed = !self.estop_latched;
+                self.refresh(now);
+                true
+            }
+            Msg::Estop { assert } => {
+                self.estop_latched = assert;
+                if assert {
+                    self.setpoint_armed = false;
+                }
+                // A deliberate e-stop frame (assert or release) is proof the
+                // link is alive, so it refreshes liveness.
+                self.refresh(now);
+                true
+            }
+            Msg::HeartbeatToShrike { .. } => {
+                self.refresh(now);
+                true
+            }
+            // Shrike->Pi5 telemetry is not a watchdog input.
+            Msg::Sensor { .. } | Msg::HeartbeatToPi { .. } => false,
+        }
+    }
+
+    /// The motor output at `now`. Fail-safe wins: e-stop latch, then arming,
+    /// then liveness.
+    #[must_use]
+    pub fn output(&self, now: u64) -> Output {
+        if self.estop_latched || !self.setpoint_armed || self.expired(now) {
+            Output::SafeStop
+        } else {
+            Output::Drive {
+                left: self.left,
+                right: self.right,
+            }
+        }
+    }
+
+    /// True if the link has gone silent past the timeout as of `now`.
+    #[must_use]
+    pub fn expired(&self, now: u64) -> bool {
+        now >= self.deadline
+    }
+
+    fn refresh(&mut self, now: u64) {
+        // Saturating so a near-u64::MAX `now` can't wrap the deadline backwards.
+        self.deadline = now.saturating_add(self.timeout);
+    }
+}
+
+/// RFC-1982-style serial comparison over `u8`: is `new` strictly newer than
+/// `last`, tolerating wraparound (255 -> 0 is newer)?
+fn seq_newer(new: u8, last: u8) -> bool {
+    let d = new.wrapping_sub(last);
+    d != 0 && d < 128
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sp(seq: u8, l: i16, r: i16) -> Msg {
+        Msg::MotorSetpoint { seq, left: l, right: r }
+    }
+
+    #[test]
+    fn cold_start_is_safe_stop() {
+        let wd = Watchdog::new(100);
+        assert_eq!(wd.output(0), Output::SafeStop);
+        assert_eq!(wd.output(50), Output::SafeStop);
+    }
+
+    #[test]
+    fn fresh_setpoint_drives_then_times_out() {
+        let mut wd = Watchdog::new(100);
+        assert!(wd.on_msg(&sp(1, 200, -200), 1000));
+        assert_eq!(wd.output(1050), Output::Drive { left: 200, right: -200 });
+        assert_eq!(wd.output(1100), Output::SafeStop); // now >= deadline (1100)
+        assert_eq!(wd.output(2000), Output::SafeStop);
+    }
+
+    #[test]
+    fn heartbeat_refreshes_liveness_without_changing_setpoint() {
+        let mut wd = Watchdog::new(100);
+        wd.on_msg(&sp(1, 50, 50), 0);
+        assert!(wd.on_msg(&Msg::HeartbeatToShrike { seq: 7 }, 90));
+        // Without the heartbeat this would be stopped at 100; with it, alive.
+        assert_eq!(wd.output(150), Output::Drive { left: 50, right: 50 });
+        assert_eq!(wd.output(190), Output::SafeStop);
+    }
+
+    #[test]
+    fn stale_or_replayed_setpoint_rejected_and_no_liveness() {
+        let mut wd = Watchdog::new(100);
+        wd.on_msg(&sp(5, 10, 10), 0);
+        // Replay of seq 5 with different values at t=90: rejected entirely.
+        assert!(!wd.on_msg(&sp(5, 999, 999), 90));
+        assert_eq!(wd.output(50), Output::Drive { left: 10, right: 10 });
+        // Replay did NOT refresh liveness, so it still times out at 100.
+        assert_eq!(wd.output(100), Output::SafeStop);
+    }
+
+    #[test]
+    fn older_seq_rejected() {
+        let mut wd = Watchdog::new(100);
+        wd.on_msg(&sp(10, 1, 1), 0);
+        assert!(!wd.on_msg(&sp(9, 2, 2), 10)); // 9 older than 10
+        assert_eq!(wd.output(50), Output::Drive { left: 1, right: 1 });
+    }
+
+    #[test]
+    fn seq_wraps_around() {
+        let mut wd = Watchdog::new(100);
+        assert!(wd.on_msg(&sp(254, 1, 1), 0));
+        assert!(wd.on_msg(&sp(255, 2, 2), 10));
+        assert!(wd.on_msg(&sp(0, 3, 3), 20)); // 255 -> 0 is newer
+        assert!(wd.on_msg(&sp(1, 4, 4), 30));
+        assert_eq!(wd.output(40), Output::Drive { left: 4, right: 4 });
+    }
+
+    #[test]
+    fn estop_latches_and_dominates_fresh_setpoint() {
+        let mut wd = Watchdog::new(100);
+        wd.on_msg(&sp(1, 100, 100), 0);
+        wd.on_msg(&Msg::Estop { assert: true }, 10);
+        assert_eq!(wd.output(20), Output::SafeStop);
+        // A setpoint while latched does not override the e-stop, and does NOT
+        // arm driving (it was received while latched).
+        wd.on_msg(&sp(2, 100, 100), 30);
+        assert_eq!(wd.output(40), Output::SafeStop);
+        // Release alone does NOT resume — a fresh post-release setpoint is
+        // required, so we never drive on a possibly-stale stored command.
+        wd.on_msg(&Msg::Estop { assert: false }, 50);
+        assert_eq!(wd.output(60), Output::SafeStop);
+        // A fresh setpoint after release arms driving again.
+        wd.on_msg(&sp(3, 70, 70), 70);
+        assert_eq!(wd.output(80), Output::Drive { left: 70, right: 70 });
+    }
+
+    #[test]
+    fn estop_release_with_no_setpoint_during_latch_requires_fresh() {
+        let mut wd = Watchdog::new(100);
+        wd.on_msg(&sp(1, 9, 9), 0);
+        wd.on_msg(&Msg::Estop { assert: true }, 10);
+        wd.on_msg(&Msg::Estop { assert: false }, 20);
+        assert_eq!(wd.output(25), Output::SafeStop); // no fresh setpoint yet
+        wd.on_msg(&sp(2, 4, 4), 30);
+        assert_eq!(wd.output(35), Output::Drive { left: 4, right: 4 });
+    }
+
+    #[test]
+    fn replay_after_estop_release_is_still_rejected() {
+        // seq tracking persists across e-stop: a replay of the pre-estop seq
+        // must not arm driving after release.
+        let mut wd = Watchdog::new(100);
+        wd.on_msg(&sp(5, 1, 1), 0);
+        wd.on_msg(&Msg::Estop { assert: true }, 10);
+        wd.on_msg(&Msg::Estop { assert: false }, 20);
+        assert!(!wd.on_msg(&sp(5, 1, 1), 30)); // replay rejected
+        assert_eq!(wd.output(35), Output::SafeStop);
+    }
+
+    #[test]
+    fn seq_newer_half_window_boundary() {
+        assert!(!seq_newer(128, 0)); // d == 128 rejected (ambiguous half-window)
+        assert!(seq_newer(127, 0)); // d == 127 newer
+        assert!(!seq_newer(0, 128)); // d == 0-128 == 128 -> rejected
+        assert!(seq_newer(200, 100)); // d == 100 newer
+        assert!(!seq_newer(0, 0)); // equal rejected
+    }
+
+    #[test]
+    fn seq_newer_matches_rfc1982_over_all_pairs() {
+        for last in 0u8..=255 {
+            for new in 0u8..=255 {
+                let d = new.wrapping_sub(last);
+                let expected = d != 0 && d < 128;
+                assert_eq!(seq_newer(new, last), expected, "new={new} last={last}");
+            }
+        }
+    }
+
+    #[test]
+    fn timeout_zero_always_expires() {
+        let mut wd = Watchdog::new(0);
+        wd.on_msg(&sp(1, 5, 5), 100);
+        // deadline == now == 100, expired uses >=, so immediately safe.
+        assert_eq!(wd.output(100), Output::SafeStop);
+    }
+
+    #[test]
+    fn backwards_now_is_caller_contract_not_defended() {
+        // Documents the monotonic-`now` contract: the watchdog has no internal
+        // clock, so a caller that passes a decreasing `now` makes the link look
+        // MORE alive (now < deadline => not expired). The caller MUST supply a
+        // monotonic clock; this test pins that assumption so a future regression
+        // in the caller is visible rather than silent.
+        let mut wd = Watchdog::new(100);
+        wd.on_msg(&sp(1, 5, 5), 1000); // deadline = 1100
+        assert_eq!(wd.output(500), Output::Drive { left: 5, right: 5 });
+    }
+
+    #[test]
+    fn deadline_saturates_near_u64_max() {
+        let mut wd = Watchdog::new(u64::MAX);
+        wd.on_msg(&sp(1, 5, 5), u64::MAX - 1);
+        // saturating_add keeps deadline at u64::MAX; not expired before then.
+        assert_eq!(wd.output(u64::MAX - 1), Output::Drive { left: 5, right: 5 });
+        assert_eq!(wd.output(u64::MAX), Output::SafeStop);
+    }
+
+    #[test]
+    fn estop_dominates_even_when_not_expired() {
+        let mut wd = Watchdog::new(1_000_000);
+        wd.on_msg(&sp(1, 5, 5), 0);
+        wd.on_msg(&Msg::Estop { assert: true }, 1);
+        assert_eq!(wd.output(2), Output::SafeStop);
+    }
+
+    #[test]
+    fn telemetry_messages_are_not_inputs() {
+        let mut wd = Watchdog::new(100);
+        wd.on_msg(&sp(1, 7, 7), 0);
+        assert!(!wd.on_msg(&Msg::Sensor { ultrasonic_echo_us: 1, estop_line: false, flags: 0 }, 50));
+        assert!(!wd.on_msg(&Msg::HeartbeatToPi { seq: 1 }, 50));
+        // Those did not refresh liveness.
+        assert_eq!(wd.output(100), Output::SafeStop);
+    }
+}

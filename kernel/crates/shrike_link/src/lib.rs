@@ -13,6 +13,8 @@
 //! FPGA envelope are the single clamp source of truth.
 #![cfg_attr(not(test), no_std)]
 
+pub mod watchdog;
+
 pub const SYNC: u8 = 0x7E;
 pub const VERSION: u8 = 0x01;
 /// Max payload bytes; bounds the decoder's stack buffer and the wire `LEN`.
