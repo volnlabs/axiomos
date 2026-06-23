@@ -20,3 +20,4 @@ disk.img
 
 # Debugger configs
 debug.lldb
+firmware/shrike_rp2040/target/

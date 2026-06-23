@@ -94,6 +94,7 @@ exclude = [
   "kernel/demos/riscv",
   "userspace/rk_bridge",
   "kernel/crates/kernel_bpf/fuzz",
+  "firmware/shrike_rp2040",
 ]
 members = [
   "kernel",

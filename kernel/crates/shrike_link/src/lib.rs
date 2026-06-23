@@ -13,6 +13,7 @@
 //! FPGA envelope are the single clamp source of truth.
 #![cfg_attr(not(test), no_std)]
 
+pub mod motor;
 pub mod watchdog;
 
 pub const SYNC: u8 = 0x7E;
