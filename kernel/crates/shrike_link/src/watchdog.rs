@@ -134,6 +134,46 @@ impl Watchdog {
     }
 }
 
+/// Inbound-direction link liveness: is the *peer* still talking to us?
+///
+/// Separate from [`Watchdog`] (which is the Shrike-side command authority and
+/// deliberately ignores telemetry frames). This is what the Pi5 runs to detect
+/// an RP2040 that has gone silent: refreshed by ANY inbound frame, `alive()`
+/// goes false once `timeout` ticks pass with no inbound. The Pi uses this to
+/// stop sending heartbeats and command a safe state, so the RP2040's own
+/// watchdog also trips (closing the one-way RX-dead/TX-alive fault). Symmetric
+/// — usable on either end. Caller supplies monotonic ticks (same unit as `timeout`).
+#[derive(Debug, Clone, Copy)]
+pub struct LinkLiveness {
+    timeout: u64,
+    deadline: u64,
+    seen: bool,
+}
+
+impl LinkLiveness {
+    #[must_use]
+    pub const fn new(timeout: u64) -> Self {
+        Self {
+            timeout,
+            deadline: 0,
+            seen: false,
+        }
+    }
+
+    /// Record an inbound frame at `now` — refreshes liveness.
+    pub fn on_inbound(&mut self, now: u64) {
+        self.seen = true;
+        self.deadline = now.saturating_add(self.timeout);
+    }
+
+    /// True iff at least one inbound frame has arrived and the peer has not gone
+    /// silent past `timeout`. False before the first frame (cold) and once dead.
+    #[must_use]
+    pub fn alive(&self, now: u64) -> bool {
+        self.seen && now < self.deadline
+    }
+}
+
 /// RFC-1982-style serial comparison over `u8`: is `new` strictly newer than
 /// `last`, tolerating wraparound (255 -> 0 is newer)?
 fn seq_newer(new: u8, last: u8) -> bool {
@@ -272,6 +312,32 @@ mod tests {
         wd.on_msg(&sp(1, 5, 5), 100);
         // deadline == now == 100, expired uses >=, so immediately safe.
         assert_eq!(wd.output(100), Output::SafeStop);
+    }
+
+    #[test]
+    fn link_liveness_cold_dead_until_first_inbound() {
+        let l = LinkLiveness::new(100);
+        assert!(!l.alive(0));
+        assert!(!l.alive(50));
+    }
+
+    #[test]
+    fn link_liveness_alive_then_times_out() {
+        let mut l = LinkLiveness::new(100);
+        l.on_inbound(1000);
+        assert!(l.alive(1050));
+        assert!(!l.alive(1100)); // now >= deadline
+        assert!(!l.alive(2000));
+    }
+
+    #[test]
+    fn link_liveness_refresh_extends() {
+        let mut l = LinkLiveness::new(100);
+        l.on_inbound(0);
+        assert!(l.alive(90));
+        l.on_inbound(90); // refresh before timeout
+        assert!(l.alive(150));
+        assert!(!l.alive(190));
     }
 
     #[test]
