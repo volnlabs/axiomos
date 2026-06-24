@@ -126,7 +126,7 @@ mod tests {
         let mut s = sess();
         s.on_inbound(0);
         let _ = s.tick(20); // alive heartbeat (consume)
-        // No further inbound; at now=100 liveness expires (deadline = 0+100).
+                            // No further inbound; at now=100 liveness expires (deadline = 0+100).
         assert_eq!(s.tick(100), LinkAction::SafeStop);
         s.estop_sent();
         assert_eq!(s.tick(120), LinkAction::Idle); // not re-spammed
@@ -193,7 +193,7 @@ mod tests {
         s.estop_sent();
         assert_eq!(s.tick(150), LinkAction::Idle); // still dead, no HB
         s.on_inbound(160); // peer came back
-        // seq continues from before the outage; assert the variant, not value.
+                           // seq continues from before the outage; assert the variant, not value.
         assert!(matches!(s.tick(160), LinkAction::Heartbeat(_)));
     }
 }

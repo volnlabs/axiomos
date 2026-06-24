@@ -530,7 +530,10 @@ impl BpfManager {
     /// to release the BpfManager lock before executing programs, preventing
     /// deadlocks when BPF helpers (like bpf_ringbuf_output) need to re-acquire
     /// the lock to access maps.
-    pub fn get_hook_programs(&self, attach_type: u32) -> Vec<(u32, Arc<BpfProgram<ActiveProfile>>)> {
+    pub fn get_hook_programs(
+        &self,
+        attach_type: u32,
+    ) -> Vec<(u32, Arc<BpfProgram<ActiveProfile>>)> {
         let mut result = Vec::new();
         if let Some(progs) = self.attachments.get(&attach_type) {
             for &prog_id in progs {
@@ -567,15 +570,16 @@ impl BpfManager {
         out: &mut [GpioProgramSlot],
     ) -> usize {
         let mut n = 0;
-        self.gpio_routes.for_each_program(chip, pin, fired, |prog_id| {
-            if n >= out.len() {
-                return;
-            }
-            if let Some(program) = self.programs.get(prog_id as usize) {
-                out[n] = Some((prog_id, program.clone()));
-                n += 1;
-            }
-        });
+        self.gpio_routes
+            .for_each_program(chip, pin, fired, |prog_id| {
+                if n >= out.len() {
+                    return;
+                }
+                if let Some(program) = self.programs.get(prog_id as usize) {
+                    out[n] = Some((prog_id, program.clone()));
+                    n += 1;
+                }
+            });
         n
     }
 

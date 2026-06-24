@@ -20,13 +20,12 @@
 use alloc::boxed::Box;
 
 use conquer_once::spin::OnceCell;
-use spin::Mutex;
-
 use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
 use shrike_link::motor::{duty_to_permille, MotorSide};
 use shrike_link::ring::RingBuf;
 use shrike_link::session::{LinkAction, LinkSession};
 use shrike_link::{encode, Decoder, Msg, MAX_FRAME};
+use spin::Mutex;
 
 use super::memory_map::RP1_UART0_BASE;
 use super::pl011::{Pl011, DEFAULT_UART_CLK_HZ};

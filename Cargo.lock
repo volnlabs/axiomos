@@ -881,6 +881,7 @@ dependencies = [
  "riscv",
  "rustc-demangle",
  "sha3",
+ "shrike_link",
  "spin",
  "thiserror",
  "uart_16550",

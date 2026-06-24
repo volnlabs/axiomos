@@ -417,8 +417,7 @@ pub fn handle_interrupt() {
                 // per pin, enforce the same cap at register_gpio_route (fail-closed
                 // load-time reject) so a 9th route can't silently never fire.
                 let fired = kernel_bpf::attach::GpioEdge::from_flags(edge);
-                let mut buf: [crate::bpf::GpioProgramSlot; 8] =
-                    core::array::from_fn(|_| None);
+                let mut buf: [crate::bpf::GpioProgramSlot; 8] = core::array::from_fn(|_| None);
                 let n = manager.lock().gpio_programs_into(0, pin, fired, &mut buf);
                 // Manager lock dropped above; helpers may re-acquire it.
                 for (prog_id, program) in buf[..n].iter().flatten() {

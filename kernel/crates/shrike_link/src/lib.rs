@@ -45,7 +45,11 @@ pub enum Msg {
     /// Pi5 -> Shrike. Liveness.
     HeartbeatToShrike { seq: u16 },
     /// Shrike -> Pi5. Sensor frame.
-    Sensor { ultrasonic_echo_us: u16, estop_line: bool, flags: u8 },
+    Sensor {
+        ultrasonic_echo_us: u16,
+        estop_line: bool,
+        flags: u8,
+    },
     /// Shrike -> Pi5. Liveness.
     HeartbeatToPi { seq: u16 },
 }
@@ -341,18 +345,30 @@ mod tests {
 
     #[test]
     fn roundtrip_all_messages() {
-        roundtrip(Msg::MotorSetpoint { seq: 7, left: -1000, right: 1000 });
+        roundtrip(Msg::MotorSetpoint {
+            seq: 7,
+            left: -1000,
+            right: 1000,
+        });
         roundtrip(Msg::Estop { assert: true });
         roundtrip(Msg::Estop { assert: false });
         roundtrip(Msg::HeartbeatToShrike { seq: 0xBEEF });
-        roundtrip(Msg::Sensor { ultrasonic_echo_us: 12345, estop_line: true, flags: 0xA5 });
+        roundtrip(Msg::Sensor {
+            ultrasonic_echo_us: 12345,
+            estop_line: true,
+            flags: 0xA5,
+        });
         roundtrip(Msg::HeartbeatToPi { seq: 1 });
     }
 
     #[test]
     fn in_payload_sync_byte_is_data() {
         // seq and both duty bytes carry 0x7E; must survive consume-by-count.
-        let msg = Msg::MotorSetpoint { seq: 0x7E, left: 0x007E, right: 0x7E00u16 as i16 };
+        let msg = Msg::MotorSetpoint {
+            seq: 0x7E,
+            left: 0x007E,
+            right: 0x7E00u16 as i16,
+        };
         let mut buf = [0u8; MAX_FRAME];
         let n = encode(&msg, &mut buf).unwrap();
         assert!(buf[..n].iter().filter(|&&b| b == 0x7E).count() >= 3);
@@ -363,13 +379,24 @@ mod tests {
     #[test]
     fn crc_corruption_rejected() {
         let mut buf = [0u8; MAX_FRAME];
-        let n = encode(&Msg::MotorSetpoint { seq: 1, left: 5, right: 6 }, &mut buf).unwrap();
+        let n = encode(
+            &Msg::MotorSetpoint {
+                seq: 1,
+                left: 5,
+                right: 6,
+            },
+            &mut buf,
+        )
+        .unwrap();
         buf[5] ^= 0x01; // flip a payload bit
         let mut dec = Decoder::new();
         assert_eq!(drain(&mut dec, &buf[..n]), vec![Err(LinkError::BadCrc)]);
         // Decoder resynced: a fresh valid frame after the bad one decodes.
         let n2 = encode(&Msg::Estop { assert: true }, &mut buf).unwrap();
-        assert_eq!(drain(&mut dec, &buf[..n2]), vec![Ok(Msg::Estop { assert: true })]);
+        assert_eq!(
+            drain(&mut dec, &buf[..n2]),
+            vec![Ok(Msg::Estop { assert: true })]
+        );
     }
 
     #[test]
@@ -386,8 +413,14 @@ mod tests {
         let payload = [0u8, 0u8];
         let crc = crc16_split(&[VERSION, T_MOTOR, len], &payload);
         let frame = [
-            SYNC, VERSION, T_MOTOR, len, payload[0], payload[1],
-            (crc & 0xFF) as u8, (crc >> 8) as u8,
+            SYNC,
+            VERSION,
+            T_MOTOR,
+            len,
+            payload[0],
+            payload[1],
+            (crc & 0xFF) as u8,
+            (crc >> 8) as u8,
         ];
         let mut dec = Decoder::new();
         assert_eq!(drain(&mut dec, &frame), vec![Err(LinkError::BadLen)]);
@@ -399,7 +432,15 @@ mod tests {
         let len = 1u8;
         let payload = [0x99u8];
         let crc = crc16_split(&[VERSION, ty, len], &payload);
-        let frame = [SYNC, VERSION, ty, len, payload[0], (crc & 0xFF) as u8, (crc >> 8) as u8];
+        let frame = [
+            SYNC,
+            VERSION,
+            ty,
+            len,
+            payload[0],
+            (crc & 0xFF) as u8,
+            (crc >> 8) as u8,
+        ];
         let mut dec = Decoder::new();
         let mut buf = [0u8; MAX_FRAME];
         let n = encode(&Msg::HeartbeatToPi { seq: 9 }, &mut buf).unwrap();
@@ -407,17 +448,26 @@ mod tests {
         stream.extend_from_slice(&buf[..n]);
         assert_eq!(
             drain(&mut dec, &stream),
-            vec![Err(LinkError::UnknownType), Ok(Msg::HeartbeatToPi { seq: 9 })]
+            vec![
+                Err(LinkError::UnknownType),
+                Ok(Msg::HeartbeatToPi { seq: 9 })
+            ]
         );
     }
 
     #[test]
     fn bad_version_dropped_then_resync() {
         let mut dec = Decoder::new();
-        assert_eq!(drain(&mut dec, &[SYNC, 0x02]), vec![Err(LinkError::BadVersion)]);
+        assert_eq!(
+            drain(&mut dec, &[SYNC, 0x02]),
+            vec![Err(LinkError::BadVersion)]
+        );
         let mut buf = [0u8; MAX_FRAME];
         let n = encode(&Msg::Estop { assert: false }, &mut buf).unwrap();
-        assert_eq!(drain(&mut dec, &buf[..n]), vec![Ok(Msg::Estop { assert: false })]);
+        assert_eq!(
+            drain(&mut dec, &buf[..n]),
+            vec![Ok(Msg::Estop { assert: false })]
+        );
     }
 
     #[test]
@@ -434,17 +484,35 @@ mod tests {
     #[test]
     fn truncated_frame_yields_nothing() {
         let mut buf = [0u8; MAX_FRAME];
-        let n = encode(&Msg::Sensor { ultrasonic_echo_us: 1, estop_line: false, flags: 0 }, &mut buf).unwrap();
+        let n = encode(
+            &Msg::Sensor {
+                ultrasonic_echo_us: 1,
+                estop_line: false,
+                flags: 0,
+            },
+            &mut buf,
+        )
+        .unwrap();
         let mut dec = Decoder::new();
         assert!(drain(&mut dec, &buf[..n - 1]).is_empty());
         // Completing it then decodes.
-        assert_eq!(dec.push(buf[n - 1]), Some(Ok(Msg::Sensor { ultrasonic_echo_us: 1, estop_line: false, flags: 0 })));
+        assert_eq!(
+            dec.push(buf[n - 1]),
+            Some(Ok(Msg::Sensor {
+                ultrasonic_echo_us: 1,
+                estop_line: false,
+                flags: 0
+            }))
+        );
     }
 
     #[test]
     fn buf_too_small() {
         let mut tiny = [0u8; 3];
-        assert_eq!(encode(&Msg::Estop { assert: true }, &mut tiny), Err(LinkError::BufTooSmall));
+        assert_eq!(
+            encode(&Msg::Estop { assert: true }, &mut tiny),
+            Err(LinkError::BufTooSmall)
+        );
     }
 
     #[test]
@@ -483,16 +551,27 @@ mod tests {
         // Still aligned: a normal frame after it decodes.
         let mut buf = [0u8; MAX_FRAME];
         let n = encode(&Msg::Estop { assert: true }, &mut buf).unwrap();
-        assert_eq!(drain(&mut dec, &buf[..n]), vec![Ok(Msg::Estop { assert: true })]);
+        assert_eq!(
+            drain(&mut dec, &buf[..n]),
+            vec![Ok(Msg::Estop { assert: true })]
+        );
     }
 
     #[test]
     fn decoder_reuse_across_back_to_back_frames() {
         let msgs = [
-            Msg::MotorSetpoint { seq: 1, left: -10, right: 10 },
+            Msg::MotorSetpoint {
+                seq: 1,
+                left: -10,
+                right: 10,
+            },
             Msg::HeartbeatToShrike { seq: 2 },
             Msg::Estop { assert: true },
-            Msg::Sensor { ultrasonic_echo_us: 999, estop_line: false, flags: 3 },
+            Msg::Sensor {
+                ultrasonic_echo_us: 999,
+                estop_line: false,
+                flags: 3,
+            },
         ];
         let mut stream = Vec::new();
         for m in &msgs {

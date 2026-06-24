@@ -186,7 +186,11 @@ mod tests {
     use super::*;
 
     fn sp(seq: u8, l: i16, r: i16) -> Msg {
-        Msg::MotorSetpoint { seq, left: l, right: r }
+        Msg::MotorSetpoint {
+            seq,
+            left: l,
+            right: r,
+        }
     }
 
     #[test]
@@ -200,7 +204,13 @@ mod tests {
     fn fresh_setpoint_drives_then_times_out() {
         let mut wd = Watchdog::new(100);
         assert!(wd.on_msg(&sp(1, 200, -200), 1000));
-        assert_eq!(wd.output(1050), Output::Drive { left: 200, right: -200 });
+        assert_eq!(
+            wd.output(1050),
+            Output::Drive {
+                left: 200,
+                right: -200
+            }
+        );
         assert_eq!(wd.output(1100), Output::SafeStop); // now >= deadline (1100)
         assert_eq!(wd.output(2000), Output::SafeStop);
     }
@@ -211,7 +221,13 @@ mod tests {
         wd.on_msg(&sp(1, 50, 50), 0);
         assert!(wd.on_msg(&Msg::HeartbeatToShrike { seq: 7 }, 90));
         // Without the heartbeat this would be stopped at 100; with it, alive.
-        assert_eq!(wd.output(150), Output::Drive { left: 50, right: 50 });
+        assert_eq!(
+            wd.output(150),
+            Output::Drive {
+                left: 50,
+                right: 50
+            }
+        );
         assert_eq!(wd.output(190), Output::SafeStop);
     }
 
@@ -221,7 +237,13 @@ mod tests {
         wd.on_msg(&sp(5, 10, 10), 0);
         // Replay of seq 5 with different values at t=90: rejected entirely.
         assert!(!wd.on_msg(&sp(5, 999, 999), 90));
-        assert_eq!(wd.output(50), Output::Drive { left: 10, right: 10 });
+        assert_eq!(
+            wd.output(50),
+            Output::Drive {
+                left: 10,
+                right: 10
+            }
+        );
         // Replay did NOT refresh liveness, so it still times out at 100.
         assert_eq!(wd.output(100), Output::SafeStop);
     }
@@ -260,7 +282,13 @@ mod tests {
         assert_eq!(wd.output(60), Output::SafeStop);
         // A fresh setpoint after release arms driving again.
         wd.on_msg(&sp(3, 70, 70), 70);
-        assert_eq!(wd.output(80), Output::Drive { left: 70, right: 70 });
+        assert_eq!(
+            wd.output(80),
+            Output::Drive {
+                left: 70,
+                right: 70
+            }
+        );
     }
 
     #[test]
@@ -373,7 +401,14 @@ mod tests {
     fn telemetry_messages_are_not_inputs() {
         let mut wd = Watchdog::new(100);
         wd.on_msg(&sp(1, 7, 7), 0);
-        assert!(!wd.on_msg(&Msg::Sensor { ultrasonic_echo_us: 1, estop_line: false, flags: 0 }, 50));
+        assert!(!wd.on_msg(
+            &Msg::Sensor {
+                ultrasonic_echo_us: 1,
+                estop_line: false,
+                flags: 0
+            },
+            50
+        ));
         assert!(!wd.on_msg(&Msg::HeartbeatToPi { seq: 1 }, 50));
         // Those did not refresh liveness.
         assert_eq!(wd.output(100), Output::SafeStop);
