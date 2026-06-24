@@ -101,6 +101,7 @@ compile_error!(
 
 pub mod actuation;
 pub mod attach;
+pub mod behaviors;
 pub mod bench;
 pub mod bytecode;
 pub mod cost_corpus;
