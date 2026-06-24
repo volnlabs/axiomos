@@ -416,13 +416,13 @@ pub fn handle_interrupt() {
                 // ponytail: cap is a local const; if attach ever allows >8 routes
                 // per pin, enforce the same cap at register_gpio_route (fail-closed
                 // load-time reject) so a 9th route can't silently never fire.
-                let fired = kernel_bpf::attach::GpioEdge::from_flags(edge as u32);
+                let fired = kernel_bpf::attach::GpioEdge::from_flags(edge);
                 let mut buf: [crate::bpf::GpioProgramSlot; 8] =
                     core::array::from_fn(|_| None);
-                let n = manager.lock().gpio_programs_into(0, pin as u8, fired, &mut buf);
+                let n = manager.lock().gpio_programs_into(0, pin, fired, &mut buf);
                 // Manager lock dropped above; helpers may re-acquire it.
-                for slot in buf[..n].iter() {
-                    if let Some((prog_id, program)) = slot {
+                for (prog_id, program) in buf[..n].iter().flatten() {
+                    {
                         // No per-edge success log: at 200k edges/s the logger
                         // lock alone would drop edges. Errors are rare; kept.
                         if let Err(e) = crate::bpf::BpfManager::execute_program(program, &ctx) {

@@ -79,3 +79,47 @@ behavior, watchdog timeout. HW-gated.
 5. Pi-side inbound liveness = new `LinkLiveness` (not the directional `Watchdog`).
 6. Ordering: M3 fail-safe BEFORE M4 motor TX. On link-dead: stop heartbeats + command zero/e-stop, and
    ARM-A refuses actuation.
+
+---
+
+## M4 design (motor TX + Sensor RX) — pre-council
+
+### TX: ARM-A -> MotorSetpoint
+- `control_link::motor_side(chip, channel) -> Option<MotorSide>`: v0.4 map (0,1)->Left, (0,2)->Right
+  (matches `apply_pwm_value`'s 1..=2 channel range).
+- Duty -> per-mille: `value * 1000 / ACT_DUTY_MAX` (embedded ACT_DUTY_MAX=90). **Forward-only** for v0.4
+  (the 3 behaviors are forward/differential; reverse = signed actuation, deferred). `value` is already
+  monitor-clamped to <= ACT_DUTY_MAX.
+- `control_link::send_motor(side, value)`: via `with_link`, update the cached left/right (this side keeps
+  the other side's last value), seq++, enqueue `MotorSetpoint{seq,left,right}`.
+- `guard_pwm_with`: replace `apply_pwm_value(chip,channel,value)` with routing:
+  - mapped channel + link alive -> `send_motor`, return decided `code`, **no local PWM** (link owns the motor).
+  - mapped channel + link DEAD -> return -1 (refuse), no local PWM (RP2040 watchdog fails the motor safe).
+  - unmapped -> local `apply_pwm_value` as today.
+- non-rpi5 builds: unchanged local apply (cfg-gated).
+
+### RX: Sensor -> IIO + e-stop
+- `Sensor{ultrasonic_echo_us, estop_line, flags}` -> synthetic `IioEvent{value=echo_us as i32,
+  channel=PROXIMITY, ...}` via `IIO_MANAGER.dispatch_event` (bypasses stub attach). `estop_line` set ->
+  `actuation::watchdog_estop_trigger()`.
+- **dispatch_event takes BPF_MANAGER; watchdog_estop_trigger takes APPLY_LOCK — neither may run while
+  CONTROL_LINK is held.** So `poll()` (under CONTROL_LINK) only DECODES and returns a `PollOutcome
+  {estop: bool, sensor: Option<SensorSample>}`; the public `poll()` wrapper runs the side-effects AFTER
+  the lock is released (still in IRQ context).
+
+### Lock ordering (the crux)
+- Thread context: `guard_pwm_with` holds APPLY_LOCK, then `send_motor` -> `with_link` (masks IRQ + takes
+  CONTROL_LINK). Order: APPLY_LOCK -> CONTROL_LINK, IRQ masked during the CL hold.
+- IRQ context: `poll()` takes CONTROL_LINK alone (decode), releases it, THEN takes APPLY_LOCK
+  (watchdog_estop_trigger) / BPF_MANAGER (iio dispatch). Never CONTROL_LINK + (APPLY_LOCK|BPF_MANAGER)
+  nested.
+- **Remaining hazard:** the IRQ's deferred `watchdog_estop_trigger` takes APPLY_LOCK; if a thread holds
+  APPLY_LOCK (guard) and the timer IRQ fires, the IRQ spins on it -> the preempted thread can't release
+  -> livelock. **Fix:** make the `guard_*` family mask IRQs around their APPLY_LOCK critical section
+  (same DAIF save/restore as `with_link`). Then the timer IRQ can't fire while a thread holds APPLY_LOCK.
+- BPF-in-IRQ (iio dispatch -> BPF_MANAGER) follows the EXISTING precedent: the GPIO IRQ already runs BPF
+  via `handle_interrupt` -> `get_hook_programs` (clone + drop lock before execute). No new pattern.
+
+### Tests
+- shrike_link: motor_side mapping + duty->permille (host-tested pure fns; add to a small module).
+- The lock-ordering / IRQ paths are kernel glue (not host-testable) — rely on review + bench (M5).

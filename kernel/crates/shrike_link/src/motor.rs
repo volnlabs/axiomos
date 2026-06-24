@@ -19,6 +19,26 @@ pub enum Direction {
 /// Per-mille full scale for a [`Msg::MotorSetpoint`](crate::Msg) duty field.
 pub const DUTY_FULL_SCALE: i16 = 1000;
 
+/// Which wheel a mapped actuation channel drives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MotorSide {
+    Left,
+    Right,
+}
+
+/// Map a monitor-clamped *unsigned* PWM duty (`0..=duty_max`) to a forward-only
+/// per-mille setpoint (`0..=1000`). v0.4 is forward-only — the ARM-A PWM path
+/// has no sign, so reverse is deferred to a future signed actuation path; the
+/// wire field is already signed for that. Saturates at `duty_max`.
+#[must_use]
+pub fn duty_to_permille(value: u32, duty_max: u32) -> i16 {
+    if duty_max == 0 {
+        return 0;
+    }
+    let v = value.min(duty_max) as u64;
+    ((v * DUTY_FULL_SCALE as u64) / duty_max as u64) as i16
+}
+
 /// Split a signed per-mille `duty` into `(direction, pwm_magnitude)`, where the
 /// magnitude is scaled to `0..=pwm_max`.
 ///
@@ -71,6 +91,15 @@ mod tests {
         assert_eq!(split_duty(i16::MAX, 1000), (Direction::Forward, 1000));
         assert_eq!(split_duty(i16::MIN, 1000), (Direction::Reverse, 1000));
         assert_eq!(split_duty(5000, 1000), (Direction::Forward, 1000));
+    }
+
+    #[test]
+    fn duty_to_permille_scales_forward_only() {
+        assert_eq!(duty_to_permille(0, 90), 0);
+        assert_eq!(duty_to_permille(90, 90), 1000);
+        assert_eq!(duty_to_permille(45, 90), 500);
+        assert_eq!(duty_to_permille(200, 90), 1000); // saturates at duty_max
+        assert_eq!(duty_to_permille(50, 0), 0); // guard
     }
 
     #[test]

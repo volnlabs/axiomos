@@ -15,6 +15,38 @@ use spin::Mutex;
 pub static ACTUATION_MONITOR: Mutex<Monitor<ActiveProfile>> = Mutex::new(Monitor::new());
 static APPLY_LOCK: Mutex<()> = Mutex::new(());
 
+/// Run `f` holding APPLY_LOCK with IRQs masked. APPLY_LOCK is reached from BOTH
+/// thread context (syscalls, the control-link poller) AND IRQ context (a BPF
+/// hook firing in the timer/GPIO IRQ can call `bpf_pwm_write` -> `guard_pwm`).
+/// A spin lock shared across those contexts livelocks if an IRQ preempts a
+/// thread mid-hold, so every acquisition masks IRQs first. On aarch64 the
+/// `are_interrupts_enabled` check makes this correct whether the caller is
+/// already in (masked) IRQ context or in thread context.
+fn with_apply_lock<R>(f: impl FnOnce() -> R) -> R {
+    #[cfg(target_arch = "aarch64")]
+    {
+        use crate::arch::aarch64::Aarch64;
+        use crate::arch::traits::Architecture;
+        let were_enabled = Aarch64::are_interrupts_enabled();
+        if were_enabled {
+            Aarch64::disable_interrupts();
+        }
+        let r = {
+            let _apply = APPLY_LOCK.lock();
+            f()
+        };
+        if were_enabled {
+            Aarch64::enable_interrupts();
+        }
+        r
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let _apply = APPLY_LOCK.lock();
+        f()
+    }
+}
+
 fn apply_pwm_value(chip: u8, channel: u8, value: u32) {
     #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
     {
@@ -29,6 +61,28 @@ fn apply_pwm_value(chip: u8, channel: u8, value: u32) {
     }
     #[cfg(not(all(target_arch = "aarch64", feature = "rpi5")))]
     let _ = (chip, channel, value);
+}
+
+/// Apply a monitor-clamped PWM `value`: link-owned motor channels go over the
+/// Shrike UART (the RP2040 drives the motor); all other channels drive local
+/// RP1 PWM. Returns the (possibly overridden) result code. Fail-closed: a
+/// link-mapped channel that is dead or whose setpoint can't be enqueued is
+/// REFUSED (-1) and never driven locally — the RP2040 watchdog fails it safe.
+#[allow(unused_variables)]
+fn apply_pwm_routed(chip: u8, channel: u8, value: u32, code: i64) -> i64 {
+    #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+    {
+        use crate::arch::aarch64::platform::rpi5::control_link;
+        if let Some(side) = control_link::motor_side(chip, channel) {
+            // Link owns this motor — never drive local PWM for it.
+            if !control_link::link_alive() || !control_link::send_motor(side, value) {
+                return -1; // dead link or TX full: refuse (peer fails safe)
+            }
+            return code;
+        }
+    }
+    apply_pwm_value(chip, channel, value);
+    code
 }
 
 fn apply_gpio_value(pin: u8, value: u32) {
@@ -46,6 +100,16 @@ fn apply_gpio_value(pin: u8, value: u32) {
     }
     #[cfg(not(all(target_arch = "aarch64", feature = "rpi5")))]
     let _ = (pin, value);
+}
+
+/// Push an e-stop over the Shrike link so link-owned motors (driven by the
+/// RP2040, not local PWM) also go safe — `apply_safe_drive` only zeroes LOCAL
+/// MMIO. Best-effort; if the link is dead the RP2040's own watchdog fails safe.
+fn notify_link_estop() {
+    #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+    {
+        crate::arch::aarch64::platform::rpi5::control_link::command_estop();
+    }
 }
 
 fn apply_safe_drive(drive: SafeDrive) {
@@ -67,27 +131,28 @@ pub fn guard_pwm_with(
     authority: Authority,
     source: AuditSource,
 ) -> i64 {
-    let _apply = APPLY_LOCK.lock();
-    let ch = ChannelId {
-        kind: ActuationKind::PwmDuty,
-        chip,
-        channel,
-    };
-    let now = crate::time::get_kernel_time_ns();
-    #[cfg(feature = "bench")]
-    let bench_t0 = crate::bench::now_cycles();
-    let (value, code) = ACTUATION_MONITOR
-        .lock()
-        .decide(ActuationRequest { ch, value: duty }, authority, source, now)
-        .apply();
-    #[cfg(feature = "bench")]
-    crate::bench::report_monitor_overhead(crate::bench::now_cycles().wrapping_sub(bench_t0));
+    with_apply_lock(|| {
+        let ch = ChannelId {
+            kind: ActuationKind::PwmDuty,
+            chip,
+            channel,
+        };
+        let now = crate::time::get_kernel_time_ns();
+        #[cfg(feature = "bench")]
+        let bench_t0 = crate::bench::now_cycles();
+        let (value, code) = ACTUATION_MONITOR
+            .lock()
+            .decide(ActuationRequest { ch, value: duty }, authority, source, now)
+            .apply();
+        #[cfg(feature = "bench")]
+        crate::bench::report_monitor_overhead(crate::bench::now_cycles().wrapping_sub(bench_t0));
 
-    apply_pwm_value(chip, channel, value);
-    #[cfg(feature = "bench")]
-    crate::bench::report_edge_to_actuate("pwm", channel, value);
+        let code = apply_pwm_routed(chip, channel, value, code);
+        #[cfg(feature = "bench")]
+        crate::bench::report_edge_to_actuate("pwm", channel, value);
 
-    code
+        code
+    })
 }
 
 pub fn guard_pwm(chip: u8, channel: u8, duty: u32) -> i64 {
@@ -107,78 +172,86 @@ pub fn guard_gpio(pin: u8, level: u32) -> i64 {
 }
 
 pub fn guard_gpio_with(pin: u8, level: u32, authority: Authority, source: AuditSource) -> i64 {
-    let _apply = APPLY_LOCK.lock();
-    let ch = ChannelId {
-        kind: ActuationKind::GpioLevel,
-        chip: 0,
-        channel: pin,
-    };
-    let now = crate::time::get_kernel_time_ns();
-    #[cfg(feature = "bench")]
-    let bench_t0 = crate::bench::now_cycles();
-    let (value, code) = ACTUATION_MONITOR
-        .lock()
-        .decide(
-            ActuationRequest { ch, value: level },
-            authority,
-            source,
-            now,
-        )
-        .apply();
-    #[cfg(feature = "bench")]
-    crate::bench::report_monitor_overhead(crate::bench::now_cycles().wrapping_sub(bench_t0));
+    with_apply_lock(|| {
+        let ch = ChannelId {
+            kind: ActuationKind::GpioLevel,
+            chip: 0,
+            channel: pin,
+        };
+        let now = crate::time::get_kernel_time_ns();
+        #[cfg(feature = "bench")]
+        let bench_t0 = crate::bench::now_cycles();
+        let (value, code) = ACTUATION_MONITOR
+            .lock()
+            .decide(
+                ActuationRequest { ch, value: level },
+                authority,
+                source,
+                now,
+            )
+            .apply();
+        #[cfg(feature = "bench")]
+        crate::bench::report_monitor_overhead(crate::bench::now_cycles().wrapping_sub(bench_t0));
 
-    apply_gpio_value(pin, value);
-    #[cfg(feature = "bench")]
-    crate::bench::report_edge_to_actuate("gpio", pin, value);
+        apply_gpio_value(pin, value);
+        #[cfg(feature = "bench")]
+        crate::bench::report_edge_to_actuate("gpio", pin, value);
 
-    code
+        code
+    })
 }
 
 pub fn trigger_estop(source: AuditSource) -> i64 {
-    let _apply = APPLY_LOCK.lock();
-    let now = crate::time::get_kernel_time_ns();
-    let drives = ACTUATION_MONITOR.lock().estop_trigger(source, now);
-    for drive in drives.iter() {
-        apply_safe_drive(drive);
-    }
-    0
+    with_apply_lock(|| {
+        let now = crate::time::get_kernel_time_ns();
+        let drives = ACTUATION_MONITOR.lock().estop_trigger(source, now);
+        for drive in drives.iter() {
+            apply_safe_drive(drive);
+        }
+        notify_link_estop();
+        0
+    })
 }
 
 pub fn operator_estop(action: EstopAction) -> i64 {
-    let _apply = APPLY_LOCK.lock();
-    let now = crate::time::get_kernel_time_ns();
-    let result = ACTUATION_MONITOR.lock().operator_estop(action, now);
-    match result {
-        EstopCommandResult::Triggered(drives) => {
-            for drive in drives.iter() {
-                apply_safe_drive(drive);
+    with_apply_lock(|| {
+        let now = crate::time::get_kernel_time_ns();
+        let result = ACTUATION_MONITOR.lock().operator_estop(action, now);
+        match result {
+            EstopCommandResult::Triggered(drives) => {
+                for drive in drives.iter() {
+                    apply_safe_drive(drive);
+                }
+                notify_link_estop();
+                0
             }
-            0
+            EstopCommandResult::Released => 0,
+            EstopCommandResult::Denied => -1,
         }
-        EstopCommandResult::Released => 0,
-        EstopCommandResult::Denied => -1,
-    }
+    })
 }
 
 pub fn watchdog_estop_trigger() -> i64 {
-    let _apply = APPLY_LOCK.lock();
-    let now = crate::time::get_kernel_time_ns();
-    let drives = ACTUATION_MONITOR.lock().watchdog_estop_trigger(now);
-    for drive in drives.iter() {
-        apply_safe_drive(drive);
-    }
-    0
+    with_apply_lock(|| {
+        let now = crate::time::get_kernel_time_ns();
+        let drives = ACTUATION_MONITOR.lock().watchdog_estop_trigger(now);
+        for drive in drives.iter() {
+            apply_safe_drive(drive);
+        }
+        notify_link_estop();
+        0
+    })
 }
 
 pub fn release_estop(authority: Authority, source: AuditSource) -> i64 {
-    let _apply = APPLY_LOCK.lock();
-    let now = crate::time::get_kernel_time_ns();
-    match ACTUATION_MONITOR
-        .lock()
-        .estop_release(authority, source, now)
-    {
-        ReleaseResult::Released => 0,
-        ReleaseResult::Denied => -1,
-    }
+    with_apply_lock(|| {
+        let now = crate::time::get_kernel_time_ns();
+        match ACTUATION_MONITOR
+            .lock()
+            .estop_release(authority, source, now)
+        {
+            ReleaseResult::Released => 0,
+            ReleaseResult::Denied => -1,
+        }
+    })
 }
