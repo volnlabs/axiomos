@@ -13,6 +13,7 @@
 pub mod gpio;
 pub mod memory_map;
 pub mod mmio;
+pub mod pl011;
 pub mod pwm;
 pub mod uart;
 

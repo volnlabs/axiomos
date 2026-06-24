@@ -101,6 +101,10 @@ pub const ATTACH_TYPE_SCHED_SWITCH: u32 = 7;
 pub const ENVELOPE_MAP_ID: u32 = 0;
 pub const RESERVED_MAP_COUNT: u32 = 1;
 
+/// One resolved GPIO program slot for the zero-alloc dispatch buffer (#65):
+/// `(prog_id, Arc<program>)`. Aliased so the hot-path buffer type stays legible.
+pub type GpioProgramSlot = Option<(u32, Arc<BpfProgram<ActiveProfile>>)>;
+
 pub struct BpfManager {
     // Arc so the hot dispatch path (gpio_programs_into/get_hook_programs) clones
     // a refcount, not the whole instruction Vec — the IRQ handler runs this per
@@ -560,7 +564,7 @@ impl BpfManager {
         chip: u8,
         pin: u8,
         fired: GpioEdge,
-        out: &mut [Option<(u32, Arc<BpfProgram<ActiveProfile>>)>],
+        out: &mut [GpioProgramSlot],
     ) -> usize {
         let mut n = 0;
         self.gpio_routes.for_each_program(chip, pin, fired, |prog_id| {

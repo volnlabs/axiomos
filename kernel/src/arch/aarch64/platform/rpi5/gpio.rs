@@ -409,10 +409,6 @@ pub fn handle_interrupt() {
             // helpers (e.g. bpf_gpio_write, bpf_ringbuf_output) can re-acquire
             // the manager lock without deadlocking.
             if let Some(manager) = crate::BPF_MANAGER.get() {
-                use alloc::sync::Arc;
-                use kernel_bpf::bytecode::program::BpfProgram;
-                use kernel_bpf::profile::ActiveProfile;
-
                 // Resolve into a stack buffer so the IRQ handler never touches
                 // the spin-locked global heap on the edge path (#65, ~200k/s).
                 // 8 programs/pin is far above any real wiring; excess routes are
@@ -421,7 +417,7 @@ pub fn handle_interrupt() {
                 // per pin, enforce the same cap at register_gpio_route (fail-closed
                 // load-time reject) so a 9th route can't silently never fire.
                 let fired = kernel_bpf::attach::GpioEdge::from_flags(edge as u32);
-                let mut buf: [Option<(u32, Arc<BpfProgram<ActiveProfile>>)>; 8] =
+                let mut buf: [crate::bpf::GpioProgramSlot; 8] =
                     core::array::from_fn(|_| None);
                 let n = manager.lock().gpio_programs_into(0, pin as u8, fired, &mut buf);
                 // Manager lock dropped above; helpers may re-acquire it.

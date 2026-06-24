@@ -14,6 +14,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod motor;
+pub mod ring;
 pub mod watchdog;
 
 pub const SYNC: u8 = 0x7E;
