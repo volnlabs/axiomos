@@ -136,6 +136,12 @@ pub extern "C" fn handle_irq(_ctx: &mut ExceptionContext) {
         // Signal end of interrupt for timer
         gic::end_of_interrupt(iar);
 
+        // Poll the Shrike control-link transport (dumb byte move + decode).
+        // No-op until control_link::init() runs at HW bring-up; never blocks
+        // beyond draining the TX FIFO.
+        #[cfg(feature = "rpi5")]
+        crate::arch::aarch64::platform::rpi5::control_link::poll();
+
         // Trigger scheduler tick (may cause context switch)
         // We do this AFTER EOI so that new tasks don't inherit the active interrupt state
         log::trace!("Calling timer_tick");

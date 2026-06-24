@@ -10,6 +10,7 @@
 //! - Debug UART (UART10): 0x10_7D00_1000
 //! - RP1 GPIO: 0x1F_000D_0000
 
+pub mod control_link;
 pub mod gpio;
 pub mod memory_map;
 pub mod mmio;

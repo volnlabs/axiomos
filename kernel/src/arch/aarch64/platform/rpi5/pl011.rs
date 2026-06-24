@@ -110,8 +110,15 @@ impl Pl011 {
         Some((dr & 0xFF) as u8)
     }
 
+    /// True if the TX FIFO is full (a `write_byte` would spin). Callers in IRQ
+    /// context check this to bound their drain and never block.
+    pub fn tx_full(&self) -> bool {
+        self.r(reg::FR).read() & fr::TXFF != 0
+    }
+
     /// Blocking TX of one byte (spins on TX-FIFO-full). Transport task only —
-    /// never call from the actuation path while holding APPLY_LOCK.
+    /// never call from the actuation path while holding APPLY_LOCK. In the IRQ
+    /// poll, gate with `tx_full()` first so this never actually spins.
     pub fn write_byte(&self, b: u8) {
         while self.r(reg::FR).read() & fr::TXFF != 0 {}
         self.r(reg::DR).write(b as u32);
