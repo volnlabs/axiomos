@@ -75,30 +75,32 @@ pub extern "C" fn _start() -> ! {
     print("Building BPF filter program...\n");
 
     let insns = [
-        // R6 = R1 (save event pointer)
+        // R6 = *(u64 *)(R1 + 0)  // ctx.data -> IioEvent*  (R1 is &BpfContext;
+        // the per-hook IioEvent is reached through ctx.data, NOT off R1 directly
+        // — R1+16 is BpfContext.data_meta, a null pointer).
         BpfInsn {
-            code: 0xbf,    // MOV64
-            dst_src: 0x61, // dst=R6, src=R1
+            code: 0x79,    // LDXDW (load doubleword)
+            dst_src: 0x16, // dst=R6, src=R1
             off: 0,
             imm: 0,
         },
-        // R0 = *(i32 *)(R1 + 16)  // Load 'value' from IioEvent
+        // R0 = *(i32 *)(R6 + 16)  // Load 'value' from IioEvent via ctx.data
         BpfInsn {
             code: 0x61,    // LDXW (load word)
-            dst_src: 0x10, // dst=R0, src=R1
+            dst_src: 0x60, // dst=R0, src=R6
             off: IIOVENT_VALUE_OFFSET,
             imm: 0,
         },
-        // if R0 < 100, goto reject (offset +8)
+        // if R0 < 100 (signed), goto reject (offset +8)
         BpfInsn {
-            code: 0x35,    // JSLT (signed <)
+            code: 0xc5,    // JSLT_K (signed <) — 0x35 was unsigned JGE (wrong sense)
             dst_src: 0x00, // dst=R0, src=imm
             off: 8,        // skip to reject
             imm: MIN_VALUE,
         },
-        // if R0 > 900, goto reject (offset +7)
+        // if R0 > 900 (signed), goto reject (offset +7)
         BpfInsn {
-            code: 0x25,    // JGT (signed >)
+            code: 0x65,    // JSGT_K (signed >) — 0x25 was unsigned JGT
             dst_src: 0x00, // dst=R0, src=imm
             off: 7,        // skip to reject
             imm: MAX_VALUE,
