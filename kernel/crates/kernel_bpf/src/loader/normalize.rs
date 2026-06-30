@@ -529,4 +529,50 @@ mod tests {
         assert_eq!(out[1].offset, 0);          // jump to next insn (the continuation = main exit)
         assert!(out[2].is_exit());             // main's own exit, preserved
     }
+
+    #[test]
+    fn expand_fixes_backward_jump() {
+        // Single-function "main" (depth 0, no calls) with a backward conditional jump:
+        // 0: r0 = 0
+        // 1: r1 = 0
+        // 2: jne r0, 0, -2   (target = 2 + 1 + (-2) = 1)
+        // 3: exit
+        //
+        // At depth 0 with no inlining the layout is unchanged, so the rewritten
+        // offset must equal the original: new_target=1, pos=2 → 1 - 2 - 1 = -2.
+        let insns = vec![
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::mov64_imm(1, 0),
+            BpfInsn::jne_imm(0, 0, -2),
+            BpfInsn::exit(),
+        ];
+        let bounds = subprogram_bounds(&insns);
+        let out = expand(&insns, &bounds, 0, 0);
+        assert_eq!(out.len(), 4);
+        // Target index 1 maps to output position 1; new offset = 1 - 2 - 1 = -2.
+        assert_eq!(out[2].offset, -2);
+    }
+
+    #[test]
+    fn expand_preserves_helper_call() {
+        // Single-function "main" with a BPF helper call (src_reg 0 — NOT a subprogram call):
+        // 0: call helper #5   (opcode 0x85, src_reg 0, imm 5)
+        // 1: exit
+        //
+        // expand must NOT treat this as a subprogram call; it goes through the
+        // is_jump() branch, offset is recomputed to 0 (target=1, pos=0 → 1-0-1=0),
+        // and imm (helper id) must survive untouched.
+        let insns = vec![
+            BpfInsn::call(5), // helper id 5, src_reg 0
+            BpfInsn::exit(),
+        ];
+        let bounds = subprogram_bounds(&insns);
+        let out = expand(&insns, &bounds, 0, 0);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].opcode, 0x85);
+        assert_eq!(out[0].src_reg(), 0);
+        assert_eq!(out[0].imm, 5);
+        assert_eq!(out[0].offset, 0);
+        assert!(out[1].is_exit());
+    }
 }
