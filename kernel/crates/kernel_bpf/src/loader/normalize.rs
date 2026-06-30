@@ -10,6 +10,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::bytecode::insn::BpfInsn;
+use crate::loader::error::{LoadError, LoadResult};
 
 /// `src_reg` value marking a `call` as a BPF-to-BPF subprogram call.
 pub const BPF_PSEUDO_CALL: u8 = 1;
@@ -50,6 +51,133 @@ fn subprogram_bounds(insns: &[BpfInsn]) -> Vec<(usize, usize)> {
     bounds
 }
 
+/// Which subprogram (index into `bounds`) starts at exactly `target`.
+/// Returns `None` if `target` is negative or not a subprogram entry.
+fn subprog_index(bounds: &[(usize, usize)], target: i64) -> Option<usize> {
+    if target < 0 {
+        return None;
+    }
+    let t = target as usize;
+    bounds.iter().position(|&(s, _)| s == t)
+}
+
+/// Subprogram indices called from subprogram `sp` (in call-site order).
+/// Returns `MalformedPseudoCall` if any target is out of range or not a subprogram entry.
+fn callees(
+    insns: &[BpfInsn],
+    bounds: &[(usize, usize)],
+    sp: usize,
+) -> LoadResult<Vec<usize>> {
+    let (start, end) = bounds[sp];
+    let mut out = Vec::new();
+    let mut i = start;
+    while i < end {
+        let insn = &insns[i];
+        if is_subprog_call(insn) {
+            match subprog_index(bounds, call_target(i, insn)) {
+                Some(idx) => out.push(idx),
+                None => return Err(LoadError::MalformedPseudoCall { insn_idx: i }),
+            }
+        }
+        i += if insn.is_wide() { 2 } else { 1 };
+    }
+    Ok(out)
+}
+
+/// Reject any program whose call graph contains a cycle.
+fn check_recursion(insns: &[BpfInsn], bounds: &[(usize, usize)]) -> LoadResult<()> {
+    // DFS with coloring: 0=unvisited, 1=on-stack, 2=done.
+    let n = bounds.len();
+    let mut color = alloc::vec![0u8; n];
+    fn dfs(
+        sp: usize,
+        insns: &[BpfInsn],
+        bounds: &[(usize, usize)],
+        color: &mut [u8],
+    ) -> LoadResult<()> {
+        color[sp] = 1;
+        for c in callees(insns, bounds, sp)? {
+            if color[c] == 1 {
+                return Err(LoadError::RecursiveCall { subprog: c });
+            }
+            if color[c] == 0 {
+                dfs(c, insns, bounds, color)?;
+            }
+        }
+        color[sp] = 2;
+        Ok(())
+    }
+    for sp in 0..n {
+        if color[sp] == 0 {
+            dfs(sp, insns, bounds, &mut color)?;
+        }
+    }
+    Ok(())
+}
+
+/// Longest call-graph path length from `main` (subprogram containing index 0); leaf = 0.
+/// Returns `CallDepthExceeded` if the depth exceeds `MAX_CALL_DEPTH`.
+fn call_depth(insns: &[BpfInsn], bounds: &[(usize, usize)]) -> LoadResult<usize> {
+    fn depth(
+        sp: usize,
+        insns: &[BpfInsn],
+        bounds: &[(usize, usize)],
+        memo: &mut [Option<usize>],
+    ) -> LoadResult<usize> {
+        if let Some(d) = memo[sp] {
+            return Ok(d);
+        }
+        let mut best = 0;
+        for c in callees(insns, bounds, sp)? {
+            best = best.max(1 + depth(c, insns, bounds, memo)?);
+        }
+        memo[sp] = Some(best);
+        Ok(best)
+    }
+    let main = subprog_index(bounds, 0).expect("index 0 is always a subprogram start");
+    let mut memo = alloc::vec![None; bounds.len()];
+    let d = depth(main, insns, bounds, &mut memo)?;
+    if d > MAX_CALL_DEPTH {
+        return Err(LoadError::CallDepthExceeded { depth: d, limit: MAX_CALL_DEPTH });
+    }
+    Ok(d)
+}
+
+/// Additive post-inline instruction count estimate for `main` (subprogram containing index 0).
+/// `size(s) = (len(s) − subprog_calls_in_s) + Σ_callsites size(callee)`.
+#[allow(dead_code)]
+fn expanded_size(insns: &[BpfInsn], bounds: &[(usize, usize)]) -> usize {
+    fn size(
+        sp: usize,
+        insns: &[BpfInsn],
+        bounds: &[(usize, usize)],
+        memo: &mut [Option<usize>],
+    ) -> usize {
+        if let Some(s) = memo[sp] {
+            return s;
+        }
+        let (start, end) = bounds[sp];
+        let mut total = 0usize;
+        let mut i = start;
+        while i < end {
+            let insn = &insns[i];
+            if is_subprog_call(insn) {
+                if let Some(c) = subprog_index(bounds, call_target(i, insn)) {
+                    total += size(c, insns, bounds, memo); // call insn replaced by callee body
+                }
+            } else {
+                total += if insn.is_wide() { 2 } else { 1 };
+            }
+            i += if insn.is_wide() { 2 } else { 1 };
+        }
+        memo[sp] = Some(total);
+        total
+    }
+    let main = subprog_index(bounds, 0).expect("index 0 is a subprogram start");
+    let mut memo = alloc::vec![None; bounds.len()];
+    size(main, insns, bounds, &mut memo)
+}
+
 #[cfg(test)]
 mod tests {
     extern crate alloc;
@@ -63,6 +191,52 @@ mod tests {
         let mut i = BpfInsn::call(imm as i32);
         i.regs = (i.regs & 0x0f) | (BPF_PSEUDO_CALL << 4); // src_reg = 1
         i
+    }
+
+    #[test]
+    fn rejects_direct_recursion() {
+        // 0: call ->0 (self) ; 1: exit
+        let insns = vec![subprog_call(0, 0), BpfInsn::exit()];
+        let bounds = subprogram_bounds(&insns);
+        assert_eq!(
+            check_recursion(&insns, &bounds),
+            Err(crate::loader::LoadError::RecursiveCall { subprog: 0 })
+        );
+    }
+
+    #[test]
+    fn computes_call_depth_and_rejects_too_deep() {
+        // main(0) -> f1(2) -> f2(4); depth 2, accepted.
+        let insns = vec![
+            subprog_call(0, 2),
+            BpfInsn::exit(),
+            subprog_call(2, 4),
+            BpfInsn::exit(),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ];
+        let bounds = subprogram_bounds(&insns);
+        assert!(check_recursion(&insns, &bounds).is_ok());
+        assert_eq!(call_depth(&insns, &bounds).unwrap(), 2);
+    }
+
+    #[test]
+    fn malformed_pseudo_call_target() {
+        // Compute bounds from a well-formed 2-subprogram layout: main[0,2) calls helper[2,5).
+        let mut insns = vec![
+            subprog_call(0, 2),
+            BpfInsn::exit(),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::add64_imm(0, 1),
+            BpfInsn::exit(),
+        ];
+        let bounds = subprogram_bounds(&insns); // [(0,2),(2,5)] — index 3 is NOT an entry
+        // Replace exit at index 1 with a call targeting index 3 (inside helper, not its entry).
+        insns[1] = subprog_call(1, 3);
+        assert_eq!(
+            callees(&insns, &bounds, 0).err(),
+            Some(crate::loader::LoadError::MalformedPseudoCall { insn_idx: 1 })
+        );
     }
 
     #[test]

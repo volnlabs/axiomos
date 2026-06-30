@@ -47,6 +47,14 @@ pub enum LoadError {
     InvalidLicense,
     /// BTF parsing error
     BtfError,
+    /// A subprogram call participates in a recursion cycle.
+    RecursiveCall { subprog: usize },
+    /// Subprogram call depth exceeds the supported limit.
+    CallDepthExceeded { depth: usize, limit: usize },
+    /// Inlined program would exceed the instruction-count limit.
+    ExpansionTooLarge { got: usize, limit: usize },
+    /// A pseudo-call target is out of range or not a subprogram entry.
+    MalformedPseudoCall { insn_idx: usize },
 }
 
 impl fmt::Display for LoadError {
@@ -73,6 +81,10 @@ impl fmt::Display for LoadError {
             Self::LicenseNotFound => write!(f, "license not found"),
             Self::InvalidLicense => write!(f, "invalid license string"),
             Self::BtfError => write!(f, "BTF parsing error"),
+            Self::RecursiveCall { subprog } => write!(f, "recursive subprogram call (subprog {})", subprog),
+            Self::CallDepthExceeded { depth, limit } => write!(f, "call depth {} exceeds limit {}", depth, limit),
+            Self::ExpansionTooLarge { got, limit } => write!(f, "expanded program {} insns exceeds limit {}", got, limit),
+            Self::MalformedPseudoCall { insn_idx } => write!(f, "malformed pseudo-call at insn {}", insn_idx),
         }
     }
 }
