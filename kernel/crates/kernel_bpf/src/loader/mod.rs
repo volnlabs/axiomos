@@ -44,6 +44,7 @@ extern crate alloc;
 
 mod elf;
 mod error;
+mod normalize;
 mod object;
 mod reloc;
 
