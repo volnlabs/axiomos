@@ -55,6 +55,8 @@ pub enum LoadError {
     ExpansionTooLarge { got: usize, limit: usize },
     /// A pseudo-call target is out of range or not a subprogram entry.
     MalformedPseudoCall { insn_idx: usize },
+    /// A jump offset computed during inlining exceeds the i16 range.
+    JumpOffsetOverflow { insn_idx: usize },
 }
 
 impl fmt::Display for LoadError {
@@ -85,6 +87,7 @@ impl fmt::Display for LoadError {
             Self::CallDepthExceeded { depth, limit } => write!(f, "call depth {} exceeds limit {}", depth, limit),
             Self::ExpansionTooLarge { got, limit } => write!(f, "expanded program {} insns exceeds limit {}", got, limit),
             Self::MalformedPseudoCall { insn_idx } => write!(f, "malformed pseudo-call at insn {}", insn_idx),
+            Self::JumpOffsetOverflow { insn_idx } => write!(f, "jump offset overflow at insn {}", insn_idx),
         }
     }
 }

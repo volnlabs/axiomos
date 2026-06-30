@@ -53,6 +53,7 @@ use core::marker::PhantomData;
 
 pub use elf::{ElfParser, SectionType};
 pub use error::{LoadError, LoadResult};
+pub use normalize::{normalize, Normalized};
 pub use object::{BpfObject, LoadedMap, LoadedProgram};
 pub use reloc::Relocator;
 

@@ -145,7 +145,6 @@ fn call_depth(insns: &[BpfInsn], bounds: &[(usize, usize)]) -> LoadResult<usize>
 
 /// Additive post-inline instruction count estimate for `main` (subprogram containing index 0).
 /// `size(s) = (len(s) − subprog_calls_in_s) + Σ_callsites size(callee)`.
-#[allow(dead_code)]
 fn expanded_size(insns: &[BpfInsn], bounds: &[(usize, usize)]) -> usize {
     fn size(
         sp: usize,
@@ -186,22 +185,33 @@ fn expanded_size(insns: &[BpfInsn], bounds: &[(usize, usize)]) -> usize {
     size(main, insns, bounds, &mut memo)
 }
 
-/// Flatten subprogram `sp` into a `Vec<BpfInsn>` at call `depth`.
+/// Range-check a computed jump offset so it fits in `i16`.
 ///
-/// All BPF-to-BPF calls inside the body are replaced by recursively inlined
-/// callee bodies.  Each callee `EXIT` becomes a `JA` to one-past the callee
-/// body; the outermost (depth-0) `EXIT` is preserved unchanged.  Internal
-/// relative jumps are recomputed against an `old_to_new` index map so that
-/// offsets remain correct after inlining stretches or compresses the layout.
-#[allow(dead_code)]
+/// `insn_idx` is the originating absolute source index of the jump or exit
+/// instruction; it appears in the error for diagnostics.
+fn checked_offset(value: i64, insn_idx: usize) -> LoadResult<i16> {
+    i16::try_from(value).map_err(|_| LoadError::JumpOffsetOverflow { insn_idx })
+}
+
+/// Flatten subprogram `sp` into a `Vec<(BpfInsn, u32)>` at call `depth`.
+///
+/// Each element pairs the emitted instruction with its originating absolute
+/// source instruction index (for the source map).  All BPF-to-BPF calls
+/// inside the body are replaced by recursively inlined callee bodies.  Each
+/// callee `EXIT` becomes a `JA` to one-past the callee body; the outermost
+/// (depth-0) `EXIT` is preserved unchanged.  Internal relative jumps are
+/// recomputed against an `old_to_new` index map so that offsets remain
+/// correct after inlining stretches or compresses the layout.
+///
+/// Returns `JumpOffsetOverflow` if any recomputed offset does not fit in i16.
 fn expand(
     insns: &[BpfInsn],
     bounds: &[(usize, usize)],
     sp: usize,
     depth: usize,
-) -> Vec<BpfInsn> {
+) -> LoadResult<Vec<(BpfInsn, u32)>> {
     let (start, end) = bounds[sp];
-    let mut out: Vec<BpfInsn> = Vec::new();
+    let mut out: Vec<(BpfInsn, u32)> = Vec::new();
     // old (absolute) index within [start,end) → position in `out`.
     let mut old_to_new = alloc::vec![usize::MAX; end - start];
     // (pos in out, absolute old target index) for this subprogram's own jumps.
@@ -217,27 +227,27 @@ fn expand(
         if is_subprog_call(&insn) {
             let callee = subprog_index(bounds, call_target(i, &insn))
                 .expect("callees() already validated targets");
-            let block = expand(insns, bounds, callee, depth + 1);
+            let block = expand(insns, bounds, callee, depth + 1)?;
             out.extend(block);
         } else if insn.is_exit() {
             if depth == 0 {
-                out.push(insn); // main's terminating exit
+                out.push((insn, i as u32)); // main's terminating exit
             } else {
-                out.push(BpfInsn::ja(0)); // fixed up below
+                out.push((BpfInsn::ja(0), i as u32)); // fixed up below
                 exit_positions.push(out.len() - 1);
             }
         } else if insn.is_jump() {
             // Conditional/unconditional internal jump (not a subprogram call).
             let target = (i as i64 + 1 + insn.offset as i64) as usize;
-            out.push(insn);
+            out.push((insn, i as u32));
             pending_jumps.push((out.len() - 1, target));
         } else if insn.is_wide() {
-            out.push(insn);
-            out.push(insns[i + 1]); // copy the 64-bit immediate continuation
+            out.push((insn, i as u32));
+            out.push((insns[i + 1], (i + 1) as u32)); // copy the 64-bit immediate continuation
         } else {
             let (re, n) = rebase(insn, depth);
             for k in 0..n {
-                out.push(re[k]);
+                out.push((re[k], i as u32));
             }
         }
 
@@ -246,15 +256,19 @@ fn expand(
 
     let body_end = out.len();
     for pos in exit_positions {
-        out[pos].offset = (body_end - pos - 1) as i16;
+        let offset_val = body_end as i64 - pos as i64 - 1;
+        let src_idx = out[pos].1 as usize;
+        out[pos].0.offset = checked_offset(offset_val, src_idx)?;
     }
     for (pos, target) in pending_jumps {
         let new_target = old_to_new[target - start];
         debug_assert!(new_target != usize::MAX, "jump target inside subprogram");
-        out[pos].offset = (new_target as isize - pos as isize - 1) as i16;
+        let offset_val = new_target as i64 - pos as i64 - 1;
+        let src_idx = out[pos].1 as usize;
+        out[pos].0.offset = checked_offset(offset_val, src_idx)?;
     }
 
-    out
+    Ok(out)
 }
 
 /// Rewrite a single instruction for an inlined frame at `depth`.
@@ -263,7 +277,6 @@ fn expand(
 /// the only source of a stack pointer, so shifting direct `r10`-relative
 /// accesses and `r10` copies by `depth × FRAME_SIZE` relocates the whole frame
 /// to its own stack window; pointers derived further carry the shift.
-#[allow(dead_code)]
 fn rebase(insn: BpfInsn, depth: usize) -> ([BpfInsn; 2], usize) {
     if depth == 0 {
         return ([insn, insn], 1);
@@ -294,12 +307,57 @@ fn rebase(insn: BpfInsn, depth: usize) -> ([BpfInsn; 2], usize) {
     ([insn, insn], 1)
 }
 
+/// The canonical flat program the verifier consumes.
+#[derive(Debug, Clone)]
+pub struct Normalized {
+    /// Flattened, loop-free instructions; all `call`s are helper calls.
+    pub insns: Vec<BpfInsn>,
+    /// `source_map[new_idx]` = originating absolute source instruction index.
+    // ponytail: source_map carried but not yet threaded to LoadedProgram; wire it when a diagnostic consumer exists.
+    pub source_map: Vec<u32>,
+}
+
+/// Normalize loaded bytecode into the canonical flat program (resolve and
+/// inline BPF-to-BPF calls). Returns the input unchanged if it has no
+/// subprogram calls.
+pub fn normalize(insns: &[BpfInsn]) -> LoadResult<Normalized> {
+    use crate::bytecode::program::BpfProgram;
+    use crate::profile::ActiveProfile;
+    let limit = BpfProgram::<ActiveProfile>::MAX_INSN_COUNT;
+
+    if !insns.iter().any(is_subprog_call) {
+        return Ok(Normalized {
+            insns: insns.to_vec(),
+            source_map: (0..insns.len() as u32).collect(),
+        });
+    }
+
+    let bounds = subprogram_bounds(insns);
+    check_recursion(insns, &bounds)?;
+    call_depth(insns, &bounds)?; // rejects CallDepthExceeded
+
+    let est = expanded_size(insns, &bounds);
+    if est > limit {
+        return Err(LoadError::ExpansionTooLarge { got: est, limit });
+    }
+
+    let main = subprog_index(&bounds, 0).expect("index 0 is a subprogram start");
+    let expanded = expand(insns, &bounds, main, 0)?;
+    if expanded.len() > limit {
+        return Err(LoadError::ExpansionTooLarge { got: expanded.len(), limit });
+    }
+
+    let (flat, source_map): (Vec<BpfInsn>, Vec<u32>) = expanded.into_iter().unzip();
+    Ok(Normalized { insns: flat, source_map })
+}
+
 #[cfg(test)]
 mod tests {
     extern crate alloc;
     use alloc::vec;
     use super::*;
     use crate::bytecode::insn::BpfInsn;
+    use crate::loader::LoadError;
 
     // A BPF-to-BPF call to the subprogram at `target` from position `at`.
     fn subprog_call(at: usize, target: usize) -> BpfInsn {
@@ -503,11 +561,11 @@ mod tests {
             BpfInsn::exit(),
         ];
         let bounds = subprogram_bounds(&insns);
-        let out = expand(&insns, &bounds, 0, 0);
+        let out = expand(&insns, &bounds, 0, 0).unwrap();
         // Nothing inserted at depth 0 with no calls → identical layout.
         assert_eq!(out.len(), 3);
-        assert_eq!(out[0].offset, 1); // jump target unchanged
-        assert!(out[2].is_exit());    // main exit preserved
+        assert_eq!(out[0].0.offset, 1); // jump target unchanged
+        assert!(out[2].0.is_exit());    // main exit preserved
     }
 
     #[test]
@@ -521,13 +579,13 @@ mod tests {
             BpfInsn::exit(),
         ];
         let bounds = subprogram_bounds(&insns);
-        let out = expand(&insns, &bounds, 0, 0);
+        let out = expand(&insns, &bounds, 0, 0).unwrap();
         // Expected flat: [r0=7, ja->end(=main continuation), exit]
         assert_eq!(out.len(), 3);
-        assert_eq!(out[0], BpfInsn::mov64_imm(0, 7));
-        assert_eq!(out[1].opcode, 0x05);      // JA
-        assert_eq!(out[1].offset, 0);          // jump to next insn (the continuation = main exit)
-        assert!(out[2].is_exit());             // main's own exit, preserved
+        assert_eq!(out[0].0, BpfInsn::mov64_imm(0, 7));
+        assert_eq!(out[1].0.opcode, 0x05);      // JA
+        assert_eq!(out[1].0.offset, 0);          // jump to next insn (the continuation = main exit)
+        assert!(out[2].0.is_exit());             // main's own exit, preserved
     }
 
     #[test]
@@ -547,10 +605,10 @@ mod tests {
             BpfInsn::exit(),
         ];
         let bounds = subprogram_bounds(&insns);
-        let out = expand(&insns, &bounds, 0, 0);
+        let out = expand(&insns, &bounds, 0, 0).unwrap();
         assert_eq!(out.len(), 4);
         // Target index 1 maps to output position 1; new offset = 1 - 2 - 1 = -2.
-        assert_eq!(out[2].offset, -2);
+        assert_eq!(out[2].0.offset, -2);
     }
 
     #[test]
@@ -567,12 +625,83 @@ mod tests {
             BpfInsn::exit(),
         ];
         let bounds = subprogram_bounds(&insns);
-        let out = expand(&insns, &bounds, 0, 0);
+        let out = expand(&insns, &bounds, 0, 0).unwrap();
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0].opcode, 0x85);
-        assert_eq!(out[0].src_reg(), 0);
-        assert_eq!(out[0].imm, 5);
-        assert_eq!(out[0].offset, 0);
-        assert!(out[1].is_exit());
+        assert_eq!(out[0].0.opcode, 0x85);
+        assert_eq!(out[0].0.src_reg(), 0);
+        assert_eq!(out[0].0.imm, 5);
+        assert_eq!(out[0].0.offset, 0);
+        assert!(out[1].0.is_exit());
+    }
+
+    // --- checked_offset unit tests (I1 overflow guard) ---
+
+    #[test]
+    fn checked_offset_in_range_returns_ok() {
+        assert_eq!(checked_offset(0, 0), Ok(0i16));
+        assert_eq!(checked_offset(i16::MAX as i64, 1), Ok(i16::MAX));
+        assert_eq!(checked_offset(i16::MIN as i64, 2), Ok(i16::MIN));
+    }
+
+    #[test]
+    fn checked_offset_overflow_returns_error() {
+        assert_eq!(
+            checked_offset(i16::MAX as i64 + 1, 42),
+            Err(LoadError::JumpOffsetOverflow { insn_idx: 42 })
+        );
+        assert_eq!(
+            checked_offset(i16::MIN as i64 - 1, 7),
+            Err(LoadError::JumpOffsetOverflow { insn_idx: 7 })
+        );
+    }
+
+    // --- normalize entry-point tests ---
+
+    #[test]
+    fn normalize_fast_path_no_calls() {
+        let insns = vec![BpfInsn::mov64_imm(0, 0), BpfInsn::exit()];
+        let n = normalize(&insns).unwrap();
+        assert_eq!(n.insns, insns);
+        assert_eq!(n.source_map, vec![0, 1]);
+    }
+
+    #[test]
+    fn normalize_inlines_and_removes_subprog_calls() {
+        // main(0): call ->2 ; exit    leaf(2): r0=7 ; exit
+        let insns = vec![
+            subprog_call(0, 2),
+            BpfInsn::exit(),
+            BpfInsn::mov64_imm(0, 7),
+            BpfInsn::exit(),
+        ];
+        let n = normalize(&insns).unwrap();
+        // No subprogram calls remain in the normalized program.
+        assert!(!n.insns.iter().any(is_subprog_call));
+        // Flat: [r0=7, ja, exit]
+        assert_eq!(n.insns.len(), 3);
+        assert!(n.insns[2].is_exit());
+    }
+
+    #[test]
+    fn normalize_rejects_recursion() {
+        let insns = vec![subprog_call(0, 0), BpfInsn::exit()];
+        assert_eq!(normalize(&insns).err(), Some(LoadError::RecursiveCall { subprog: 0 }));
+    }
+
+    #[test]
+    fn normalize_rebases_nested_frames() {
+        // main(0): store *(r10-8)=r1 ; call ->3 ; exit
+        // leaf(3): store *(r10-8)=r2 ; exit   (depth 1 → offset shifts by 512)
+        let insns = vec![
+            BpfInsn::new(0x7b, 10, 1, -8, 0), // *(r10-8) = r1   (main, depth 0)
+            subprog_call(1, 3),
+            BpfInsn::exit(),
+            BpfInsn::new(0x7b, 10, 2, -8, 0), // *(r10-8) = r2   (leaf, depth 1)
+            BpfInsn::exit(),
+        ];
+        let n = normalize(&insns).unwrap();
+        // main's store keeps -8; leaf's store rebased to -8-512.
+        let stores: Vec<i16> = n.insns.iter().filter(|i| i.opcode == 0x7b).map(|i| i.offset).collect();
+        assert_eq!(stores, vec![-8, -8 - 512]);
     }
 }
