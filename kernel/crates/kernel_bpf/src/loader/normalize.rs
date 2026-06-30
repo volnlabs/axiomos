@@ -186,6 +186,77 @@ fn expanded_size(insns: &[BpfInsn], bounds: &[(usize, usize)]) -> usize {
     size(main, insns, bounds, &mut memo)
 }
 
+/// Flatten subprogram `sp` into a `Vec<BpfInsn>` at call `depth`.
+///
+/// All BPF-to-BPF calls inside the body are replaced by recursively inlined
+/// callee bodies.  Each callee `EXIT` becomes a `JA` to one-past the callee
+/// body; the outermost (depth-0) `EXIT` is preserved unchanged.  Internal
+/// relative jumps are recomputed against an `old_to_new` index map so that
+/// offsets remain correct after inlining stretches or compresses the layout.
+#[allow(dead_code)]
+fn expand(
+    insns: &[BpfInsn],
+    bounds: &[(usize, usize)],
+    sp: usize,
+    depth: usize,
+) -> Vec<BpfInsn> {
+    let (start, end) = bounds[sp];
+    let mut out: Vec<BpfInsn> = Vec::new();
+    // old (absolute) index within [start,end) → position in `out`.
+    let mut old_to_new = alloc::vec![usize::MAX; end - start];
+    // (pos in out, absolute old target index) for this subprogram's own jumps.
+    let mut pending_jumps: Vec<(usize, usize)> = Vec::new();
+    // positions of EXIT-derived JAs to fix to body end (non-main only).
+    let mut exit_positions: Vec<usize> = Vec::new();
+
+    let mut i = start;
+    while i < end {
+        let insn = insns[i];
+        old_to_new[i - start] = out.len();
+
+        if is_subprog_call(&insn) {
+            let callee = subprog_index(bounds, call_target(i, &insn))
+                .expect("callees() already validated targets");
+            let block = expand(insns, bounds, callee, depth + 1);
+            out.extend(block);
+        } else if insn.is_exit() {
+            if depth == 0 {
+                out.push(insn); // main's terminating exit
+            } else {
+                out.push(BpfInsn::ja(0)); // fixed up below
+                exit_positions.push(out.len() - 1);
+            }
+        } else if insn.is_jump() {
+            // Conditional/unconditional internal jump (not a subprogram call).
+            let target = (i as i64 + 1 + insn.offset as i64) as usize;
+            out.push(insn);
+            pending_jumps.push((out.len() - 1, target));
+        } else if insn.is_wide() {
+            out.push(insn);
+            out.push(insns[i + 1]); // copy the 64-bit immediate continuation
+        } else {
+            let (re, n) = rebase(insn, depth);
+            for k in 0..n {
+                out.push(re[k]);
+            }
+        }
+
+        i += if insn.is_wide() { 2 } else { 1 };
+    }
+
+    let body_end = out.len();
+    for pos in exit_positions {
+        out[pos].offset = (body_end - pos - 1) as i16;
+    }
+    for (pos, target) in pending_jumps {
+        let new_target = old_to_new[target - start];
+        debug_assert!(new_target != usize::MAX, "jump target inside subprogram");
+        out[pos].offset = (new_target as isize - pos as isize - 1) as i16;
+    }
+
+    out
+}
+
 /// Rewrite a single instruction for an inlined frame at `depth`.
 ///
 /// Returns the rewritten instruction(s) and the valid length (1 or 2). `r10` is
@@ -420,5 +491,42 @@ mod tests {
         let (out, n) = rebase(m, 3);
         assert_eq!(n, 1);
         assert_eq!(out[0], m);
+    }
+
+    #[test]
+    fn expand_leaf_fixes_forward_jump_and_keeps_main_exit() {
+        // Single-function "main" (depth 0), no calls, with a forward jump:
+        // 0: if r0 == 0 goto +1 ; 1: r0 = 1 ; 2: exit
+        let insns = vec![
+            BpfInsn::jeq_imm(0, 0, 1),
+            BpfInsn::mov64_imm(0, 1),
+            BpfInsn::exit(),
+        ];
+        let bounds = subprogram_bounds(&insns);
+        let out = expand(&insns, &bounds, 0, 0);
+        // Nothing inserted at depth 0 with no calls → identical layout.
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].offset, 1); // jump target unchanged
+        assert!(out[2].is_exit());    // main exit preserved
+    }
+
+    #[test]
+    fn expand_inlines_leaf_and_converts_exit_to_ja() {
+        // main(0): 0: call ->2 ; 1: exit
+        // leaf(2): 2: r0 = 7 ; 3: exit
+        let insns = vec![
+            subprog_call(0, 2),
+            BpfInsn::exit(),
+            BpfInsn::mov64_imm(0, 7),
+            BpfInsn::exit(),
+        ];
+        let bounds = subprogram_bounds(&insns);
+        let out = expand(&insns, &bounds, 0, 0);
+        // Expected flat: [r0=7, ja->end(=main continuation), exit]
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0], BpfInsn::mov64_imm(0, 7));
+        assert_eq!(out[1].opcode, 0x05);      // JA
+        assert_eq!(out[1].offset, 0);          // jump to next insn (the continuation = main exit)
+        assert!(out[2].is_exit());             // main's own exit, preserved
     }
 }
