@@ -162,8 +162,16 @@ fn expanded_size(insns: &[BpfInsn], bounds: &[(usize, usize)]) -> usize {
         while i < end {
             let insn = &insns[i];
             if is_subprog_call(insn) {
-                if let Some(c) = subprog_index(bounds, call_target(i, insn)) {
-                    total += size(c, insns, bounds, memo); // call insn replaced by callee body
+                match subprog_index(bounds, call_target(i, insn)) {
+                    Some(c) => {
+                        total += size(c, insns, bounds, memo); // call insn replaced by callee body
+                    }
+                    None => {
+                        debug_assert!(
+                            false,
+                            "expanded_size called on unvalidated program (malformed call target)"
+                        );
+                    }
                 }
             } else {
                 total += if insn.is_wide() { 2 } else { 1 };
@@ -259,5 +267,73 @@ mod tests {
             BpfInsn::exit(),
         ];
         assert_eq!(subprogram_bounds(&insns), vec![(0, 3), (3, 5)]);
+    }
+
+    /// Build a linear call chain of `depth` levels deep: main → f1 → f2 → … → leaf.
+    /// Each non-leaf subprogram occupies exactly 2 instructions: [call_to_next, exit].
+    /// The leaf subprogram occupies exactly 2 instructions: [mov64_imm(0,0), exit].
+    /// Returns the instruction vector.
+    fn build_call_chain(depth: usize) -> alloc::vec::Vec<BpfInsn> {
+        // There are `depth + 1` subprograms: main plus `depth` callees.
+        // Non-leaf levels: call to next, exit   → 2 insns each
+        // Leaf:            mov64_imm(0,0), exit  → 2 insns
+        // Total instructions = (depth + 1) * 2
+        let mut insns = alloc::vec::Vec::new();
+        for level in 0..depth {
+            // Entry of this subprogram = level * 2
+            let this_entry = level * 2;
+            let next_entry = (level + 1) * 2;
+            insns.push(subprog_call(this_entry, next_entry));
+            insns.push(BpfInsn::exit());
+        }
+        // Leaf subprogram
+        insns.push(BpfInsn::mov64_imm(0, 0));
+        insns.push(BpfInsn::exit());
+        insns
+    }
+
+    #[test]
+    fn call_depth_exactly_at_limit_is_accepted() {
+        // A chain of exactly MAX_CALL_DEPTH (8) calls: main → f1 → … → f8 (leaf).
+        // The depth is 8 (edges from main to leaf).
+        let insns = build_call_chain(MAX_CALL_DEPTH);
+        let bounds = subprogram_bounds(&insns);
+        // Sanity: every level entry must be a real subprogram start.
+        for level in 0..=MAX_CALL_DEPTH {
+            let entry = level * 2;
+            assert!(
+                bounds.iter().any(|&(s, _)| s == entry),
+                "entry {} not found in bounds {:?}",
+                entry,
+                bounds
+            );
+        }
+        assert!(check_recursion(&insns, &bounds).is_ok());
+        assert_eq!(
+            call_depth(&insns, &bounds),
+            Ok(MAX_CALL_DEPTH),
+            "chain of depth {} should be accepted",
+            MAX_CALL_DEPTH
+        );
+    }
+
+    #[test]
+    fn call_depth_exceeds_limit_is_rejected() {
+        // A chain of MAX_CALL_DEPTH + 1 (9) calls: main → f1 → … → f9 (leaf).
+        // The depth is 9, which exceeds the limit of 8.
+        let too_deep = MAX_CALL_DEPTH + 1;
+        let insns = build_call_chain(too_deep);
+        let bounds = subprogram_bounds(&insns);
+        assert!(check_recursion(&insns, &bounds).is_ok());
+        assert_eq!(
+            call_depth(&insns, &bounds),
+            Err(crate::loader::LoadError::CallDepthExceeded {
+                depth: too_deep,
+                limit: MAX_CALL_DEPTH,
+            }),
+            "chain of depth {} should be rejected with limit {}",
+            too_deep,
+            MAX_CALL_DEPTH
+        );
     }
 }
