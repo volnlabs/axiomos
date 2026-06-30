@@ -185,6 +185,9 @@ impl<P: PhysicalProfile> BpfLoader<P> {
             let mut relocator = Relocator::new(maps);
             let insns = relocator.relocate(&name, insns, parser)?;
 
+            // Resolve & inline BPF-to-BPF calls into a flat program (#87).
+            let insns = normalize(&insns)?.insns;
+
             programs.push(LoadedProgram::new(name, prog_type, insns));
         }
 
