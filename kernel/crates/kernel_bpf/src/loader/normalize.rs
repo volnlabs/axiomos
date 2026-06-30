@@ -186,6 +186,43 @@ fn expanded_size(insns: &[BpfInsn], bounds: &[(usize, usize)]) -> usize {
     size(main, insns, bounds, &mut memo)
 }
 
+/// Rewrite a single instruction for an inlined frame at `depth`.
+///
+/// Returns the rewritten instruction(s) and the valid length (1 or 2). `r10` is
+/// the only source of a stack pointer, so shifting direct `r10`-relative
+/// accesses and `r10` copies by `depth × FRAME_SIZE` relocates the whole frame
+/// to its own stack window; pointers derived further carry the shift.
+#[allow(dead_code)]
+fn rebase(insn: BpfInsn, depth: usize) -> ([BpfInsn; 2], usize) {
+    if depth == 0 {
+        return ([insn, insn], 1);
+    }
+    let disp = (depth as i64 * FRAME_SIZE) as i16;
+
+    // mov64 X, r10
+    if insn.opcode == 0xbf && insn.src_reg() == 10 {
+        let add = BpfInsn::add64_imm(insn.dst_reg(), -(depth as i64 * FRAME_SIZE) as i32);
+        return ([insn, add], 2);
+    }
+
+    // direct r10-relative memory access (ld_imm64/wide excluded by is_wide check)
+    if insn.is_memory() && !insn.is_wide() {
+        let ptr_is_fp = match insn.class() {
+            Some(crate::bytecode::opcode::OpcodeClass::Ldx) => insn.src_reg() == 10,
+            Some(crate::bytecode::opcode::OpcodeClass::St)
+            | Some(crate::bytecode::opcode::OpcodeClass::Stx) => insn.dst_reg() == 10,
+            _ => false,
+        };
+        if ptr_is_fp {
+            let mut m = insn;
+            m.offset -= disp;
+            return ([m, m], 1);
+        }
+    }
+
+    ([insn, insn], 1)
+}
+
 #[cfg(test)]
 mod tests {
     extern crate alloc;
@@ -335,5 +372,53 @@ mod tests {
             too_deep,
             MAX_CALL_DEPTH
         );
+    }
+
+    // store *(r10 + off) = src  →  opcode 0x7b (STX, DW), dst=r10
+    fn stx_to_fp(off: i16, src: u8) -> BpfInsn {
+        BpfInsn::new(0x7b, 10, src, off, 0)
+    }
+    // load dst = *(r10 + off)  →  opcode 0x79 (LDX, DW), src=r10
+    fn ldx_from_fp(dst: u8, off: i16) -> BpfInsn {
+        BpfInsn::new(0x79, dst, 10, off, 0)
+    }
+
+    #[test]
+    fn rebase_depth_zero_is_identity() {
+        let i = stx_to_fp(-8, 1);
+        let (out, n) = rebase(i, 0);
+        assert_eq!(n, 1);
+        assert_eq!(out[0], i);
+    }
+
+    #[test]
+    fn rebase_shifts_direct_fp_access() {
+        let (store, n) = rebase(stx_to_fp(-8, 1), 1);
+        assert_eq!(n, 1);
+        assert_eq!(store[0].offset, -8 - 512);
+        let (load, n) = rebase(ldx_from_fp(2, -16), 2);
+        assert_eq!(n, 1);
+        assert_eq!(load[0].offset, -16 - 1024);
+    }
+
+    #[test]
+    fn rebase_mov_from_fp_emits_add() {
+        let (out, n) = rebase(BpfInsn::mov64_reg(6, 10), 1);
+        assert_eq!(n, 2);
+        assert_eq!(out[0], BpfInsn::mov64_reg(6, 10));
+        assert_eq!(out[1], BpfInsn::add64_imm(6, -512));
+    }
+
+    #[test]
+    fn rebase_leaves_nonstack_untouched() {
+        let i = BpfInsn::mov64_imm(0, 7);
+        let (out, n) = rebase(i, 3);
+        assert_eq!(n, 1);
+        assert_eq!(out[0], i);
+        // a memory op through a non-r10 register is untouched
+        let m = BpfInsn::new(0x7b, 1, 2, -8, 0); // *(r1 - 8) = r2
+        let (out, n) = rebase(m, 3);
+        assert_eq!(n, 1);
+        assert_eq!(out[0], m);
     }
 }
