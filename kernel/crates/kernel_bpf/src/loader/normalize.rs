@@ -238,14 +238,18 @@ fn expand(
             }
         } else if insn.is_jump() {
             // Conditional/unconditional internal jump (not a subprogram call).
-            let target = (i as i64 + 1 + insn.offset as i64) as usize;
+            let t = i as i64 + 1 + insn.offset as i64;
+            if t < start as i64 || t >= end as i64 {
+                return Err(LoadError::JumpTargetOutOfRange { insn_idx: i });
+            }
+            let target = t as usize;
             out.push((insn, i as u32));
             pending_jumps.push((out.len() - 1, target));
         } else if insn.is_wide() {
             out.push((insn, i as u32));
             out.push((insns[i + 1], (i + 1) as u32)); // copy the 64-bit immediate continuation
         } else {
-            let (re, n) = rebase(insn, depth);
+            let (re, n) = rebase(insn, depth, i)?;
             for k in 0..n {
                 out.push((re[k], i as u32));
             }
@@ -277,16 +281,32 @@ fn expand(
 /// the only source of a stack pointer, so shifting direct `r10`-relative
 /// accesses and `r10` copies by `depth × FRAME_SIZE` relocates the whole frame
 /// to its own stack window; pointers derived further carry the shift.
-fn rebase(insn: BpfInsn, depth: usize) -> ([BpfInsn; 2], usize) {
+///
+/// # Frame isolation
+///
+/// Direct `r10`-relative memory accesses (LDX/STX/ST with `r10` as the base)
+/// are validated to lie within the callee's own frame: the original `offset`
+/// must be in `[-FRAME_SIZE, 0)`, i.e. `[-512, -1]`. Accesses outside this
+/// range are rejected with `StackOffsetOutOfFrame`, giving per-frame isolation
+/// for all direct stack accesses.
+///
+/// A pointer computed via `MOV X, r10` followed by runtime arithmetic is
+/// rebased by the emitted `ADD X, -(depth*FRAME_SIZE)` instruction, confining
+/// it to the whole flattened program stack; the verifier's existing
+/// bounds-checking enforces memory safety there. Per-frame isolation for such
+/// computed pointers is **not** enforced here — it remains MEMORY-SAFE, but
+/// is NOT per-frame isolated. Full per-frame pointer masking is deferred to
+/// #89 (Spectre/pointer masking).
+fn rebase(insn: BpfInsn, depth: usize, insn_idx: usize) -> LoadResult<([BpfInsn; 2], usize)> {
     if depth == 0 {
-        return ([insn, insn], 1);
+        return Ok(([insn, insn], 1));
     }
     let disp = (depth as i64 * FRAME_SIZE) as i16;
 
     // mov64 X, r10
     if insn.opcode == 0xbf && insn.src_reg() == 10 {
         let add = BpfInsn::add64_imm(insn.dst_reg(), -(depth as i64 * FRAME_SIZE) as i32);
-        return ([insn, add], 2);
+        return Ok(([insn, add], 2));
     }
 
     // direct r10-relative memory access (ld_imm64/wide excluded by is_wide check)
@@ -298,13 +318,21 @@ fn rebase(insn: BpfInsn, depth: usize) -> ([BpfInsn; 2], usize) {
             _ => false,
         };
         if ptr_is_fp {
+            // Reject accesses outside the callee's own frame [-FRAME_SIZE, 0).
+            // A positive offset would reach into the caller's frame; an offset
+            // below -FRAME_SIZE would underflow into a deeper frame's window.
+            if !(-FRAME_SIZE..0).contains(&(insn.offset as i64)) {
+                return Err(LoadError::StackOffsetOutOfFrame { insn_idx });
+            }
             let mut m = insn;
+            // offset ∈ [-512, -1], disp = depth*512 ≤ 4096 (depth ≤ 8).
+            // Result ∈ [-(depth+1)*512, -1] ⊆ [-4608, -1]: fits i16, no overflow.
             m.offset -= disp;
-            return ([m, m], 1);
+            return Ok(([m, m], 1));
         }
     }
 
-    ([insn, insn], 1)
+    Ok(([insn, insn], 1))
 }
 
 /// The canonical flat program the verifier consumes.
@@ -515,24 +543,24 @@ mod tests {
     #[test]
     fn rebase_depth_zero_is_identity() {
         let i = stx_to_fp(-8, 1);
-        let (out, n) = rebase(i, 0);
+        let (out, n) = rebase(i, 0, 0).unwrap();
         assert_eq!(n, 1);
         assert_eq!(out[0], i);
     }
 
     #[test]
     fn rebase_shifts_direct_fp_access() {
-        let (store, n) = rebase(stx_to_fp(-8, 1), 1);
+        let (store, n) = rebase(stx_to_fp(-8, 1), 1, 0).unwrap();
         assert_eq!(n, 1);
         assert_eq!(store[0].offset, -8 - 512);
-        let (load, n) = rebase(ldx_from_fp(2, -16), 2);
+        let (load, n) = rebase(ldx_from_fp(2, -16), 2, 0).unwrap();
         assert_eq!(n, 1);
         assert_eq!(load[0].offset, -16 - 1024);
     }
 
     #[test]
     fn rebase_mov_from_fp_emits_add() {
-        let (out, n) = rebase(BpfInsn::mov64_reg(6, 10), 1);
+        let (out, n) = rebase(BpfInsn::mov64_reg(6, 10), 1, 0).unwrap();
         assert_eq!(n, 2);
         assert_eq!(out[0], BpfInsn::mov64_reg(6, 10));
         assert_eq!(out[1], BpfInsn::add64_imm(6, -512));
@@ -541,14 +569,70 @@ mod tests {
     #[test]
     fn rebase_leaves_nonstack_untouched() {
         let i = BpfInsn::mov64_imm(0, 7);
-        let (out, n) = rebase(i, 3);
+        let (out, n) = rebase(i, 3, 0).unwrap();
         assert_eq!(n, 1);
         assert_eq!(out[0], i);
         // a memory op through a non-r10 register is untouched
         let m = BpfInsn::new(0x7b, 1, 2, -8, 0); // *(r1 - 8) = r2
-        let (out, n) = rebase(m, 3);
+        let (out, n) = rebase(m, 3, 0).unwrap();
         assert_eq!(n, 1);
         assert_eq!(out[0], m);
+    }
+
+    #[test]
+    fn rebase_rejects_out_of_frame_direct_access() {
+        // Positive offset: write into the caller's territory (offset >= 0).
+        let out_high = stx_to_fp(8, 1);
+        assert!(
+            matches!(rebase(out_high, 1, 0), Err(LoadError::StackOffsetOutOfFrame { .. })),
+            "positive offset should be rejected"
+        );
+        // Too-negative offset: below the callee's own frame (offset < -FRAME_SIZE).
+        let out_low = stx_to_fp(-600, 1);
+        assert!(
+            matches!(rebase(out_low, 1, 5), Err(LoadError::StackOffsetOutOfFrame { .. })),
+            "offset below -512 should be rejected"
+        );
+        // In-frame: -8 at depth 1 → offset becomes -8 - 512 = -520.
+        let (store, n) = rebase(stx_to_fp(-8, 1), 1, 2).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(store[0].offset, -8 - 512);
+    }
+
+    #[test]
+    fn normalize_rejects_callee_writing_out_of_frame() {
+        // main(0): call ->2 ; exit
+        // leaf(2): *(r10 + 8) = r1  (positive offset = out of callee frame); exit
+        let insns = vec![
+            subprog_call(0, 2),
+            BpfInsn::exit(),
+            stx_to_fp(8, 1), // out-of-frame direct store
+            BpfInsn::exit(),
+        ];
+        assert!(
+            matches!(normalize(&insns), Err(LoadError::StackOffsetOutOfFrame { .. })),
+            "callee writing outside its own frame must be rejected"
+        );
+    }
+
+    #[test]
+    fn expand_rejects_jump_target_past_end() {
+        // Single-function program (no calls), depth 0:
+        // 0: jne r0, 0, +1  → target = 0 + 1 + 1 = 2 = end  (one past end)
+        // 1: exit
+        // bounds = [(0, 2)]; target 2 >= end 2 → JumpTargetOutOfRange.
+        let insns = vec![
+            BpfInsn::jne_imm(0, 0, 1),
+            BpfInsn::exit(),
+        ];
+        let bounds = subprogram_bounds(&insns);
+        assert!(
+            matches!(
+                expand(&insns, &bounds, 0, 0),
+                Err(LoadError::JumpTargetOutOfRange { .. })
+            ),
+            "jump target == end must be rejected"
+        );
     }
 
     #[test]

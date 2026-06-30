@@ -62,7 +62,7 @@ BTF/CO-RE rewriting (#90), and other pre-verification rewrites.
 | Soundness proof | Verifier proof unchanged. One isolated new obligation (§7). | Must extend soundness to a framed abstract domain. | **Canon** |
 | Verification cost | `states ≤ (h+1)·N'` holds verbatim on expanded size `N'`. | `(h+1)·n·(call multiplicity)`; bound depends on call structure. | **Canon** |
 | Static WCET | Flattened DAG longest-path = exact WCET incl. callee code; `cost.rs` untouched. | Must model call/return edges in the longest-path DP. | **Canon** |
-| Frame isolation | Free, by stack rebasing (§5); no slot-owner tracking. | Needs explicit slot-owner field. | **Canon** |
+| Frame isolation | Direct-access isolation enforced by rebase offset check; computed-pointer per-frame isolation deferred to #89 (memory-safe throughout). | Needs explicit slot-owner field. | **Canon** |
 | Spectre (#89) | Uniform masking over flat program; BPF-to-BPF return-target speculation surface eliminated. | Speculation crosses frames; RSB return-target surface. | **Canon** |
 | BTF (#90) | Resolved in the same pre-verifier stage; verifier stays BTF-agnostic. | Same staging possible, verifier more entangled. | **Canon** |
 | Code-size growth | Multiplicative along call multiplicity; diamond nesting → worst-case exponential. | Shared callees verified once; no duplication. | **Linux** |
@@ -146,9 +146,19 @@ Rewrite rules for an inlined body at depth `d > 0`:
     window.
 
   After rebasing, a depth-`d` body's accesses occupy `[−(d+1)·512, −d·512)`.
-  Touching the caller's window would require an original `off ≥ 0`, already
-  rejected as out-of-frame. **Frame isolation is therefore free** — no
-  slot-owner field, #84 unnecessary for this purpose.
+
+  **Direct-access frame isolation (enforced).** A direct `r10`-relative
+  access (`off` must be in `[−512, −1]`) that reaches outside the callee's
+  own frame is rejected at load time (`StackOffsetOutOfFrame`). This covers
+  all LDX/STX/ST with `r10` as the base register.
+
+  **Computed-pointer isolation (deferred to #89).** A pointer produced by
+  `MOV X, r10` followed by runtime arithmetic is rebased by the emitted
+  `ADD X, −(d·512)` instruction. The flattened verifier's existing
+  bounds-checking enforces memory safety on the resulting pointer, but
+  per-frame isolation (preventing it from reaching the caller's window via
+  arithmetic) is NOT enforced here. Full per-frame pointer masking is
+  deferred to #89 (Spectre/pointer masking). Memory safety holds throughout.
 
 - **Callee-saved R6–R9: inline verbatim, no injected save/restore.** The verifier
   never trusts that a call preserves R6–R9; it tracks the inlined body's actual

@@ -57,6 +57,10 @@ pub enum LoadError {
     MalformedPseudoCall { insn_idx: usize },
     /// A jump offset computed during inlining exceeds the i16 range.
     JumpOffsetOverflow { insn_idx: usize },
+    /// A jump target computed during inlining is outside the subprogram's [start, end) range.
+    JumpTargetOutOfRange { insn_idx: usize },
+    /// A direct r10-relative memory access is outside the callee's own frame `[-FRAME_SIZE, 0)`.
+    StackOffsetOutOfFrame { insn_idx: usize },
 }
 
 impl fmt::Display for LoadError {
@@ -88,6 +92,8 @@ impl fmt::Display for LoadError {
             Self::ExpansionTooLarge { got, limit } => write!(f, "expanded program {} insns exceeds limit {}", got, limit),
             Self::MalformedPseudoCall { insn_idx } => write!(f, "malformed pseudo-call at insn {}", insn_idx),
             Self::JumpOffsetOverflow { insn_idx } => write!(f, "jump offset overflow at insn {}", insn_idx),
+            Self::JumpTargetOutOfRange { insn_idx } => write!(f, "jump target out of subprogram range at insn {}", insn_idx),
+            Self::StackOffsetOutOfFrame { insn_idx } => write!(f, "direct r10-relative access out of callee frame at insn {}", insn_idx),
         }
     }
 }
