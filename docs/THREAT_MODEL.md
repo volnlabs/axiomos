@@ -159,12 +159,12 @@ Primary defense per attack, cited as `file:line` at commit `f2e38bc`:
 | ID | Gap | Issue |
 |---|---|---|
 | G1 | Spectre-class speculative execution unmitigated | #89 |
-| G2 | No privilege check at the attach syscall boundary — `AttachError::PermissionDenied` exists (`attach/mod.rs:139`) but is never returned; the only tiering is helper `min_tier` at verify time. Any userspace that can issue `sys_bpf` can attach to any hook. | file new issue |
-| G3 | JIT output not independently checked; JIT is inside the TCB on cloud profile | file new issue |
+| G2 | No privilege check at the attach syscall boundary — `AttachError::PermissionDenied` exists (`attach/mod.rs:139`) but is never returned; the only tiering is helper `min_tier` at verify time. Any userspace that can issue `sys_bpf` can attach to any hook. | #176 |
+| G3 | JIT output not independently checked; JIT is inside the TCB on cloud profile | #177 |
 | G4 | Signature enforcement default-off; no key provisioning | #20 |
-| G5 | No secure/measured boot; limine handoff trusted | file new issue |
-| G6 | Dependency supply chain unaudited (no `cargo vet`/vendoring) | file new issue |
-| G7 | Kernel image and persistent state unsigned/unprotected at rest | subsumed by #20 scope or new issue |
+| G5 | No secure/measured boot; limine handoff trusted | #178 |
+| G6 | Dependency supply chain unaudited (no `cargo vet`/vendoring) | #179 |
+| G7 | Kernel image and persistent state unsigned/unprotected at rest | #178 / #20 |
 
 ## 7. TCB sizing and the seL4 comparison
 
