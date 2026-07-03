@@ -12,13 +12,37 @@ use kernel_bpf::actuation::{ActuationKind, Authority, ChannelId, EnvelopeMap};
 use kernel_bpf::attach::{GpioEdge, GpioRouteTable};
 use kernel_bpf::bytecode::insn::BpfInsn;
 use kernel_bpf::bytecode::program::{BpfProgType, BpfProgram};
-use kernel_bpf::execution::{BpfContext, BpfError, BpfExecutor, Interpreter};
+use kernel_bpf::execution::{BpfContext, BpfError, Interpreter};
 use kernel_bpf::loader::BpfLoader;
 use kernel_bpf::maps::{ArrayMap, BpfMap, HashMap as BpfHashMap, RingBufMap, TimeSeriesMap};
 use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
 use kernel_bpf::signing::{SignatureVerifier, TrustedKey};
 use kernel_bpf::verifier::admission::AdmissionLedger;
 use kernel_bpf::verifier::{LoadCaller, MapPerm, Verifier, VerifyConfig};
+
+/// Reused BPF interpreter stack, so program execution allocates nothing on the
+/// hot path (#181). A heap allocation per hook fire is WCET-unsound (the
+/// admitted cycle bound does not model allocator latency) and, because hooks
+/// run in IRQ context, a deadlock hazard against the global heap lock.
+///
+/// SAFETY / concurrency: this single buffer is shared by all hook executions.
+/// That is sound only because BPF execution is *serialized* on the current
+/// single-core target — every hook path (timer/GPIO IRQ handlers, syscall-hook
+/// dispatch) runs with interrupts masked, helpers do not re-enter the
+/// interpreter, and BPF-to-BPF calls are inlined at load, so no two executions
+/// are ever live at once. The same interrupt masking that serializes access is
+/// what makes a shared buffer safe here.
+///
+/// ponytail: one global scratch stack, correct only while single-core; make it
+/// per-CPU when #59 (SMP audit) lands — a second core executing a hook would
+/// alias this buffer.
+struct BpfInterpStack(core::cell::UnsafeCell<[u8; <ActiveProfile as PhysicalProfile>::MAX_STACK_SIZE]>);
+// SAFETY: access is serialized by single-core interrupt masking (see above).
+unsafe impl Sync for BpfInterpStack {}
+static BPF_INTERP_STACK: BpfInterpStack =
+    BpfInterpStack(core::cell::UnsafeCell::new(
+        [0u8; <ActiveProfile as PhysicalProfile>::MAX_STACK_SIZE],
+    ));
 
 /// Context size used for load-time verification (#122).
 ///
@@ -465,14 +489,19 @@ impl BpfManager {
         program: &BpfProgram<ActiveProfile>,
         ctx: &BpfContext,
     ) -> Result<u64, BpfError> {
+        // SAFETY: BPF execution is serialized on the single-core target (all
+        // hook paths run interrupt-masked, no re-entrancy), so the shared
+        // scratch stack has no concurrent accessor. See BPF_INTERP_STACK.
+        let stack = unsafe { &mut *BPF_INTERP_STACK.0.get() };
+
         #[cfg(target_arch = "aarch64")]
         {
             if !<ActiveProfile as PhysicalProfile>::JIT_ALLOWED {
                 let interpreter = Interpreter::<ActiveProfile>::new();
-                return interpreter.execute(program, ctx);
+                return interpreter.execute_with_stack(program, ctx, stack);
             }
 
-            use kernel_bpf::execution::Arm64JitExecutor;
+            use kernel_bpf::execution::{Arm64JitExecutor, BpfExecutor};
             let executor = Arm64JitExecutor::<ActiveProfile>::new();
             executor.execute(program, ctx)
         }
@@ -480,7 +509,7 @@ impl BpfManager {
         #[cfg(not(target_arch = "aarch64"))]
         {
             let interpreter = Interpreter::<ActiveProfile>::new();
-            interpreter.execute(program, ctx)
+            interpreter.execute_with_stack(program, ctx, stack)
         }
     }
 

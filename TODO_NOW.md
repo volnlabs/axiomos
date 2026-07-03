@@ -9,61 +9,72 @@ has *reason*, *files*, *complexity* (S <1d / M 1–3d / L >3d), *depends*, and
 *blocks release?*. "Blocks release" means: must be fixed before the branch it
 lives on merges toward `main`.
 
-The three biggest facts this audit surfaced, up front:
-1. **The BPF manager lock is taken inside interrupt handlers with no interrupt
-   masking on the syscall side** → real single-core deadlock. (C1)
-2. **A heap allocation sits on every hook-fire execution path** → breaks WCET
-   soundness and embedded determinism, the two things this kernel sells. (C2)
-3. **Nothing is ever freed** — programs, maps, WCET entries are append-only
-   `Vec`s with no unload path → unbounded growth. (C3)
+The facts this audit surfaced, up front (C1 corrected 2026-07-03 after
+verification — see the strikethrough; do not re-escalate it):
 
-None of these is hardware-dependent. All three are software bugs that a 24-hour
-soak (the v0.4 gate) would eventually expose.
+1. ~~The BPF manager lock is taken inside interrupt handlers with no interrupt
+   masking → single-core deadlock. (C1)~~ **CORRECTED — not a deadlock.**
+   Syscalls run fully interrupt-masked on both arches (x86 IDT
+   `disable_interrupts(true)`, aarch64 DAIF-on-SVC), so a same-core timer IRQ
+   cannot fire during `sys_bpf` and cannot reenter the manager lock. What's
+   left is SMP-only priority-inversion + a long IRQ-masked verify window — not
+   a blocker on single-core. See C1 below and #180.
+2. **A heap allocation sat on every hook-fire execution path** → broke WCET
+   soundness *and* was the actual IRQ-context deadlock (via the global heap
+   spinlock, not the manager lock). (C2) **FIXED 2026-07-03** — see #181.
+3. **Nothing is ever freed** — programs, maps, WCET entries are append-only
+   `Vec`s with no unload path → unbounded growth. (C3) Still open, #182.
+
+Lesson recorded: C1 was over-called because the interrupt masking is
+architectural (gate/DAIF), not an explicit `without_interrupts` in the syscall
+path — a grep for the latter missed it. The real deadlock was C2's allocator,
+not C1's lock. Verify interrupt state, don't infer it from lock-call sites.
 
 ---
 
 # Critical blockers
 
-### C1 — BPF manager mutex is acquired in IRQ context; deadlocks against the syscall path
-- **Description:** `sys_bpf` takes `BPF_MANAGER.lock()` at ~10 sites (incl.
-  `PROG_ATTACH`, which runs the *verifier* under the lock for milliseconds),
-  and does so with interrupts enabled — there is no `without_interrupts` guard
-  anywhere in the syscall path. The timer IRQ handler (`idt.rs:268`,
-  `aarch64/interrupts.rs:174`) also takes `BPF_MANAGER.lock()`. A timer tick
-  during any `sys_bpf` critical section spins forever on a lock the interrupted
-  code holds. `spin::Mutex` has no deadlock detection.
-- **Reason:** Correctness. This is a latent hang that timing luck has hidden;
-  the v0.4 24-hour soak is exactly the workload that trips it.
-- **Files:** `kernel/src/syscall/bpf.rs` (all `manager.lock()` sites),
-  `kernel/src/lib.rs:71` (`BPF_MANAGER`), `kernel/src/arch/idt.rs:268`,
-  `kernel/src/arch/aarch64/interrupts.rs:174`.
-- **Fix direction:** either (a) make every `sys_bpf` lock acquisition mask
-  interrupts for the CPU holding it (`without_interrupts`), or (b) split the
-  manager so the IRQ-reachable read path (`get_hook_programs`) uses a separate
-  lock / RCU-style versioned pointer from the load/attach write path. (b) is the
-  right long-term answer and overlaps with #58 and the v0.5 hot-swap design.
-- **Complexity:** M for the interrupt-mask stopgap; L for the proper split.
-- **Depends:** none. **Blocks release:** YES (before v0.4 → dev).
+### C1 — ~~BPF manager mutex deadlocks against the syscall path~~ CORRECTED: SMP priority-inversion only (not a deadlock)
+- **Correction (2026-07-03):** the deadlock claim was wrong. The full syscall
+  runs interrupt-masked on both arches — x86 syscall IDT gate sets
+  `.disable_interrupts(true)` (`arch/idt.rs:88`); aarch64 masks `PSTATE.DAIF`
+  on SVC exception entry (`syscall/mod.rs:129`), with no re-enable anywhere in
+  `syscall/bpf.rs`/`bpf/mod.rs`. So a same-core timer IRQ cannot fire while
+  `sys_bpf` holds `BPF_MANAGER.lock()`; no reentrancy, no deadlock. The original
+  finding mistook "no explicit `without_interrupts` in the syscall path" for "no
+  masking" — the masking is architectural.
+- **What actually remains (real, not a blocker):**
+  - **SMP priority-inversion** — on multi-core, a core taking a timer IRQ spins
+    on `BPF_MANAGER.lock()` for as long as another core holds it in `sys_bpf`
+    (`PROG_ATTACH` = full verify = ms). Bounded spin, not a hang. Only under SMP
+    (unaudited, #59); not the single-core Pi5 target.
+  - **Long IRQ-masked window** — `PROG_ATTACH` verifies (multi-ms) with
+    interrupts masked, blocking all IRQs on that core for that window. RT
+    latency concern, inherent to verifying inside the syscall.
+- **Files:** `kernel/src/syscall/bpf.rs`, `kernel/src/lib.rs:71`.
+- **Fix direction:** the IRQ-read / load-write lock split (formerly "C1 proper")
+  is still worth doing — but for the SMP case and as the v0.5 hot-swap
+  substrate, coordinated with C3 (same `BpfManager` storage). Not urgent.
+- **Complexity:** L. **Depends:** #59. **Blocks release:** NO.
 
-### C2 — per-fire heap allocation on the execution hot path breaks WCET soundness
-- **Description:** `Interpreter::execute` allocates `vec![0u8; P::MAX_STACK_SIZE]`
-  on every program execution (`interpreter.rs:561`) — 8 KB on embedded, 512 KB
-  on cloud, zeroed each time. This is on the GPIO edge path advertised at
-  ~200 kHz, i.e. up to 200k heap allocations/sec. Worse: admission control
-  admits programs against a *static* WCET cycle bound (`verifier/cost.rs`,
-  `admission.rs`) that does not model allocator latency, so the admitted WCET is
-  unsound the moment the allocator has to walk a fragmented free list or block.
-- **Reason:** Correctness (WCET claim) + performance + determinism. The kernel's
-  headline differentiator is "load-time schedulability admission for real-time
-  hooks." A non-deterministic malloc on the exec path silently invalidates it.
-- **Files:** `kernel/crates/kernel_bpf/src/execution/interpreter.rs:561`;
-  interacts with `verifier/cost.rs`, `verifier/admission.rs`.
-- **Fix direction:** preallocate one stack buffer per hook/execution context (or
-  a small fixed pool) at attach time, reuse across fires. The stack size is a
-  compile-time `const` per profile — it can be a stack array or an
-  attach-owned buffer, no per-fire alloc.
-- **Complexity:** M. **Depends:** none. **Blocks release:** YES (before v0.4 →
-  dev — it's in the soak-test path and the paper's WCET claim).
+### C2 — per-fire heap alloc on exec path: WCET-unsound AND the real IRQ deadlock — **FIXED 2026-07-03**
+- **Description:** `Interpreter::execute` allocated `vec![0u8; P::MAX_STACK_SIZE]`
+  on every execution (`interpreter.rs:561`) — 8 KB embedded / 512 KB cloud,
+  zeroed each fire, on the ~200 kHz GPIO path. Two defects: (1) admission admits
+  against a *static* WCET cycle bound (`verifier/cost.rs`) that ignores allocator
+  latency → unsound under heap pressure; (2) **the actual deadlock** — hooks run
+  in IRQ context (`idt.rs:268`), the allocator is a `LockedHeap` spinlock taken
+  by ordinary interrupts-enabled code, so a same-core timer IRQ mid-allocation
+  makes the handler's `vec!` spin on a held heap lock.
+- **Fix (done):** `Interpreter::execute_with_stack(&self, program, ctx, stack)`
+  — zero-alloc, validates `stack.len() >= MAX_STACK_SIZE`, zeroes+reuses the
+  caller buffer; `execute()` kept as allocating wrapper for tests/benches. Kernel
+  `execute_program` passes a single reused static scratch (`BPF_INTERP_STACK`),
+  sound under single-core serialized execution (same masking as C1), `ponytail:`
+  per-CPU upgrade noted for #59. Regression test added. All tests green; builds
+  on all three profiles.
+- **Files:** `kernel/crates/kernel_bpf/src/execution/interpreter.rs`,
+  `kernel/src/bpf/mod.rs`. **Issue:** #181. **Blocks release:** was YES, now DONE.
 
 ### C3 — no unload/unregister path; programs and maps grow unbounded
 - **Description:** `BpfManager` stores `programs: Vec<Arc<BpfProgram>>`,
@@ -329,11 +340,13 @@ Complexity S each. **Blocks release:** NO.
 
 ## One-paragraph triage
 
-Merge nothing toward `main` until **C1, C2, C3** are fixed — they are all in the
-v0.4 soak-test path and all software. **H3** (hardware attach) is the legitimate
-hardware gate and cannot be closed at a desk. Everything else is cleanup that
-makes the project releasable but does not block the next merge. The codebase is
-architecturally strong (clean crate DAG, sound verifier design, genuinely good
-`shrike_link` safety logic); its risks are concentrated in the
-`BpfManager`/interrupt seam and in claims (static memory, WCET) that the current
-allocation strategy doesn't yet honor.
+Updated triage (2026-07-03): **C2 is fixed** (#181 — the real IRQ-context
+deadlock + WCET-soundness hole). **C1 was corrected to a non-blocker** (SMP-only
+priority inversion; not a deadlock on single-core). That leaves **C3** (unbounded
+growth, #182) as the remaining structural software item — it blocks v0.5, not
+v0.4. So the software gate before v0.4→dev is now essentially clear; **H3**
+(hardware attach) is the real remaining v0.4 gate and cannot be closed at a desk.
+The codebase is architecturally strong (clean crate DAG, sound verifier design,
+genuinely good `shrike_link` safety logic); the one remaining correctness item
+(C3) and the claim/allocation mismatches (H1 static memory) are the cleanup
+before v0.5.

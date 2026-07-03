@@ -7,6 +7,20 @@ cross-checked against code. Findings verified against the tree at commit
 
 Companion: [`TODO_NOW.md`](../TODO_NOW.md) (actionable task list, prioritized).
 
+> **Correction appended 2026-07-03 (same day):** during fix implementation, two
+> of this review's claims were verified against the code and revised. (1) **C1
+> is not a deadlock** — the syscall path runs interrupt-masked on both arches
+> (x86 IDT `disable_interrupts(true)`; aarch64 DAIF-on-SVC), so same-core
+> manager-lock reentrancy is impossible; C1 is downgraded to SMP-only
+> priority-inversion (#180). (2) **C2 was both the WCET-soundness hole and the
+> *actual* IRQ-context deadlock** (via the global heap spinlock, not the manager
+> lock) — now **fixed** (#181). Net: the "two confirmed correctness defects in
+> the core exec/lock path" in §3 is really one (C2, fixed) plus a non-blocking
+> SMP concern (C1). The correctness score's justification is updated in place
+> below; the score itself stays 5 because C3 (unbounded growth) and the untested
+> integration surface still stand. Treat this banner as authoritative where it
+> conflicts with the body.
+
 ---
 
 ## 1. Architecture assessment
