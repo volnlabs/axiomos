@@ -708,8 +708,14 @@ mod tests {
         // A caller-provided, reusable buffer gives the same result as the
         // allocating path — and a reused buffer stays correct across fires (#181).
         let mut stack = vec![0u8; ActiveProfile::MAX_STACK_SIZE];
-        assert_eq!(interpreter.execute_with_stack(&program, &ctx, &mut stack), Ok(42));
-        assert_eq!(interpreter.execute_with_stack(&program, &ctx, &mut stack), Ok(42));
+        assert_eq!(
+            interpreter.execute_with_stack(&program, &ctx, &mut stack),
+            Ok(42)
+        );
+        assert_eq!(
+            interpreter.execute_with_stack(&program, &ctx, &mut stack),
+            Ok(42)
+        );
         assert_eq!(interpreter.execute(&program, &ctx), Ok(42));
 
         // An undersized buffer is refused, not a UB write past the end.

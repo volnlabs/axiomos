@@ -63,11 +63,7 @@ fn subprog_index(bounds: &[(usize, usize)], target: i64) -> Option<usize> {
 
 /// Subprogram indices called from subprogram `sp` (in call-site order).
 /// Returns `MalformedPseudoCall` if any target is out of range or not a subprogram entry.
-fn callees(
-    insns: &[BpfInsn],
-    bounds: &[(usize, usize)],
-    sp: usize,
-) -> LoadResult<Vec<usize>> {
+fn callees(insns: &[BpfInsn], bounds: &[(usize, usize)], sp: usize) -> LoadResult<Vec<usize>> {
     let (start, end) = bounds[sp];
     let mut out = Vec::new();
     let mut i = start;
@@ -138,7 +134,10 @@ fn call_depth(insns: &[BpfInsn], bounds: &[(usize, usize)]) -> LoadResult<usize>
     let mut memo = alloc::vec![None; bounds.len()];
     let d = depth(main, insns, bounds, &mut memo)?;
     if d > MAX_CALL_DEPTH {
-        return Err(LoadError::CallDepthExceeded { depth: d, limit: MAX_CALL_DEPTH });
+        return Err(LoadError::CallDepthExceeded {
+            depth: d,
+            limit: MAX_CALL_DEPTH,
+        });
     }
     Ok(d)
 }
@@ -250,8 +249,8 @@ fn expand(
             out.push((insns[i + 1], (i + 1) as u32)); // copy the 64-bit immediate continuation
         } else {
             let (re, n) = rebase(insn, depth, i)?;
-            for k in 0..n {
-                out.push((re[k], i as u32));
+            for &insn in re.iter().take(n) {
+                out.push((insn, i as u32));
             }
         }
 
@@ -372,17 +371,24 @@ pub fn normalize(insns: &[BpfInsn]) -> LoadResult<Normalized> {
     let main = subprog_index(&bounds, 0).expect("index 0 is a subprogram start");
     let expanded = expand(insns, &bounds, main, 0)?;
     if expanded.len() > limit {
-        return Err(LoadError::ExpansionTooLarge { got: expanded.len(), limit });
+        return Err(LoadError::ExpansionTooLarge {
+            got: expanded.len(),
+            limit,
+        });
     }
 
     let (flat, source_map): (Vec<BpfInsn>, Vec<u32>) = expanded.into_iter().unzip();
-    Ok(Normalized { insns: flat, source_map })
+    Ok(Normalized {
+        insns: flat,
+        source_map,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     extern crate alloc;
     use alloc::vec;
+
     use super::*;
     use crate::bytecode::insn::BpfInsn;
     use crate::loader::LoadError;
@@ -584,13 +590,19 @@ mod tests {
         // Positive offset: write into the caller's territory (offset >= 0).
         let out_high = stx_to_fp(8, 1);
         assert!(
-            matches!(rebase(out_high, 1, 0), Err(LoadError::StackOffsetOutOfFrame { .. })),
+            matches!(
+                rebase(out_high, 1, 0),
+                Err(LoadError::StackOffsetOutOfFrame { .. })
+            ),
             "positive offset should be rejected"
         );
         // Too-negative offset: below the callee's own frame (offset < -FRAME_SIZE).
         let out_low = stx_to_fp(-600, 1);
         assert!(
-            matches!(rebase(out_low, 1, 5), Err(LoadError::StackOffsetOutOfFrame { .. })),
+            matches!(
+                rebase(out_low, 1, 5),
+                Err(LoadError::StackOffsetOutOfFrame { .. })
+            ),
             "offset below -512 should be rejected"
         );
         // In-frame: -8 at depth 1 → offset becomes -8 - 512 = -520.
@@ -610,7 +622,10 @@ mod tests {
             BpfInsn::exit(),
         ];
         assert!(
-            matches!(normalize(&insns), Err(LoadError::StackOffsetOutOfFrame { .. })),
+            matches!(
+                normalize(&insns),
+                Err(LoadError::StackOffsetOutOfFrame { .. })
+            ),
             "callee writing outside its own frame must be rejected"
         );
     }
@@ -621,10 +636,7 @@ mod tests {
         // 0: jne r0, 0, +1  → target = 0 + 1 + 1 = 2 = end  (one past end)
         // 1: exit
         // bounds = [(0, 2)]; target 2 >= end 2 → JumpTargetOutOfRange.
-        let insns = vec![
-            BpfInsn::jne_imm(0, 0, 1),
-            BpfInsn::exit(),
-        ];
+        let insns = vec![BpfInsn::jne_imm(0, 0, 1), BpfInsn::exit()];
         let bounds = subprogram_bounds(&insns);
         assert!(
             matches!(
@@ -649,7 +661,7 @@ mod tests {
         // Nothing inserted at depth 0 with no calls → identical layout.
         assert_eq!(out.len(), 3);
         assert_eq!(out[0].0.offset, 1); // jump target unchanged
-        assert!(out[2].0.is_exit());    // main exit preserved
+        assert!(out[2].0.is_exit()); // main exit preserved
     }
 
     #[test]
@@ -667,9 +679,9 @@ mod tests {
         // Expected flat: [r0=7, ja->end(=main continuation), exit]
         assert_eq!(out.len(), 3);
         assert_eq!(out[0].0, BpfInsn::mov64_imm(0, 7));
-        assert_eq!(out[1].0.opcode, 0x05);      // JA
-        assert_eq!(out[1].0.offset, 0);          // jump to next insn (the continuation = main exit)
-        assert!(out[2].0.is_exit());             // main's own exit, preserved
+        assert_eq!(out[1].0.opcode, 0x05); // JA
+        assert_eq!(out[1].0.offset, 0); // jump to next insn (the continuation = main exit)
+        assert!(out[2].0.is_exit()); // main's own exit, preserved
     }
 
     #[test]
@@ -769,7 +781,10 @@ mod tests {
     #[test]
     fn normalize_rejects_recursion() {
         let insns = vec![subprog_call(0, 0), BpfInsn::exit()];
-        assert_eq!(normalize(&insns).err(), Some(LoadError::RecursiveCall { subprog: 0 }));
+        assert_eq!(
+            normalize(&insns).err(),
+            Some(LoadError::RecursiveCall { subprog: 0 })
+        );
     }
 
     #[test]
@@ -785,7 +800,12 @@ mod tests {
         ];
         let n = normalize(&insns).unwrap();
         // main's store keeps -8; leaf's store rebased to -8-512.
-        let stores: Vec<i16> = n.insns.iter().filter(|i| i.opcode == 0x7b).map(|i| i.offset).collect();
+        let stores: Vec<i16> = n
+            .insns
+            .iter()
+            .filter(|i| i.opcode == 0x7b)
+            .map(|i| i.offset)
+            .collect();
         assert_eq!(stores, vec![-8, -8 - 512]);
     }
 }

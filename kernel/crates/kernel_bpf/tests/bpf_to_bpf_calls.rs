@@ -2,9 +2,9 @@
 
 use kernel_bpf::bytecode::insn::BpfInsn;
 use kernel_bpf::bytecode::program::BpfProgType;
-use kernel_bpf::loader::{normalize, LoadError};
-use kernel_bpf::verifier::{VerifyConfig, Verifier};
+use kernel_bpf::loader::{LoadError, normalize};
 use kernel_bpf::profile::ActiveProfile;
+use kernel_bpf::verifier::{Verifier, VerifyConfig};
 
 fn subprog_call(at: usize, target: usize) -> BpfInsn {
     let imm = target as i64 - at as i64 - 1;
@@ -31,11 +31,18 @@ fn three_function_program_normalizes_and_verifies() {
         &norm.insns,
         VerifyConfig::default(),
     );
-    assert!(prog.is_ok(), "verifier accepts normalized program: {:?}", prog.err());
+    assert!(
+        prog.is_ok(),
+        "verifier accepts normalized program: {:?}",
+        prog.err()
+    );
 }
 
 #[test]
 fn recursive_program_is_rejected_at_normalization() {
     let insns = vec![subprog_call(0, 0), BpfInsn::exit()];
-    assert_eq!(normalize(&insns).err(), Some(LoadError::RecursiveCall { subprog: 0 }));
+    assert_eq!(
+        normalize(&insns).err(),
+        Some(LoadError::RecursiveCall { subprog: 0 })
+    );
 }

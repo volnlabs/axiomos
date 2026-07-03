@@ -36,13 +36,14 @@ use kernel_bpf::verifier::{LoadCaller, MapPerm, Verifier, VerifyConfig};
 /// ponytail: one global scratch stack, correct only while single-core; make it
 /// per-CPU when #59 (SMP audit) lands — a second core executing a hook would
 /// alias this buffer.
-struct BpfInterpStack(core::cell::UnsafeCell<[u8; <ActiveProfile as PhysicalProfile>::MAX_STACK_SIZE]>);
+struct BpfInterpStack(
+    core::cell::UnsafeCell<[u8; <ActiveProfile as PhysicalProfile>::MAX_STACK_SIZE]>,
+);
 // SAFETY: access is serialized by single-core interrupt masking (see above).
 unsafe impl Sync for BpfInterpStack {}
-static BPF_INTERP_STACK: BpfInterpStack =
-    BpfInterpStack(core::cell::UnsafeCell::new(
-        [0u8; <ActiveProfile as PhysicalProfile>::MAX_STACK_SIZE],
-    ));
+static BPF_INTERP_STACK: BpfInterpStack = BpfInterpStack(core::cell::UnsafeCell::new(
+    [0u8; <ActiveProfile as PhysicalProfile>::MAX_STACK_SIZE],
+));
 
 /// Context size used for load-time verification (#122).
 ///

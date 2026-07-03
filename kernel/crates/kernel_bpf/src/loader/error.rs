@@ -87,13 +87,31 @@ impl fmt::Display for LoadError {
             Self::LicenseNotFound => write!(f, "license not found"),
             Self::InvalidLicense => write!(f, "invalid license string"),
             Self::BtfError => write!(f, "BTF parsing error"),
-            Self::RecursiveCall { subprog } => write!(f, "recursive subprogram call (subprog {})", subprog),
-            Self::CallDepthExceeded { depth, limit } => write!(f, "call depth {} exceeds limit {}", depth, limit),
-            Self::ExpansionTooLarge { got, limit } => write!(f, "expanded program {} insns exceeds limit {}", got, limit),
-            Self::MalformedPseudoCall { insn_idx } => write!(f, "malformed pseudo-call at insn {}", insn_idx),
-            Self::JumpOffsetOverflow { insn_idx } => write!(f, "jump offset overflow at insn {}", insn_idx),
-            Self::JumpTargetOutOfRange { insn_idx } => write!(f, "jump target out of subprogram range at insn {}", insn_idx),
-            Self::StackOffsetOutOfFrame { insn_idx } => write!(f, "direct r10-relative access out of callee frame at insn {}", insn_idx),
+            Self::RecursiveCall { subprog } => {
+                write!(f, "recursive subprogram call (subprog {})", subprog)
+            }
+            Self::CallDepthExceeded { depth, limit } => {
+                write!(f, "call depth {} exceeds limit {}", depth, limit)
+            }
+            Self::ExpansionTooLarge { got, limit } => {
+                write!(f, "expanded program {} insns exceeds limit {}", got, limit)
+            }
+            Self::MalformedPseudoCall { insn_idx } => {
+                write!(f, "malformed pseudo-call at insn {}", insn_idx)
+            }
+            Self::JumpOffsetOverflow { insn_idx } => {
+                write!(f, "jump offset overflow at insn {}", insn_idx)
+            }
+            Self::JumpTargetOutOfRange { insn_idx } => write!(
+                f,
+                "jump target out of subprogram range at insn {}",
+                insn_idx
+            ),
+            Self::StackOffsetOutOfFrame { insn_idx } => write!(
+                f,
+                "direct r10-relative access out of callee frame at insn {}",
+                insn_idx
+            ),
         }
     }
 }
