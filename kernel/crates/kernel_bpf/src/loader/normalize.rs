@@ -245,6 +245,14 @@ fn expand(
             out.push((insn, i as u32));
             pending_jumps.push((out.len() - 1, target));
         } else if insn.is_wide() {
+            // The 64-bit-immediate continuation must exist within this range. A
+            // truncated wide instruction (a pseudo-call-bearing program whose
+            // last slot is an ld_imm64 first half) must error, not panic —
+            // normalize runs on untrusted ELF *before* verification, so `i + 1`
+            // is attacker-reachable. (#87 P2.)
+            if i + 1 >= end {
+                return Err(LoadError::InvalidInstructionData);
+            }
             out.push((insn, i as u32));
             out.push((insns[i + 1], (i + 1) as u32)); // copy the 64-bit immediate continuation
         } else {
@@ -317,14 +325,20 @@ fn rebase(insn: BpfInsn, depth: usize, insn_idx: usize) -> LoadResult<([BpfInsn;
             _ => false,
         };
         if ptr_is_fp {
-            // Reject accesses outside the callee's own frame [-FRAME_SIZE, 0).
-            // A positive offset would reach into the caller's frame; an offset
-            // below -FRAME_SIZE would underflow into a deeper frame's window.
-            if !(-FRAME_SIZE..0).contains(&(insn.offset as i64)) {
+            // Reject accesses that leave the callee's own frame [-FRAME_SIZE, 0).
+            // The check must cover the WHOLE access [offset, offset+size), not
+            // just its start: a multi-byte access whose start is in-frame can
+            // still spill over the frame top (offset+size > 0) into the caller's
+            // frame, or below -FRAME_SIZE into a deeper frame. Either becomes an
+            // in-bounds write to the wrong frame once rebased, because the
+            // verifier only ever sees the rebased offset. (#87 frame isolation.)
+            let size = insn.mem_size().map_or(8, |m| m.size_bytes() as i64);
+            let off = insn.offset as i64;
+            if off < -FRAME_SIZE || off + size > 0 {
                 return Err(LoadError::StackOffsetOutOfFrame { insn_idx });
             }
             let mut m = insn;
-            // offset ∈ [-512, -1], disp = depth*512 ≤ 4096 (depth ≤ 8).
+            // off ∈ [-512, -size], disp = depth*512 ≤ 4096 (depth ≤ 8).
             // Result ∈ [-(depth+1)*512, -1] ⊆ [-4608, -1]: fits i16, no overflow.
             m.offset -= disp;
             return Ok(([m, m], 1));
@@ -605,6 +619,17 @@ mod tests {
             ),
             "offset below -512 should be rejected"
         );
+        // Multi-byte spill: an 8-byte store whose START is in-frame (offset -1)
+        // but whose access spans [-1, +7), crossing the frame top into the
+        // caller's frame. The start-only check let this through (#87 P1).
+        let spill = stx_to_fp(-1, 1); // 0x7b is a DW (8-byte) store
+        assert!(
+            matches!(
+                rebase(spill, 1, 0),
+                Err(LoadError::StackOffsetOutOfFrame { .. })
+            ),
+            "8-byte store crossing the frame top must be rejected"
+        );
         // In-frame: -8 at depth 1 → offset becomes -8 - 512 = -520.
         let (store, n) = rebase(stx_to_fp(-8, 1), 1, 2).unwrap();
         assert_eq!(n, 1);
@@ -627,6 +652,24 @@ mod tests {
                 Err(LoadError::StackOffsetOutOfFrame { .. })
             ),
             "callee writing outside its own frame must be rejected"
+        );
+    }
+
+    #[test]
+    fn expand_rejects_truncated_wide_instruction() {
+        // A subprogram whose last slot is an ld_imm64 first half (opcode 0x18)
+        // with no continuation. Before the fix, `insns[i + 1]` panicked on this
+        // untrusted-bytecode path (normalize runs before verification, #87 P2).
+        let wide = BpfInsn::new(0x18, 0, 0, 0, 0);
+        assert!(wide.is_wide());
+        let insns = vec![BpfInsn::mov64_imm(0, 0), wide]; // truncated: no slot 2
+        let bounds = vec![(0usize, insns.len())];
+        assert!(
+            matches!(
+                expand(&insns, &bounds, 0, 0),
+                Err(LoadError::InvalidInstructionData)
+            ),
+            "truncated wide instruction must error, not panic"
         );
     }
 
