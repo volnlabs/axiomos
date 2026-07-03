@@ -13,12 +13,21 @@
 //!
 //! | Property | Cloud | Embedded |
 //! |----------|-------|----------|
-//! | Memory | Elastic (heap) | Static (64KB pool) |
-//! | Stack | 512 KB | 8 KB |
+//! | Map storage | Elastic (heap) | Bounded heap [^pool] |
+//! | Interpreter stack | 512 KB | 8 KB (reused static buffer [^stack]) |
 //! | Instructions | 1,000,000 max | 100,000 max |
 //! | JIT | Available | Erased |
 //! | Scheduling | Throughput | Deadline (EDF) |
 //! | Map Resize | Available | Erased |
+//!
+//! [^pool]: A 64 KB static pool (`maps::StaticPool`) is *defined* for the
+//! embedded profile but **not yet wired** — embedded map storage currently
+//! allocates from the bounded kernel heap, same as cloud. Wiring the static
+//! pool (or formally scoping the "static memory" claim) is tracked as audit
+//! item H1.
+//! [^stack]: The interpreter no longer allocates its stack per program
+//! execution; a single reused static scratch buffer is used on the hot path
+//! (#181), so the stack side of the embedded profile is genuinely static.
 //!
 //! # Build-Time Selection
 //!
