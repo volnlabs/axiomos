@@ -465,7 +465,10 @@ fn sha512(data: &[u8]) -> [u8; 64] {
     }
     padded.extend_from_slice(&ml.to_be_bytes());
 
-    // Process blocks
+    // Process blocks. `chunks_exact` is intentional over `as_chunks` here: this
+    // is a hand-rolled SHA-512 and the byte-slice form is kept verbatim against
+    // the reference; the newer clippy lint is a style suggestion, not a bug.
+    #[allow(clippy::chunks_exact_to_as_chunks)]
     for chunk in padded.chunks_exact(128) {
         let mut w = [0u64; 80];
         for (i, bytes) in chunk.chunks_exact(8).enumerate() {

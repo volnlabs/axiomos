@@ -377,6 +377,10 @@ pub struct SymtabSection<'a> {
 }
 
 impl SymtabSection<'_> {
+    // `chunks_exact` kept over `as_chunks`: the byte-slice item feeds
+    // `Symbol::try_ref_from_bytes` (zerocopy), which the array form would not
+    // coerce to in the `.map` chain. The newer clippy lint is style-only.
+    #[allow(clippy::chunks_exact_to_as_chunks)]
     pub fn symbols(&self) -> impl Iterator<Item = &Symbol> {
         self.data
             .chunks_exact(size_of::<Symbol>())

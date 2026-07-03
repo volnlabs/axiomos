@@ -236,7 +236,7 @@ impl<P: PhysicalProfile> BpfLoader<P> {
 
         let mut insns = Vec::with_capacity(data.len() / INSN_SIZE);
 
-        for chunk in data.chunks_exact(INSN_SIZE) {
+        for chunk in data.as_chunks::<INSN_SIZE>().0 {
             let insn = BpfInsn::from_bytes_load(chunk)?;
             insns.push(insn);
         }
