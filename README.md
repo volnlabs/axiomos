@@ -68,7 +68,7 @@ BPF_PROG(gpio_handler, struct gpio_event *event) {
 
 ## Build & Run
 
-**Requirements:** Rust nightly, `cargo`, QEMU, cross targets (`x86_64-unknown-none`, `aarch64-unknown-none`).
+**Requirements:** Rust nightly, `cargo`, QEMU, cross targets (`x86_64-unknown-none`, `aarch64-unknown-none`). The build also assembles a rootfs image and (x86_64) an ISO, so it needs `e2fsprogs` (`mke2fs`), `xorriso`, `git`, and `make` on `PATH` — a clean box without these fails in `build.rs`.
 
 ```bash
 # Build and run in QEMU (x86_64)

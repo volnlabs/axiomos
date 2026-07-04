@@ -312,10 +312,14 @@ Admission:                                     Σ WCETᵢ·freqᵢ ≤ U  (load-
 
 Compile-time selection between cloud and embedded profiles:
 
-| Profile | Stack | Instructions | JIT | Memory |
-|---------|-------|--------------|-----|--------|
+| Profile | Stack | Instructions | JIT | Map storage |
+|---------|-------|--------------|-----|-------------|
 | Cloud | 512KB (elastic) | 1M (soft) | Yes | Heap |
-| Embedded | 8KB (static) | 100K (hard) | Optional | 64KB pool |
+| Embedded | 8KB (reused static) | 100K (hard) | Optional | Bounded heap † |
+
+† The embedded interpreter stack is a single reused static buffer (no per-fire
+allocation, #181). Map storage, however, still allocates from the bounded kernel
+heap — the 64 KB `StaticPool` is defined but not yet wired (audit item H1).
 
 The embedded profile physically erases cloud-only code at compile time.
 

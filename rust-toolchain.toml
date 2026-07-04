@@ -1,5 +1,10 @@
 [toolchain]
-channel = "nightly"
+# Pinned to a dated nightly for reproducible builds. A bare "nightly" let CI
+# pull whatever nightly was newest each run, so a new clippy/rustfmt rule (e.g.
+# chunks_exact_to_as_chunks in the 2026-07-02 nightly) silently reddened Lint.
+# Bump this deliberately; don't float. All required components (miri, rustfmt,
+# clippy, rust-src, llvm-tools) are present on this date.
+channel = "nightly-2026-07-02"
 components = ["rustfmt", "clippy", "llvm-tools-preview", "rust-src", "miri"]
 profile = "default"
 targets = ["x86_64-unknown-none", "aarch64-unknown-none"]

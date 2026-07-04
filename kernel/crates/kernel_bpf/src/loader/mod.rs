@@ -44,6 +44,7 @@ extern crate alloc;
 
 mod elf;
 mod error;
+mod normalize;
 mod object;
 mod reloc;
 
@@ -52,6 +53,7 @@ use core::marker::PhantomData;
 
 pub use elf::{ElfParser, SectionType};
 pub use error::{LoadError, LoadResult};
+pub use normalize::{Normalized, normalize};
 pub use object::{BpfObject, LoadedMap, LoadedProgram};
 pub use reloc::Relocator;
 
@@ -183,6 +185,9 @@ impl<P: PhysicalProfile> BpfLoader<P> {
             let mut relocator = Relocator::new(maps);
             let insns = relocator.relocate(&name, insns, parser)?;
 
+            // Resolve & inline BPF-to-BPF calls into a flat program (#87).
+            let insns = normalize(&insns)?.insns;
+
             programs.push(LoadedProgram::new(name, prog_type, insns));
         }
 
@@ -231,7 +236,7 @@ impl<P: PhysicalProfile> BpfLoader<P> {
 
         let mut insns = Vec::with_capacity(data.len() / INSN_SIZE);
 
-        for chunk in data.chunks_exact(INSN_SIZE) {
+        for chunk in data.as_chunks::<INSN_SIZE>().0 {
             let insn = BpfInsn::from_bytes_load(chunk)?;
             insns.push(insn);
         }

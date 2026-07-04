@@ -136,6 +136,9 @@ pub extern "C" fn handle_irq(_ctx: &mut ExceptionContext) {
         // Signal end of interrupt for timer
         gic::end_of_interrupt(iar);
 
+        // (The Shrike control link is serviced by a dedicated kernel poller
+        // task, not here — actuation/BPF work must run in thread context.)
+
         // Trigger scheduler tick (may cause context switch)
         // We do this AFTER EOI so that new tasks don't inherit the active interrupt state
         log::trace!("Calling timer_tick");

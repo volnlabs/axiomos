@@ -15,6 +15,7 @@ kernel_physical_memory = { path = "crates/kernel_physical_memory" }
 kernel_syscall = { path = "crates/kernel_syscall" }
 kernel_vfs = { path = "crates/kernel_vfs" }
 kernel_virtual_memory = { path = "crates/kernel_virtual_memory" }
+shrike_link = { path = "crates/shrike_link" }
 
 addr2line.workspace = true
 bitfield.workspace = true

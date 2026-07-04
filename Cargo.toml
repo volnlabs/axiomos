@@ -94,6 +94,7 @@ exclude = [
   "kernel/demos/riscv",
   "userspace/rk_bridge",
   "kernel/crates/kernel_bpf/fuzz",
+  "firmware/shrike_rp2040",
 ]
 members = [
   "kernel",
@@ -107,7 +108,8 @@ members = [
   "kernel/crates/kernel_physical_memory",
   "kernel/crates/kernel_syscall",
   "kernel/crates/kernel_vfs",
-  "kernel/crates/kernel_virtual_memory", "userspace/bpf_loader",
+  "kernel/crates/kernel_virtual_memory",
+  "kernel/crates/shrike_link", "userspace/bpf_loader",
   "userspace/file_structure",
   "userspace/init",
   "userspace/minilib",

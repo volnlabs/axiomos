@@ -21,11 +21,38 @@ mod interpreter;
 #[cfg(test)]
 #[allow(clippy::missing_safety_doc, improper_ctypes_definitions)]
 pub mod helpers_stub {
-    use core::sync::atomic::{AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
     use super::BpfContext;
 
     static TEST_MAP_VALUE: AtomicU64 = AtomicU64::new(0);
+
+    // PWM-call recorder for behavior semantic tests. Sessions are serialized by
+    // REC_LOCK and gated by RECORDING, so concurrent cargo-test threads can't
+    // corrupt a recording (no other test executes a pwm program).
+    static REC_LOCK: AtomicBool = AtomicBool::new(false);
+    static RECORDING: AtomicBool = AtomicBool::new(false);
+    static PWM_CH1: AtomicI64 = AtomicI64::new(-1);
+    static PWM_CH2: AtomicI64 = AtomicI64::new(-1);
+
+    /// Run `f` with PWM recording on, returning `(left_duty, right_duty)` — the
+    /// last duty written to channel 1 / channel 2, or `-1` if none.
+    pub fn record_pwm<R>(f: impl FnOnce() -> R) -> (i64, i64) {
+        while REC_LOCK.swap(true, Ordering::Acquire) {
+            core::hint::spin_loop();
+        }
+        PWM_CH1.store(-1, Ordering::Relaxed);
+        PWM_CH2.store(-1, Ordering::Relaxed);
+        RECORDING.store(true, Ordering::Relaxed);
+        let _ = f();
+        RECORDING.store(false, Ordering::Relaxed);
+        let out = (
+            PWM_CH1.load(Ordering::Relaxed),
+            PWM_CH2.load(Ordering::Relaxed),
+        );
+        REC_LOCK.store(false, Ordering::Release);
+        out
+    }
 
     #[unsafe(no_mangle)]
     pub extern "C" fn bpf_ktime_get_ns() -> u64 {
@@ -115,7 +142,14 @@ pub mod helpers_stub {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "C" fn bpf_pwm_write(_pwm_id: u32, _channel: u32, _duty: u32) -> i64 {
+    pub extern "C" fn bpf_pwm_write(_pwm_id: u32, channel: u32, duty: u32) -> i64 {
+        if RECORDING.load(Ordering::Relaxed) {
+            match channel {
+                1 => PWM_CH1.store(duty as i64, Ordering::Relaxed),
+                2 => PWM_CH2.store(duty as i64, Ordering::Relaxed),
+                _ => {}
+            }
+        }
         0
     }
 

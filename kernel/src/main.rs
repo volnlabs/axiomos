@@ -175,6 +175,9 @@ unsafe extern "C" fn main() -> ! {
 
     #[cfg(feature = "rpi5")]
     {
+        // Bring up the Shrike control link + its poller task (HW bring-up).
+        kernel::arch::aarch64::platform::rpi5::control_link::spawn();
+
         // Forced scheduling probe:
         // If timer/preemption is the blocker, this should still let a runnable init task run.
         dbg_mark(0x53); // 'S'

@@ -47,6 +47,20 @@ pub enum LoadError {
     InvalidLicense,
     /// BTF parsing error
     BtfError,
+    /// A subprogram call participates in a recursion cycle.
+    RecursiveCall { subprog: usize },
+    /// Subprogram call depth exceeds the supported limit.
+    CallDepthExceeded { depth: usize, limit: usize },
+    /// Inlined program would exceed the instruction-count limit.
+    ExpansionTooLarge { got: usize, limit: usize },
+    /// A pseudo-call target is out of range or not a subprogram entry.
+    MalformedPseudoCall { insn_idx: usize },
+    /// A jump offset computed during inlining exceeds the i16 range.
+    JumpOffsetOverflow { insn_idx: usize },
+    /// A jump target computed during inlining is outside the subprogram's [start, end) range.
+    JumpTargetOutOfRange { insn_idx: usize },
+    /// A direct r10-relative memory access is outside the callee's own frame `[-FRAME_SIZE, 0)`.
+    StackOffsetOutOfFrame { insn_idx: usize },
 }
 
 impl fmt::Display for LoadError {
@@ -73,6 +87,31 @@ impl fmt::Display for LoadError {
             Self::LicenseNotFound => write!(f, "license not found"),
             Self::InvalidLicense => write!(f, "invalid license string"),
             Self::BtfError => write!(f, "BTF parsing error"),
+            Self::RecursiveCall { subprog } => {
+                write!(f, "recursive subprogram call (subprog {})", subprog)
+            }
+            Self::CallDepthExceeded { depth, limit } => {
+                write!(f, "call depth {} exceeds limit {}", depth, limit)
+            }
+            Self::ExpansionTooLarge { got, limit } => {
+                write!(f, "expanded program {} insns exceeds limit {}", got, limit)
+            }
+            Self::MalformedPseudoCall { insn_idx } => {
+                write!(f, "malformed pseudo-call at insn {}", insn_idx)
+            }
+            Self::JumpOffsetOverflow { insn_idx } => {
+                write!(f, "jump offset overflow at insn {}", insn_idx)
+            }
+            Self::JumpTargetOutOfRange { insn_idx } => write!(
+                f,
+                "jump target out of subprogram range at insn {}",
+                insn_idx
+            ),
+            Self::StackOffsetOutOfFrame { insn_idx } => write!(
+                f,
+                "direct r10-relative access out of callee frame at insn {}",
+                insn_idx
+            ),
         }
     }
 }

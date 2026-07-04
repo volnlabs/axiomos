@@ -1,0 +1,24 @@
+[package]
+name = "shrike_rp2040"
+version = "0.1.0"
+edition = "2021"
+description = "Shrike-lite RP2040 sidecar firmware: UART control link, L298N motors, ultrasonic, e-stop"
+
+[dependencies]
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+embedded-hal = "1.0"
+fugit = "0.3"
+panic-halt = "0.2"
+rp2040-hal = { version = "0.10", features = ["rt", "critical-section-impl"] }
+rp2040-boot2 = "0.3"
+shrike_link = { path = "../../kernel/crates/shrike_link" }
+
+[[bin]]
+name = "shrike_rp2040"
+test = false
+bench = false
+
+[profile.release]
+lto = true
+opt-level = "s"

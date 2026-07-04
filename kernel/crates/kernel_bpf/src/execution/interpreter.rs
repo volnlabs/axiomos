@@ -546,19 +546,37 @@ impl<P: PhysicalProfile> Default for Interpreter<P> {
     }
 }
 
-impl<P: PhysicalProfile> BpfExecutor<P> for Interpreter<P> {
-    fn execute(&self, program: &BpfProgram<P>, ctx: &BpfContext) -> BpfResult {
+impl<P: PhysicalProfile> Interpreter<P> {
+    /// Execute a program using a caller-provided stack buffer, allocating
+    /// nothing on the hot path.
+    ///
+    /// `stack` must be at least `P::MAX_STACK_SIZE` bytes; the leading
+    /// `MAX_STACK_SIZE` bytes are zeroed and used as the BPF stack frame. This
+    /// is the form the kernel's per-hook execution path calls so that no heap
+    /// allocation lands on an interrupt/real-time path — a heap allocation
+    /// there is both WCET-unsound (the admitted cycle bound does not model
+    /// allocator latency) and, in IRQ context, a deadlock hazard against the
+    /// global heap lock. See issue #181.
+    pub fn execute_with_stack(
+        &self,
+        program: &BpfProgram<P>,
+        ctx: &BpfContext,
+        stack: &mut [u8],
+    ) -> BpfResult {
         let insns = program.instructions();
 
         if insns.is_empty() {
             return Err(BpfError::NotLoaded);
         }
 
+        if stack.len() < P::MAX_STACK_SIZE {
+            return Err(BpfError::OutOfBounds);
+        }
+        let stack = &mut stack[..P::MAX_STACK_SIZE];
+        stack.fill(0);
+
         // Initialize register file
         let mut regs = RegisterFile::new();
-
-        // Allocate stack
-        let mut stack = vec![0u8; P::MAX_STACK_SIZE];
 
         // R1 = context pointer
         regs.set(Register::R1, ctx as *const _ as u64);
@@ -566,7 +584,7 @@ impl<P: PhysicalProfile> BpfExecutor<P> for Interpreter<P> {
         // R10 = frame pointer (top of stack)
         let fp = stack.as_ptr() as u64 + P::MAX_STACK_SIZE as u64;
         // SAFETY: We are initializing the frame pointer R10 with a valid stack address.
-        // This is safe because we just allocated the stack.
+        // The stack slice is live for the duration of this call.
         unsafe {
             regs.set_unchecked(Register::R10, fp);
         }
@@ -606,7 +624,7 @@ impl<P: PhysicalProfile> BpfExecutor<P> for Interpreter<P> {
             }
 
             // Execute instruction
-            match self.execute_insn(insn, &mut regs, &mut stack, ctx)? {
+            match self.execute_insn(insn, &mut regs, stack, ctx)? {
                 InsnResult::Continue => {
                     pc += 1;
                 }
@@ -622,6 +640,18 @@ impl<P: PhysicalProfile> BpfExecutor<P> for Interpreter<P> {
                 }
             }
         }
+    }
+}
+
+impl<P: PhysicalProfile> BpfExecutor<P> for Interpreter<P> {
+    /// Convenience entry point that allocates a fresh stack per call.
+    ///
+    /// Suitable for tests, benchmarks, and any cold path. The kernel's hot
+    /// execution path calls [`Interpreter::execute_with_stack`] with a reused
+    /// buffer instead — see #181.
+    fn execute(&self, program: &BpfProgram<P>, ctx: &BpfContext) -> BpfResult {
+        let mut stack = vec![0u8; P::MAX_STACK_SIZE];
+        self.execute_with_stack(program, ctx, &mut stack)
     }
 }
 
@@ -663,6 +693,37 @@ mod tests {
 
         let result = interpreter.execute(&program, &ctx);
         assert_eq!(result, Ok(42));
+    }
+
+    #[test]
+    fn execute_with_stack_matches_execute_and_rejects_small_buffer() {
+        let program = ProgramBuilder::<ActiveProfile>::new(BpfProgType::SocketFilter)
+            .insn(BpfInsn::mov64_imm(0, 42))
+            .exit()
+            .build()
+            .expect("valid program");
+        let interpreter = Interpreter::<ActiveProfile>::new();
+        let ctx = BpfContext::empty();
+
+        // A caller-provided, reusable buffer gives the same result as the
+        // allocating path — and a reused buffer stays correct across fires (#181).
+        let mut stack = vec![0u8; ActiveProfile::MAX_STACK_SIZE];
+        assert_eq!(
+            interpreter.execute_with_stack(&program, &ctx, &mut stack),
+            Ok(42)
+        );
+        assert_eq!(
+            interpreter.execute_with_stack(&program, &ctx, &mut stack),
+            Ok(42)
+        );
+        assert_eq!(interpreter.execute(&program, &ctx), Ok(42));
+
+        // An undersized buffer is refused, not a UB write past the end.
+        let mut small = vec![0u8; ActiveProfile::MAX_STACK_SIZE - 1];
+        assert_eq!(
+            interpreter.execute_with_stack(&program, &ctx, &mut small),
+            Err(BpfError::OutOfBounds)
+        );
     }
 
     #[test]

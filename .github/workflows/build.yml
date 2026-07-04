@@ -4,7 +4,7 @@ permissions:
 
 on:
   push:
-  #  pull_request:
+  pull_request:
   workflow_dispatch:
   schedule:
     - cron: 0 5,17 * * *
@@ -20,9 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install latest nightly
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly
           components: rustfmt, clippy, llvm-tools-preview, rust-src
       - name: Add build target
         run: |
@@ -48,9 +47,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install latest nightly
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly
+        uses: dtolnay/rust-toolchain@nightly
       - name: Install dependencies
         run: |
           sudo apt update
@@ -81,9 +78,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install latest nightly
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly
+          components: miri, rust-src
       - name: Miri Setup
         run: |
           cargo miri setup
@@ -100,17 +97,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install latest nightly
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly
+          components: miri, rust-src
       - name: Miri Setup
         run: |
           cargo miri setup
       - name: Miri
         run: |
           cargo miri test -p kernel_bpf --no-default-features --features ${{ matrix.profile }}
-  
-  
+
+
 
   build:
     name: "Build and upload artifacts"
@@ -122,9 +119,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install latest nightly
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly
+          targets: x86_64-unknown-none, aarch64-unknown-none
       - name: Add build targets
         run: |
           rustup target add x86_64-unknown-none
