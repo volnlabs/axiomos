@@ -94,6 +94,13 @@ struct PollOutcome {
     sensor_echo_us: Option<u16>,
 }
 
+#[derive(Clone, Copy)]
+enum PendingEstop {
+    Assert,
+    Release,
+    AssertThenRelease,
+}
+
 pub struct ControlLink {
     uart: Pl011,
     rx: RingBuf<RING_BYTES>,
@@ -106,6 +113,7 @@ pub struct ControlLink {
     motor_left: i16,
     motor_right: i16,
     motor_seq: u8,
+    pending_estop: Option<PendingEstop>,
 }
 
 impl ControlLink {
@@ -142,17 +150,22 @@ impl ControlLink {
             }
         }
 
-        // Liveness-driven heartbeat / fail-safe.
-        match self.session.tick(now) {
-            LinkAction::Heartbeat(seq) => {
-                let _ = self.enqueue(&Msg::HeartbeatToShrike { seq });
-            }
-            LinkAction::SafeStop => {
-                if self.enqueue(&Msg::Estop { assert: true }) {
-                    self.session.estop_sent();
+        // Ordered e-stop commands dominate heartbeats; if an assert frame cannot
+        // fit yet, do not refresh the peer watchdog with a smaller heartbeat.
+        let estop_queue_empty = self.flush_pending_estop();
+        let pending_assert = self.has_pending_estop_assert();
+        if estop_queue_empty || !pending_assert {
+            match self.session.tick(now) {
+                LinkAction::Heartbeat(seq) => {
+                    let _ = self.enqueue(&Msg::HeartbeatToShrike { seq });
                 }
+                LinkAction::SafeStop => {
+                    if self.request_estop(true) {
+                        self.session.estop_sent();
+                    }
+                }
+                LinkAction::Idle => {}
             }
-            LinkAction::Idle => {}
         }
 
         // TX: bounded drain. Stop when the FIFO is full (write_byte won't spin).
@@ -186,18 +199,66 @@ impl ControlLink {
         true
     }
 
+    fn request_estop(&mut self, assert: bool) -> bool {
+        self.pending_estop = match (self.pending_estop, assert) {
+            (None, true) | (Some(PendingEstop::Release), true) => Some(PendingEstop::Assert),
+            (None, false) | (Some(PendingEstop::Release), false) => Some(PendingEstop::Release),
+            (Some(PendingEstop::Assert), true) | (Some(PendingEstop::AssertThenRelease), true) => {
+                Some(PendingEstop::Assert)
+            }
+            (Some(PendingEstop::Assert), false)
+            | (Some(PendingEstop::AssertThenRelease), false) => {
+                Some(PendingEstop::AssertThenRelease)
+            }
+        };
+        self.flush_pending_estop()
+    }
+
+    fn flush_pending_estop(&mut self) -> bool {
+        while let Some(pending) = self.pending_estop {
+            let assert = match pending {
+                PendingEstop::Assert | PendingEstop::AssertThenRelease => true,
+                PendingEstop::Release => false,
+            };
+            if !self.enqueue(&Msg::Estop { assert }) {
+                return false;
+            }
+            self.pending_estop = match pending {
+                PendingEstop::Assert | PendingEstop::Release => None,
+                PendingEstop::AssertThenRelease => Some(PendingEstop::Release),
+            };
+        }
+        true
+    }
+
+    fn has_pending_estop_assert(&self) -> bool {
+        matches!(
+            self.pending_estop,
+            Some(PendingEstop::Assert | PendingEstop::AssertThenRelease)
+        )
+    }
+
     /// Update one wheel and enqueue the combined `MotorSetpoint`.
     fn set_motor(&mut self, side: MotorSide, permille: i16) -> bool {
-        match side {
-            MotorSide::Left => self.motor_left = permille,
-            MotorSide::Right => self.motor_right = permille,
+        if !self.flush_pending_estop() {
+            return false;
         }
-        self.motor_seq = self.motor_seq.wrapping_add(1);
-        self.enqueue(&Msg::MotorSetpoint {
-            seq: self.motor_seq,
-            left: self.motor_left,
-            right: self.motor_right,
-        })
+
+        let mut left = self.motor_left;
+        let mut right = self.motor_right;
+        match side {
+            MotorSide::Left => left = permille,
+            MotorSide::Right => right = permille,
+        }
+        let seq = self.motor_seq.wrapping_add(1);
+        if !self.enqueue(&Msg::MotorSetpoint { seq, left, right }) {
+            return false;
+        }
+
+        self.motor_left = left;
+        self.motor_right = right;
+        self.motor_seq = seq;
+        true
     }
 }
 
@@ -271,6 +332,7 @@ fn init() {
             motor_left: 0,
             motor_right: 0,
             motor_seq: 0,
+            pending_estop: None,
         })
     });
 }
@@ -318,13 +380,14 @@ pub fn send_motor(side: MotorSide, value: u32) -> bool {
     with_link(|l| l.set_motor(side, permille)).unwrap_or(false)
 }
 
-/// Command the RP2040 to e-stop (used when ARM-A e-stops link-owned motors, so
-/// the safe state reaches the peer, not just the local PWM). Best-effort.
-pub fn command_estop() -> bool {
-    with_link(|l| l.enqueue(&Msg::Estop { assert: true })).unwrap_or(false)
+/// Command the RP2040 e-stop latch. Returns true if all pending e-stop commands
+/// are queued; otherwise the poller will retry before heartbeats/motor setpoints.
+pub fn command_estop(assert: bool) -> bool {
+    with_link(|l| l.request_estop(assert)).unwrap_or(false)
 }
 
-/// Enqueue a message for transmission (nonblocking). False if link down or full.
+/// Enqueue a message for transmission after any pending e-stop command.
+/// False if link down, full, or an earlier e-stop command still cannot fit.
 pub fn send(msg: &Msg) -> bool {
-    with_link(|l| l.enqueue(msg)).unwrap_or(false)
+    with_link(|l| l.flush_pending_estop() && l.enqueue(msg)).unwrap_or(false)
 }

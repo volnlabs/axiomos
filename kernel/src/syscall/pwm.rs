@@ -5,6 +5,10 @@ use kernel_bpf::actuation::{AuditSource, Authority};
 use crate::arch::aarch64::platform::rpi5::pwm::{PWM0, PWM1};
 
 fn guard_pwm_zero(pwm_id: usize, channel: usize) -> isize {
+    if !valid_pwm_id(pwm_id) || !valid_pwm_channel(channel) {
+        return -1;
+    }
+
     crate::actuation::guard_pwm_with(
         pwm_id as u8,
         channel as u8,
@@ -12,6 +16,10 @@ fn guard_pwm_zero(pwm_id: usize, channel: usize) -> isize {
         Authority::Operator,
         AuditSource::SyscallPwm,
     ) as isize
+}
+
+fn valid_pwm_id(pwm_id: usize) -> bool {
+    (0..=1).contains(&pwm_id)
 }
 
 fn valid_pwm_channel(channel: usize) -> bool {
@@ -24,7 +32,7 @@ fn valid_pwm_channel(channel: usize) -> bool {
 /// - `pwm_id`: 0 or 1 (PWM controller)
 /// - `freq_hz`: Frequency in Hz
 pub fn sys_pwm_config(pwm_id: usize, freq_hz: usize) -> isize {
-    if !(0..=1).contains(&pwm_id) || freq_hz == 0 {
+    if !valid_pwm_id(pwm_id) || freq_hz == 0 {
         return -1;
     }
 
@@ -56,10 +64,17 @@ pub fn sys_pwm_config(pwm_id: usize, freq_hz: usize) -> isize {
 /// - `channel`: 1 or 2
 /// - `duty_percent`: 0-100 (percentage)
 pub fn sys_pwm_write(pwm_id: usize, channel: usize, duty_percent: usize) -> isize {
+    if !valid_pwm_id(pwm_id) || !valid_pwm_channel(channel) {
+        return -1;
+    }
+    let Ok(duty_percent) = u32::try_from(duty_percent) else {
+        return -1;
+    };
+
     crate::actuation::guard_pwm_with(
         pwm_id as u8,
         channel as u8,
-        duty_percent as u32,
+        duty_percent,
         Authority::Operator,
         AuditSource::SyscallPwm,
     ) as isize
@@ -72,7 +87,7 @@ pub fn sys_pwm_write(pwm_id: usize, channel: usize, duty_percent: usize) -> isiz
 /// - `channel`: 1 or 2
 /// - `enable`: 0 (disable) or 1 (enable)
 pub fn sys_pwm_enable(pwm_id: usize, channel: usize, enable: usize) -> isize {
-    if !(0..=1).contains(&pwm_id) || !valid_pwm_channel(channel) {
+    if !valid_pwm_id(pwm_id) || !valid_pwm_channel(channel) {
         return -1;
     }
 

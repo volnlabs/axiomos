@@ -1,5 +1,19 @@
 use crate::time::get_kernel_time_ns;
 
+const GPIO_PIN_COUNT: u32 = 28;
+
+fn valid_gpio_pin(pin: u32) -> bool {
+    pin < GPIO_PIN_COUNT
+}
+
+fn valid_pwm_id(pwm_id: u32) -> bool {
+    pwm_id <= 1
+}
+
+fn valid_pwm_channel(channel: u32) -> bool {
+    (1..=2).contains(&channel)
+}
+
 /// BPF helper: Get current time in nanoseconds
 ///
 /// # Safety
@@ -75,7 +89,7 @@ pub extern "C" fn bpf_get_kernel_image_mb(ctx: *const kernel_bpf::execution::Bpf
 pub extern "C" fn bpf_gpio_read(pin: u32) -> i64 {
     #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
     {
-        if pin >= 28 {
+        if !valid_gpio_pin(pin) {
             return -1;
         }
         // SAFETY: Creating a temporary GPIO interface to access hardware registers.
@@ -107,6 +121,10 @@ pub extern "C" fn bpf_gpio_read(pin: u32) -> i64 {
 /// but validates inputs (pin numbers) to prevent invalid access.
 #[unsafe(no_mangle)]
 pub extern "C" fn bpf_gpio_write(pin: u32, value: u32) -> i64 {
+    if !valid_gpio_pin(pin) {
+        return -1;
+    }
+
     crate::actuation::guard_gpio(pin as u8, value)
 }
 
@@ -128,7 +146,7 @@ pub extern "C" fn bpf_gpio_write(pin: u32, value: u32) -> i64 {
 pub extern "C" fn bpf_gpio_toggle(pin: u32) -> i64 {
     #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
     {
-        if pin >= 28 {
+        if !valid_gpio_pin(pin) {
             return -1;
         }
         // SAFETY: Creating a temporary GPIO interface to access hardware registers.
@@ -167,7 +185,7 @@ pub extern "C" fn bpf_gpio_toggle(pin: u32) -> i64 {
 pub extern "C" fn bpf_gpio_set_output(pin: u32, initial_high: u32) -> i64 {
     #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
     {
-        if pin >= 28 {
+        if !valid_gpio_pin(pin) {
             return -1;
         }
         // SAFETY: Creating a temporary GPIO interface to access hardware registers.
@@ -199,6 +217,10 @@ pub extern "C" fn bpf_gpio_set_output(pin: u32, initial_high: u32) -> i64 {
 /// BPF helper: Emergency motor stop
 #[no_mangle]
 pub extern "C" fn bpf_pwm_write(pwm_id: u32, channel: u32, duty_percent: u32) -> i64 {
+    if !valid_pwm_id(pwm_id) || !valid_pwm_channel(channel) {
+        return -1;
+    }
+
     crate::actuation::guard_pwm(pwm_id as u8, channel as u8, duty_percent)
 }
 

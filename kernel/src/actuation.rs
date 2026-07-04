@@ -102,14 +102,16 @@ fn apply_gpio_value(pin: u8, value: u32) {
     let _ = (pin, value);
 }
 
-/// Push an e-stop over the Shrike link so link-owned motors (driven by the
-/// RP2040, not local PWM) also go safe — `apply_safe_drive` only zeroes LOCAL
-/// MMIO. Best-effort; if the link is dead the RP2040's own watchdog fails safe.
-fn notify_link_estop() {
+/// Push an e-stop command over the Shrike link so link-owned motors (driven by
+/// the RP2040, not local PWM) mirror the ARM-A latch state. If the link TX ring
+/// is full, the control-link poller retries before sending further setpoints.
+fn notify_link_estop(assert: bool) {
     #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
     {
-        crate::arch::aarch64::platform::rpi5::control_link::command_estop();
+        crate::arch::aarch64::platform::rpi5::control_link::command_estop(assert);
     }
+    #[cfg(not(all(target_arch = "aarch64", feature = "rpi5")))]
+    let _ = assert;
 }
 
 fn apply_safe_drive(drive: SafeDrive) {
@@ -208,7 +210,7 @@ pub fn trigger_estop(source: AuditSource) -> i64 {
         for drive in drives.iter() {
             apply_safe_drive(drive);
         }
-        notify_link_estop();
+        notify_link_estop(true);
         0
     })
 }
@@ -222,10 +224,13 @@ pub fn operator_estop(action: EstopAction) -> i64 {
                 for drive in drives.iter() {
                     apply_safe_drive(drive);
                 }
-                notify_link_estop();
+                notify_link_estop(true);
                 0
             }
-            EstopCommandResult::Released => 0,
+            EstopCommandResult::Released => {
+                notify_link_estop(false);
+                0
+            }
             EstopCommandResult::Denied => -1,
         }
     })
@@ -238,7 +243,7 @@ pub fn watchdog_estop_trigger() -> i64 {
         for drive in drives.iter() {
             apply_safe_drive(drive);
         }
-        notify_link_estop();
+        notify_link_estop(true);
         0
     })
 }
@@ -250,7 +255,10 @@ pub fn release_estop(authority: Authority, source: AuditSource) -> i64 {
             .lock()
             .estop_release(authority, source, now)
         {
-            ReleaseResult::Released => 0,
+            ReleaseResult::Released => {
+                notify_link_estop(false);
+                0
+            }
             ReleaseResult::Denied => -1,
         }
     })
