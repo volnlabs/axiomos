@@ -3,11 +3,26 @@ permissions:
   contents: read
 
 on:
+  # Skip full CI on doc-only changes — they used to fire the whole fan-out.
   push:
-  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE*'
+      - '.gitignore'
+  #  pull_request:   # kept off: push already covers branches; PR would double runs
   workflow_dispatch:
   schedule:
-    - cron: 0 5,17 * * *
+    # Weekly drift check (Mon 05:00 UTC). Was twice-daily; at ~145 billed
+    # minutes/run that alone approached the whole monthly quota.
+    - cron: 0 5 * * 1
+
+# Cancel an in-progress run when a newer commit lands on the same ref. During
+# rapid iteration this is the single biggest saver — a superseded fan-out run
+# (lint + tests + per-crate Miri + build, every job billed) is killed at once.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always

@@ -6,8 +6,10 @@ on:
       - 'kernel/crates/kernel_bpf/**'
       - '.github/workflows/fuzz.yml'
   schedule:
-    # 02:30 UTC nightly. Long campaigns run here, not on every PR.
-    - cron: '30 2 * * *'
+    # 02:30 UTC weekly (Sun). Was nightly with two 8h targets ≈ 960 billed
+    # min/run; nightly that is ~28.8k min/month, ~10× the whole quota. Weekly
+    # + 2h (below) with a persistent corpus keeps coverage growing sustainably.
+    - cron: '30 2 * * 0'
   workflow_dispatch:
 
 # A finding here is a soundness bug. Do not cancel a run that is still
@@ -48,9 +50,9 @@ jobs:
 
   nightly:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    name: "Fuzz nightly (${{ matrix.target }}, 8h)"
+    name: "Fuzz weekly (${{ matrix.target }}, 2h)"
     runs-on: ubuntu-latest
-    timeout-minutes: 510   # 8h + slack
+    timeout-minutes: 150   # 2h + slack
     strategy:
       fail-fast: false
       matrix:
@@ -77,9 +79,9 @@ jobs:
           restore-keys: |
             fuzz-corpus-${{ matrix.target }}-
 
-      - name: Run ${{ matrix.target }} for 8h
+      - name: Run ${{ matrix.target }} for 2h
         working-directory: kernel/crates/kernel_bpf
-        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=28800
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=7200
 
       - name: Upload corpus
         if: always()
