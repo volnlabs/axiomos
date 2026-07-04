@@ -141,10 +141,6 @@ pub fn estop_trigger() -> c_int {
     syscall1(61, 1) as i32
 }
 
-pub fn estop_release() -> c_int {
-    syscall1(61, 2) as i32
-}
-
 // --- Time ---
 
 #[repr(C)]

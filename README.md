@@ -109,7 +109,7 @@ The kernel boots and runs real BPF programs on a Raspberry Pi 5. Several load-be
 **BPF subsystem:**
 - **Unsigned loads accepted by default** — provenance enforcement is wired ([#20](https://github.com/pro-utkarshM/axiomOS/issues/20)) and fails closed on bad signatures, but `allow_unsigned = true` until a userspace signer ships
 - **BPF Manager guarded by one global mutex** — every map op / load / attach serializes ([#58](https://github.com/pro-utkarshM/axiomOS/issues/58))
-- **No BPF-to-BPF function calls** ([#87](https://github.com/pro-utkarshM/axiomOS/issues/87)), no BTF integration ([#90](https://github.com/pro-utkarshM/axiomOS/issues/90)), no Spectre mitigations ([#89](https://github.com/pro-utkarshM/axiomOS/issues/89))
+- **BPF-to-BPF calls are supported for the loader's single-section subprogram layout** ([#87](https://github.com/pro-utkarshM/axiomOS/issues/87)); cross-section subprogram linking, BTF integration ([#90](https://github.com/pro-utkarshM/axiomOS/issues/90)), and Spectre mitigations ([#89](https://github.com/pro-utkarshM/axiomOS/issues/89)) remain unsupported
 - **WCET admission assumes one nominal 1 kHz fire rate for every hook** — per-hook-type / caller-declared frequencies are future work; PREVAIL head-to-head comparison not yet run
 
 **Memory:**

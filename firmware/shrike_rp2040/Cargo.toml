@@ -19,6 +19,10 @@ name = "shrike_rp2040"
 test = false
 bench = false
 
+[profile.dev]
+panic = "abort"
+
 [profile.release]
+panic = "abort"
 lto = true
 opt-level = "s"
