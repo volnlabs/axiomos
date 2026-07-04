@@ -92,7 +92,7 @@ pub fn sys_pwm_enable(pwm_id: usize, channel: usize, enable: usize) -> isize {
     }
 
     let prepared = guard_pwm_zero(pwm_id, channel);
-    if enable != 0 && prepared < 0 {
+    if prepared < 0 {
         return -1;
     }
 

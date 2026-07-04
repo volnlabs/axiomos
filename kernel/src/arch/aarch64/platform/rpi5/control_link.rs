@@ -37,9 +37,10 @@ const LINK_BAUD: u32 = 115_200;
 /// Per-service work caps (bound the work done per poller pass).
 const RX_PER_POLL: usize = 64;
 const TX_PER_POLL: usize = 64;
-/// Inbound-silence timeout. MUST be strictly > the RP2040 firmware LINK_TIMEOUT
-/// (100 ms) so the peer's local watchdog fails the motors FIRST. (ns)
-const LINK_TIMEOUT_NS: u64 = 150_000_000; // 150 ms
+/// Inbound-silence timeout. Keep this below the RP2040 firmware LINK_TIMEOUT
+/// (100 ms) so one-way Shrike->Pi silence stops Pi heartbeats before the MCU
+/// watchdog deadline. (ns)
+const LINK_TIMEOUT_NS: u64 = 80_000_000; // 80 ms
 /// Heartbeat period while the link is alive. (ns)
 const HEARTBEAT_PERIOD_NS: u64 = 20_000_000; // 20 ms (50 Hz)
 
