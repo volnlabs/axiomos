@@ -12,14 +12,13 @@
 #![no_std]
 #![no_main]
 
-use panic_halt as _;
-
 use cortex_m_rt::entry;
 use embedded_hal::digital::InputPin;
 use fugit::RateExtU32;
-use rp2040_hal as hal;
 use hal::clocks::Clock;
 use hal::pac;
+use panic_halt as _;
+use rp2040_hal as hal;
 
 mod control;
 mod motor;
@@ -36,9 +35,11 @@ pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 const XTAL_HZ: u32 = 12_000_000; // on-board crystal
 const UART_BAUD: u32 = 115_200; // MUST match the Pi5 side
 const LINK_TIMEOUT_US: u64 = 100_000; // 100 ms link-silence -> motors safe
+const PEER_HEARTBEAT_PERIOD_US: u64 = 20_000; // 50 Hz Shrike->Pi liveness
 const PING_PERIOD_US: u64 = 50_000; // 20 Hz ultrasonic ping
 const ECHO_TIMEOUT_US: u64 = 30_000; // HC-SR04 max ~ 5 m round trip
 const ESTOP_ACTIVE_LOW: bool = true; // button to GND with pull-up
+
 // Pins: ENA via PWM, IN1/IN2 direction, UART0, HC-SR04 trig/echo, e-stop.
 // (Documented here so the wiring is one glance away.)
 // gpio0=UART0 TX, gpio1=UART0 RX
@@ -97,7 +98,11 @@ enum EchoState {
 }
 impl<T: embedded_hal::digital::OutputPin, E: InputPin> Hcsr04<T, E> {
     fn new(trig: T, echo: E) -> Self {
-        Self { trig, echo, state: EchoState::Idle }
+        Self {
+            trig,
+            echo,
+            state: EchoState::Idle,
+        }
     }
 }
 impl<T: embedded_hal::digital::OutputPin, E: InputPin> Ultrasonic for Hcsr04<T, E> {
@@ -106,7 +111,9 @@ impl<T: embedded_hal::digital::OutputPin, E: InputPin> Ultrasonic for Hcsr04<T, 
         cortex_m::asm::delay(1250); // ~10 µs at 125 MHz
         let _ = self.trig.set_low();
         let now = Clock1MHz.now_us();
-        self.state = EchoState::WaitRise { deadline: now + ECHO_TIMEOUT_US };
+        self.state = EchoState::WaitRise {
+            deadline: now + ECHO_TIMEOUT_US,
+        };
     }
     fn take_echo_us(&mut self) -> Option<u16> {
         let now = Clock1MHz.now_us();
@@ -115,7 +122,10 @@ impl<T: embedded_hal::digital::OutputPin, E: InputPin> Ultrasonic for Hcsr04<T, 
             EchoState::Idle => None,
             EchoState::WaitRise { deadline } => {
                 if high {
-                    self.state = EchoState::Timing { start: now, deadline };
+                    self.state = EchoState::Timing {
+                        start: now,
+                        deadline,
+                    };
                     None
                 } else if now >= deadline {
                     self.state = EchoState::Idle; // no echo (out of range)
@@ -241,6 +251,7 @@ fn main() -> ! {
         Config {
             link_timeout_us: LINK_TIMEOUT_US,
             ping_period_us: PING_PERIOD_US,
+            peer_heartbeat_period_us: PEER_HEARTBEAT_PERIOD_US,
         },
     )
 }

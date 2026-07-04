@@ -27,10 +27,10 @@ impl GpioRouteTable {
 
     /// Record that `prog_id` is attached to `(chip, pin)` for `edge`.
     pub fn insert(&mut self, chip: u8, pin: u8, edge: GpioEdge, prog_id: u32) {
-        self.routes
-            .entry((chip, pin))
-            .or_default()
-            .push((edge, prog_id));
+        let list = self.routes.entry((chip, pin)).or_default();
+        if !list.iter().any(|&(e, id)| e == edge && id == prog_id) {
+            list.push((edge, prog_id));
+        }
     }
 
     /// Program ids whose attached edge matches `fired`. `Both` matches either
@@ -97,6 +97,14 @@ mod tests {
         t.insert(0, 17, GpioEdge::Both, 1);
         assert_eq!(t.programs_for(0, 17, GpioEdge::Rising), alloc::vec![1]);
         assert_eq!(t.programs_for(0, 17, GpioEdge::Falling), alloc::vec![1]);
+    }
+
+    #[test]
+    fn duplicate_insert_is_idempotent() {
+        let mut t = GpioRouteTable::new();
+        t.insert(0, 17, GpioEdge::Rising, 1);
+        t.insert(0, 17, GpioEdge::Rising, 1);
+        assert_eq!(t.programs_for(0, 17, GpioEdge::Rising), alloc::vec![1]);
     }
 
     #[test]

@@ -41,6 +41,8 @@ pub struct Config {
     pub link_timeout_us: u64,
     /// How often to fire the ultrasonic + report a Sensor frame.
     pub ping_period_us: u64,
+    /// Shrike->Pi heartbeat cadence, independent of sensor echo availability.
+    pub peer_heartbeat_period_us: u64,
 }
 
 /// Run the control loop forever. Never returns.
@@ -64,6 +66,8 @@ where
     let mut dec = Decoder::new();
     let mut wd = Watchdog::new(cfg.link_timeout_us);
     let mut last_ping: u64 = 0;
+    let mut last_peer_heartbeat: u64 = 0;
+    let mut peer_heartbeat_seq: u16 = 0;
     let mut prev_estop = false;
 
     loop {
@@ -122,6 +126,20 @@ where
                 estop_line: hw_estop,
                 flags: 0,
             };
+            let mut buf = [0u8; MAX_FRAME];
+            if let Ok(n) = encode(&msg, &mut buf) {
+                io.write(&buf[..n]);
+            }
+        }
+
+        if cfg.peer_heartbeat_period_us > 0
+            && now.wrapping_sub(last_peer_heartbeat) >= cfg.peer_heartbeat_period_us
+        {
+            let msg = Msg::HeartbeatToPi {
+                seq: peer_heartbeat_seq,
+            };
+            peer_heartbeat_seq = peer_heartbeat_seq.wrapping_add(1);
+            last_peer_heartbeat = now;
             let mut buf = [0u8; MAX_FRAME];
             if let Ok(n) = encode(&msg, &mut buf) {
                 io.write(&buf[..n]);

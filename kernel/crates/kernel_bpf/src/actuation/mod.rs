@@ -466,6 +466,13 @@ impl ChannelState {
     };
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChannelStateSnapshot {
+    last_output: u32,
+    last_update_ns: u64,
+    safe_hold: bool,
+}
+
 /// Number of GPIO pins addressable on RP1 bank 0 (mirrors `Rp1Gpio::NUM_PINS`).
 const GPIO_PINS: usize = 28;
 const PWM_CHIPS: usize = 2;
@@ -723,6 +730,28 @@ impl<P: PhysicalProfile> Monitor<P> {
         } else {
             &mut self.gpio[i]
         })
+    }
+
+    pub fn snapshot_channel_state(&self, ch: ChannelId) -> Option<ChannelStateSnapshot> {
+        let (is_pwm, i, j) = self.slot_index(ch)?;
+        let state = if is_pwm { self.pwm[i][j] } else { self.gpio[i] };
+        Some(ChannelStateSnapshot {
+            last_output: state.last_output,
+            last_update_ns: state.last_update_ns,
+            safe_hold: state.safe_hold,
+        })
+    }
+
+    pub fn restore_channel_state(&mut self, ch: ChannelId, snapshot: ChannelStateSnapshot) -> bool {
+        let Some(slot) = self.slot_mut(ch) else {
+            return false;
+        };
+        *slot = ChannelState {
+            last_output: snapshot.last_output,
+            last_update_ns: snapshot.last_update_ns,
+            safe_hold: snapshot.safe_hold,
+        };
+        true
     }
 
     fn registered_safe_value(&self, ch: ChannelId, fallback: u32) -> u32 {

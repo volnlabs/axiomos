@@ -69,20 +69,20 @@ fn apply_pwm_value(chip: u8, channel: u8, value: u32) {
 /// link-mapped channel that is dead or whose setpoint can't be enqueued is
 /// REFUSED (-1) and never driven locally — the RP2040 watchdog fails it safe.
 #[allow(unused_variables)]
-fn apply_pwm_routed(chip: u8, channel: u8, value: u32, code: i64) -> i64 {
+fn apply_pwm_routed(chip: u8, channel: u8, value: u32, code: i64) -> (bool, i64) {
     #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
     {
         use crate::arch::aarch64::platform::rpi5::control_link;
         if let Some(side) = control_link::motor_side(chip, channel) {
             // Link owns this motor — never drive local PWM for it.
             if !control_link::link_alive() || !control_link::send_motor(side, value) {
-                return -1; // dead link or TX full: refuse (peer fails safe)
+                return (false, -1); // dead link or TX full: refuse (peer fails safe)
             }
-            return code;
+            return (true, code);
         }
     }
     apply_pwm_value(chip, channel, value);
-    code
+    (true, code)
 }
 
 fn apply_gpio_value(pin: u8, value: u32) {
@@ -142,16 +142,31 @@ pub fn guard_pwm_with(
         let now = crate::time::get_kernel_time_ns();
         #[cfg(feature = "bench")]
         let bench_t0 = crate::bench::now_cycles();
-        let (value, code) = ACTUATION_MONITOR
-            .lock()
-            .decide(ActuationRequest { ch, value: duty }, authority, source, now)
-            .apply();
+        let (before, after, value, code) = {
+            let mut monitor = ACTUATION_MONITOR.lock();
+            let before = monitor.snapshot_channel_state(ch);
+            let (value, code) = monitor
+                .decide(ActuationRequest { ch, value: duty }, authority, source, now)
+                .apply();
+            let after = monitor.snapshot_channel_state(ch);
+            (before, after, value, code)
+        };
         #[cfg(feature = "bench")]
         crate::bench::report_monitor_overhead(crate::bench::now_cycles().wrapping_sub(bench_t0));
 
-        let code = apply_pwm_routed(chip, channel, value, code);
+        let (applied, code) = apply_pwm_routed(chip, channel, value, code);
+        if !applied {
+            if let (Some(before), Some(after)) = (before, after) {
+                let mut monitor = ACTUATION_MONITOR.lock();
+                if monitor.snapshot_channel_state(ch) == Some(after) {
+                    monitor.restore_channel_state(ch, before);
+                }
+            }
+        }
         #[cfg(feature = "bench")]
-        crate::bench::report_edge_to_actuate("pwm", channel, value);
+        if applied {
+            crate::bench::report_edge_to_actuate("pwm", channel, value);
+        }
 
         code
     })
