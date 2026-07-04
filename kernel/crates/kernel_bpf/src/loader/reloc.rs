@@ -6,8 +6,9 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use super::elf::ElfParser;
+use super::elf::{ElfParser, Symbol};
 use super::error::{LoadError, LoadResult};
+use super::normalize::BPF_PSEUDO_CALL;
 use super::object::LoadedMap;
 use crate::bytecode::insn::BpfInsn;
 use crate::verifier::HelperId;
@@ -17,6 +18,8 @@ const R_BPF_64_64: u32 = 1;
 const R_BPF_64_ABS64: u32 = 2;
 const R_BPF_64_ABS32: u32 = 3;
 const R_BPF_64_32: u32 = 10;
+const STT_FUNC: u8 = 2;
+const SHN_UNDEF: u16 = 0;
 
 /// BPF instruction relocation handler.
 pub struct Relocator<'a> {
@@ -79,8 +82,8 @@ impl<'a> Relocator<'a> {
                     self.relocate_map_ref(&mut insns, insn_idx, &sym_name)?;
                 }
                 R_BPF_64_32 => {
-                    // Helper function call
-                    self.relocate_call(&mut insns, insn_idx, &sym_name)?;
+                    // Helper or BPF-to-BPF function call.
+                    self.relocate_call(&mut insns, insn_idx, sym, &sym_name, section_idx)?;
                 }
                 R_BPF_64_ABS64 | R_BPF_64_ABS32 => {
                     // Absolute references - typically for data
@@ -132,14 +135,35 @@ impl<'a> Relocator<'a> {
         &self,
         insns: &mut [BpfInsn],
         insn_idx: usize,
+        sym: &Symbol,
         sym_name: &str,
+        section_idx: usize,
     ) -> LoadResult<()> {
         // Check if this is a helper function call
         if let Some(helper_id) = Self::helper_name_to_id(sym_name) {
+            insns[insn_idx].regs &= 0x0f;
             insns[insn_idx].imm = helper_id;
+            return Ok(());
         }
-        // Otherwise, it's a BPF-to-BPF call which needs different handling
-        // (BPF-to-BPF calls are not yet implemented)
+
+        if sym.sym_type() != STT_FUNC || sym.shndx == SHN_UNDEF {
+            return Ok(());
+        }
+        if sym.shndx as usize != section_idx || !sym.value.is_multiple_of(BpfInsn::SIZE as u64) {
+            return Err(LoadError::InvalidRelocation);
+        }
+
+        let target_idx = (sym.value / BpfInsn::SIZE as u64) as usize;
+        if target_idx >= insns.len() {
+            return Err(LoadError::InvalidRelocation);
+        }
+        let imm = target_idx as i64 - insn_idx as i64 - 1;
+        if imm < i32::MIN as i64 || imm > i32::MAX as i64 {
+            return Err(LoadError::InvalidRelocation);
+        }
+
+        insns[insn_idx].regs = (insns[insn_idx].regs & 0x0f) | (BPF_PSEUDO_CALL << 4);
+        insns[insn_idx].imm = imm as i32;
 
         Ok(())
     }
@@ -183,6 +207,7 @@ impl<'a> Relocator<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::loader::normalize::BPF_PSEUDO_CALL;
 
     #[test]
     fn helper_name_mapping_uses_runtime_abi() {
@@ -242,5 +267,31 @@ mod tests {
                 "{name} relocated to id {id}, which the runtime ABI does not know"
             );
         }
+    }
+
+    #[test]
+    fn function_relocation_marks_section_local_pseudo_call() {
+        let mut insns = alloc::vec![
+            BpfInsn::call(-1),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+            BpfInsn::mov64_imm(0, 1),
+            BpfInsn::exit(),
+        ];
+        let sym = crate::loader::elf::Symbol {
+            name_offset: 0,
+            info: 2,
+            other: 0,
+            shndx: 7,
+            value: (3 * BpfInsn::SIZE) as u64,
+            size: (2 * BpfInsn::SIZE) as u64,
+        };
+
+        Relocator::new(&[])
+            .relocate_call(&mut insns, 0, &sym, "leaf", 7)
+            .unwrap();
+
+        assert_eq!(insns[0].src_reg(), BPF_PSEUDO_CALL);
+        assert_eq!(insns[0].imm, 2);
     }
 }

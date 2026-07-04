@@ -70,6 +70,13 @@ fn apply_pwm_value(chip: u8, channel: u8, value: u32) {
 /// REFUSED (-1) and never driven locally — the RP2040 watchdog fails it safe.
 #[allow(unused_variables)]
 fn apply_pwm_routed(chip: u8, channel: u8, value: u32, code: i64) -> (bool, i64) {
+    #[cfg(all(target_arch = "aarch64", feature = "rpi5", feature = "bench"))]
+    if crate::bench::is_bench_pwm_output(chip, channel) {
+        // Task 11 measures the RP1 PWM edge directly, not the Shrike UART path.
+        apply_pwm_value(chip, channel, value);
+        return (true, code);
+    }
+
     #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
     {
         use crate::arch::aarch64::platform::rpi5::control_link;

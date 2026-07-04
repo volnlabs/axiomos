@@ -6,7 +6,7 @@
 //!      so the M-A/M-B/M-C numbers can be read without a logic analyzer.
 //!   2. The physical e-stop button IRQ path (`handle_estop_button`).
 //!   3. The auto-loaded GPIO reflex (`init`): a verified BPF program that stops a
-//!      PWM channel on a sensor edge, attached at boot.
+//!      local PWM channel on a sensor edge, attached at boot.
 //!
 //! Pin assignments (BCM/GPIO numbering, i.e. the numbers the kernel uses):
 //!   - GPIO23 = sensor trigger (reflex fires on its rising edge)
@@ -26,6 +26,12 @@ pub const BENCH_PWM_CHIP: u32 = 0;
 pub const BENCH_PWM_CHANNEL: u32 = 1;
 /// Header GPIO routed to PWM0 channel 1 for the v0.3 bench.
 pub const BENCH_PWM_PIN: u8 = 12;
+
+/// True when an actuation targets the local PWM output reserved for Task 11.
+#[inline]
+pub fn is_bench_pwm_output(chip: u8, channel: u8) -> bool {
+    u32::from(chip) == BENCH_PWM_CHIP && u32::from(channel) == BENCH_PWM_CHANNEL
+}
 
 /// Cycle stamp captured at GPIO IRQ entry; read at the actuation apply point to
 /// compute edge->actuate latency (M-C). 0 means "no GPIO IRQ in flight".
@@ -153,7 +159,7 @@ pub fn init() {
     gpio.enable_interrupt(REFLEX_SENSOR_PIN, true, false);
     gpio.enable_interrupt(ESTOP_BUTTON_PIN, true, true);
 
-    // Build + load + attach the reflex (stop PWM0/ch1 on the sensor edge).
+    // Build + load + attach the reflex (stop local PWM0/ch1 on the sensor edge).
     let insns = kernel_bpf::bench::reflex_pwm_program(BENCH_PWM_CHIP, BENCH_PWM_CHANNEL, 0);
     let Some(manager) = crate::BPF_MANAGER.get() else {
         log::error!("[bench] BPF manager not initialized; reflex not loaded");
