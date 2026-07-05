@@ -333,6 +333,10 @@ pub enum BpfError {
     /// (#43). The program is safe but not schedulable on this hook.
     AdmissionRejected,
 
+    /// GPIO attach refused: the route would exceed the fixed IRQ dispatch
+    /// fan-out buffer.
+    GpioFanoutExceeded,
+
     /// A map mutation targeted a kernel-marked read-only map.
     ReadOnlyMap,
 }
@@ -351,6 +355,7 @@ impl core::fmt::Display for BpfError {
             Self::VerificationFailed => write!(f, "program failed verification"),
             Self::SignatureRejected => write!(f, "program failed signature authentication"),
             Self::AdmissionRejected => write!(f, "attach exceeds hook WCET admission capacity"),
+            Self::GpioFanoutExceeded => write!(f, "GPIO attach exceeds IRQ fan-out capacity"),
             Self::ReadOnlyMap => write!(f, "map is read-only"),
         }
     }

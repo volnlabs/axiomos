@@ -411,13 +411,11 @@ pub fn handle_interrupt() {
             if let Some(manager) = crate::BPF_MANAGER.get() {
                 // Resolve into a stack buffer so the IRQ handler never touches
                 // the spin-locked global heap on the edge path (#65, ~200k/s).
-                // 8 programs/pin is far above any real wiring; excess routes are
-                // dropped by gpio_programs_into (bounded per-edge work).
-                // ponytail: cap is a local const; if attach ever allows >8 routes
-                // per pin, enforce the same cap at register_gpio_route (fail-closed
-                // load-time reject) so a 9th route can't silently never fire.
+                // 8 programs/pin is far above any real wiring; route admission
+                // enforces the same cap before the IRQ path can see it.
                 let fired = kernel_bpf::attach::GpioEdge::from_flags(edge);
-                let mut buf: [crate::bpf::GpioProgramSlot; 8] = core::array::from_fn(|_| None);
+                let mut buf: [crate::bpf::GpioProgramSlot; crate::bpf::GPIO_IRQ_FANOUT_LIMIT] =
+                    core::array::from_fn(|_| None);
                 let n = manager.lock().gpio_programs_into(0, pin, fired, &mut buf);
                 // Manager lock dropped above; helpers may re-acquire it.
                 for (prog_id, program) in buf[..n].iter().flatten() {

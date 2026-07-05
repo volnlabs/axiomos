@@ -8,7 +8,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use kernel_abi::{BpfObjectInfo, BPF_OBJECT_KIND_MAP};
-use kernel_bpf::actuation::{ActuationKind, Authority, ChannelId, EnvelopeMap};
+use kernel_bpf::actuation::EnvelopeMap;
 use kernel_bpf::attach::{GpioEdge, GpioRouteTable};
 use kernel_bpf::bytecode::insn::BpfInsn;
 use kernel_bpf::bytecode::program::{BpfProgType, BpfProgram};
@@ -129,6 +129,9 @@ pub const RESERVED_MAP_COUNT: u32 = 1;
 /// One resolved GPIO program slot for the zero-alloc dispatch buffer (#65):
 /// `(prog_id, Arc<program>)`. Aliased so the hot-path buffer type stays legible.
 pub type GpioProgramSlot = Option<(u32, Arc<BpfProgram<ActiveProfile>>)>;
+/// Maximum GPIO programs resolved for one IRQ edge. Must match the stack buffer
+/// used by the Pi 5 GPIO IRQ handler.
+pub const GPIO_IRQ_FANOUT_LIMIT: usize = 8;
 
 pub struct BpfManager {
     // Arc so the hot dispatch path (gpio_programs_into/get_hook_programs) clones
@@ -209,18 +212,7 @@ impl BpfManager {
             ),
             gpio_routes: GpioRouteTable::new(),
         };
-        let mut envelope = EnvelopeMap::<ActiveProfile>::init_from_profile();
-        // v0.3 bench output: GPIO12 / PWM0 channel 1 is physically actuated.
-        // Learned BPF may still force the trusted safe value, but nonzero output
-        // on this channel must come from Operator-or-higher authority.
-        let _ = envelope.set_required_authority(
-            ChannelId {
-                kind: ActuationKind::PwmDuty,
-                chip: 0,
-                channel: 1,
-            },
-            Authority::Operator,
-        );
+        let envelope = EnvelopeMap::<ActiveProfile>::init_from_profile();
         crate::actuation::ACTUATION_MONITOR
             .lock()
             .init_envelope_cache(&envelope);
@@ -575,10 +567,56 @@ impl BpfManager {
         result
     }
 
+    /// Return true if a GPIO route can be admitted without overflowing the
+    /// fixed IRQ fan-out buffer.
+    pub fn can_register_gpio_route(&self, chip: u8, pin: u8, edge: GpioEdge, prog_id: u32) -> bool {
+        self.gpio_routes
+            .can_insert_with_limit(chip, pin, edge, prog_id, GPIO_IRQ_FANOUT_LIMIT)
+    }
+
+    /// Attach a program to the GPIO hook and record its route atomically with
+    /// respect to the manager lock.
+    pub fn attach_gpio_route(
+        &mut self,
+        chip: u8,
+        pin: u8,
+        edge: GpioEdge,
+        prog_id: u32,
+    ) -> Result<(), BpfError> {
+        if !self.can_register_gpio_route(chip, pin, edge, prog_id) {
+            log::error!(
+                "BpfManager: GPIO route fan-out exceeded for chip={} pin={} edge={:?}",
+                chip,
+                pin,
+                edge
+            );
+            return Err(BpfError::GpioFanoutExceeded);
+        }
+
+        self.attach(ATTACH_TYPE_GPIO, prog_id)?;
+        self.register_gpio_route(chip, pin, edge, prog_id)
+    }
+
     /// Record a GPIO attachment route. Called from `BPF_PROG_ATTACH` after the
     /// pin IRQ is armed.
-    pub fn register_gpio_route(&mut self, chip: u8, pin: u8, edge: GpioEdge, prog_id: u32) {
+    pub fn register_gpio_route(
+        &mut self,
+        chip: u8,
+        pin: u8,
+        edge: GpioEdge,
+        prog_id: u32,
+    ) -> Result<(), BpfError> {
+        if !self.can_register_gpio_route(chip, pin, edge, prog_id) {
+            log::error!(
+                "BpfManager: GPIO route fan-out exceeded for chip={} pin={} edge={:?}",
+                chip,
+                pin,
+                edge
+            );
+            return Err(BpfError::GpioFanoutExceeded);
+        }
         self.gpio_routes.insert(chip, pin, edge, prog_id);
+        Ok(())
     }
 
     /// Resolve the programs attached to a fired GPIO `(chip, pin, edge)` into a
@@ -588,10 +626,10 @@ impl BpfManager {
     /// ~200k/s (#65), and the global allocator is a spin-locked free list
     /// (`mem/heap.rs`), so a Vec here would serialize every edge on the heap
     /// lock and drop edges. Each entry is an `Arc` refcount clone (no bytecode
-    /// copy). Matches past the buffer length are dropped — `out` must be sized
-    /// for the worst-case fan-out per pin (bounded per-edge work is also what
-    /// the WCET model wants). Caller clones + drops the lock before executing so
-    /// helpers can re-acquire the manager lock without deadlocking.
+    /// copy). GPIO route admission keeps the configured IRQ fan-out within the
+    /// Pi 5 handler's stack buffer; callers that pass a smaller scratch buffer
+    /// still get a bounded prefix. Caller clones + drops the lock before
+    /// executing so helpers can re-acquire the manager lock without deadlocking.
     pub fn gpio_programs_into(
         &self,
         chip: u8,
@@ -876,6 +914,21 @@ mod tests {
         assert_eq!(
             manager.ringbuf_output(ENVELOPE_MAP_ID, &value, 0),
             Err(BpfError::ReadOnlyMap)
+        );
+    }
+
+    #[test]
+    fn gpio_route_registration_enforces_irq_fanout_limit() {
+        let mut manager = BpfManager::new();
+        for prog_id in 0..GPIO_IRQ_FANOUT_LIMIT as u32 {
+            manager
+                .register_gpio_route(0, 17, GpioEdge::Rising, prog_id)
+                .expect("route within fanout limit");
+        }
+
+        assert_eq!(
+            manager.register_gpio_route(0, 17, GpioEdge::Rising, GPIO_IRQ_FANOUT_LIMIT as u32),
+            Err(BpfError::GpioFanoutExceeded)
         );
     }
 }

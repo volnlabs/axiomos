@@ -168,11 +168,10 @@ pub fn init() {
     let mut mgr = manager.lock();
     match mgr.load_raw_program(insns) {
         Ok(prog_id) => {
-            if let Err(e) = mgr.attach(ATTACH_TYPE_GPIO, prog_id) {
+            if let Err(e) = mgr.attach_gpio_route(0, REFLEX_SENSOR_PIN, GpioEdge::Rising, prog_id) {
                 log::error!("[bench] reflex attach failed: {:?}", e);
                 return;
             }
-            mgr.register_gpio_route(0, REFLEX_SENSOR_PIN, GpioEdge::Rising, prog_id);
             log::info!(
                 "[bench] reflex loaded id={} -> (gpiochip0, pin {}, rising) stops PWM{} ch{} on GPIO{}",
                 prog_id,

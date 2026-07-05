@@ -25,6 +25,10 @@ impl GpioRouteTable {
         }
     }
 
+    fn edge_matches(attached: GpioEdge, fired: GpioEdge) -> bool {
+        attached == fired || attached == GpioEdge::Both || fired == GpioEdge::Both
+    }
+
     /// Record that `prog_id` is attached to `(chip, pin)` for `edge`.
     pub fn insert(&mut self, chip: u8, pin: u8, edge: GpioEdge, prog_id: u32) {
         let list = self.routes.entry((chip, pin)).or_default();
@@ -33,13 +37,53 @@ impl GpioRouteTable {
         }
     }
 
+    /// Return true if this exact route already exists.
+    pub fn contains(&self, chip: u8, pin: u8, edge: GpioEdge, prog_id: u32) -> bool {
+        self.routes
+            .get(&(chip, pin))
+            .is_some_and(|list| list.iter().any(|&(e, id)| e == edge && id == prog_id))
+    }
+
+    /// Count routes that would run for a fired edge.
+    pub fn matching_count(&self, chip: u8, pin: u8, fired: GpioEdge) -> usize {
+        self.routes
+            .get(&(chip, pin))
+            .map(|list| {
+                list.iter()
+                    .filter(|&&(edge, _)| Self::edge_matches(edge, fired))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Return true if adding this route would keep every possible fired edge
+    /// within `limit` resolved programs.
+    pub fn can_insert_with_limit(
+        &self,
+        chip: u8,
+        pin: u8,
+        edge: GpioEdge,
+        prog_id: u32,
+        limit: usize,
+    ) -> bool {
+        if self.contains(chip, pin, edge, prog_id) {
+            return true;
+        }
+
+        [GpioEdge::Rising, GpioEdge::Falling, GpioEdge::Both]
+            .iter()
+            .copied()
+            .filter(|&fired| Self::edge_matches(edge, fired))
+            .all(|fired| self.matching_count(chip, pin, fired) < limit)
+    }
+
     /// Program ids whose attached edge matches `fired`. `Both` matches either
     /// direction (on the attached side and the fired side).
     pub fn programs_for(&self, chip: u8, pin: u8, fired: GpioEdge) -> Vec<u32> {
         let mut out = Vec::new();
         if let Some(list) = self.routes.get(&(chip, pin)) {
             for &(edge, id) in list {
-                if edge == fired || edge == GpioEdge::Both || fired == GpioEdge::Both {
+                if Self::edge_matches(edge, fired) {
                     out.push(id);
                 }
             }
@@ -53,7 +97,7 @@ impl GpioRouteTable {
     pub fn for_each_program(&self, chip: u8, pin: u8, fired: GpioEdge, mut f: impl FnMut(u32)) {
         if let Some(list) = self.routes.get(&(chip, pin)) {
             for &(edge, id) in list {
-                if edge == fired || edge == GpioEdge::Both || fired == GpioEdge::Both {
+                if Self::edge_matches(edge, fired) {
                     f(id);
                 }
             }
@@ -105,6 +149,7 @@ mod tests {
         t.insert(0, 17, GpioEdge::Rising, 1);
         t.insert(0, 17, GpioEdge::Rising, 1);
         assert_eq!(t.programs_for(0, 17, GpioEdge::Rising), alloc::vec![1]);
+        assert_eq!(t.matching_count(0, 17, GpioEdge::Rising), 1);
     }
 
     #[test]
@@ -113,5 +158,27 @@ mod tests {
         t.insert(0, 17, GpioEdge::Rising, 1);
         t.remove(1);
         assert!(t.programs_for(0, 17, GpioEdge::Rising).is_empty());
+    }
+
+    #[test]
+    fn route_limit_rejects_overflowing_matching_edge() {
+        let mut t = GpioRouteTable::new();
+        t.insert(0, 17, GpioEdge::Rising, 1);
+        t.insert(0, 17, GpioEdge::Rising, 2);
+
+        assert!(!t.can_insert_with_limit(0, 17, GpioEdge::Rising, 3, 2));
+        assert!(t.can_insert_with_limit(0, 17, GpioEdge::Rising, 2, 2));
+        assert!(t.can_insert_with_limit(0, 18, GpioEdge::Rising, 3, 2));
+    }
+
+    #[test]
+    fn both_edge_route_counts_against_each_direction() {
+        let mut t = GpioRouteTable::new();
+        t.insert(0, 17, GpioEdge::Both, 1);
+
+        assert_eq!(t.matching_count(0, 17, GpioEdge::Rising), 1);
+        assert_eq!(t.matching_count(0, 17, GpioEdge::Falling), 1);
+        assert!(!t.can_insert_with_limit(0, 17, GpioEdge::Rising, 2, 1));
+        assert!(!t.can_insert_with_limit(0, 17, GpioEdge::Falling, 2, 1));
     }
 }

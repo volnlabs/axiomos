@@ -280,62 +280,79 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
             let attach_type = attr.attach_btf_id;
             let prog_id = attr.attach_prog_fd;
 
+            #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+            if attach_type == crate::bpf::ATTACH_TYPE_GPIO {
+                // Use key as GPIO pin number, value as edge flags.
+                // edge flags: 1 = rising, 2 = falling, 3 = both
+                let pin = match u8::try_from(attr.key) {
+                    Ok(pin) if pin < 28 => pin,
+                    _ => {
+                        log::warn!("sys_bpf: invalid GPIO pin {} (must be 0-27)", attr.key);
+                        return -1;
+                    }
+                };
+                let edge_flags = match u32::try_from(attr.value) {
+                    Ok(flags) => flags,
+                    Err(_) => {
+                        log::warn!("sys_bpf: invalid GPIO edge flags {}", attr.value);
+                        return -1;
+                    }
+                };
+                let edge = kernel_bpf::attach::GpioEdge::from_flags(edge_flags);
+
+                if let Some(manager) = BPF_MANAGER.get() {
+                    match manager.lock().attach_gpio_route(0, pin, edge, prog_id) {
+                        Ok(_) => {
+                            log::info!(
+                                "sys_bpf: attached prog {} to type {}",
+                                prog_id,
+                                attach_type
+                            );
+
+                            // SAFETY: Rp1Gpio::new() creates an interface to memory-mapped
+                            // GPIO registers. This is safe because:
+                            // 1. We are on aarch64 with rpi5 feature enabled (checked by cfg)
+                            // 2. The GPIO base address is hardcoded for RPi5 platform
+                            // 3. We have validated the pin number is in range 0-27
+                            // 4. The kernel has exclusive access to GPIO hardware
+                            let gpio = unsafe {
+                                crate::arch::aarch64::platform::rpi5::gpio::Rp1Gpio::new()
+                            };
+
+                            gpio.configure_input(pin);
+
+                            let rising = (edge_flags & 1) != 0;
+                            let falling = (edge_flags & 2) != 0;
+                            let (rising, falling) = if !rising && !falling {
+                                (true, true)
+                            } else {
+                                (rising, falling)
+                            };
+
+                            gpio.enable_interrupt(pin, rising, falling);
+                            log::info!(
+                                "sys_bpf: enabled GPIO{} interrupt (rising={}, falling={})",
+                                pin,
+                                rising,
+                                falling
+                            );
+                            return 0;
+                        }
+                        Err(e) => {
+                            log::error!("sys_bpf: attach failed: {}", e);
+                            return -1;
+                        }
+                    }
+                } else {
+                    return -1;
+                }
+            }
+
             if let Some(manager) = BPF_MANAGER.get() {
                 let attach_result = manager.lock().attach(attach_type, prog_id);
                 match attach_result {
                     Ok(_) => {
                         log::info!("sys_bpf: attached prog {} to type {}", prog_id, attach_type);
-
-                        // For GPIO attach type, also configure hardware interrupts
-                        #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
-                        if attach_type == crate::bpf::ATTACH_TYPE_GPIO {
-                            // Use key as GPIO pin number, value as edge flags
-                            // edge flags: 1 = rising, 2 = falling, 3 = both
-                            let pin = attr.key as u8;
-                            let edge_flags = attr.value as u32;
-
-                            if pin < 28 {
-                                // SAFETY: Rp1Gpio::new() creates an interface to memory-mapped
-                                // GPIO registers. This is safe because:
-                                // 1. We are on aarch64 with rpi5 feature enabled (checked by cfg)
-                                // 2. The GPIO base address is hardcoded for RPi5 platform
-                                // 3. We have validated the pin number is in range 0-27
-                                // 4. The kernel has exclusive access to GPIO hardware
-                                let gpio = unsafe {
-                                    crate::arch::aarch64::platform::rpi5::gpio::Rp1Gpio::new()
-                                };
-
-                                // Configure pin as input for edge detection
-                                gpio.configure_input(pin);
-
-                                // Enable interrupts based on edge flags
-                                let rising = (edge_flags & 1) != 0;
-                                let falling = (edge_flags & 2) != 0;
-
-                                // Default to both edges if none specified
-                                let (rising, falling) = if !rising && !falling {
-                                    (true, true)
-                                } else {
-                                    (rising, falling)
-                                };
-
-                                gpio.enable_interrupt(pin, rising, falling);
-                                log::info!(
-                                    "sys_bpf: enabled GPIO{} interrupt (rising={}, falling={})",
-                                    pin,
-                                    rising,
-                                    falling
-                                );
-                                manager.lock().register_gpio_route(
-                                    0,
-                                    pin,
-                                    kernel_bpf::attach::GpioEdge::from_flags(edge_flags),
-                                    prog_id,
-                                );
-                            } else {
-                                log::warn!("sys_bpf: invalid GPIO pin {} (must be 0-27)", pin);
-                            }
-                        }
 
                         // For PWM attach type, also configure hardware if needed
                         #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
