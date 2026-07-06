@@ -68,3 +68,22 @@ By contrast, the x86_64 path has real SMP: Limine MP bring-up per CPU
 - **E. CPU affinity/pinning** — needed before the "4 pinned tasks" acceptance test can exist; `turn_idle()` TODOs are the anchor.
 
 Suggested order: D (restores virt test signal) → A → B → C → E, then re-run the #59 test matrix.
+
+## Status update (2026-07-06, same branch)
+
+D, A, B, and C are implemented and verified in QEMU virt:
+
+- **D** (`6de29e2`) — IGROUPR Group-1 move gated to rpi5; virt timer/IRQ
+  delivery restored, full boot smoke back (mount, `/bin/init`, BPF attach).
+- **A+B** (`ef12766`) — PSCI `CPU_ON` bring-up (`psci.rs`, `smp.rs`,
+  `secondary_start` in boot.S), per-CPU GICC/banked-PPI/timer/TPIDR init.
+  `-smp 4`: all 4 CPUs online with per-CPU timers ticking; `-smp 1`
+  degrades gracefully. Secondaries do **not** schedule tasks or run BPF
+  hooks — gated on #40/#58.
+- **C** (`371b185`) — `send_sgi()` + INTID 0-15 dispatch + boot-time IPI
+  ack test: `IPI cpu0->cpu{1,2,3} acked` — the #59 IPI test passes.
+- **E** (affinity/pinning) — not started; needs #40's scheduler design.
+
+Still pending: Pi 5 hardware validation (SMC conduit, A76 secondary boot
+path); the "4 pinned CPU-bound tasks" test (needs E); x86_64 regression
+smoke was clean.
