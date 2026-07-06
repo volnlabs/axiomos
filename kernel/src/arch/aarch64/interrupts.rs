@@ -125,6 +125,15 @@ pub extern "C" fn handle_irq(_ctx: &mut ExceptionContext) {
 
     // log::info!("Handling IRQ {}", irq);
 
+    // SGIs (IPIs) are INTIDs 0-15.
+    // ponytail: the reschedule IPI only counts + acks for now — actual
+    // task stealing on secondaries is gated on #40 (scheduler SMP safety).
+    if irq < 16 {
+        gic::end_of_interrupt(iar);
+        super::smp::note_ipi(super::cpu::cpu_id(), irq);
+        return;
+    }
+
     // Dispatch based on IRQ number
     if irq == TIMER_IRQ {
         // ponytail: secondary CPUs only rearm their timer and count ticks.

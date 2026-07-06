@@ -46,6 +46,8 @@ mod gicd {
     pub const ITARGETSR: usize = 0x800;
     /// Interrupt Configuration Registers (2 bits per IRQ)
     pub const ICFGR: usize = 0xC00;
+    /// Software Generated Interrupt Register
+    pub const SGIR: usize = 0xF00;
 }
 
 /// GIC CPU Interface register offsets
@@ -79,6 +81,35 @@ pub mod irq {
     /// Spurious interrupt (no pending interrupt)
     pub const SPURIOUS: u32 = 1023;
 }
+
+/// Software Generated Interrupt (IPI) IDs — INTIDs 0-15
+pub mod sgi {
+    /// Reschedule hint (task steal / preemption request)
+    pub const RESCHEDULE: u32 = 0;
+}
+
+/// Send a Software Generated Interrupt (IPI) to a single target CPU.
+///
+/// `target_cpu` is the GIC CPU interface number (0-7), `sgi_id` an INTID
+/// in 0-15.
+#[cfg(any(feature = "rpi5", feature = "virt"))]
+pub fn send_sgi(target_cpu: u32, sgi_id: u32) {
+    debug_assert!(target_cpu < 8);
+    debug_assert!(sgi_id < 16);
+    // SAFETY: Writing GICD_SGIR raises an SGI on the listed CPU interface;
+    // the dsb makes this core's prior memory writes visible to the target
+    // before the interrupt lands.
+    unsafe {
+        core::arch::asm!("dsb ishst", options(nostack, preserves_flags));
+        write_gicd(
+            gicd::SGIR,
+            (1 << (16 + target_cpu)) | (sgi_id & 0xF),
+        );
+    }
+}
+
+#[cfg(not(any(feature = "rpi5", feature = "virt")))]
+pub fn send_sgi(_target_cpu: u32, _sgi_id: u32) {}
 
 /// GICD base address (set at runtime for flexibility)
 #[cfg(any(feature = "rpi5", feature = "virt"))]

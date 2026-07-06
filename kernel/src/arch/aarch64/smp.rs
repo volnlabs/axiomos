@@ -133,6 +133,11 @@ pub fn bring_up_secondary_cpus() {
         CPUS_ONLINE.load(Ordering::Acquire),
         MAX_CPUS
     );
+
+    // ponytail: assumes online secondaries are contiguous from cpu1, which
+    // holds for QEMU virt and Pi 5 (PSCI either boots a core or the count
+    // stops there). Track a per-CPU online mask if that ever changes.
+    ipi_self_test();
 }
 
 /// Rust entry for secondary CPUs. Called from `secondary_start` (boot.S)
@@ -173,5 +178,60 @@ pub fn note_secondary_tick(cpu_id: usize) {
     let ticks = TIMER_TICKS[cpu_id].fetch_add(1, Ordering::Relaxed) + 1;
     if ticks == 1 {
         log::info!("SMP: cpu{} timer ticking", cpu_id);
+    }
+}
+
+/// IPIs received per CPU.
+pub static IPI_COUNTS: [AtomicU64; MAX_CPUS] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+
+/// Called from the IRQ path when an SGI (IPI) arrives on this CPU.
+pub fn note_ipi(cpu_id: usize, _sgi_id: u32) {
+    IPI_COUNTS[cpu_id].fetch_add(1, Ordering::Release);
+}
+
+/// Send a reschedule IPI from this CPU to each online secondary and verify
+/// receipt (bounded ~10ms per CPU). Boot-time diagnostic for the #59 IPI
+/// acceptance test.
+fn ipi_self_test() {
+    let freq: u64 = unsafe {
+        let f: u64;
+        core::arch::asm!("mrs {}, cntfrq_el0", out(reg) f, options(nostack, preserves_flags));
+        f
+    };
+
+    for cpu_num in 1..CPUS_ONLINE.load(Ordering::Acquire) as usize {
+        let before = IPI_COUNTS[cpu_num].load(Ordering::Acquire);
+        gic::send_sgi(cpu_num as u32, gic::sgi::RESCHEDULE);
+
+        let start: u64 = unsafe {
+            let s: u64;
+            core::arch::asm!("mrs {}, cntvct_el0", out(reg) s, options(nostack, preserves_flags));
+            s
+        };
+        let deadline = start + freq / 100;
+        let mut acked = false;
+        while !acked {
+            acked = IPI_COUNTS[cpu_num].load(Ordering::Acquire) > before;
+            let now: u64 = unsafe {
+                let n: u64;
+                core::arch::asm!("mrs {}, cntvct_el0", out(reg) n, options(nostack, preserves_flags));
+                n
+            };
+            if now >= deadline {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+
+        if acked {
+            log::info!("SMP: IPI cpu0->cpu{} acked", cpu_num);
+        } else {
+            log::warn!("SMP: IPI cpu0->cpu{} NOT acked", cpu_num);
+        }
     }
 }
