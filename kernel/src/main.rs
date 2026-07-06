@@ -128,6 +128,9 @@ unsafe extern "C" fn main() -> ! {
 
     info!("Interrupts enabled");
 
+    // Bring secondary CPUs online (PSCI CPU_ON). Non-fatal on failure.
+    kernel::arch::aarch64::smp::bring_up_secondary_cpus();
+
     if let Some(root_block_device) = BlockDevices::by_id(0) {
         dbg_mark(0x43); // 'C'
         info!("mounting root filesystem");

@@ -10,7 +10,9 @@ pub mod mm;
 pub mod paging;
 pub mod phys;
 pub mod platform;
+pub mod psci;
 pub mod shutdown;
+pub mod smp;
 pub mod syscall;
 
 use crate::arch::traits::Architecture;

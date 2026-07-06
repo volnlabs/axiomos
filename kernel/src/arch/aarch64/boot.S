@@ -112,10 +112,90 @@ _start_asm:
     wfi
     b       .Lhalt
 
-// Secondary cores wait here
+// Secondary cores that enter via _start_asm (spin-table style firmware)
+// park here. PSCI CPU_ON brings secondaries in at secondary_start instead.
 .Lpark_secondary:
     wfe
     b       .Lpark_secondary
+
+// -----------------------------------------------------------------------
+// Secondary CPU entry (PSCI CPU_ON target)
+//
+// Entry state per PSCI: MMU off, caches off, interrupts masked, EL1 or EL2,
+// x0 = context_id (unused; the CPU id is derived from MPIDR_EL1).
+//
+// IMPORTANT: no RAM writes (no stack) until the MMU + caches are on.
+// With caches off, writes bypass coherency and core 0's dirty lines can
+// clobber them later. The MMU register values come from SECONDARY_MMU_REGS,
+// written and cleaned to PoC by core 0 before CPU_ON (smp.rs).
+// -----------------------------------------------------------------------
+.global secondary_start
+secondary_start:
+    // Drop to EL1 if entered at EL2 (same sequence as the primary path)
+    mrs     x0, CurrentEL
+    lsr     x0, x0, #2
+    cmp     x0, #2
+    b.ne    .Lsec_at_el1
+
+    mov     x0, #(1 << 31)      // RW=1 (AArch64 for EL1)
+    orr     x0, x0, #(1 << 1)   // SWIO hardwired on
+    msr     hcr_el2, x0
+    msr     cptr_el2, xzr
+    mov     x0, #0x3            // EL1PCTEN|EL1PCEN
+    msr     cnthctl_el2, x0
+    msr     cntvoff_el2, xzr
+    mov     x0, #0x3C5          // D=1, A=1, I=1, F=1, M=EL1h
+    msr     spsr_el2, x0
+    adr     x0, .Lsec_at_el1
+    msr     elr_el2, x0
+    eret
+
+.Lsec_at_el1:
+    // Invalidate local TLB before joining the shared address space
+    tlbi    vmalle1
+    dsb     nsh
+
+    // Apply core 0's MMU configuration (reads only, cleaned to PoC by core 0)
+    ldr     x0, =SECONDARY_MMU_REGS
+    ldp     x1, x2, [x0]        // mair, tcr
+    ldp     x3, x4, [x0, #16]   // ttbr0, ttbr1
+    msr     mair_el1, x1
+    msr     tcr_el1, x2
+    msr     ttbr0_el1, x3
+    msr     ttbr1_el1, x4
+    isb
+
+    // Enable MMU + D/I caches (same bits as paging::enable_mmu: M, C, I)
+    mrs     x1, sctlr_el1
+    mov     x2, #0x1005
+    orr     x1, x1, x2
+    msr     sctlr_el1, x1
+    isb
+
+    // Now coherent: safe to use RAM. Per-CPU stack, top = base + Aff0*16KB
+    // (cpu N's stack occupies [base+(N-1)*16KB, base+N*16KB), grows down).
+    mrs     x1, mpidr_el1
+    and     x1, x1, #0xFF
+    ldr     x0, =__secondary_stacks_bottom
+    lsl     x2, x1, #14         // Aff0 * 16KB
+    add     x0, x0, x2
+    mov     sp, x0
+
+    // Enable FP/SIMD (required for Rust)
+    mov     x0, #(3 << 20)      // FPEN = 0b11
+    msr     cpacr_el1, x0
+    isb
+
+    // Exception vector table (per-CPU register)
+    ldr     x0, =exception_vector_base
+    msr     vbar_el1, x0
+    isb
+
+    bl      secondary_rust
+
+.Lsec_halt:
+    wfi
+    b       .Lsec_halt
 
 // Stack allocation in BSS
 .section .bss.stack
@@ -125,3 +205,8 @@ __stack_bottom:
     .space 0x10000              // 64KB stack for boot core
 .global __stack_top
 __stack_top:
+// 16KB per secondary core (cores 1..3). ponytail: bump if secondary IRQ
+// paths ever grow deep call chains.
+.global __secondary_stacks_bottom
+__secondary_stacks_bottom:
+    .space 0x4000 * 3

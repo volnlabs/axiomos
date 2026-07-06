@@ -127,6 +127,18 @@ pub extern "C" fn handle_irq(_ctx: &mut ExceptionContext) {
 
     // Dispatch based on IRQ number
     if irq == TIMER_IRQ {
+        // ponytail: secondary CPUs only rearm their timer and count ticks.
+        // BPF timer hooks and the scheduler tick stay on CPU 0 until #40
+        // (scheduler SMP safety) and #58 (BpfManager locking) land.
+        let cpu_id = super::cpu::cpu_id();
+        if cpu_id != 0 {
+            clear_timer_interrupt();
+            set_next_timer();
+            gic::end_of_interrupt(iar);
+            super::smp::note_secondary_tick(cpu_id);
+            return;
+        }
+
         #[cfg(feature = "rpi5")]
         if !TIMER_IRQ_MARKER_SENT.swap(true, Ordering::Relaxed) {
             dbg_mark(b't' as u32);

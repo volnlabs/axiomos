@@ -149,17 +149,38 @@ pub fn init() {
 
         // Enable distributor for both Group 0 and Group 1 interrupts.
         write_gicd(gicd::CTLR, 0b11);
+    }
 
-        // Configure CPU interface
+    // Configure this (boot) CPU's interface.
+    init_per_cpu();
+
+    log::info!("GICv2 initialized");
+}
+
+/// Per-CPU GIC initialization: the CPU interface plus the banked SGI/PPI
+/// registers. Must run on every core — the distributor init in [`init`]
+/// only configures the boot CPU's banked copies.
+#[cfg(any(feature = "rpi5", feature = "virt"))]
+pub fn init_per_cpu() {
+    // SAFETY: GICC registers are banked per CPU; each core configures only
+    // its own interface. GICD_IGROUPR0 is likewise a banked SGI/PPI copy.
+    unsafe {
+        // Route this core's SGIs/PPIs to Group 1 (BCM2712/EL1-NS needs
+        // Group 1; virt stays on Group 0 — see the IGROUPR note in init()).
+        #[cfg(feature = "rpi5")]
+        write_gicd(gicd::IGROUPR, 0xFFFF_FFFF);
+
         // Set priority mask to accept all priorities
         write_gicc(gicc::PMR, 0xFF);
 
         // Enable CPU interface for both Group 0 and Group 1 interrupts.
         write_gicc(gicc::CTLR, 0b11);
     }
-
-    log::info!("GICv2 initialized");
 }
+
+/// Placeholder for non-supported builds
+#[cfg(not(any(feature = "rpi5", feature = "virt")))]
+pub fn init_per_cpu() {}
 
 /// Placeholder for non-supported builds
 #[cfg(not(any(feature = "rpi5", feature = "virt")))]
