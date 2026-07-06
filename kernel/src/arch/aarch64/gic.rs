@@ -114,6 +114,11 @@ pub fn init() {
 
         // Route all interrupts to Group 1 (non-secure). On BCM2712/EL1-NS we
         // must handle Group 1 IRQs; leaving defaults can keep PPIs undispatched.
+        // rpi5-only: on QEMU virt (no security extensions) Group 1 interrupts
+        // cannot be acked through the plain IAR (AckCtl=0), so every IAR read
+        // returns spurious 1022 and the pending IRQ storms the core. virt keeps
+        // the reset default (Group 0), which is delivered as IRQ with FIQEn=0.
+        #[cfg(feature = "rpi5")]
         for i in 0..num_regs {
             write_gicd(gicd::IGROUPR + i as usize * 4, 0xFFFF_FFFF);
         }
