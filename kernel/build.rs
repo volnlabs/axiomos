@@ -57,11 +57,15 @@ fn main() {
             println!("cargo:rerun-if-changed=src/arch/aarch64/boot.S");
             println!("cargo:rerun-if-changed=src/arch/aarch64/exception_vectors.S");
 
-            cc::Build::new()
+            let mut build = cc::Build::new();
+            build
                 .compiler("aarch64-linux-gnu-gcc")
                 .file("src/arch/aarch64/boot.S")
-                .file("src/arch/aarch64/exception_vectors.S")
-                .compile("aarch64_boot");
+                .file("src/arch/aarch64/exception_vectors.S");
+            if std::env::var("CARGO_FEATURE_RPI5").is_ok() {
+                build.define("RPI5_DBG_UART", None);
+            }
+            build.compile("aarch64_boot");
         }
         "x86_64" => {
             // x86_64 doesn't need assembly compilation (uses Limine)

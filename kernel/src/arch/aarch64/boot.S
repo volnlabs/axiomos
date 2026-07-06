@@ -19,12 +19,16 @@
 .global _start_asm
 
 .macro dbg_putc ch
+#ifdef RPI5_DBG_UART
     // UART10 base: 0x10_7D00_1000 (Pi5 debug connector PL011)
+    // Pi5-only: this address is unmapped on QEMU virt and data-aborts before
+    // the exception vectors are installed, killing the boot silently.
     mov     x9, #0x1000
     movk    x9, #0x7d00, lsl #16
     movk    x9, #0x10, lsl #32
     mov     w10, #\ch
     str     w10, [x9]
+#endif
 .endm
 
 _start_asm:
