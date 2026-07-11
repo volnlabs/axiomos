@@ -33,6 +33,12 @@ pub enum LoadElfError {
     InvalidVirtualAddress(usize),
     #[error("more than one TLS header found")]
     TooManyTlsHeaders,
+    /// The input ELF was structurally malformed in a way the loader relies on
+    /// (e.g. a LOAD or TLS program's `phoff`/`phnum` claimed bytes past the
+    /// end of the input). Propagates the parser's typed [`ElfParseError`]
+    /// instead of panicking (audit H-05).
+    #[error("ELF parse error: {0}")]
+    Parse(ElfParseError),
 }
 
 impl<M> ElfLoader<M>
@@ -77,8 +83,15 @@ where
             .elf_file
             .program_headers_by_type(ProgramHeaderType::LOAD)
         {
+            let hdr = hdr.map_err(LoadElfError::Parse)?;
             trace!("load header {hdr:x?}");
-            let pdata = image.elf_file.program_data(hdr);
+            let pdata = image.elf_file.program_data(hdr).ok_or(LoadElfError::Parse(
+                ElfParseError::SectionDataOutOfBounds {
+                    offset: hdr.offset,
+                    size: hdr.filesz,
+                    source_len: image.elf_file.source.len(),
+                },
+            ))?;
 
             let location = Location::Fixed(hdr.vaddr as u64);
 
@@ -125,17 +138,24 @@ where
     }
 
     fn load_tls(&mut self, image: &mut ElfImage<'_, M>) -> Result<(), LoadElfError> {
-        let Some(tls) = image
+        let tls = image
             .elf_file
             .program_headers_by_type(ProgramHeaderType::TLS)
             .at_most_one()
-            .map_err(|_| LoadElfError::TooManyTlsHeaders)?
-        else {
+            .map_err(|_| LoadElfError::TooManyTlsHeaders)?;
+        let Some(tls) = tls else {
             return Ok(());
         };
+        let tls = tls.map_err(LoadElfError::Parse)?;
         trace!("tls header {tls:x?}");
 
-        let pdata = image.elf_file.program_data(tls);
+        let pdata = image.elf_file.program_data(tls).ok_or(LoadElfError::Parse(
+            ElfParseError::SectionDataOutOfBounds {
+                offset: tls.offset,
+                size: tls.filesz,
+                source_len: image.elf_file.source.len(),
+            },
+        ))?;
 
         let layout = Layout::from_size_align(tls.memsz, tls.align)
             .map_err(|_| LoadElfError::InvalidSizeOrAlign)?;
