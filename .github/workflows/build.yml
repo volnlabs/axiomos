@@ -177,6 +177,6 @@ jobs:
           cargo build --release --target aarch64-unknown-none --no-default-features --features aarch64_deps
       - uses: actions/upload-artifact@v4
         with:
-          name: muffin-boot-images
+          name: axiomos-boot-images
           path: |
-            target/release/build/**/out/muffin.iso
+            target/release/build/**/out/axiomos.iso

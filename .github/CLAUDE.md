@@ -16,7 +16,7 @@ axiom-ebpf is a hobby x86-64 operating system kernel written in Rust. It boots v
 # Build workspace libraries (recommended for validation)
 cargo build --workspace --lib
 
-# Full release build (creates muffin.iso)
+# Full release build (creates axiomos.iso)
 cargo build --release
 
 # Format check

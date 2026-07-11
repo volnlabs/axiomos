@@ -117,6 +117,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
+name = "axiomos"
+version = "0.1.0"
+dependencies = [
+ "benchmark",
+ "bpf_loader",
+ "clap",
+ "file_io_demo",
+ "file_structure",
+ "fork_test",
+ "gpio_demo",
+ "iio_demo",
+ "init",
+ "kernel",
+ "ovmf-prebuilt",
+ "pwm_demo",
+ "rk_uart_forwarder",
+ "sched_switch_bridge_demo",
+ "sched_switch_demo",
+ "sched_switch_export_demo",
+ "sys_exit_demo",
+ "syscall_demo",
+ "timeseries_demo",
+ "verifier_bench",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1152,32 +1178,6 @@ dependencies = [
 name = "mkfs-filesystem"
 version = "0.1.0"
 source = "git+https://github.com/tsatke/mkfs#24c1cfba44f360c8d4936f08cee49a34a5e4f916"
-
-[[package]]
-name = "muffinos"
-version = "0.1.0"
-dependencies = [
- "benchmark",
- "bpf_loader",
- "clap",
- "file_io_demo",
- "file_structure",
- "fork_test",
- "gpio_demo",
- "iio_demo",
- "init",
- "kernel",
- "ovmf-prebuilt",
- "pwm_demo",
- "rk_uart_forwarder",
- "sched_switch_bridge_demo",
- "sched_switch_demo",
- "sched_switch_export_demo",
- "sys_exit_demo",
- "syscall_demo",
- "timeseries_demo",
- "verifier_bench",
-]
 
 [[package]]
 name = "nu-ansi-term"

@@ -209,7 +209,7 @@ architecture.
    static memory that isn't there (H1). A reviewer or auditor who checks will
    find the claim doesn't match the allocator.
 4. **The aarch64 image builds cloud-profile (H2).** Any Pi5 measurement taken via
-   the `muffinos` image path is measuring the wrong kernel — a silent
+   the `axiomos` image path is measuring the wrong kernel — a silent
    benchmark-integrity risk right when the paper needs clean numbers.
 5. **No CI boot test means integration regressions are invisible.** All the green
    tests are unit/host; the IRQ→BPF→actuation seam where C1/C2 live is exercised
