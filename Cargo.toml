@@ -109,6 +109,7 @@ members = [
   "kernel/crates/kernel_syscall",
   "kernel/crates/kernel_vfs",
   "kernel/crates/kernel_virtual_memory",
+  "kernel/crates/kernel_usermem",
   "kernel/crates/shrike_link", "userspace/bpf_loader",
   "userspace/file_structure",
   "userspace/init",

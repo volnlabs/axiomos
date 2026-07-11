@@ -1007,6 +1007,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kernel_usermem"
+version = "0.1.0"
+dependencies = [
+ "kernel_abi",
+ "kernel_virtual_memory",
+ "thiserror",
+]
+
+[[package]]
 name = "kernel_vfs"
 version = "0.1.0"
 dependencies = [
