@@ -111,7 +111,7 @@ impl RingBufConsumer {
                 return Ok(Some(self.event_buf[..size].to_vec()));
             }
 
-            let err = io::Error::from_raw_os_error((-result) as i32);
+            let err = io::Error::from_raw_os_error(-result);
             if err.raw_os_error() == Some(libc::ENOSPC) {
                 let next_len = self.event_buf.len().saturating_mul(2).max(DEFAULT_EVENT_BUF_SIZE);
                 self.event_buf.resize(next_len, 0);
@@ -145,7 +145,7 @@ fn bpf_obj_get(path: &CString) -> io::Result<u32> {
 
     let result = sys_bpf(BPF_OBJ_GET, &attr);
     if result < 0 {
-        Err(io::Error::from_raw_os_error((-result) as i32))
+        Err(io::Error::from_raw_os_error(-result))
     } else {
         Ok(result as u32)
     }
