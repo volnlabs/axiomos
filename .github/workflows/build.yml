@@ -281,10 +281,11 @@ jobs:
       # T-01 / H-06: a deterministic serial-line smoke test that boots the
       # release ISO under QEMU and asserts the kernel reaches init (rootfs
       # mounted, ext2 mounted, init started) — *not* just kernel init. The
-      # marker `QEMU_BOOT_OK` is emitted from print_benchmark_metrics after
-      # AXIOM KERNEL METRICS prints; the actual user-mode init sequence is
-      # observed via `init started` and `trampoline` log lines that the
-      # kernel prints at the same point. Boot must complete ACPI/RSDP walk
+      # marker `QEMU_BOOT_OK` is emitted from kernel/src/main.rs right after
+      # Process::create_from_executable returns for /bin/init (R1 moved it
+      # out of print_benchmark_metrics); init execution itself is
+      # observed via the `started process pid=` log line the kernel
+      # prints at the same point. Boot must complete ACPI/RSDP walk
       # before either marker — a kernel panic during ACPI is treated as a
       # gate failure (audit review round-1 finding).
       runs-on: ubuntu-latest
@@ -300,7 +301,10 @@ jobs:
         - name: Install QEMU + ISO/disk build deps
           run: |
             sudo apt update
-            sudo apt install -y qemu-system-x86 xorriso mtools e2fsprogs
+            # ovmf explicitly: /usr/share/OVMF/*.fd is required by the pflash
+            # drives below and only ships in the ovmf package (relying on
+            # qemu-system-x86's Recommends is not guaranteed on the runner).
+            sudo apt install -y qemu-system-x86 xorriso mtools e2fsprogs ovmf
         - name: Build release (produces axiomos.iso + disk image)
           env:
             AXIOMOS_BOOT_TIMEOUT_SECS: "60"
