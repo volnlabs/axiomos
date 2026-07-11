@@ -335,14 +335,30 @@ jobs:
           run: |
             set -e
             SERIAL_LOG=$(mktemp)
+            # Pre-flight: locate OVMF pflash blobs explicitly. The
+            # `ovmf` package on Ubuntu ships them under
+            # /usr/share/OVMF/x64/, but file naming varies across
+            # distributions (.fd vs .4m.fd). Fail loudly if neither
+            # naming pattern matches so the gate reports the real
+            # problem instead of "QEMU_BOOT_OK missing" downstream.
+            OVMF_CODE=$(find /usr/share/OVMF -name 'OVMF_CODE.fd' -o -name 'OVMF_CODE_4M.fd' -o -name 'OVMF_CODE.4m.fd' 2>/dev/null | head -n1)
+            OVMF_VARS=$(find /usr/share/OVMF -name 'OVMF_VARS.fd' -o -name 'OVMF_VARS_4M.fd' -o -name 'OVMF_VARS.4m.fd' 2>/dev/null | head -n1)
+            if [[ -z "$OVMF_CODE" || -z "$OVMF_VARS" ]]; then
+              echo "::error::OVMF pflash blobs not found under /usr/share/OVMF"
+              echo "Expected one of: OVMF_CODE.fd / OVMF_CODE_4M.fd / OVMF_CODE.4m.fd"
+              echo "Audit fix R4 explicit apt install should have provided these; investigate the runner image."
+              exit 1
+            fi
+            echo "OVMF_CODE=$OVMF_CODE"
+            echo "OVMF_VARS=$OVMF_VARS"
             # Mirror src/main.rs QEMU arguments: OVMF pflash, virtio-blk disk,
             # cdrom ISO, 1 GiB RAM, 2 vCPUs (matches the audit's reproducing run).
             # -no-reboot: panic/halt exits QEMU cleanly rather than spinning.
             # -monitor none / -display none: headless serial-only output.
             # -nographic keeps a graphics device attached (matches the runner).
             timeout 90s qemu-system-x86_64 \
-              -drive "if=pflash,unit=0,format=raw,file=$(find /usr/share/OVMF -name OVMF_CODE.fd 2>/dev/null | head -n1 || find /usr/share/OVMF -name 'OVMF_CODE_4M.fd' 2>/dev/null | head -n1),readonly=on" \
-              -drive "if=pflash,unit=1,format=raw,file=$(find /usr/share/OVMF -name OVMF_VARS.fd 2>/dev/null | head -n1 || find /usr/share/OVMF -name 'OVMF_VARS_4M.fd' 2>/dev/null | head -n1)" \
+              -drive "if=pflash,unit=0,format=raw,file=$OVMF_CODE,readonly=on" \
+              -drive "if=pflash,unit=1,format=raw,file=$OVMF_VARS" \
               -cdrom "$ISO_PATH" \
               -drive "id=virtio-disk0,file=$DISK_PATH,format=raw,if=none" \
               -device virtio-blk-pci,drive=virtio-disk0 \
