@@ -1,5 +1,28 @@
 # Axiom Kernel Benchmarks
 
+> **⚠ Benchmark validity warning (2026-07-11, ENGINEERING_AUDIT.md):**
+> The x86 boot timing and all HPET-derived latencies in this document
+> were captured on `dev` at commits prior to the audited
+> `661d5ede...`. Audit finding **H-02** shows the x86 clock treats
+> raw HPET ticks as nanoseconds (`Timestamp::now` divides the raw
+> counter by 1e9 without converting from the HPET period
+> femtoseconds), so every boot metric on this page — including
+> "Boot to init: ..." and all interrupt-latency rows — is off by a
+> factor equal to `(HPET period in fs) / 1_000_000_000`, i.e. roughly
+> 100×–1000× for typical QEMU HPET settings. One audit-captured run
+> printed "Boot to init: 1783718449014 ms" — that is the canonical
+> example of this unit error.
+>
+> **Until the H-02 clocksource rewrite lands, treat every boot-time
+> and HPET-derived number in this document as suspect.** A future
+> commit will replace §1 with numbers measured against a monotonic
+> tick→ns conversion that uses `Hpet::period_femtoseconds()`. The
+> raw captures remain in git history (`git log -- docs/benchmarks.md`)
+> for archaeology only.
+>
+> The non-time metrics (memory footprint, kernel image size) are
+> unaffected by H-02 and remain reproducible.
+
 This benchmark suite provides reproducible measurements for comparing Axiom and Linux on identical hardware, focusing on metrics critical for high-performance robotics and real-time control.
 
 The goal is to measure:
