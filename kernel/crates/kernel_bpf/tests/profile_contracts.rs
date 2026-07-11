@@ -22,7 +22,13 @@ fn cloud_profile_has_high_limits() {
     // Cloud profile should have generous limits
     assert!(CloudProfile::MAX_STACK_SIZE >= 512 * 1024); // At least 512KB
     assert!(CloudProfile::MAX_INSN_COUNT >= 1_000_000); // At least 1M instructions
-    assert!(CloudProfile::JIT_ALLOWED);
+    // PR #8 (audit C-06): both profiles now use the interpreter. JIT is
+    // gated off until the compile-on-load RW→RX redesign lands.
+    assert!(
+        !CloudProfile::JIT_ALLOWED,
+        "CloudProfile::JIT_ALLOWED must stay false until the C-06 redesign; \
+         see kernel_bpf::profile::CloudProfile::JIT_ALLOWED for context"
+    );
     assert!(CloudProfile::RESTART_ACCEPTABLE);
 }
 

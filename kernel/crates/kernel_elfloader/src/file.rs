@@ -249,16 +249,17 @@ impl<'a> ElfFile<'a> {
     /// Return the name of a section, or `None` if the section's
     /// `shstrndx` lookup or name-string extraction fails for any
     /// reason (header table out of bounds, missing NUL terminator,
-    /// non-UTF-8 bytes). Never panics on malformed input (audit H-05).
+    /// non-UTF-8 bytes, or a `name` offset that runs past the
+    /// section's string-table data). Never panics on malformed input
+    /// (audit H-05).
     #[must_use]
     pub fn section_name(&self, header: &SectionHeader) -> Option<&str> {
         let idx = usize::from(self.header.shstrndx);
         let shstrtab = self.section_headers().nth(idx)?.ok()?;
         let shstrtab_data = self.section_data(shstrtab)?;
-        CStr::from_bytes_until_nul(&shstrtab_data[header.name as usize..])
-            .ok()?
-            .to_str()
-            .ok()
+        let name_offset = usize::try_from(header.name).ok()?;
+        let tail = shstrtab_data.get(name_offset..)?;
+        CStr::from_bytes_until_nul(tail).ok()?.to_str().ok()
     }
 
     pub fn sections_by_name(&self, name: &str) -> impl Iterator<Item = &SectionHeader> {
@@ -284,14 +285,18 @@ impl<'a> ElfFile<'a> {
         Some(SymtabSection { header, data })
     }
 
-    /// Return the symbol name, or `None` if any lookup fails. Never
-    /// panics on malformed input (audit H-05).
+    /// Return the symbol name, or `None` if any lookup fails (out-of-bounds
+    /// `name` offset, missing NUL terminator, non-UTF-8 bytes, or any
+    /// upstream section/strtab reference error). Never panics on
+    /// malformed input (audit H-05).
     #[must_use]
     pub fn symbol_name(&self, symtab: &SymtabSection<'a>, symbol: &Symbol) -> Option<&str> {
         let strtab_index = symtab.header.link as usize;
         let strtab_hdr = self.section_headers().nth(strtab_index)?.ok()?;
         let strtab_data = self.section_data(strtab_hdr)?;
-        CStr::from_bytes_until_nul(&strtab_data[symbol.name as usize..])
+        let name_offset = usize::try_from(symbol.name).ok()?;
+        let tail = strtab_data.get(name_offset..)?;
+        CStr::from_bytes_until_nul(tail)
             .ok()
             .and_then(|cstr| cstr.to_str().ok())
     }
@@ -524,7 +529,7 @@ const _: () = {
     assert!(64 == size_of::<SectionHeader>());
 };
 
-#[derive(TryFromBytes, KnownLayout, Immutable, Debug, Eq, PartialEq)]
+#[derive(TryFromBytes, KnownLayout, Immutable, Debug, Eq, PartialEq, Clone)]
 #[repr(C)]
 pub struct SectionHeader {
     pub name: u32,
@@ -564,7 +569,7 @@ impl SectionHeaderType {
     pub const NUM: Self = Self(0x13);
 }
 
-#[derive(TryFromBytes, KnownLayout, Immutable, Debug, Eq, PartialEq)]
+#[derive(TryFromBytes, KnownLayout, Immutable, Debug, Eq, PartialEq, Clone, Copy)]
 #[repr(transparent)]
 pub struct SectionHeaderFlags(pub u32);
 

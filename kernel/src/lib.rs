@@ -223,12 +223,13 @@ fn print_benchmark_metrics() {
         serial_println!("Kernel image: {} MB", kernel_image_mb);
         serial_println!("");
 
-        // Deterministic boot-success marker for CI smoke tests (H-06 / T-01).
-        // The qemu-kernel-smoke job in .github/workflows/build.yml greps the
-        // serial capture for this exact string before declaring PASS. Emit it
-        // only after kernel metrics are printed so a panic between metrics and
-        // marker correctly fails the gate instead of spuriously passing.
-        serial_println!("QEMU_BOOT_OK");
+        // The deterministic boot-success marker for CI smoke tests is
+        // emitted from src/main.rs after root mount + init creation —
+        // see the call site that prints `QEMU_BOOT_OK`. Emitting it here
+        // (inside kernel::init) would fire *before* the root filesystem
+        // is mounted and the first user process exists, which the
+        // audit's review round-1 flagged as "proves kernel
+        // initialization only".
     }
 }
 

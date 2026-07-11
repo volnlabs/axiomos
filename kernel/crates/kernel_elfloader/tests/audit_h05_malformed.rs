@@ -20,7 +20,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-use kernel_elfloader::{ElfFile, ElfParseError};
+use kernel_elfloader::{ElfFile, ElfParseError, SectionHeader, SectionHeaderType};
 
 /// 64-byte ELF64 header for x86_64 (little-endian). All-zero magic.
 fn zero_header() -> [u8; 64] {
@@ -155,4 +155,186 @@ fn section_headers_iterator_returns_oob_when_section_table_truncated() {
         results[0].as_ref().unwrap_err(),
         ElfParseError::HeaderOutOfBounds { .. }
     ));
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Round-2 (review fix R1): finish the audit H-05 surface. Every remaining
+// panic surface in kernel_elfloader and the loader call sites that the
+// review caught is covered here.
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Build a minimal ELF64 input that has one valid `SHT_STRTAB` section
+/// plus one `SHT_PROGBITS` section whose `name` offset points past the
+/// end of the string-table data. Section header table follows the
+/// 64-byte ELF header; the string-table section is the second entry.
+fn valid_elf_with_oversize_section_name() -> Vec<u8> {
+    let mut buf = vec![0u8; 64];
+    buf[0..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
+    buf[4] = 2; // ELFCLASS64
+    buf[5] = 1; // ELFDATA2LSB
+    buf[6] = 1; // EV_CURRENT
+    buf[7] = 0; // ELFOSABI_NONE
+    // e_type = ET_EXEC
+    buf[16..18].copy_from_slice(&2u16.to_le_bytes());
+    // e_machine = EM_X86_64
+    buf[18..20].copy_from_slice(&62u16.to_le_bytes());
+    // e_version
+    buf[20..24].copy_from_slice(&1u32.to_le_bytes());
+    // e_phoff = 0 (no phdrs)
+    // e_shoff = 64 (sections start right after the ELF header)
+    buf[40..48].copy_from_slice(&64u64.to_le_bytes());
+    // e_ehsize
+    buf[52..54].copy_from_slice(&64u16.to_le_bytes());
+    // e_phentsize = sizeof(ProgramHeader) = 56
+    buf[54..56].copy_from_slice(&56u16.to_le_bytes());
+    // e_phnum = 0
+    buf[58..60].copy_from_slice(&64u16.to_le_bytes()); // e_shentsize
+    // e_shnum = 2: [0]=null, [1]=strtab
+    buf[60..62].copy_from_slice(&2u16.to_le_bytes());
+    // e_shstrndx = 1
+    buf[62..64].copy_from_slice(&1u16.to_le_bytes());
+
+    // Section header 0: SHT_NULL
+    buf.extend_from_slice(&[0u8; 64]);
+
+    // Section header 1: SHT_STRTAB with sh_offset and sh_size both = 0.
+    // sh_name will be ignored because we'll point the second section's
+    // sh_name at a u32::MAX value.
+    let mut sh = [0u8; 64];
+    sh[4..8].copy_from_slice(&3u32.to_le_bytes()); // sh_type = SHT_STRTAB
+    sh[32..40].copy_from_slice(&0u64.to_le_bytes()); // sh_offset
+    sh[40..48].copy_from_slice(&0u64.to_le_bytes()); // sh_size
+    buf.extend_from_slice(&sh);
+
+    buf
+}
+
+#[test]
+fn section_name_returns_none_when_name_offset_past_end() {
+    // Build a valid ELF, then locate section 1 (which is its own
+    // shstrtab), and ask for the name with a deliberately out-of-bounds
+    // sh_name.
+    let buf = valid_elf_with_oversize_section_name();
+    let elf = ElfFile::try_parse(&buf).expect("header parses");
+    let sec1_owned: SectionHeader = elf
+        .section_headers()
+        .nth(1)
+        .expect("section 1 present")
+        .expect("section 1 parses")
+        .clone();
+    // sh_name = u32::MAX points past the end of shstrtab_data (size 0).
+    // Pre-fix this sliced &shstrtab_data[u32::MAX as usize..] and
+    // panicked. Post-fix it returns None.
+    let sec1 = SectionHeader {
+        name: u32::MAX,
+        ..sec1_owned
+    };
+    assert!(elf.section_name(&sec1).is_none());
+}
+
+#[test]
+fn symbol_name_returns_none_when_name_offset_past_end() {
+    let buf = valid_elf_with_oversize_section_name();
+    let elf = ElfFile::try_parse(&buf).expect("header parses");
+    use kernel_elfloader::Symbol;
+    let bad_sym = Symbol {
+        name: 0,
+        info: 0,
+        other: 0,
+        shndx: 0,
+        value: 0,
+        size: 0,
+    };
+    let sec1: SectionHeader = elf
+        .section_headers()
+        .nth(1)
+        .expect("section 1 present")
+        .expect("section 1 parses")
+        .clone();
+    let symtab = elf
+        .symtab_data(&sec1)
+        .expect("symtab_data succeeds for valid section");
+    assert!(elf.symbol_name(&symtab, &bad_sym).is_none());
+}
+
+#[test]
+fn program_data_returns_none_when_offset_plus_size_past_eof() {
+    // Build a valid ELF with phoff pointing at a fake program header
+    // whose offset+filesz exceeds source.len().
+    let mut buf = vec![0u8; 64];
+    buf[0..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
+    buf[4] = 2;
+    buf[5] = 1;
+    buf[6] = 1;
+    buf[7] = 0;
+    buf[16..18].copy_from_slice(&2u16.to_le_bytes());
+    buf[18..20].copy_from_slice(&62u16.to_le_bytes());
+    buf[20..24].copy_from_slice(&1u32.to_le_bytes());
+    // e_phoff = 64 (one program header right after the ELF header)
+    buf[32..40].copy_from_slice(&64u64.to_le_bytes());
+    buf[52..54].copy_from_slice(&64u16.to_le_bytes());
+    buf[54..56].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize
+    buf[56..58].copy_from_slice(&1u16.to_le_bytes()); // e_phnum = 1
+    buf[58..60].copy_from_slice(&64u16.to_le_bytes());
+    buf[60..62].copy_from_slice(&0u16.to_le_bytes()); // e_shnum = 0
+    buf.extend_from_slice(&[0u8; 56]); // one fake ProgramHeader at offset 64
+
+    let elf = ElfFile::try_parse(&buf).expect("header parses");
+
+    // Synthesize a ProgramHeader whose filesz spans past EOF and
+    // whose offset+filesz would overflow. program_data must return
+    // None instead of panicking.
+    use kernel_elfloader::{ProgramHeader, ProgramHeaderFlags, ProgramHeaderType};
+    let mut fake = ProgramHeader {
+        typ: ProgramHeaderType::LOAD,
+        flags: ProgramHeaderFlags::READABLE,
+        offset: 50,
+        vaddr: 0,
+        paddr: 0,
+        filesz: usize::MAX, // 50 + usize::MAX wraps to < 50
+        memsz: 1024,
+        align: 0,
+    };
+    assert!(elf.program_data(&fake).is_none());
+    // Realistic OOB: small offset, filesz past EOF
+    fake.offset = 50;
+    fake.filesz = buf.len() as usize + 1024;
+    assert!(elf.program_data(&fake).is_none());
+}
+
+#[test]
+fn section_data_returns_none_when_offset_plus_size_past_eof() {
+    let mut buf = vec![0u8; 64];
+    buf[0..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
+    buf[4] = 2;
+    buf[5] = 1;
+    buf[6] = 1;
+    buf[7] = 0;
+    buf[16..18].copy_from_slice(&2u16.to_le_bytes());
+    buf[18..20].copy_from_slice(&62u16.to_le_bytes());
+    buf[20..24].copy_from_slice(&1u32.to_le_bytes());
+    buf[40..48].copy_from_slice(&64u64.to_le_bytes()); // e_shoff
+    buf[52..54].copy_from_slice(&64u16.to_le_bytes()); // e_ehsize
+    buf[54..56].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize
+    buf[58..60].copy_from_slice(&64u16.to_le_bytes()); // e_shentsize
+    buf[60..62].copy_from_slice(&1u16.to_le_bytes()); // e_shnum = 1
+    buf.extend_from_slice(&[0u8; 64]); // one SHN_UNDEF section header
+
+    let elf = ElfFile::try_parse(&buf).expect("header parses");
+    use kernel_elfloader::SectionHeaderFlags;
+    let mut fake = SectionHeader {
+        name: 0,
+        typ: SectionHeaderType::PROGBITS,
+        flags: SectionHeaderFlags(0),
+        addr: 0,
+        offset: 100, // offset is valid (within 128-byte input)
+        size: usize::MAX,
+        link: 0,
+        info: 0,
+        addralign: 0,
+        entsize: 0,
+    };
+    assert!(elf.section_data(&fake).is_none());
+    fake.offset = usize::MAX;
+    assert!(elf.section_data(&fake).is_none());
 }

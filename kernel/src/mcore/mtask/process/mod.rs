@@ -470,12 +470,19 @@ impl Process {
         // We use the same self reference, but now it points to the new AS/VMM
         let mut memapi = LowerHalfMemoryApi::new(self.clone());
 
-        // Need to verify it's a valid ELF first
-        let elf_file = ElfFile::try_parse(&file_content).map_err(|_| "Invalid ELF file")?;
+        // Need to verify it's a valid ELF first. Surface the typed
+        // ElfParseError so a malformed binary (audit H-05) is
+        // diagnosable from logs instead of a generic "Invalid ELF
+        // file" line.
+        let elf_file = ElfFile::try_parse(&file_content).map_err(|e| {
+            log::error!("execve: ELF parse error: {e}");
+            "Invalid ELF file"
+        })?;
 
-        let elf_image = ElfLoader::new(memapi.clone())
-            .load(elf_file)
-            .map_err(|_| "Failed to load ELF")?;
+        let elf_image = ElfLoader::new(memapi.clone()).load(elf_file).map_err(|e| {
+            log::error!("execve: ELF load error: {e}");
+            "Failed to load ELF"
+        })?;
 
         let entry_point = elf_image.entry_point() as usize;
         let (exec_allocs, mut ro_allocs, wr_allocs, tls_master) = elf_image.into_inner();
@@ -755,21 +762,32 @@ extern "C" fn trampoline(_arg: *mut c_void) {
     let (code_ptr, exec_allocs, mut ro_allocs, wr_allocs, tls_master) =
         with_process_address_space_active(&current_process, || {
             // Keep all borrowed ELF reads in the active process address space.
-            let elf_file = ElfFile::try_parse(executable_file_allocation.as_ref())
-                .expect("should be able to parse elf binary");
+            // Parse errors are logged with the typed ElfParseError before the
+            // panic so a malformed executable image (audit H-05) leaves a
+            // diagnostic instead of a generic "should be able to parse" line.
+            let elf_file =
+                ElfFile::try_parse(executable_file_allocation.as_ref()).unwrap_or_else(|e| {
+                    log::error!("Trampoline: ELF parse error: {e}");
+                    panic!("Trampoline: ELF parse failed: {e}");
+                });
             let code_ptr = elf_file.entry();
             log::info!("Trampoline: ELF parsed, loading...");
             #[cfg(feature = "rpi5")]
             dbg_mark(b'E' as u32);
             let elf_image = ElfLoader::new(memapi.clone())
                 .load(elf_file)
-                .expect("should be able to load elf file");
+                .unwrap_or_else(|e| {
+                    log::error!("Trampoline: ELF load error: {e}");
+                    panic!("Trampoline: ELF load failed: {e}");
+                });
             let (exec_allocs, ro_allocs, wr_allocs, tls_master) = elf_image.into_inner();
             (code_ptr, exec_allocs, ro_allocs, wr_allocs, tls_master)
         });
     #[cfg(not(target_arch = "aarch64"))]
-    let elf_file = ElfFile::try_parse(executable_file_allocation.as_ref())
-        .expect("should be able to parse elf binary");
+    let elf_file = ElfFile::try_parse(executable_file_allocation.as_ref()).unwrap_or_else(|e| {
+        log::error!("Trampoline: ELF parse error: {e}");
+        panic!("Trampoline: ELF parse failed: {e}");
+    });
     #[cfg(not(target_arch = "aarch64"))]
     let code_ptr = elf_file.entry();
     #[cfg(not(target_arch = "aarch64"))]
