@@ -27,10 +27,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install nightly toolchain
-        uses: actions-rs/toolchain@v1
+      - name: Install pinned nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
         with:
-          toolchain: nightly
           components: rust-src
 
       - name: Install cargo-fuzz
@@ -62,10 +61,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install nightly toolchain
-        uses: actions-rs/toolchain@v1
+      - name: Install pinned nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
         with:
-          toolchain: nightly
           components: rust-src
 
       - name: Install cargo-fuzz

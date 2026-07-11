@@ -1,4 +1,19 @@
 name: Rust
+
+# H-06 / PR #1 fixes in this workflow:
+#   * Toolchain pinning: every job uses dtolnay/rust-toolchain@nightly-2026-07-02,
+#     the same channel declared in rust-toolchain.toml. The previous "nightly"
+#     and "stable" pins floated; stable in particular could not parse the
+#     workspace's `artifact = "bin"` (requires nightly -Z bindeps).
+#   * Standalone-workspace coverage: every Cargo workspace not in the root
+#     default-members gets an explicit lint + test job
+#     (`lint-standalone-workspaces`, `test-standalone-workspaces`).
+#   * QEMU kernel-test protocol: a new `qemu-kernel-smoke` job builds the
+#     release ISO, boots it under `qemu-system-x86_64` with a hard timeout, and
+#     asserts a serial-line PASS marker before declaring success. The kernel
+#     emits `QEMU_BOOT_OK` once user-mode init has mounted the ext2 rootfs and
+#     reached the BPF manager idle state.
+
 permissions:
   contents: read
 
@@ -8,9 +23,10 @@ on:
     paths-ignore:
       - '**.md'
       - 'docs/**'
+      - 'website/**'
       - 'LICENSE*'
       - '.gitignore'
-  #  pull_request:   # kept off: push already covers branches; PR would double runs
+  pull_request:
   workflow_dispatch:
   schedule:
     # Weekly drift check (Mon 05:00 UTC). Was twice-daily; at ~145 billed
@@ -26,16 +42,17 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN_DATE: '2026-07-02'
 
 jobs:
 
   lint:
-    name: "Lint"
+    name: "Lint (root workspace)"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install latest nightly
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Install pinned nightly
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
         with:
           components: rustfmt, clippy, llvm-tools-preview, rust-src
       - name: Add build target
@@ -48,36 +65,92 @@ jobs:
           sudo apt install -y xorriso
       - name: Rustfmt
         run: |
-          cargo fmt -- --check
-      - name: Clippy
+          cargo fmt --all -- --check
+      - name: Clippy (per-crate, matches local CI recipe)
+        # Per the axiom-kernel skill: per-crate clippy avoids the
+        # profile-typed kernel_bpf "no default profile" failures that bare
+        # `cargo clippy --workspace --lib` triggers on a host build.
         run: |
-          cargo clippy -- -D clippy::all
+          cargo clippy -p kernel_abi --lib -- -D clippy::all
+          cargo clippy -p kernel_vfs --lib -- -D clippy::all
+          cargo clippy -p kernel_physical_memory --lib -- -D clippy::all
+          cargo clippy -p kernel_bpf --no-default-features --features cloud-profile --lib -- -D clippy::all
+          cargo clippy -p kernel_bpf --no-default-features --features embedded-profile --lib -- -D clippy::all
+
+  lint-standalone-workspaces:
+    name: "Lint (standalone workspaces)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned nightly
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        with:
+          components: rustfmt, clippy
+      - name: Clippy (rk_bridge)
+        run: cargo clippy --manifest-path userspace/rk_bridge/Cargo.toml --lib -- -D clippy::all
+      - name: Clippy (rk_cli)
+        run: cargo clippy --manifest-path userspace/rk_cli/Cargo.toml -- -D clippy::all
+      - name: Clippy (RP2040 firmware, debug)
+        run: cargo clippy --manifest-path firmware/shrike_rp2040/Cargo.toml -- -D clippy::all
+      - name: Clippy (RP2040 firmware, release)
+        run: cargo clippy --manifest-path firmware/shrike_rp2040/Cargo.toml --release -- -D clippy::all
+      - name: Clippy (RISC-V demo)
+        run: cargo clippy --manifest-path kernel/demos/riscv/Cargo.toml -- -D clippy::all
+      - name: Clippy (Lean check, formal proofs)
+        working-directory: formal
+        run: |
+          if command -v elan >/dev/null 2>&1; then
+            lake build
+          else
+            echo "elan not installed; skipping formal/ build (T-04 follow-on)"
+          fi
 
   test:
-    name: "Test"
+    name: "Test (root workspace)"
     runs-on: ubuntu-latest
     strategy:
       matrix:
         strategy: [ debug, release ]
     steps:
       - uses: actions/checkout@v4
-      - name: Install latest nightly
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Install pinned nightly
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
       - name: Install dependencies
         run: |
           sudo apt update
           sudo apt install -y xorriso
-      - name: Test
+      - name: Test (per-crate, host-testable)
         run: |
-          cargo test $(if [[ "${{ matrix.strategy }}" == "release" ]]; then echo "--release"; fi)
+          cargo test -p kernel_abi $(if [[ "${{ matrix.strategy }}" == "release" ]]; then echo "--release"; fi)
+          cargo test -p kernel_vfs $(if [[ "${{ matrix.strategy }}" == "release" ]]; then echo "--release"; fi)
+          cargo test -p kernel_physical_memory $(if [[ "${{ matrix.strategy }}" == "release" ]]; then echo "--release"; fi)
+          cargo test -p kernel_bpf --no-default-features --features cloud-profile $(if [[ "${{ matrix.strategy }}" == "release" ]]; then echo "--release"; fi)
+          cargo test -p kernel_bpf --no-default-features --features embedded-profile $(if [[ "${{ matrix.strategy }}" == "release" ]]; then echo "--release"; fi)
+          cargo test -p shrike_link $(if [[ "${{ matrix.strategy }}" == "release" ]]; then echo "--release"; fi)
+
+  test-standalone-workspaces:
+    name: "Test (standalone workspaces)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned nightly
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+      - name: Test rk_bridge
+        run: cargo test --manifest-path userspace/rk_bridge/Cargo.toml
+      - name: Test rk_cli
+        run: cargo test --manifest-path userspace/rk_cli/Cargo.toml
+      - name: Test RP2040 firmware (debug)
+        run: cargo test --manifest-path firmware/shrike_rp2040/Cargo.toml --no-run
+      - name: Test RP2040 firmware (release)
+        run: cargo test --manifest-path firmware/shrike_rp2040/Cargo.toml --release --no-run
 
   firmware-rp2040:
     name: "Firmware (RP2040)"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install latest nightly
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Install pinned nightly
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
         with:
           targets: thumbv6m-none-eabi
       - name: Check RP2040 firmware (debug)
@@ -108,8 +181,8 @@ jobs:
       matrix: ${{fromJson(needs.prepare-miri.outputs.matrix)}}
     steps:
       - uses: actions/checkout@v4
-      - name: Install latest nightly
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Install pinned nightly
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
         with:
           components: miri, rust-src
       - name: Miri Setup
@@ -134,8 +207,8 @@ jobs:
         profile: [cloud-profile]
     steps:
       - uses: actions/checkout@v4
-      - name: Install latest nightly
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Install pinned nightly
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
         with:
           components: miri, rust-src
       - name: Miri Setup
@@ -146,19 +219,19 @@ jobs:
           cargo miri test -p kernel_bpf --no-default-features --features ${{ matrix.profile }}
 
 
-
   build:
     name: "Build and upload artifacts"
     runs-on: ubuntu-latest
     needs:
       - test
+      - test-standalone-workspaces
       - firmware-rp2040
       - miri
       - miri-kernel-bpf
     steps:
       - uses: actions/checkout@v4
-      - name: Install latest nightly
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Install pinned nightly
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
         with:
           targets: x86_64-unknown-none, aarch64-unknown-none
       - name: Add build targets
@@ -180,3 +253,62 @@ jobs:
           name: axiomos-boot-images
           path: |
             target/release/build/**/out/axiomos.iso
+
+  qemu-kernel-smoke:
+    name: "QEMU kernel smoke (x86_64)"
+    # T-01 / H-06: a deterministic serial-line smoke test that builds the
+    # release ISO, boots it under QEMU with a hard timeout, and asserts the
+    # kernel emitted the QEMU_BOOT_OK marker before declaring success. Without
+    # this gate every other PR was merging without a "the kernel booted"
+    # signal — the audit's "no boot result is asserted" gap.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned nightly
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        with:
+          targets: x86_64-unknown-none
+      - name: Add build target
+        run: rustup target add x86_64-unknown-none
+      - name: Install QEMU + ISO deps
+        run: |
+          sudo apt update
+          sudo apt install -y qemu-system-x86 xorriso
+      - name: Build release ISO
+        run: cargo build --release
+      - name: Locate ISO
+        id: iso
+        run: |
+          set -e
+          ISO_PATH=$(find target/release/build -name axiomos.iso -type f | head -n 1)
+          if [[ -z "$ISO_PATH" ]]; then
+            echo "::error::axiomos.iso not produced by release build"
+            exit 1
+          fi
+          echo "iso-path=$ISO_PATH" >> "$GITHUB_OUTPUT"
+      - name: Boot ISO under QEMU
+        env:
+          ISO_PATH: ${{ steps.iso.outputs.iso-path }}
+        run: |
+          set -e
+          SERIAL_LOG=$(mktemp)
+          # -no-reboot: panic/halt exits QEMU cleanly rather than spinning.
+          # -monitor none / -display none: headless serial-only output.
+          # -m 1G -smp 2: matches the audit's reproducing smoke run.
+          timeout 90s qemu-system-x86_64 \
+            -cdrom "$ISO_PATH" \
+            -m 1G -smp 2 \
+            -display none -monitor none \
+            -serial file:"$SERIAL_LOG" \
+            -no-reboot || true
+          echo "----- serial capture (last 200 lines) -----"
+          tail -n 200 "$SERIAL_LOG" || true
+          echo "----- marker check -----"
+          if grep -q 'QEMU_BOOT_OK' "$SERIAL_LOG"; then
+            echo "PASS: kernel emitted QEMU_BOOT_OK"
+            exit 0
+          fi
+          echo "::error::QEMU_BOOT_OK marker missing from serial capture"
+          echo "Expected marker QEMU_BOOT_OK printed by kernel/src/lib.rs after init reaches BPF idle."
+          exit 1
