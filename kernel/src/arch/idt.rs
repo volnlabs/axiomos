@@ -17,7 +17,8 @@ use x86_64::PrivilegeLevel;
 
 use crate::arch::gdt;
 use crate::mcore::context::ExecutionContext;
-use crate::mcore::mtask::task::{FxArea, Task};
+use crate::mcore::mtask::exception::UserExceptionResult;
+use crate::mcore::mtask::task::FxArea;
 use crate::mem::memapi::LowerHalfMemoryApi;
 use crate::syscall::dispatch_syscall;
 
@@ -210,7 +211,11 @@ fn exception_from_user_mode(stack_frame: &InterruptStackFrame) -> bool {
     stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3
 }
 
-fn terminate_current_task_on_user_exception(exception: &str, stack_frame: &InterruptStackFrame) {
+fn terminate_current_task_on_user_exception(
+    exception: &'static str,
+    status: i32,
+    stack_frame: &InterruptStackFrame,
+) {
     if !exception_from_user_mode(stack_frame) {
         return;
     }
@@ -225,7 +230,11 @@ fn terminate_current_task_on_user_exception(exception: &str, stack_frame: &Inter
             task.name(),
         );
     });
-    Task::exit();
+    UserExceptionResult::Kill {
+        status,
+        reason: exception,
+    }
+    .apply();
 }
 
 /// Restores the user context and returns to userspace.
@@ -328,7 +337,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
-    terminate_current_task_on_user_exception("GENERAL PROTECTION FAULT", &stack_frame);
+    terminate_current_task_on_user_exception("GENERAL PROTECTION FAULT", 139, &stack_frame);
     panic!(
         "EXCEPTION: GENERAL PROTECTION FAULT:\nerror code: {error_code:#X}\n{}[{}], external: {}\n{stack_frame:#?}",
         match (error_code >> 1) & 0b11 {
@@ -342,12 +351,12 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
-    terminate_current_task_on_user_exception("INVALID OPCODE", &stack_frame);
+    terminate_current_task_on_user_exception("INVALID OPCODE", 132, &stack_frame);
     panic!("EXCEPTION: INVALID OPCODE:\n{stack_frame:#?}");
 }
 
 extern "x86-interrupt" fn invalid_tss_handler(stack_frame: InterruptStackFrame, error_code: u64) {
-    terminate_current_task_on_user_exception("INVALID TSS", &stack_frame);
+    terminate_current_task_on_user_exception("INVALID TSS", 139, &stack_frame);
     panic!("EXCEPTION: INVALID TSS:\nerror code: {error_code:#X}\n{stack_frame:#?}");
 }
 
@@ -382,7 +391,7 @@ extern "x86-interrupt" fn page_fault_handler(
 
     // Lazy/file-backed fault resolution is not implemented yet. Returning to
     // the same user instruction would just fault forever, so fail the task.
-    terminate_current_task_on_user_exception("PAGE FAULT", &stack_frame);
+    terminate_current_task_on_user_exception("PAGE FAULT", 139, &stack_frame);
 
     panic!(
         "EXCEPTION: PAGE FAULT:\naccessed address: {accessed_address:?}\nerror code: {error_code:#?}\n{stack_frame:#?}"
@@ -393,6 +402,7 @@ extern "x86-interrupt" fn segment_not_present_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    terminate_current_task_on_user_exception("SEGMENT NOT PRESENT", 139, &stack_frame);
     let error_code = SelectorErrorCode::from(error_code);
     panic!("EXCEPTION: SEGMENT NOT PRESENT:\nerror code: {error_code:#?}\n{stack_frame:#?}");
 }
@@ -401,6 +411,7 @@ extern "x86-interrupt" fn stack_segment_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    terminate_current_task_on_user_exception("STACK SEGMENT FAULT", 139, &stack_frame);
     panic!("EXCEPTION: STACK SEGMENT FAULT:\nerror code: {error_code:#?}\n{stack_frame:#?}");
 }
 

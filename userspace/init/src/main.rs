@@ -22,6 +22,18 @@ pub extern "C" fn _start() -> ! {
         write(1, b"UNKNOWN_SYSCALL_ENOSYS_FAIL\n");
     }
 
+    if lifecycle_exit_wait_probe() {
+        write(1, b"LIFECYCLE_EXIT_WAIT_OK\n");
+    } else {
+        write(1, b"LIFECYCLE_EXIT_WAIT_FAIL\n");
+    }
+
+    if lifecycle_fault_wait_probe() {
+        write(1, b"LIFECYCLE_FAULT_WAIT_OK\n");
+    } else {
+        write(1, b"LIFECYCLE_FAULT_WAIT_FAIL\n");
+    }
+
     write(1, b"=== Axiom eBPF Init ===\n");
     write(1, b"Phase 4 demo boot: ");
     write(1, PHASE4_EXPORT_DEMO.as_bytes());
@@ -265,6 +277,56 @@ pub extern "C" fn _start() -> ! {
             minilib::pause();
         }
     */
+}
+
+fn lifecycle_exit_wait_probe() -> bool {
+    let child = minilib::fork();
+    if child < 0 {
+        return false;
+    }
+    if child == 0 {
+        minilib::exit(42);
+    }
+
+    let mut status = 0;
+    minilib::waitpid(child, &mut status, 0) == child && status == 42 << 8
+}
+
+fn lifecycle_fault_wait_probe() -> bool {
+    let child = minilib::fork();
+    if child < 0 {
+        return false;
+    }
+    if child == 0 {
+        trigger_unmapped_load();
+    }
+
+    let mut status = 0;
+    minilib::waitpid(child, &mut status, 0) == child && status == 139 << 8
+}
+
+fn trigger_unmapped_load() -> ! {
+    let value: usize;
+    // SAFETY: This is an intentional userspace fault probe. The kernel must
+    // terminate only this forked child rather than panic or retry forever.
+    unsafe {
+        #[cfg(target_arch = "x86_64")]
+        core::arch::asm!(
+            "mov {value}, qword ptr [{address}]",
+            value = out(reg) value,
+            address = in(reg) UNMAPPED_USER_ADDRESS,
+            options(nostack, readonly)
+        );
+        #[cfg(target_arch = "aarch64")]
+        core::arch::asm!(
+            "ldr {value}, [{address}]",
+            value = out(reg) value,
+            address = in(reg) UNMAPPED_USER_ADDRESS,
+            options(nostack, readonly)
+        );
+    }
+    core::hint::black_box(value);
+    minilib::exit(125)
 }
 
 fn usercopy_fault_probe() -> bool {
