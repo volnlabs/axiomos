@@ -566,6 +566,14 @@ impl AddressSpace {
         }
     }
 
+    fn shootdown(&self) {
+        #[cfg(target_arch = "x86_64")]
+        crate::arch::shootdown_tlb(self.shootdown_targets());
+
+        #[cfg(target_arch = "aarch64")]
+        crate::arch::aarch64::paging::flush_tlb();
+    }
+
     #[allow(dead_code)]
     pub fn is_active(&self) -> bool {
         self.inner.read().is_active()
@@ -584,7 +592,11 @@ impl AddressSpace {
     where
         for<'a> RecursivePageTable<'a>: Mapper<S>,
     {
-        self.inner.write().map(page, frame, flags)
+        let result = self.inner.write().map(page, frame, flags);
+        if result.is_ok() {
+            self.shootdown();
+        }
+        result
     }
 
     /// # Errors
@@ -599,7 +611,9 @@ impl AddressSpace {
     where
         for<'a> RecursivePageTable<'a>: Mapper<S>,
     {
-        self.inner.write().map_range(pages.into(), frames, flags)
+        let result = self.inner.write().map_range(pages.into(), frames, flags);
+        self.shootdown();
+        result
     }
 
     /// Map a range while transferring ownership of one frame reference per page.
@@ -615,9 +629,16 @@ impl AddressSpace {
         for<'a> RecursivePageTable<'a>: Mapper<S>,
         PhysicalMemoryManager: PhysicalFrameAllocator<S>,
     {
-        self.inner
+        let mut released = alloc::vec::Vec::new();
+        let result = self
+            .inner
             .write()
-            .map_range_owned(pages.into(), frames, flags)
+            .map_range_owned(pages.into(), frames, flags, |frame| released.push(frame));
+        self.shootdown();
+        for frame in released {
+            PhysicalMemory::deallocate_frame(frame);
+        }
+        result
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -625,7 +646,11 @@ impl AddressSpace {
     where
         for<'a> RecursivePageTable<'a>: Mapper<S>,
     {
-        self.inner.write().unmap(page)
+        let frame = self.inner.write().unmap(page);
+        if frame.is_some() {
+            self.shootdown();
+        }
+        frame
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -636,7 +661,16 @@ impl AddressSpace {
     ) where
         for<'a> RecursivePageTable<'a>: Mapper<S>,
     {
-        self.inner.write().unmap_range(pages.into(), callback);
+        let mut unmapped = alloc::vec::Vec::new();
+        self.inner
+            .write()
+            .unmap_range(pages.into(), |frame| unmapped.push(frame));
+        if !unmapped.is_empty() {
+            self.shootdown();
+        }
+        for frame in unmapped {
+            callback(frame);
+        }
     }
 
     /// # Errors
@@ -650,7 +684,11 @@ impl AddressSpace {
     where
         for<'a> RecursivePageTable<'a>: Mapper<S>,
     {
-        self.inner.write().remap(page, &f)
+        let result = self.inner.write().remap(page, &f);
+        if result.is_ok() {
+            self.shootdown();
+        }
+        result
     }
 
     /// # Errors
@@ -664,7 +702,9 @@ impl AddressSpace {
     where
         for<'a> RecursivePageTable<'a>: Mapper<S>,
     {
-        self.inner.write().remap_range(pages.into(), &f)
+        let result = self.inner.write().remap_range(pages.into(), &f);
+        self.shootdown();
+        result
     }
 
     #[allow(dead_code)]
@@ -691,7 +731,11 @@ impl AddressSpace {
         frame: PhysFrame<S>,
         flags: PageTableFlags,
     ) -> Result<(), &'static str> {
-        self.inner.write().map(page, frame, flags)
+        let result = self.inner.write().map(page, frame, flags);
+        if result.is_ok() {
+            self.shootdown();
+        }
+        result
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -701,7 +745,9 @@ impl AddressSpace {
         frames: impl Iterator<Item = PhysFrame<S>>,
         flags: PageTableFlags,
     ) -> Result<(), &'static str> {
-        self.inner.write().map_range(pages.into(), frames, flags)
+        let result = self.inner.write().map_range(pages.into(), frames, flags);
+        self.shootdown();
+        result
     }
 
     /// Map a range while transferring ownership of one frame reference per page.
@@ -716,9 +762,12 @@ impl AddressSpace {
     where
         PhysicalMemoryManager: PhysicalFrameAllocator<S>,
     {
-        self.inner
+        let result = self
+            .inner
             .write()
-            .map_range_owned(pages.into(), frames, flags)
+            .map_range_owned(pages.into(), frames, flags);
+        self.shootdown();
+        result
     }
 
     #[cfg(target_arch = "aarch64")]

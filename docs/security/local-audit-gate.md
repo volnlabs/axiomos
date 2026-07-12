@@ -35,6 +35,6 @@ normal required gate. `--no-qemu` is intended only for environments without
 QEMU access; the manifest records the skipped boot gate.
 
 The required gate fails if any selected command fails or if QEMU misses
-`QEMU_BOOT_OK`, `USERCOPY_EFAULT_OK`, `UNKNOWN_SYSCALL_ENOSYS_OK`, or evidence
-that a userspace process started. GitHub quota or runner status is deliberately
-not consulted.
+`QEMU_BOOT_OK`, `USERCOPY_EFAULT_OK`, `UNKNOWN_SYSCALL_ENOSYS_OK`,
+`TLB_SHOOTDOWN_OK`, or evidence that a userspace process started. GitHub quota
+or runner status is deliberately not consulted.

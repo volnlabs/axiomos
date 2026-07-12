@@ -2,6 +2,8 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::fmt;
+#[cfg(target_arch = "x86_64")]
+use core::sync::atomic::AtomicU32;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
@@ -25,6 +27,8 @@ use crate::mcore::mtask::scheduler::Scheduler;
 use crate::mcore::mtask::task::Task;
 
 static ONLINE_CPU_MASK: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_arch = "x86_64")]
+static ONLINE_LAPIC_IDS: [AtomicU32; 64] = [const { AtomicU32::new(u32::MAX) }; 64];
 
 fn cpu_bit(cpu_id: usize) -> u64 {
     1u64.checked_shl(u32::try_from(cpu_id).expect("CPU id must fit u32"))
@@ -34,6 +38,12 @@ fn cpu_bit(cpu_id: usize) -> u64 {
 
 pub fn online_cpu_mask() -> u64 {
     ONLINE_CPU_MASK.load(Ordering::Acquire)
+}
+
+#[cfg(target_arch = "x86_64")]
+pub fn online_lapic_id(cpu_id: usize) -> Option<u32> {
+    let lapic_id = ONLINE_LAPIC_IDS.get(cpu_id)?.load(Ordering::Acquire);
+    (lapic_id != u32::MAX).then_some(lapic_id)
 }
 
 struct BpfCpuStack {
@@ -243,6 +253,11 @@ impl ExecutionContext {
     }
 
     pub fn mark_online(&self) {
+        #[cfg(target_arch = "x86_64")]
+        ONLINE_LAPIC_IDS[self.cpu_id].store(
+            u32::try_from(self.lapic_id).expect("LAPIC id must fit u32"),
+            Ordering::Relaxed,
+        );
         ONLINE_CPU_MASK.fetch_or(cpu_bit(self.cpu_id), Ordering::Release);
     }
 

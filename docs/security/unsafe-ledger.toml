@@ -1,6 +1,6 @@
 version = 1
-baseline_sites = 688
-baseline_fingerprint = "sha256:293fd3d0cfdf7c7e9b916f2e9be391ddd8e405a37ad32fd6cfda7fa8ac27c2ce"
+baseline_sites = 690
+baseline_fingerprint = "sha256:f8c67f7fc0f2d1f78b073760136283d164aadfa1866417f65597f5bb4e432d5f"
 
 # Rules are evaluated in order. Keep narrow, high-risk obligations before broad
 # subsystem rules. The first matching rule supplies every site-level field.
