@@ -1,13 +1,13 @@
 //! stat/fstat syscall implementations
 
-use kernel_abi::{EBADF, EINVAL, Errno};
+use kernel_abi::{EBADF, Errno};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 use crate::access::FileAccess;
-use crate::ptr::UserspaceMutPtr;
 
 /// Linux stat structure (simplified for now)
 #[repr(C)]
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct UserStat {
     /// Device ID
     pub st_dev: u64,
@@ -76,26 +76,6 @@ pub trait StatAccess: FileAccess {
 }
 
 /// Get file status by file descriptor.
-pub fn sys_fstat<Cx: StatAccess>(
-    cx: &Cx,
-    fildes: Cx::Fd,
-    mut buf: UserspaceMutPtr<UserStat>,
-) -> Result<usize, Errno> {
-    if buf.as_ptr().is_null() {
-        return Err(EINVAL);
-    }
-
-    buf.validate_range(core::mem::size_of::<UserStat>())
-        .map_err(|_| EINVAL)?;
-
-    let stat = cx.fstat(fildes).map_err(|_| EBADF)?;
-
-    // Write stat to userspace buffer
-    // SAFETY: buf is a UserspaceMutPtr which has been validated to be non-null.
-    // We assume the userspace memory is writable and valid for the size of UserStat.
-    unsafe {
-        core::ptr::write(buf.as_mut_ptr(), stat);
-    }
-
-    Ok(0)
+pub fn sys_fstat<Cx: StatAccess>(cx: &Cx, fildes: Cx::Fd) -> Result<UserStat, Errno> {
+    cx.fstat(fildes).map_err(|_| EBADF)
 }

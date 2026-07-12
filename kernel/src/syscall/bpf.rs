@@ -2,16 +2,29 @@ use alloc::vec::Vec;
 use core::mem::size_of;
 
 use kernel_abi::{
-    BpfAttr, BpfObjectInfo, BPF_MAP_CREATE, BPF_MAP_DELETE_ELEM, BPF_MAP_LOOKUP_ELEM,
-    BPF_MAP_UPDATE_ELEM, BPF_OBJ_GET, BPF_OBJ_GET_INFO_BY_FD, BPF_OBJ_PIN, BPF_PROG_ATTACH,
-    BPF_PROG_DETACH, BPF_PROG_LOAD, BPF_PROG_LOAD_ELF, BPF_RINGBUF_POLL,
+    BpfAttr, BpfObjectInfo, BPF_MAP_CREATE, BPF_MAP_DELETE_ELEM, BPF_MAP_DESTROY,
+    BPF_MAP_LOOKUP_ELEM, BPF_MAP_UPDATE_ELEM, BPF_OBJ_GET, BPF_OBJ_GET_INFO_BY_FD, BPF_OBJ_PIN,
+    BPF_OBJ_UNPIN, BPF_PROG_ATTACH, BPF_PROG_DETACH, BPF_PROG_LOAD, BPF_PROG_LOAD_ELF,
+    BPF_PROG_UNLOAD, BPF_RINGBUF_POLL,
 };
 use kernel_bpf::bytecode::insn::BpfInsn;
+use kernel_bpf::execution::BpfError;
+use zerocopy::IntoBytes;
 
 use super::validation::{
     copy_from_userspace, copy_to_userspace, read_userspace_slice, read_userspace_string,
 };
 use crate::BPF_MANAGER;
+
+fn bpf_error_errno(error: BpfError) -> isize {
+    match error {
+        BpfError::OutOfMemory | BpfError::ResourceLimit => -12, // ENOMEM
+        BpfError::ObjectBusy => -16,                            // EBUSY
+        BpfError::NotLoaded => -2,                              // ENOENT
+        BpfError::ReadOnlyMap | BpfError::SignatureRejected => -1, // EPERM
+        _ => -22,                                               // EINVAL
+    }
+}
 
 pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
     // Security Hardening: Validate the attribute size matches expected struct size
@@ -26,6 +39,19 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
     }
 
     let cmd_u32 = cmd as u32;
+
+    // These commands touch map backing storage that a running BPF program may
+    // address through a raw helper-returned pointer. Serialize them with BPF
+    // execution until map APIs carry an epoch/read guard themselves.
+    let _runtime = matches!(
+        cmd_u32,
+        BPF_MAP_LOOKUP_ELEM
+            | BPF_MAP_UPDATE_ELEM
+            | BPF_MAP_DELETE_ELEM
+            | BPF_MAP_DESTROY
+            | BPF_RINGBUF_POLL
+    )
+    .then(crate::bpf::lock_runtime);
 
     match cmd_u32 {
         BPF_MAP_CREATE => {
@@ -53,7 +79,7 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
                     Ok(map_id) => map_id as isize,
                     Err(e) => {
                         log::error!("sys_bpf: MAP_CREATE failed: {}", e);
-                        -1
+                        bpf_error_errno(e)
                     }
                 }
             } else {
@@ -195,6 +221,9 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
             };
 
             let map_id = attr.map_fd;
+            if attr.path_len == 0 || attr.path_len as usize > crate::bpf::BPF_PIN_PATH_MAX {
+                return -22;
+            }
             let path = match read_userspace_string(attr.pathname as usize, attr.path_len as usize) {
                 Ok(path) => path,
                 Err(_) => return -1,
@@ -205,7 +234,7 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
                     Ok(()) => 0,
                     Err(e) => {
                         log::error!("sys_bpf: OBJ_PIN failed: {}", e);
-                        -1
+                        bpf_error_errno(e)
                     }
                 }
             } else {
@@ -219,6 +248,9 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
                 Err(_) => return -1,
             };
 
+            if attr.path_len == 0 || attr.path_len as usize > crate::bpf::BPF_PIN_PATH_MAX {
+                return -22;
+            }
             let path = match read_userspace_string(attr.pathname as usize, attr.path_len as usize) {
                 Ok(path) => path,
                 Err(_) => return -1,
@@ -249,13 +281,7 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
                     Some(info) => info,
                     None => return -1,
                 };
-                let info_bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        (&info as *const BpfObjectInfo).cast::<u8>(),
-                        size_of::<BpfObjectInfo>(),
-                    )
-                };
-                if copy_to_userspace(attr.info as usize, info_bytes).is_err() {
+                if copy_to_userspace(attr.info as usize, info.as_bytes()).is_err() {
                     return -1;
                 }
                 size_of::<BpfObjectInfo>() as isize
@@ -459,6 +485,55 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
                 -1
             }
         }
+        BPF_PROG_UNLOAD => {
+            log::info!("sys_bpf: PROG_UNLOAD");
+            let attr = match copy_from_userspace::<BpfAttr>(attr_ptr) {
+                Ok(a) => a,
+                Err(_) => return -14,
+            };
+            let Some(manager) = BPF_MANAGER.get() else {
+                return -2;
+            };
+            match manager.lock().unload_program(attr.attach_prog_fd) {
+                Ok(()) => 0,
+                Err(error) => bpf_error_errno(error),
+            }
+        }
+        BPF_MAP_DESTROY => {
+            log::info!("sys_bpf: MAP_DESTROY");
+            let attr = match copy_from_userspace::<BpfAttr>(attr_ptr) {
+                Ok(a) => a,
+                Err(_) => return -14,
+            };
+            let Some(manager) = BPF_MANAGER.get() else {
+                return -2;
+            };
+            match manager.lock().destroy_map(attr.map_fd) {
+                Ok(()) => 0,
+                Err(error) => bpf_error_errno(error),
+            }
+        }
+        BPF_OBJ_UNPIN => {
+            log::info!("sys_bpf: OBJ_UNPIN");
+            let attr = match copy_from_userspace::<BpfAttr>(attr_ptr) {
+                Ok(a) => a,
+                Err(_) => return -14,
+            };
+            if attr.path_len == 0 || attr.path_len as usize > crate::bpf::BPF_PIN_PATH_MAX {
+                return -22;
+            }
+            let path = match read_userspace_string(attr.pathname as usize, attr.path_len as usize) {
+                Ok(path) => path,
+                Err(_) => return -14,
+            };
+            let Some(manager) = BPF_MANAGER.get() else {
+                return -2;
+            };
+            match manager.lock().unpin_map(&path) {
+                Ok(()) => 0,
+                Err(error) => bpf_error_errno(error),
+            }
+        }
         BPF_PROG_LOAD => {
             log::info!("sys_bpf: PROG_LOAD");
 
@@ -506,7 +581,7 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
                     }
                     Err(e) => {
                         log::error!("sys_bpf: failed to load program: {}", e);
-                        -1
+                        bpf_error_errno(e)
                     }
                 }
             } else {
@@ -553,7 +628,7 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
                     }
                     Err(e) => {
                         log::error!("sys_bpf: failed to load ELF program: {}", e);
-                        -1
+                        bpf_error_errno(e)
                     }
                 }
             } else {

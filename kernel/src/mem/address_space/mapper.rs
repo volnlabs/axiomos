@@ -1,3 +1,6 @@
+use alloc::vec::Vec;
+
+use kernel_physical_memory::{PhysicalFrameAllocator, PhysicalMemoryManager};
 #[cfg(target_arch = "x86_64")]
 use x86_64::registers::control::Cr3;
 #[cfg(target_arch = "x86_64")]
@@ -10,7 +13,6 @@ use crate::arch::aarch64::paging::PageTableWalker;
 use crate::arch::types::{
     Page, PageRangeInclusive, PageSize, PageTableFlags, PhysAddr, PhysFrame, VirtAddr,
 };
-#[cfg(target_arch = "x86_64")]
 use crate::mem::phys::PhysicalMemory;
 
 #[derive(Debug)]
@@ -109,13 +111,83 @@ impl AddressSpaceMapper {
     where
         for<'a> RecursivePageTable<'a>: Mapper<S>,
     {
+        self.map_range_transaction(pages, frames, flags, false, |_| {})
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub fn map_range_owned<S: PageSize>(
+        &mut self,
+        pages: PageRangeInclusive<S>,
+        frames: impl Iterator<Item = PhysFrame<S>>,
+        flags: PageTableFlags,
+    ) -> Result<(), MapToError<S>>
+    where
+        for<'a> RecursivePageTable<'a>: Mapper<S>,
+        PhysicalMemoryManager: PhysicalFrameAllocator<S>,
+    {
+        self.map_range_transaction(pages, frames, flags, true, PhysicalMemory::deallocate_frame)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn map_range_transaction<S: PageSize>(
+        &mut self,
+        pages: PageRangeInclusive<S>,
+        frames: impl Iterator<Item = PhysFrame<S>>,
+        flags: PageTableFlags,
+        owns_frames: bool,
+        release: impl Fn(PhysFrame<S>),
+    ) -> Result<(), MapToError<S>>
+    where
+        for<'a> RecursivePageTable<'a>: Mapper<S>,
+    {
         assert!(self.is_active());
 
+        let mut pages = pages.into_iter();
         let mut frames = frames.into_iter();
+        let mut first_mapped = None;
+        let mut last_mapped = None;
 
-        for page in pages {
-            let frame = frames.next().ok_or(MapToError::FrameAllocationFailed)?;
-            self.map(page, frame, flags)?;
+        while let Some(page) = pages.next() {
+            let Some(frame) = frames.next() else {
+                if let (Some(start), Some(end)) = (first_mapped, last_mapped) {
+                    for mapped_page in (PageRangeInclusive { start, end }) {
+                        if let Some(frame) = self.unmap(mapped_page) {
+                            if owns_frames {
+                                release(frame);
+                            }
+                        }
+                    }
+                }
+                return Err(MapToError::FrameAllocationFailed);
+            };
+
+            if let Err(error) = self.map(page, frame, flags) {
+                if owns_frames {
+                    release(frame);
+                }
+                if let (Some(start), Some(end)) = (first_mapped, last_mapped) {
+                    for mapped_page in (PageRangeInclusive { start, end }) {
+                        if let Some(frame) = self.unmap(mapped_page) {
+                            if owns_frames {
+                                release(frame);
+                            }
+                        }
+                    }
+                }
+                // The iterator transfers one frame reference per requested page.
+                // Release references that were supplied but never mapped.
+                if owns_frames {
+                    for _ in pages {
+                        let Some(frame) = frames.next() else {
+                            break;
+                        };
+                        release(frame);
+                    }
+                }
+                return Err(error);
+            }
+            first_mapped.get_or_insert(page);
+            last_mapped = Some(page);
         }
 
         Ok(())
@@ -187,8 +259,21 @@ impl AddressSpaceMapper {
     {
         assert!(self.is_active());
 
+        let mut originals = Vec::new();
         for page in pages {
-            self.remap(page, &f)?;
+            let Some((_frame, flags)) = self.translate_page_flags(page.start_address()) else {
+                return Err(FlagUpdateError::PageNotMapped);
+            };
+            originals.push((page, flags));
+        }
+
+        for (index, (page, _)) in originals.iter().enumerate() {
+            if let Err(error) = self.remap(*page, f) {
+                for (mapped_page, old_flags) in originals[..index].iter().rev() {
+                    let _ = self.remap(*mapped_page, &|_| *old_flags);
+                }
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -215,10 +300,75 @@ impl AddressSpaceMapper {
         frames: impl Iterator<Item = PhysFrame<S>>,
         flags: PageTableFlags,
     ) -> Result<(), &'static str> {
+        self.map_range_transaction(pages, frames, flags, false, |_| {})
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    pub fn map_range_owned<S: PageSize>(
+        &mut self,
+        pages: PageRangeInclusive<S>,
+        frames: impl Iterator<Item = PhysFrame<S>>,
+        flags: PageTableFlags,
+    ) -> Result<(), &'static str>
+    where
+        PhysicalMemoryManager: PhysicalFrameAllocator<S>,
+    {
+        self.map_range_transaction(pages, frames, flags, true, PhysicalMemory::deallocate_frame)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn map_range_transaction<S: PageSize>(
+        &mut self,
+        pages: PageRangeInclusive<S>,
+        frames: impl Iterator<Item = PhysFrame<S>>,
+        flags: PageTableFlags,
+        owns_frames: bool,
+        release: impl Fn(PhysFrame<S>),
+    ) -> Result<(), &'static str> {
+        let mut pages = pages.into_iter();
         let mut frames = frames.into_iter();
-        for page in pages {
-            let frame = frames.next().ok_or("Not enough frames for range")?;
-            self.map(page, frame, flags)?;
+        let mut first_mapped = None;
+        let mut last_mapped = None;
+
+        while let Some(page) = pages.next() {
+            let Some(frame) = frames.next() else {
+                if let (Some(start), Some(end)) = (first_mapped, last_mapped) {
+                    for mapped_page in (PageRangeInclusive { start, end }) {
+                        if let Some(frame) = self.unmap(mapped_page) {
+                            if owns_frames {
+                                release(frame);
+                            }
+                        }
+                    }
+                }
+                return Err("Not enough frames for range");
+            };
+
+            if let Err(error) = self.map(page, frame, flags) {
+                if owns_frames {
+                    release(frame);
+                }
+                if let (Some(start), Some(end)) = (first_mapped, last_mapped) {
+                    for mapped_page in (PageRangeInclusive { start, end }) {
+                        if let Some(frame) = self.unmap(mapped_page) {
+                            if owns_frames {
+                                release(frame);
+                            }
+                        }
+                    }
+                }
+                if owns_frames {
+                    for _ in pages {
+                        let Some(frame) = frames.next() else {
+                            break;
+                        };
+                        release(frame);
+                    }
+                }
+                return Err(error);
+            }
+            first_mapped.get_or_insert(page);
+            last_mapped = Some(page);
         }
         Ok(())
     }
@@ -258,10 +408,7 @@ impl AddressSpaceMapper {
         let old_flags = PageTableFlags::from_pte_bits(raw_flags);
         let new_flags = f(old_flags);
 
-        let phys = walker.unmap_page(vaddr)?;
-        let pte_bits = new_flags.to_pte_bits();
-
-        walker.map_page(vaddr, phys, pte_bits)
+        walker.update_page_flags(vaddr, new_flags.to_pte_bits())
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -270,8 +417,21 @@ impl AddressSpaceMapper {
         pages: PageRangeInclusive<S>,
         f: &F,
     ) -> Result<(), &'static str> {
+        let mut originals = Vec::new();
         for page in pages {
-            self.remap(page, f)?;
+            let Some((_frame, flags)) = self.translate_page_flags(page.start_address()) else {
+                return Err("Page not mapped");
+            };
+            originals.push((page, flags));
+        }
+
+        for (index, (page, _)) in originals.iter().enumerate() {
+            if let Err(error) = self.remap(*page, f) {
+                for (mapped_page, old_flags) in originals[..index].iter().rev() {
+                    let _ = self.remap(*mapped_page, &|_| *old_flags);
+                }
+                return Err(error);
+            }
         }
         Ok(())
     }

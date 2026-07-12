@@ -8,7 +8,6 @@
 
 extern crate alloc;
 
-use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
@@ -47,13 +46,20 @@ struct ArrayStorage {
 
 impl ArrayStorage {
     /// Create new storage.
-    fn new(value_size: usize, max_entries: usize) -> Self {
-        let buffer = vec![0u8; value_size * max_entries];
-        Self {
+    fn new(value_size: usize, max_entries: usize) -> MapResult<Self> {
+        let len = value_size
+            .checked_mul(max_entries)
+            .ok_or(MapError::OutOfMemory)?;
+        let mut buffer = Vec::new();
+        buffer
+            .try_reserve_exact(len)
+            .map_err(|_| MapError::OutOfMemory)?;
+        buffer.resize(len, 0);
+        Ok(Self {
             buffer,
             value_size,
             max_entries,
-        }
+        })
     }
 
     /// Get a value at index.
@@ -79,14 +85,28 @@ impl ArrayStorage {
 
     /// Resize storage (cloud profile only).
     #[cfg(feature = "cloud-profile")]
-    fn resize(&mut self, new_max_entries: usize) {
-        let new_size = self.value_size * new_max_entries;
+    fn resize(&mut self, new_max_entries: usize) -> MapResult<()> {
+        let new_size = self
+            .value_size
+            .checked_mul(new_max_entries)
+            .ok_or(MapError::OutOfMemory)?;
+        if new_size > self.buffer.len() {
+            self.buffer
+                .try_reserve_exact(new_size - self.buffer.len())
+                .map_err(|_| MapError::OutOfMemory)?;
+        }
         self.buffer.resize(new_size, 0);
         self.max_entries = new_max_entries;
+        Ok(())
     }
 }
 
 impl<P: PhysicalProfile> ArrayMap<P> {
+    /// Heap bytes reserved by an array map's value storage.
+    pub const fn allocation_size(value_size: u32, max_entries: u32) -> Option<usize> {
+        (value_size as usize).checked_mul(max_entries as usize)
+    }
+
     /// Create a new array map.
     ///
     /// # Arguments
@@ -119,12 +139,14 @@ impl<P: PhysicalProfile> ArrayMap<P> {
         {
             use crate::profile::MemoryStrategy;
             let budget = <P::MemoryStrategy as MemoryStrategy>::MEMORY_BUDGET;
-            if budget > 0 && def.total_size() > budget {
+            let allocation_size = Self::allocation_size(def.value_size, def.max_entries)
+                .ok_or(MapError::OutOfMemory)?;
+            if budget > 0 && allocation_size > budget {
                 return Err(MapError::OutOfMemory);
             }
         }
 
-        let storage = ArrayStorage::new(def.value_size as usize, def.max_entries as usize);
+        let storage = ArrayStorage::new(def.value_size as usize, def.max_entries as usize)?;
 
         Ok(Self {
             def,
@@ -194,7 +216,7 @@ impl<P: PhysicalProfile> BpfMap<P> for ArrayMap<P> {
     #[cfg(feature = "cloud-profile")]
     fn resize(&mut self, new_max_entries: u32) -> MapResult<()> {
         let mut guard = self.data.write();
-        guard.resize(new_max_entries as usize);
+        guard.resize(new_max_entries as usize)?;
         self.def.max_entries = new_max_entries;
         Ok(())
     }
@@ -260,6 +282,14 @@ mod tests {
             map.update(&key, &bad_value, 0),
             Err(MapError::InvalidValue)
         ));
+    }
+
+    #[test]
+    fn array_map_uses_checked_allocation_size() {
+        assert_eq!(
+            ArrayMap::<ActiveProfile>::allocation_size(u32::MAX, u32::MAX),
+            (u32::MAX as usize).checked_mul(u32::MAX as usize)
+        );
     }
 
     #[cfg(feature = "cloud-profile")]

@@ -895,6 +895,8 @@ dependencies = [
  "kernel_pci",
  "kernel_physical_memory",
  "kernel_syscall",
+ "kernel_time",
+ "kernel_usermem",
  "kernel_vfs",
  "kernel_virtual_memory",
  "limine",
@@ -923,6 +925,7 @@ name = "kernel_abi"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.10.0",
+ "zerocopy 0.9.0-alpha.0",
 ]
 
 [[package]]
@@ -932,6 +935,7 @@ dependencies = [
  "criterion",
  "proptest",
  "spin",
+ "zerocopy 0.9.0-alpha.0",
 ]
 
 [[package]]
@@ -1004,7 +1008,12 @@ dependencies = [
  "spin",
  "thiserror",
  "x86_64",
+ "zerocopy 0.9.0-alpha.0",
 ]
+
+[[package]]
+name = "kernel_time"
+version = "0.1.0"
 
 [[package]]
 name = "kernel_usermem"

@@ -6,13 +6,13 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::ffi::c_void;
-use core::fmt::{Debug, Formatter};
+use core::fmt::{Debug, Display, Formatter};
 use core::ptr;
 #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use conquer_once::spin::OnceCell;
-use kernel_elfloader::{ElfFile, ElfLoader};
+use kernel_elfloader::{ElfFile, ElfLoader, LoadElfError};
 use kernel_memapi::{Allocation, Guarded, Location, MemoryApi, UserAccessible};
 use kernel_vfs::node::VfsNode;
 use kernel_vfs::path::{AbsoluteOwnedPath, AbsolutePath, ROOT};
@@ -53,6 +53,20 @@ use crate::mcore::mtask::scheduler::global::GlobalTaskQueue;
 use crate::mem::virt::VirtualMemoryAllocator;
 
 pub mod tree;
+
+enum TrampolineLoadError {
+    Parse(kernel_elfloader::ElfParseError),
+    Load(LoadElfError),
+}
+
+impl Display for TrampolineLoadError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Parse(err) => write!(f, "ELF parse error: {err}"),
+            Self::Load(err) => write!(f, "ELF load error: {err}"),
+        }
+    }
+}
 
 struct ElfSegments {
     executable: Vec<LowerHalfAllocation<Executable>>,
@@ -678,6 +692,18 @@ fn read_executable_file_into(
     Ok(())
 }
 
+fn trampoline_load_elf<'a>(
+    bytes: &'a [u8],
+    memapi: LowerHalfMemoryApi,
+) -> Result<(usize, kernel_elfloader::ElfImageParts<LowerHalfMemoryApi>), TrampolineLoadError> {
+    let elf_file = ElfFile::try_parse(bytes).map_err(TrampolineLoadError::Parse)?;
+    let code_ptr = elf_file.entry();
+    let elf_image = ElfLoader::new(memapi)
+        .load(elf_file)
+        .map_err(TrampolineLoadError::Load)?;
+    Ok((code_ptr, elf_image.into_inner()))
+}
+
 extern "C" fn trampoline(_arg: *mut c_void) {
     #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
     if !TRAMPOLINE_MARKER_SENT.swap(true, Ordering::Relaxed) {
@@ -760,47 +786,37 @@ extern "C" fn trampoline(_arg: *mut c_void) {
 
     #[cfg(target_arch = "aarch64")]
     let (code_ptr, exec_allocs, mut ro_allocs, wr_allocs, tls_master) =
-        with_process_address_space_active(&current_process, || {
+        match with_process_address_space_active(&current_process, || {
             // Keep all borrowed ELF reads in the active process address space.
-            // Parse errors are logged with the typed ElfParseError before the
-            // panic so a malformed executable image (audit H-05) leaves a
-            // diagnostic instead of a generic "should be able to parse" line.
-            let elf_file =
-                ElfFile::try_parse(executable_file_allocation.as_ref()).unwrap_or_else(|e| {
-                    log::error!("Trampoline: ELF parse error: {e}");
-                    panic!("Trampoline: ELF parse failed: {e}");
-                });
-            let code_ptr = elf_file.entry();
-            log::info!("Trampoline: ELF parsed, loading...");
-            #[cfg(feature = "rpi5")]
-            dbg_mark(b'E' as u32);
-            let elf_image = ElfLoader::new(memapi.clone())
-                .load(elf_file)
-                .unwrap_or_else(|e| {
-                    log::error!("Trampoline: ELF load error: {e}");
-                    panic!("Trampoline: ELF load failed: {e}");
-                });
-            let (exec_allocs, ro_allocs, wr_allocs, tls_master) = elf_image.into_inner();
-            (code_ptr, exec_allocs, ro_allocs, wr_allocs, tls_master)
-        });
+            trampoline_load_elf(executable_file_allocation.as_ref(), memapi.clone())
+        }) {
+            Ok((code_ptr, (exec_allocs, ro_allocs, wr_allocs, tls_master))) => {
+                log::info!("Trampoline: ELF loaded");
+                (code_ptr, exec_allocs, ro_allocs, wr_allocs, tls_master)
+            }
+            Err(err) => {
+                log::error!("Trampoline: {err}");
+                current_task.set_should_terminate(true);
+                Task::exit();
+                unreachable!("Task::exit never returns");
+            }
+        };
     #[cfg(not(target_arch = "aarch64"))]
-    let elf_file = ElfFile::try_parse(executable_file_allocation.as_ref()).unwrap_or_else(|e| {
-        log::error!("Trampoline: ELF parse error: {e}");
-        panic!("Trampoline: ELF parse failed: {e}");
-    });
-    #[cfg(not(target_arch = "aarch64"))]
-    let code_ptr = elf_file.entry();
-    #[cfg(not(target_arch = "aarch64"))]
-    log::info!("Trampoline: ELF parsed, loading...");
+    let (code_ptr, exec_allocs, mut ro_allocs, wr_allocs, tls_master) =
+        match trampoline_load_elf(executable_file_allocation.as_ref(), memapi.clone()) {
+            Ok((code_ptr, (exec_allocs, ro_allocs, wr_allocs, tls_master))) => {
+                log::info!("Trampoline: ELF loaded");
+                (code_ptr, exec_allocs, ro_allocs, wr_allocs, tls_master)
+            }
+            Err(err) => {
+                log::error!("Trampoline: {err}");
+                current_task.set_should_terminate(true);
+                Task::exit();
+                unreachable!("Task::exit never returns");
+            }
+        };
     #[cfg(all(not(target_arch = "aarch64"), feature = "rpi5"))]
     dbg_mark(b'E' as u32);
-    #[cfg(not(target_arch = "aarch64"))]
-    let elf_image = ElfLoader::new(memapi.clone())
-        .load(elf_file)
-        .expect("should be able to load elf file");
-    #[cfg(not(target_arch = "aarch64"))]
-    let (exec_allocs, mut ro_allocs, wr_allocs, tls_master) = elf_image.into_inner();
-    log::info!("Trampoline: ELF loaded");
     #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
     if !TRAMPOLINE_ELF_STAGE_SENT.swap(true, Ordering::Relaxed) {
         dbg_mark(b's' as u32);

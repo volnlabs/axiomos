@@ -1,3 +1,5 @@
+use kernel_abi::ProtFlags;
+
 use crate::UserspacePtr;
 use crate::access::{AllocationStrategy, CreateMappingError, Location};
 
@@ -23,6 +25,7 @@ pub trait MemoryRegionAccess {
         location: Location,
         size: usize,
         allocation_strategy: AllocationStrategy,
+        protection: ProtFlags,
     ) -> Result<UserspacePtr<u8>, CreateMappingError>;
 
     /// Adds a memory region to the process's memory region tracking.

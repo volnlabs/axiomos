@@ -1,8 +1,8 @@
 #![no_std]
 #![no_main]
 
-use core::panic::PanicInfo;
 use core::fmt::Write;
+use core::panic::PanicInfo;
 
 // SBI console functions
 const SBI_CONSOLE_PUTCHAR: usize = 1;
@@ -75,7 +75,7 @@ pub unsafe extern "C" fn _start_rust(hart_id: usize, dtb_addr: usize) -> ! {
     println!("  - Proper linker script usage");
     println!("");
     println!("Halting...");
-    
+
     loop {
         riscv::asm::wfi();
     }
@@ -85,8 +85,7 @@ pub unsafe extern "C" fn _start_rust(hart_id: usize, dtb_addr: usize) -> ! {
 fn panic(info: &PanicInfo) -> ! {
     println!("PANIC: {}", info);
     loop {
-        // SAFETY: Safe to execute wfi (wait for interrupt) in the panic loop
-        // to save power while the system is halted.
-        unsafe { riscv::asm::wfi(); }
+        // Wait for interrupt in the panic loop to save power while the system is halted.
+        riscv::asm::wfi();
     }
 }

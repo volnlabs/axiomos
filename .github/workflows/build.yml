@@ -66,12 +66,19 @@ jobs:
       - name: Rustfmt
         run: |
           cargo fmt --all -- --check
+      - name: Unsafe-code ledger
+        run: python3 -B scripts/unsafe-ledger.py --check
       - name: Clippy (per-crate, matches local CI recipe)
         # Per the axiom-kernel skill: per-crate clippy avoids the
         # profile-typed kernel_bpf "no default profile" failures that bare
         # `cargo clippy --workspace --lib` triggers on a host build.
         run: |
           cargo clippy -p kernel_abi --lib -- -D clippy::all
+          cargo clippy -p kernel_elfloader --all-targets -- -D clippy::all
+          cargo clippy -p kernel_syscall --all-targets -- -D clippy::all
+          cargo clippy -p kernel_time --all-targets -- -D clippy::all
+          cargo clippy -p kernel_usermem --all-targets -- -D clippy::all
+          cargo clippy -p kernel_virtual_memory --all-targets -- -D clippy::all
           cargo clippy -p kernel_vfs --lib -- -D clippy::all
           cargo clippy -p kernel_physical_memory --lib -- -D clippy::all
           cargo clippy -p kernel_bpf --no-default-features --features cloud-profile --lib -- -D clippy::all
@@ -86,24 +93,24 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly-2026-07-02
         with:
           components: rustfmt, clippy
+      - name: Add standalone non-host targets
+        run: |
+          rustup target add thumbv6m-none-eabi
+          rustup target add riscv64gc-unknown-none-elf
       - name: Clippy (rk_bridge)
         run: cargo clippy --manifest-path userspace/rk_bridge/Cargo.toml --lib -- -D clippy::all
       - name: Clippy (rk_cli)
         run: cargo clippy --manifest-path userspace/rk_cli/Cargo.toml -- -D clippy::all
       - name: Clippy (RP2040 firmware, debug)
-        run: cargo clippy --manifest-path firmware/shrike_rp2040/Cargo.toml -- -D clippy::all
+        run: cargo clippy --manifest-path firmware/shrike_rp2040/Cargo.toml --target thumbv6m-none-eabi -- -D clippy::all
       - name: Clippy (RP2040 firmware, release)
-        run: cargo clippy --manifest-path firmware/shrike_rp2040/Cargo.toml --release -- -D clippy::all
+        run: cargo clippy --manifest-path firmware/shrike_rp2040/Cargo.toml --target thumbv6m-none-eabi --release -- -D clippy::all
       - name: Clippy (RISC-V demo)
-        # Audit fix R1: install the target the demo's .cargo/config.toml
-        # requests. Without this the cargo invocation picks a host target
-        # or fails to find the std library.
-        run: |
-          rustup target add riscv64gc-unknown-none-elf || \
-            echo "::warning::riscv64gc-unknown-none-elf unavailable on this nightly; clippy job skipped"
-          if rustup target list --installed | grep -q riscv64gc-unknown-none-elf; then
-            cargo clippy --manifest-path kernel/demos/riscv/Cargo.toml -- -D clippy::all
-          fi
+        # Audit fix R5: `--manifest-path` from the repository root does not
+        # load kernel/demos/riscv/.cargo/config.toml, so the previous command
+        # compiled the demo build script for the host target and invoked host
+        # `cc` with RISC-V flags. Pass the target explicitly.
+        run: cargo clippy --manifest-path kernel/demos/riscv/Cargo.toml --target riscv64gc-unknown-none-elf -- -D clippy::all
       - name: Clippy (Lean check, formal proofs)
         working-directory: formal
         run: |
@@ -115,6 +122,9 @@ jobs:
             curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
             echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
           fi
+          # GITHUB_PATH is applied only to later steps; export PATH here too
+          # so a fresh runner can invoke `lake` in this same shell.
+          export PATH="$HOME/.elan/bin:$PATH"
           lake build
 
   test:
@@ -142,6 +152,7 @@ jobs:
             cargo test -p kernel_vfs $PROFILE_FLAG
             cargo test -p kernel_physical_memory $PROFILE_FLAG
             cargo test -p kernel_syscall $PROFILE_FLAG
+            cargo test -p kernel_time $PROFILE_FLAG
             cargo test -p kernel_virtual_memory $PROFILE_FLAG
             cargo test -p kernel_usermem $PROFILE_FLAG
             cargo test --manifest-path kernel/crates/kernel_elfloader/Cargo.toml $PROFILE_FLAG
@@ -157,14 +168,18 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install pinned nightly
         uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        with:
+          targets: thumbv6m-none-eabi
+      - name: Add RP2040 target
+        run: rustup target add thumbv6m-none-eabi
       - name: Test rk_bridge
         run: cargo test --manifest-path userspace/rk_bridge/Cargo.toml
       - name: Test rk_cli
         run: cargo test --manifest-path userspace/rk_cli/Cargo.toml
       - name: Test RP2040 firmware (debug)
-        run: cargo test --manifest-path firmware/shrike_rp2040/Cargo.toml --no-run
+        run: cargo test --manifest-path firmware/shrike_rp2040/Cargo.toml --target thumbv6m-none-eabi --no-run
       - name: Test RP2040 firmware (release)
-        run: cargo test --manifest-path firmware/shrike_rp2040/Cargo.toml --release --no-run
+        run: cargo test --manifest-path firmware/shrike_rp2040/Cargo.toml --target thumbv6m-none-eabi --release --no-run
 
   firmware-rp2040:
     name: "Firmware (RP2040)"
@@ -177,10 +192,10 @@ jobs:
           targets: thumbv6m-none-eabi
       - name: Check RP2040 firmware (debug)
         run: |
-          cargo check --manifest-path firmware/shrike_rp2040/Cargo.toml
+          cargo check --manifest-path firmware/shrike_rp2040/Cargo.toml --target thumbv6m-none-eabi
       - name: Check RP2040 firmware (release)
         run: |
-          cargo check --manifest-path firmware/shrike_rp2040/Cargo.toml --release
+          cargo check --manifest-path firmware/shrike_rp2040/Cargo.toml --target thumbv6m-none-eabi --release
 
   prepare-miri:
     name: "Prepare Miri"
@@ -318,12 +333,15 @@ jobs:
               echo "::error::axiomos.iso not produced by release build"
               exit 1
             fi
-            DISK_PATH=$(find target/release/build -name '*.img' -path '*/disk-image/*' -type f | head -n 1)
-            if [[ -z "$DISK_PATH" ]]; then
-              DISK_PATH=$(find target/release/build -name 'axiomos-x86_64.img' -type f | head -n 1)
+            DISK_PATH="$(dirname "$ISO_PATH")/disk.img"
+            if [[ ! -f "$DISK_PATH" ]]; then
+              # Fallback for future build.rs layout changes: prefer any disk.img
+              # in the same Cargo target tree, but do not look for retired
+              # artifact names.
+              DISK_PATH=$(find target/release/build -path '*/out/disk.img' -type f | head -n 1)
             fi
-            if [[ -z "$DISK_PATH" ]]; then
-              echo "::error::disk image not produced by release build"
+            if [[ -z "$DISK_PATH" || ! -f "$DISK_PATH" ]]; then
+              echo "::error::disk image not produced next to $ISO_PATH (expected build.rs out/disk.img)"
               exit 1
             fi
             echo "iso-path=$ISO_PATH" >> "$GITHUB_OUTPUT"
@@ -341,8 +359,8 @@ jobs:
             # distributions (.fd vs .4m.fd). Fail loudly if neither
             # naming pattern matches so the gate reports the real
             # problem instead of "QEMU_BOOT_OK missing" downstream.
-            OVMF_CODE=$(find /usr/share/OVMF -name 'OVMF_CODE.fd' -o -name 'OVMF_CODE_4M.fd' -o -name 'OVMF_CODE.4m.fd' 2>/dev/null | head -n1)
-            OVMF_VARS=$(find /usr/share/OVMF -name 'OVMF_VARS.fd' -o -name 'OVMF_VARS_4M.fd' -o -name 'OVMF_VARS.4m.fd' 2>/dev/null | head -n1)
+            OVMF_CODE=$(find /usr/share/OVMF \( -name 'OVMF_CODE.fd' -o -name 'OVMF_CODE_4M.fd' -o -name 'OVMF_CODE.4m.fd' \) -type f 2>/dev/null | head -n1)
+            OVMF_VARS=$(find /usr/share/OVMF \( -name 'OVMF_VARS.fd' -o -name 'OVMF_VARS_4M.fd' -o -name 'OVMF_VARS.4m.fd' \) -type f 2>/dev/null | head -n1)
             if [[ -z "$OVMF_CODE" || -z "$OVMF_VARS" ]]; then
               echo "::error::OVMF pflash blobs not found under /usr/share/OVMF"
               echo "Expected one of: OVMF_CODE.fd / OVMF_CODE_4M.fd / OVMF_CODE.4m.fd"
@@ -381,24 +399,16 @@ jobs:
             #   3. at least one userspace process actually ran — evidence
             #      that init reached user mode without dying immediately
             #
-            # The gate ALSO records the audit C-01 surface signal:
-            #   * kernel panicked at kernel/src/arch/idt.rs PAGE FAULT
-            #     after QEMU_BOOT_OK means a user-mode instruction
-            #     fetch hit an unmapped canonical address. That's the
-            #     exact C-01 panic surface. The gate prints it as a
-            #     ::warning so it shows up on PRs but does not block
-            #     until PR #3 (exception model + UserMemory adapter)
-            #     lands. Before PR #3 the C-01 warning is expected.
+            #   4. /bin/init receives EFAULT, without a CPU page fault, for
+            #      copy-in and copy-out syscalls aimed at an unmapped canonical
+            #      user address
+            #   5. unknown syscalls return ENOSYS instead of panicking
             ACPI_FAIL=$(grep -c -E 'RsdpIncorrectSignature|RSDP|panicked at kernel/src/acpi' "$SERIAL_LOG" || true)
             BOOT_OK=$(grep -c 'QEMU_BOOT_OK' "$SERIAL_LOG" || true)
             INIT_RAN=$(grep -c 'started process pid=' "$SERIAL_LOG" || true)
-            # Audit C-01 / H-01 surface signal: the kernel still panics
-            # on user-mode page faults (audit C-01). The 'EXCEPTION:
-            # PAGE FAULT' string is followed by an error-code line that
-            # distinguishes USER_MODE from KERNEL_MODE faults; we just
-            # count the exception count here and surface it as a warning
-            # so PRs see the regression without blocking until PR #3.
-            USER_PANIC=$(grep -c 'EXCEPTION: PAGE FAULT' "$SERIAL_LOG" || true)
+            USERCOPY_OK=$(grep -c 'USERCOPY_EFAULT_OK' "$SERIAL_LOG" || true)
+            ENOSYS_OK=$(grep -c 'UNKNOWN_SYSCALL_ENOSYS_OK' "$SERIAL_LOG" || true)
+            EXCEPTION_PANIC=$(grep -c -E 'panicked at kernel/src/arch/idt|KERNEL_MODE.*PAGE FAULT' "$SERIAL_LOG" || true)
 
             if [[ "$ACPI_FAIL" -gt 0 ]]; then
               echo "::error::ACPI/RSDP failure before QEMU_BOOT_OK — kernel panicked during boot"
@@ -413,8 +423,16 @@ jobs:
               echo "::error::no 'started process pid=' line — kernel reached QEMU_BOOT_OK but init did not run"
               exit 1
             fi
-            if [[ "$USER_PANIC" -gt 0 ]]; then
-              echo "::warning::audit C-01 / H-01 surfaced: $USER_PANIC user-mode instruction-fetch page fault(s) panicking the kernel after init"
-              echo "::warning::expected before PR #3 (exception model + UserMemory adapter) lands"
+            if [[ "$USERCOPY_OK" -lt 1 ]]; then
+              echo "::error::USERCOPY_EFAULT_OK missing — unmapped user pointers were not contained as EFAULT"
+              exit 1
             fi
-            echo "PASS: kernel reached QEMU_BOOT_OK and ran init (audit C-01: $USER_PANIC user-fault panic(s) recorded as warning)"
+            if [[ "$ENOSYS_OK" -lt 1 ]]; then
+              echo "::error::UNKNOWN_SYSCALL_ENOSYS_OK missing — unknown syscall contract regressed"
+              exit 1
+            fi
+            if [[ "$EXCEPTION_PANIC" -gt 0 ]]; then
+              echo "::error::kernel exception path panicked during userspace smoke test"
+              exit 1
+            fi
+            echo "PASS: kernel reached init; user-copy EFAULT and ENOSYS containment probes passed"

@@ -48,6 +48,7 @@ mod pruner;
 mod refine;
 mod state;
 
+pub(crate) use core::VerificationToken;
 pub use core::{MapPerm, Verifier, VerifyConfig, VerifyStats};
 
 pub use alu::{compute_alu_result, compute_alu_result_width, scalar_from_imm};

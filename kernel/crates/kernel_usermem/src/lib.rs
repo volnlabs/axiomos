@@ -16,10 +16,8 @@
 //! 4. Convert any recoverable fault into [`UserMemError`]. Never deref a raw
 //!    pointer that hasn't been proven mapped and permissioned.
 //!
-//! A live kernel adapter is added in PR #2.2 (blocked on PR #3's
-//! exception/task-termination model). The contract and the
-//! [`MockUserMemory`] test backend in this PR are what every subsequent
-//! user-memory change must conform to.
+//! The live kernel adapter implements this contract over the current process's
+//! page tables. [`MockUserMemory`] keeps the same semantics host-testable.
 //!
 //! The crate is intentionally `#![no_std]` and dependency-light so the same
 //! contract can be hosted inside `kernel_bpf`'s helper layer and the syscall
@@ -209,34 +207,68 @@ impl MockUserMemory {
     fn offset_within_page(vaddr: VirtAddr) -> usize {
         (vaddr.as_u64() & 0xFFF) as usize
     }
+
+    fn validate_range(
+        &self,
+        addr: VirtAddr,
+        len: usize,
+        permission: UserMemPerm,
+    ) -> UserMemResult<()> {
+        if addr.as_u64() == 0 {
+            return Err(UserMemError::Null);
+        }
+        if len > MAX_USER_COPY {
+            return Err(UserMemError::TooLong(len, MAX_USER_COPY));
+        }
+        if len == 0 {
+            return Ok(());
+        }
+
+        let end = addr
+            .as_u64()
+            .checked_add(len as u64)
+            .ok_or(UserMemError::BadRange(addr, len))?;
+        #[cfg(target_arch = "x86_64")]
+        const USER_END_EXCLUSIVE: u64 = 0x0000_8000_0000_0000;
+        #[cfg(target_arch = "aarch64")]
+        const USER_END_EXCLUSIVE: u64 = 0x0001_0000_0000_0000;
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        const USER_END_EXCLUSIVE: u64 = u64::MAX;
+        if addr.as_u64() >= USER_END_EXCLUSIVE || end > USER_END_EXCLUSIVE {
+            return Err(UserMemError::BadRange(addr, len));
+        }
+
+        let mut current = addr.as_u64();
+        while current < end {
+            let current_addr = VirtAddr::new(current);
+            let perms = self
+                .pages
+                .get(&Self::page_of(current_addr))
+                .copied()
+                .ok_or(UserMemError::Unmapped(current_addr))?;
+            let allowed = match permission {
+                UserMemPerm::Read => perms.readable,
+                UserMemPerm::Write => perms.writable,
+            };
+            if !allowed {
+                return Err(UserMemError::PermissionDenied(current_addr, permission));
+            }
+            current = (current | 0xFFF).saturating_add(1).min(end);
+        }
+
+        Ok(())
+    }
 }
 
 impl UserMemory for MockUserMemory {
     fn copy_from_user(&mut self, dst: &mut [u8], src_addr: VirtAddr) -> UserMemResult<()> {
-        if src_addr.as_u64() == 0 {
-            return Err(UserMemError::Null);
-        }
-        if dst.is_empty() {
-            return Ok(());
-        }
-        if dst.len() > MAX_USER_COPY {
-            return Err(UserMemError::TooLong(dst.len(), MAX_USER_COPY));
-        }
+        self.validate_range(src_addr, dst.len(), UserMemPerm::Read)?;
 
         let mut copied = 0usize;
         while copied < dst.len() {
             let cur = VirtAddr::new(src_addr.as_u64() + copied as u64);
             let page = Self::page_of(cur);
             let off = Self::offset_within_page(cur);
-
-            let perms = self
-                .pages
-                .get(&page)
-                .copied()
-                .ok_or(UserMemError::Unmapped(cur))?;
-            if !perms.readable {
-                return Err(UserMemError::PermissionDenied(cur, UserMemPerm::Read));
-            }
 
             let backing = self.backing.get(&page).expect("mapped page has no backing");
             let remaining_in_page = 4096 - off;
@@ -251,22 +283,7 @@ impl UserMemory for MockUserMemory {
     }
 
     fn copy_to_user(&mut self, dst_addr: VirtAddr, src: &[u8]) -> UserMemResult<()> {
-        if dst_addr.as_u64() == 0 {
-            return Err(UserMemError::Null);
-        }
-        if src.is_empty() {
-            return Ok(());
-        }
-        if src.len() > MAX_USER_COPY {
-            return Err(UserMemError::TooLong(src.len(), MAX_USER_COPY));
-        }
-
-        // Mutable access requires a different backing view; split the borrow.
-        let pages_snapshot: Vec<(u64, MockPageEntry)> =
-            self.pages.iter().map(|(k, v)| (*k, *v)).collect();
-        for (k, _v) in &pages_snapshot {
-            assert!(self.backing.contains_key(k), "mapped page has no backing");
-        }
+        self.validate_range(dst_addr, src.len(), UserMemPerm::Write)?;
 
         let mut copied = 0usize;
         while copied < src.len() {
@@ -274,32 +291,14 @@ impl UserMemory for MockUserMemory {
             let page = Self::page_of(cur);
             let off = Self::offset_within_page(cur);
 
-            let perms = self
-                .pages
-                .get(&page)
-                .copied()
-                .ok_or(UserMemError::Unmapped(cur))?;
-            if !perms.writable {
-                return Err(UserMemError::PermissionDenied(cur, UserMemPerm::Write));
-            }
-
-            // Safe: per-page write below 4096 bytes, never aliasing across pages.
-            // We take a fresh lookup each iteration so the immutable borrow
-            // on `pages` doesn't span the mutable borrow on `backing`.
             let remaining_in_page = 4096 - off;
             let remaining_in_src = src.len() - copied;
             let chunk = remaining_in_page.min(remaining_in_src);
 
-            // SAFETY: bounded write of `chunk` bytes at `off` within the
-            // mapped page's backing. The page was mapped with Write
-            // permission. The chunk size never exceeds 4096 - off, so we
-            // cannot write past the page end.
             let page_key = page;
             let backing_len = self.backing[&page_key].len();
             assert!(off + chunk <= backing_len, "chunk exceeds page");
-            // Use a split borrow: collect src slice index first, then mut-borrow backing.
             let src_chunk = &src[copied..copied + chunk];
-            // Mutable borrow scope is just this slice write.
             let backing_mut = self
                 .backing
                 .get_mut(&page_key)
@@ -552,5 +551,44 @@ mod tests {
         // Empty copy does not need a mapped page; still must not panic.
         mem.copy_from_user(&mut buf, VirtAddr::new(0xDEAD_BEEF))
             .unwrap();
+    }
+
+    #[test]
+    fn cross_page_read_failure_does_not_partially_modify_kernel_buffer() {
+        let mut mem = rwx_page(MockUserMemory::new(), 0x3000_0000, &[0xAA; 4096]);
+        let mut dst = [0x55; 16];
+
+        let error = mem
+            .copy_from_user(&mut dst, VirtAddr::new(0x3000_0FF8))
+            .unwrap_err();
+
+        assert!(matches!(error, UserMemError::Unmapped(_)));
+        assert_eq!(dst, [0x55; 16]);
+    }
+
+    #[test]
+    fn cross_page_write_failure_does_not_partially_modify_user_memory() {
+        let mut mem = rwx_page(MockUserMemory::new(), 0x4000_0000, &[0xAA; 4096]);
+
+        let error = mem
+            .copy_to_user(VirtAddr::new(0x4000_0FF8), &[0x55; 16])
+            .unwrap_err();
+
+        assert!(matches!(error, UserMemError::Unmapped(_)));
+        let mut tail = [0u8; 8];
+        mem.copy_from_user(&mut tail, VirtAddr::new(0x4000_0FF8))
+            .unwrap();
+        assert_eq!(tail, [0xAA; 8]);
+    }
+
+    #[test]
+    fn overflowing_range_is_rejected_before_page_lookup() {
+        let mut mem = MockUserMemory::new();
+        let mut dst = [0u8; 16];
+        let address = VirtAddr::new(0x0000_7FFF_FFFF_FFF8);
+
+        let error = mem.copy_from_user(&mut dst, address).unwrap_err();
+
+        assert!(matches!(error, UserMemError::BadRange(_, 16)));
     }
 }

@@ -27,6 +27,10 @@ pub enum LoadElfError {
     AllocationFailed,
     #[error("unsupported file type")]
     UnsupportedFileType(ElfType),
+    #[error("segment file size is larger than memory size")]
+    SegmentFileLargerThanMemory,
+    #[error("writable+executable segments are not supported")]
+    WritableExecutableSegment,
     #[error("size or alignment requirement is invalid")]
     InvalidSizeOrAlign,
     #[error("invalid virtual address 0x{0:016x}")]
@@ -51,18 +55,15 @@ where
 
     /// # Errors
     /// Returns an error if the ELF file is not supported or if a required memory allocation fails.
-    ///
-    /// # Panics
-    /// Panics if the ELF file is not of type `ET_EXEC`.
     pub fn load<'a>(&mut self, elf_file: ElfFile<'a>) -> Result<ElfImage<'a, M>, LoadElfError>
     where
         <M as MemoryApi>::WritableAllocation: Debug,
     {
-        assert_eq!(
-            ElfType::Exec,
-            elf_file.header.typ,
-            "only ET_EXEC supported for now"
-        );
+        if elf_file.header.typ != ElfType::Exec {
+            return Err(LoadElfError::UnsupportedFileType(
+                elf_file.header.typ.clone(),
+            ));
+        }
 
         let mut image = ElfImage {
             elf_file,
@@ -92,6 +93,14 @@ where
                     source_len: image.elf_file.source.len(),
                 },
             ))?;
+            if hdr.filesz > hdr.memsz {
+                return Err(LoadElfError::SegmentFileLargerThanMemory);
+            }
+            if hdr.flags.contains(&ProgramHeaderFlags::EXECUTABLE)
+                && hdr.flags.contains(&ProgramHeaderFlags::WRITABLE)
+            {
+                return Err(LoadElfError::WritableExecutableSegment);
+            }
 
             let location = Location::Fixed(hdr.vaddr as u64);
 
@@ -111,12 +120,6 @@ where
             let slice = alloc.as_mut();
             slice[..hdr.filesz].copy_from_slice(pdata);
             slice[hdr.filesz..].fill(0);
-
-            assert!(
-                !(hdr.flags.contains(&ProgramHeaderFlags::EXECUTABLE)
-                    && hdr.flags.contains(&ProgramHeaderFlags::WRITABLE)),
-                "segments that are executable and writable are not supported"
-            );
 
             if hdr.flags.contains(&ProgramHeaderFlags::EXECUTABLE) {
                 let alloc = self
@@ -156,6 +159,9 @@ where
                 source_len: image.elf_file.source.len(),
             },
         ))?;
+        if tls.filesz > tls.memsz {
+            return Err(LoadElfError::SegmentFileLargerThanMemory);
+        }
 
         let layout = Layout::from_size_align(tls.memsz, tls.align)
             .map_err(|_| LoadElfError::InvalidSizeOrAlign)?;

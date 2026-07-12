@@ -227,7 +227,10 @@ impl<P: PhysicalProfile> RingBufMap<P> {
             flags: 0,
         };
 
-        let data = vec![0u8; size];
+        let mut data = Vec::new();
+        data.try_reserve_exact(size)
+            .map_err(|_| MapError::OutOfMemory)?;
+        data.resize(size, 0);
         let control = RingControl::new(size);
 
         Ok(Self {
@@ -254,8 +257,8 @@ impl<P: PhysicalProfile> RingBufMap<P> {
     ///
     /// Returns a reservation that must be submitted or discarded.
     pub fn reserve(&self, size: usize) -> Option<RingBufReservation> {
-        let total_size = EventHeader::SIZE + size;
-        let aligned_size = (total_size + 7) & !7;
+        let total_size = EventHeader::SIZE.checked_add(size)?;
+        let aligned_size = total_size.checked_add(7)? & !7;
 
         // Check if there's enough space
         if self.control.available_space() < aligned_size {
@@ -466,6 +469,12 @@ impl<P: PhysicalProfile> BpfMap<P> for RingBufMap<P> {
 
         // Resize requires draining existing data
         let mut buffer = self.data.lock();
+        if new_size > buffer.len() {
+            let additional = new_size - buffer.len();
+            buffer
+                .try_reserve_exact(additional)
+                .map_err(|_| MapError::OutOfMemory)?;
+        }
         buffer.resize(new_size, 0);
 
         // Reset control

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 spin.workspace = true
+zerocopy.workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
@@ -14,6 +15,9 @@ proptest = "1"
 default = []
 cloud-profile = []
 embedded-profile = []
+# Excluded from every shipped profile until code images have an owned,
+# compile-on-load RW-to-RX lifecycle.
+experimental-aarch64-jit = []
 
 [[bench]]
 name = "interpreter"

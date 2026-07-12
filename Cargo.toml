@@ -107,6 +107,7 @@ members = [
   "kernel/crates/kernel_pci",
   "kernel/crates/kernel_physical_memory",
   "kernel/crates/kernel_syscall",
+  "kernel/crates/kernel_time",
   "kernel/crates/kernel_vfs",
   "kernel/crates/kernel_virtual_memory",
   "kernel/crates/kernel_usermem",
@@ -140,6 +141,7 @@ default-members = [
   "kernel/crates/kernel_pci",
   "kernel/crates/kernel_physical_memory",
   "kernel/crates/kernel_syscall",
+  "kernel/crates/kernel_time",
   "kernel/crates/kernel_vfs",
   "kernel/crates/kernel_virtual_memory",
   "userspace/file_structure",
@@ -184,7 +186,7 @@ x2apic = "0.5"
 x86_64 = "0.15"
 riscv = "0.11"
 aarch64-cpu = "9.4"
-zerocopy = { version = "0.9.0-alpha.0", features = ["alloc", "derive"] }
+zerocopy = { version = "0.9.0-alpha.0", default-features = false, features = ["derive"] }
 fdt = "0.1.5"
 
 [profile.dev]

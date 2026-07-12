@@ -156,21 +156,14 @@ impl Task {
         let task = ExecutionContext::load().current_task();
         trace!("exiting task {}", task.name());
 
-        // SAFETY: We are forcefully unlocking locks held by the exiting task to avoid deadlocks
-        // and cleaning up resources. This is done just before termination.
-        unsafe {
-            task.ustack.force_write_unlock();
-            task.tls.force_write_unlock();
-            task.fx_area.force_write_unlock();
+        // Known entry/trampoline call sites do not hold these task-local locks,
+        // so normal lock acquisition is the sound teardown.
+        let _ = task.fx_area.write().take();
+        let _ = task.tls.write().take();
+        let _ = task.ustack.write().take();
+        task.set_should_terminate(true);
 
-            let _ = task.fx_area.write().take();
-            let _ = task.tls.write().take();
-            let _ = task.ustack.write().take();
-
-            task.set_should_terminate(true);
-        }
-
-        // Disable interrupts and reschedule away from this terminated task.
+        // AArch64 switches away immediately once the task is marked dead.
         #[cfg(all(target_arch = "aarch64", feature = "aarch64_arch"))]
         {
             use crate::arch::traits::Architecture;
@@ -181,7 +174,8 @@ impl Task {
         }
         loop {
             #[cfg(target_arch = "x86_64")]
-            x86_64::instructions::hlt();
+            // The timer interrupt performs the eventual scheduler switch.
+            x86_64::instructions::interrupts::enable_and_hlt();
             #[cfg(target_arch = "aarch64")]
             unsafe {
                 core::arch::asm!("wfi");

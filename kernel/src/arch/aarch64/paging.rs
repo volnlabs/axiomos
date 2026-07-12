@@ -361,6 +361,32 @@ impl PageTableWalker {
         Ok(phys)
     }
 
+    /// Update an existing leaf PTE without creating an unmapped interval.
+    pub fn update_page_flags(&mut self, virt: usize, flags: u64) -> Result<(), &'static str> {
+        let indices = va_to_indices(virt);
+
+        let l0 = unsafe { &mut *self.root };
+        let l1 = self
+            .get_table(l0, indices[0])
+            .ok_or("L1 table not present")?;
+        let l2 = self
+            .get_table(l1, indices[1])
+            .ok_or("L2 table not present")?;
+        let l3 = self
+            .get_table(l2, indices[2])
+            .ok_or("L3 table not present")?;
+
+        let entry = l3.entry_mut(indices[3]);
+        if !entry.is_valid() {
+            return Err("Page not mapped");
+        }
+
+        let phys = entry.addr();
+        *entry = PageTableEntry::page(phys, flags);
+        flush_tlb_page(virt);
+        Ok(())
+    }
+
     /// Translate virtual address to physical address and raw flags
     pub fn translate_full(&self, virt: usize) -> Option<(usize, u64)> {
         let indices = va_to_indices(virt);

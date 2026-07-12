@@ -118,15 +118,16 @@ impl StaticPool {
         let mut metadata = POOL.metadata.lock();
 
         // Align to 8 bytes
-        let aligned_size = (size + 7) & !7;
+        let aligned_size = size.checked_add(7)? & !7;
 
         // Check if we have enough space
-        if metadata.watermark + aligned_size > DEFAULT_POOL_SIZE {
+        let end = metadata.watermark.checked_add(aligned_size)?;
+        if end > DEFAULT_POOL_SIZE {
             return None;
         }
 
         let start = metadata.watermark;
-        metadata.watermark += aligned_size;
+        metadata.watermark = end;
         metadata.alloc_count += 1;
 
         // SAFETY: We're returning a unique mutable slice from the pool.
@@ -255,6 +256,15 @@ mod tests {
         // Another large allocation should fail
         let result = StaticPool::allocate(StaticPool::total_size());
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn allocation_size_overflow_is_rejected_without_moving_watermark() {
+        setup();
+        let before = StaticPool::used();
+
+        assert!(StaticPool::allocate(usize::MAX).is_none());
+        assert_eq!(StaticPool::used(), before);
     }
 
     #[test]

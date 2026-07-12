@@ -1,4 +1,5 @@
 use bitflags::bitflags;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 bitflags! {
     pub struct BpfMapTags: u32 {
@@ -77,9 +78,14 @@ pub const BPF_RINGBUF_POLL: u32 = 37; // Custom command for polling ringbuf even
 // with the `verifier-cost` measurement feature; rejected otherwise.
 // attach_prog_fd = program id, attach_btf_id = run count.
 pub const BPF_BENCH_EXEC: u32 = 100;
+/// Custom lifecycle commands. Raw object IDs are tombstoned rather than reused
+/// until the ABI grows owned, generational per-process descriptors.
+pub const BPF_PROG_UNLOAD: u32 = 101;
+pub const BPF_MAP_DESTROY: u32 = 102;
+pub const BPF_OBJ_UNPIN: u32 = 103;
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, KnownLayout, Immutable)]
 pub struct BpfAttr {
     // Field 0-1: Used by multiple commands
     // - MAP_CREATE: map_type, key_size
@@ -129,7 +135,7 @@ pub struct BpfAttr {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct BpfObjectInfo {
     pub id: u32,
     pub object_kind: u32,

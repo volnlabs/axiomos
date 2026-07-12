@@ -360,6 +360,7 @@ impl kernel_syscall::access::MemoryRegionAccess for KernelAccess<'_> {
         location: kernel_syscall::access::Location,
         size: usize,
         allocation_strategy: kernel_syscall::access::AllocationStrategy,
+        protection: kernel_abi::ProtFlags,
     ) -> Result<kernel_syscall::UserspacePtr<u8>, kernel_syscall::access::CreateMappingError> {
         // Use the MemoryAccess trait to create the mapping
         let mapping = <Self as kernel_syscall::access::MemoryAccess>::create_mapping(
@@ -367,6 +368,7 @@ impl kernel_syscall::access::MemoryRegionAccess for KernelAccess<'_> {
             location,
             size,
             allocation_strategy,
+            protection,
         )?;
 
         let addr =

@@ -1,13 +1,11 @@
 use core::ops::Neg;
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-use core::slice::{from_raw_parts, from_raw_parts_mut};
 #[cfg(feature = "rpi5")]
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use access::KernelAccess;
-use kernel_abi::{syscall_name, Errno, EINVAL};
+use kernel_abi::{syscall_name, Errno, EINVAL, ENOSYS};
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use kernel_syscall::{
     access::FileAccess,
@@ -18,15 +16,18 @@ use kernel_syscall::{
         sys_close, sys_dup, sys_dup2, sys_getcwd, sys_lseek, sys_pipe, sys_read, sys_write,
         sys_writev,
     },
-    UserspaceMutPtr, UserspacePtr,
+    UserspacePtr,
 };
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use kernel_usermem::MAX_USER_COPY;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use kernel_vfs::path::AbsolutePath;
-use log::{error, info, trace};
+use log::{error, trace};
 #[cfg(target_arch = "x86_64")]
 use x86_64::instructions::hlt;
-
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use zerocopy::IntoBytes;
+
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::mcore::mtask::process::Process;
 
@@ -91,7 +92,7 @@ pub fn dispatch_syscall(
     arg5: usize,
     arg6: usize,
 ) -> isize {
-    info!(
+    trace!(
         "syscall: {} ({n}) {arg1} {arg2} {arg3} {arg4} {arg5} {arg6}",
         syscall_name(n)
     );
@@ -189,9 +190,7 @@ pub fn dispatch_syscall(
         kernel_abi::SYS_ESTOP => dispatch_sys_estop(arg1),
         _ => {
             error!("unimplemented syscall: {} ({n})", syscall_name(n));
-            loop {
-                hlt();
-            }
+            Err(ENOSYS)
         }
     };
 
@@ -215,20 +214,15 @@ pub fn dispatch_syscall(
             result: result as i64,
         };
         let ctx = kernel_bpf::execution::BpfContext::from_struct(&exit_ctx);
-        if let Some(manager) = crate::BPF_MANAGER.get() {
-            let attached = manager
-                .lock()
-                .get_hook_programs(crate::bpf::ATTACH_TYPE_SYS_EXIT)
-                .len();
+        if let Ok(attached) = crate::bpf::BpfManager::run_hook_programs(
+            crate::bpf::ATTACH_TYPE_SYS_EXIT,
+            &ctx,
+            "sys_exit",
+        ) {
             if attached != 0 {
                 trace!("sys_exit dispatch: syscall={n} attached_programs={attached}");
             }
         }
-        let _ = crate::bpf::BpfManager::run_hook_programs(
-            crate::bpf::ATTACH_TYPE_SYS_EXIT,
-            &ctx,
-            "sys_exit",
-        );
     }
 
     result
@@ -262,78 +256,13 @@ fn dispatch_sys_estop(action: usize) -> Result<usize, Errno> {
     }
 }
 
-/// Create a slice from a raw pointer and length.
-///
-/// # Safety
-///
-/// The caller must ensure:
-/// - `ptr` points to valid, initialized memory for `len` elements of type `T`
-/// - The memory is properly aligned for type `T`
-/// - The memory remains valid for the lifetime `'a`
-/// - No mutable references to the memory exist during the slice's lifetime
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-unsafe fn slice_from_ptr_and_len<'a, T>(ptr: usize, len: usize) -> Result<&'a [T], Errno> {
-    if ptr == 0 {
-        return Err(EINVAL);
-    }
-    if len == 0 {
-        return Ok(&[]);
-    }
-
-    // SAFETY: We validate that ptr is in the userspace address range (canonical lower half)
-    // via try_from_usize, which rejects kernel addresses.
-    let user_ptr = unsafe { UserspacePtr::<T>::try_from_usize(ptr)? };
-
-    // Check if the memory range is valid for userspace access
-    user_ptr.validate_range(len * core::mem::size_of::<T>())?;
-
-    // SAFETY: Caller guarantees ptr points to valid memory for len elements of T,
-    // is properly aligned, and no mutable references exist. The checks above
-    // ensure it is within userspace bounds.
-    let slice = unsafe { from_raw_parts(ptr as *mut T, len) };
-    Ok(slice)
-}
-
-/// Create a mutable slice from a raw pointer and length.
-///
-/// # Safety
-///
-/// The caller must ensure:
-/// - `ptr` points to valid, initialized memory for `len` elements of type `T`
-/// - The memory is properly aligned for type `T`
-/// - The memory remains valid for the lifetime `'a`
-/// - No other references (mutable or immutable) to the memory exist
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-unsafe fn slice_from_ptr_and_len_mut<'a, T>(ptr: usize, len: usize) -> Result<&'a mut [T], Errno> {
-    if ptr == 0 {
-        return Err(EINVAL);
-    }
-    if len == 0 {
-        return Ok(&mut []);
-    }
-
-    // SAFETY: We validate that ptr is in the userspace address range (canonical lower half)
-    // via try_from_usize, which rejects kernel addresses.
-    let user_ptr = unsafe { UserspaceMutPtr::<T>::try_from_usize(ptr)? };
-
-    // Check if the memory range is valid for userspace access
-    user_ptr.validate_range(len * core::mem::size_of::<T>())?;
-
-    // SAFETY: Caller guarantees ptr points to valid memory for len elements of T,
-    // is properly aligned, and no other references exist. The checks above
-    // ensure it is within userspace bounds.
-    let slice = unsafe { from_raw_parts_mut(ptr as *mut T, len) };
-    Ok(slice)
-}
-
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn dispatch_sys_getcwd(path: usize, size: usize) -> Result<usize, Errno> {
     let cx = KernelAccess::new();
-
-    // SAFETY: path comes from userspace syscall arguments. UserspaceMutPtr::try_from_usize
-    // validates that the address is in the userspace address range (canonical lower half).
-    let path = unsafe { UserspaceMutPtr::try_from_usize(path)? };
-    sys_getcwd(&cx, path, size)
+    let mut buffer = alloc::vec![0u8; size.min(kernel_abi::PATH_MAX + 1)];
+    let written = sys_getcwd(&cx, &mut buffer)?;
+    validation::copy_to_userspace(path, &buffer[..written])?;
+    Ok(path)
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -376,11 +305,11 @@ fn dispatch_sys_open(
     mode: usize,
 ) -> Result<usize, Errno> {
     let cx = KernelAccess::new();
-
-    // SAFETY: path comes from userspace syscall arguments. UserspacePtr::try_from_usize
-    // validates that the address is in the userspace address range (canonical lower half).
-    let path = unsafe { UserspacePtr::try_from_usize(path)? };
-    sys_open(&cx, path, path_len, oflag as i32, mode as i32)
+    if path_len > kernel_abi::PATH_MAX {
+        return Err(kernel_abi::ENAMETOOLONG);
+    }
+    let path = validation::read_userspace_slice(path, path_len)?;
+    sys_open(&cx, &path, oflag as i32, mode as i32)
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -390,11 +319,13 @@ fn dispatch_sys_read(fd: usize, buf: usize, nbyte: usize) -> Result<usize, Errno
     let fd = i32::try_from(fd).map_err(|_| EINVAL)?;
     let fd = <KernelAccess as FileAccess>::Fd::from(fd);
 
-    // SAFETY: buf comes from userspace syscall arguments. The slice_from_ptr_and_len_mut
-    // function validates that buf is non-null. The caller (userspace) is responsible for
-    // ensuring the buffer is valid and writable for nbyte bytes.
-    let slice = unsafe { slice_from_ptr_and_len_mut(buf, nbyte) }?;
-    sys_read(&cx, fd, slice)
+    if nbyte == 0 {
+        return Ok(0);
+    }
+    let mut buffer = alloc::vec![0u8; nbyte.min(MAX_USER_COPY)];
+    let read = sys_read(&cx, fd, &mut buffer)?;
+    validation::copy_to_userspace(buf, &buffer[..read])?;
+    Ok(read)
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -408,25 +339,49 @@ fn dispatch_sys_write(fd: usize, buf: usize, nbyte: usize) -> Result<usize, Errn
     let fd = i32::try_from(fd).map_err(|_| EINVAL)?;
     let fd = <KernelAccess as FileAccess>::Fd::from(fd);
 
-    // SAFETY: buf comes from userspace syscall arguments. The slice_from_ptr_and_len
-    // function validates that buf is non-null. The caller (userspace) is responsible for
-    // ensuring the buffer is valid and readable for nbyte bytes.
-    let slice = unsafe { slice_from_ptr_and_len(buf, nbyte) }?;
-    sys_write(&cx, fd, slice)
+    if nbyte == 0 {
+        return Ok(0);
+    }
+    let buffer = validation::read_userspace_slice(buf, nbyte.min(MAX_USER_COPY))?;
+    sys_write(&cx, fd, &buffer)
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn dispatch_sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> Result<usize, Errno> {
     let cx = KernelAccess::new();
 
+    if iovcnt > kernel_abi::UIO_MAXIOV {
+        return Err(EINVAL);
+    }
     let fd = i32::try_from(fd).map_err(|_| EINVAL)?;
-    let fd = <KernelAccess as FileAccess>::Fd::from(fd);
+    let mut total_written = 0usize;
 
-    // SAFETY: iov_ptr comes from userspace syscall arguments. UserspacePtr::try_from_usize
-    // validates that the address is in the userspace address range.
-    let iov_ptr = unsafe { UserspacePtr::<kernel_abi::iovec>::try_from_usize(iov_ptr)? };
+    for index in 0..iovcnt {
+        let offset = index
+            .checked_mul(core::mem::size_of::<kernel_abi::iovec>())
+            .ok_or(EINVAL)?;
+        let entry_addr = iov_ptr.checked_add(offset).ok_or(EINVAL)?;
+        let iov = validation::copy_from_userspace::<kernel_abi::iovec>(entry_addr)?;
+        if iov.iov_len == 0 {
+            continue;
+        }
 
-    sys_writev(&cx, fd, iov_ptr, iovcnt)
+        let chunk_len = iov.iov_len.min(MAX_USER_COPY);
+        let buffer = match validation::read_userspace_slice(iov.iov_base, chunk_len) {
+            Ok(buffer) => buffer,
+            Err(_) if total_written > 0 => return Ok(total_written),
+            Err(error) => return Err(error),
+        };
+        let current_fd = <KernelAccess as FileAccess>::Fd::from(fd);
+        let written = sys_writev(&cx, current_fd, &[buffer.as_slice()])?;
+        total_written = total_written.checked_add(written).ok_or(EINVAL)?;
+
+        if written < chunk_len || chunk_len < iov.iov_len {
+            break;
+        }
+    }
+
+    Ok(total_written)
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -442,10 +397,14 @@ fn dispatch_sys_bpf(cmd: usize, attr: usize, size: usize) -> Result<usize, Errno
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn dispatch_sys_pipe(pipefd: usize) -> Result<usize, Errno> {
     let cx = KernelAccess::new();
-    // SAFETY: pipefd comes from userspace syscall arguments. UserspaceMutPtr::try_from_usize
-    // validates that the address is in the userspace address range.
-    let pipefd = unsafe { UserspaceMutPtr::<i32>::try_from_usize(pipefd)? };
-    sys_pipe(&cx, pipefd)
+    let (read_fd, write_fd) = sys_pipe(&cx)?;
+    let read_fd: i32 = read_fd.into();
+    let write_fd: i32 = write_fd.into();
+    let mut bytes = [0u8; 2 * core::mem::size_of::<i32>()];
+    bytes[..4].copy_from_slice(&read_fd.to_ne_bytes());
+    bytes[4..].copy_from_slice(&write_fd.to_ne_bytes());
+    validation::copy_to_userspace(pipefd, &bytes)?;
+    Ok(0)
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -490,18 +449,13 @@ fn dispatch_sys_lseek(fd: usize, offset: usize, whence: usize) -> Result<usize, 
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn dispatch_sys_fstat(fd: usize, statbuf: usize) -> Result<usize, Errno> {
-    use kernel_syscall::stat::UserStat;
-
     let cx = KernelAccess::new();
 
     let fd = i32::try_from(fd).map_err(|_| EINVAL)?;
     let fd = <KernelAccess as FileAccess>::Fd::from(fd);
-    // SAFETY: statbuf comes from userspace syscall arguments. UserspaceMutPtr::try_from_usize
-    // validates that the address is in the userspace address range (canonical lower half).
-    // The caller (userspace) is responsible for providing a valid, writable buffer.
-    let buf = unsafe { UserspaceMutPtr::<UserStat>::try_from_usize(statbuf)? };
-
-    sys_fstat::<KernelAccess>(&cx, fd, buf)
+    let stat = sys_fstat::<KernelAccess>(&cx, fd)?;
+    validation::copy_to_userspace(statbuf, stat.as_bytes())?;
+    Ok(0)
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -625,45 +579,34 @@ fn dispatch_sys_pwm_enable(pwm_id: usize, channel: usize, enable: usize) -> Resu
     }
 }
 
-fn dispatch_sys_clock_gettime(_clock_id: usize, tp: usize) -> Result<usize, Errno> {
-    // We strictly support CLOCK_REALTIME/MONOTONIC which are mapped to kernel time for now.
-    let ns = crate::time::get_kernel_time_ns();
+fn dispatch_sys_clock_gettime(clock_id: usize, tp: usize) -> Result<usize, Errno> {
+    let clock_id = i32::try_from(clock_id).map_err(|_| EINVAL)?;
+    let ns = match clock_id {
+        kernel_abi::CLOCK_REALTIME => crate::time::get_realtime_time_ns(),
+        kernel_abi::CLOCK_MONOTONIC => crate::time::get_monotonic_time_ns(),
+        _ => return Err(EINVAL),
+    };
     let ts = kernel_abi::timespec {
         tv_sec: (ns / 1_000_000_000) as i64,
         tv_nsec: (ns % 1_000_000_000) as i64,
     };
 
-    // Serialize struct to bytes
-    let slice = unsafe {
-        core::slice::from_raw_parts(
-            &ts as *const _ as *const u8,
-            core::mem::size_of::<kernel_abi::timespec>(),
-        )
-    };
-
-    validation::copy_to_userspace(tp, slice)?;
+    validation::copy_to_userspace(tp, ts.as_bytes())?;
     Ok(0)
 }
 
 fn dispatch_sys_nanosleep(req: usize, _rem: usize) -> Result<usize, Errno> {
     let ts: kernel_abi::timespec = validation::copy_from_userspace(req)?;
 
-    // Check for valid nanoseconds
-    if ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
-        return Err(EINVAL);
-    }
+    let duration_ns =
+        kernel_time::timespec_to_duration_nanoseconds(ts.tv_sec, ts.tv_nsec).ok_or(EINVAL)?;
 
-    let duration_ns = (ts.tv_sec as u64)
-        .checked_mul(1_000_000_000)
-        .and_then(|s| s.checked_add(ts.tv_nsec as u64))
-        .ok_or(EINVAL)?;
-
-    let start = crate::time::get_kernel_time_ns();
+    let start = crate::time::get_monotonic_time_ns();
 
     // Busy wait loop
     // TODO: Use proper scheduler sleep/wait queue
     loop {
-        let now = crate::time::get_kernel_time_ns();
+        let now = crate::time::get_monotonic_time_ns();
         if now.wrapping_sub(start) >= duration_ns {
             break;
         }
@@ -695,10 +638,8 @@ fn dispatch_sys_spawn(path_ptr: usize, path_len: usize) -> Result<usize, Errno> 
         return Err(ENAMETOOLONG);
     }
 
-    // SAFETY: We checked path_len. UserspacePtr ensures address range validity.
-    // We assume the caller provides valid memory for the duration of the call.
-    let path_slice = unsafe { slice_from_ptr_and_len(path_ptr, path_len)? };
-    let path_str = core::str::from_utf8(path_slice).map_err(|_| EINVAL)?;
+    let path = validation::read_userspace_slice(path_ptr, path_len)?;
+    let path_str = core::str::from_utf8(&path).map_err(|_| EINVAL)?;
 
     // 2. Resolve AbsolutePath
     // We assume the path string is valid UTF-8 and represents a path

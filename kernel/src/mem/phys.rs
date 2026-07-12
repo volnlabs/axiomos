@@ -54,8 +54,10 @@ static mut RESERVED_REGIONS: ReservedRegions = ReservedRegions::new();
 
 struct FrameRefCountRegion {
     base: u64,
-    counts: Vec<u8>,
+    counts: Vec<u32>,
 }
+
+const IMMORTAL_FRAME_REFS: u32 = u32::MAX;
 
 impl FrameRefCountRegion {
     fn frame_index(&self, addr: u64) -> Option<usize> {
@@ -97,7 +99,7 @@ impl FrameRefCounts {
         Self { regions }
     }
 
-    fn locate_mut(&mut self, addr: u64) -> Option<(&mut u8, u64)> {
+    fn locate_mut(&mut self, addr: u64) -> Option<(&mut u32, u64)> {
         for region in &mut self.regions {
             if let Some(index) = region.frame_index(addr) {
                 return Some((&mut region.counts[index], region.base));
@@ -110,7 +112,7 @@ impl FrameRefCounts {
     fn locate(&self, addr: u64) -> Option<u32> {
         for region in &self.regions {
             if let Some(index) = region.frame_index(addr) {
-                return Some(region.counts[index] as u32);
+                return Some(region.counts[index]);
             }
         }
 
@@ -128,8 +130,10 @@ impl FrameRefCounts {
         let (count, _) = self
             .locate_mut(addr)
             .unwrap_or_else(|| panic!("frame refcount missing for {addr:#x}"));
-        *count = count.saturating_add(1);
-        u32::from(*count)
+        if *count != IMMORTAL_FRAME_REFS {
+            *count += 1;
+        }
+        *count
     }
 
     fn release(&mut self, addr: u64) -> Option<u32> {
@@ -139,8 +143,14 @@ impl FrameRefCounts {
             return Some(0);
         }
 
+        // Overflow promotes a frame to an explicit immortal state. It may leak,
+        // but it can never wrap/undercount and free a still-shared frame.
+        if *count == IMMORTAL_FRAME_REFS {
+            return Some(IMMORTAL_FRAME_REFS);
+        }
+
         *count -= 1;
-        Some(u32::from(*count))
+        Some(*count)
     }
 
     fn count(&self, addr: u64) -> Option<u32> {

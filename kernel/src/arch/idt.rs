@@ -7,7 +7,7 @@ use core::sync::atomic::Ordering::Relaxed;
 
 use kernel_memapi::{Guarded, Location, MemoryApi, UserAccessible};
 use log::{error, warn};
-use x86_64::instructions::{hlt, interrupts};
+use x86_64::instructions::hlt;
 use x86_64::registers::control::Cr2;
 use x86_64::registers::debug::{Dr6, Dr7};
 use x86_64::structures::idt::{
@@ -17,11 +17,9 @@ use x86_64::PrivilegeLevel;
 
 use crate::arch::gdt;
 use crate::mcore::context::ExecutionContext;
-use crate::mcore::mtask::process::mem::MemoryRegion;
-use crate::mcore::mtask::task::FxArea;
+use crate::mcore::mtask::task::{FxArea, Task};
 use crate::mem::memapi::LowerHalfMemoryApi;
 use crate::syscall::dispatch_syscall;
-use crate::UsizeExt;
 
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
@@ -194,7 +192,36 @@ pub extern "sysv64" fn syscall_handler_impl(
 
     let result = dispatch_syscall(&mut ctx, n, arg1, arg2, arg3, arg4, arg5, arg6);
 
-    regs.rax = result as usize; // save result
+    ctx.regs.rax = result as usize;
+    *regs = ctx.regs;
+
+    // SAFETY: `ctx.frame` originated from this interrupt frame and syscall
+    // dispatch only applies kernel-validated return-context changes (e.g. execve).
+    // The x86_64 API requires volatile mutation so LLVM preserves the writeback.
+    unsafe {
+        stack_frame.as_mut().update(|frame| *frame = ctx.frame);
+    }
+}
+
+fn exception_from_user_mode(stack_frame: &InterruptStackFrame) -> bool {
+    stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3
+}
+
+fn terminate_current_task_on_user_exception(exception: &str, stack_frame: &InterruptStackFrame) {
+    if !exception_from_user_mode(stack_frame) {
+        return;
+    }
+
+    let Some(ctx) = ExecutionContext::try_load() else {
+        return;
+    };
+    let task = ctx.current_task();
+    error!(
+        "{exception} from user mode in process '{}' task '{}', terminating...\n{stack_frame:#?}",
+        task.process().name(),
+        task.name(),
+    );
+    Task::exit();
 }
 
 /// Restores the user context and returns to userspace.
@@ -260,23 +287,11 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
         end_of_interrupt();
     }
 
-    // 2. Run BPF hooks (AttachType::Timer = 1)
-    //
-    // We clone programs and release the lock BEFORE execution so that BPF
-    // helpers (e.g. bpf_ringbuf_output) can re-acquire the lock for map
-    // operations without deadlocking.
-    if let Some(manager) = crate::BPF_MANAGER.get() {
-        let programs = manager.lock().get_hook_programs(1);
-        let ctx = kernel_bpf::execution::BpfContext::empty();
-        for (prog_id, program) in &programs {
-            match crate::bpf::BpfManager::execute_program(program, &ctx) {
-                Ok(res) => {
-                    let _ = res;
-                }
-                Err(e) => log::error!("BPF Timer Hook [id={}] failed: {:?}", prog_id, e),
-            }
-        }
-    }
+    // 2. Resolve the bounded hook snapshot without heap allocation, then run
+    // outside the manager lock so map helpers can re-acquire it.
+    let bpf_ctx = kernel_bpf::execution::BpfContext::empty();
+    let _ =
+        crate::bpf::BpfManager::run_hook_programs(crate::bpf::ATTACH_TYPE_TIMER, &bpf_ctx, "timer");
 
     // 3. Schedule next task
     let ctx = ExecutionContext::load();
@@ -303,6 +318,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    terminate_current_task_on_user_exception("GENERAL PROTECTION FAULT", &stack_frame);
     panic!(
         "EXCEPTION: GENERAL PROTECTION FAULT:\nerror code: {error_code:#X}\n{}[{}], external: {}\n{stack_frame:#?}",
         match (error_code >> 1) & 0b11 {
@@ -316,10 +332,12 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
+    terminate_current_task_on_user_exception("INVALID OPCODE", &stack_frame);
     panic!("EXCEPTION: INVALID OPCODE:\n{stack_frame:#?}");
 }
 
 extern "x86-interrupt" fn invalid_tss_handler(stack_frame: InterruptStackFrame, error_code: u64) {
+    terminate_current_task_on_user_exception("INVALID TSS", &stack_frame);
     panic!("EXCEPTION: INVALID TSS:\nerror code: {error_code:#X}\n{stack_frame:#?}");
 }
 
@@ -329,84 +347,31 @@ extern "x86-interrupt" fn page_fault_handler(
 ) {
     let accessed_address = Cr2::read().ok();
 
-    // if we know the address...
+    // Record process telemetry when multitasking is available and preserve a
+    // kernel-stack guard fault as a kernel panic, never as userspace teardown.
     if let Some(addr) = accessed_address {
-        // ...and we have initialized multitasking...
         if let Some(ctx) = ExecutionContext::try_load() {
             let task = ctx.current_task();
-            let process = task.process();
-            process.telemetry().page_faults.fetch_add(1, Relaxed);
+            task.process().telemetry().page_faults.fetch_add(1, Relaxed);
 
-            // ...and the current task has stack...
-            if let Some(stack) = task.kstack() {
-                // ...then the accessed address must not be within the guard page of the stack,
-                // otherwise we have a stack overflow...
-                if stack.guard_page().contains(addr) {
-                    error!(
-                        "KERNEL STACK OVERFLOW DETECTED in process '{}' task '{}', terminating...",
-                        task.process().name(),
-                        task.name(),
-                    );
-
-                    // FIXME: once we have signals, trigger a SIGSEGV here
-
-                    // ...in which case we mark the task for termination...
-                    task.set_should_terminate(true);
-                    // ...and halt, waiting for the scheduler to terminate the task
-                    interrupts::enable();
-                    loop {
-                        hlt();
-                    }
-                }
-            }
-
-            // ...but if it's not a stack issue, maybe it is a lazy mapping?
-            let regions = process.memory_regions();
-            if let Some(()) = regions.with_memory_region_for_address(addr, |region| {
-                debug_assert!(
-                    region.addr() <= addr,
-                    "region addr must be less than or equal to the addr we are looking for"
+            if !exception_from_user_mode(&stack_frame)
+                && task
+                    .kstack()
+                    .as_ref()
+                    .is_some_and(|stack| stack.guard_page().contains(addr))
+            {
+                panic!(
+                    "KERNEL STACK OVERFLOW DETECTED in process '{}' task '{}':\n{stack_frame:#?}",
+                    task.process().name(),
+                    task.name(),
                 );
-                debug_assert!(
-                    region.addr() + region.size().into_u64() > addr,
-                    "region addr + it's size must be larger than the addr we are looking for"
-                );
-
-                // we found a region that matches the accessed address
-                match region {
-                    MemoryRegion::Lazy(_lazy_memory_region) => {
-                        // TODO: allocate new physical page, map it and add it to the lazy memory
-                        // region
-                    }
-                    MemoryRegion::Mapped(_mapped_memory_region) => {
-                        error!(
-                            "invalid memory access in process '{}' task '{}', terminating...",
-                            process.name(),
-                            task.name()
-                        );
-
-                        // TODO: refactor task/process termination into a separate method
-
-                        // TODO: refactor the whole page fault handler into a separate crate
-
-                        // FIXME: once we have signals, trigger a SIGSEGV here
-                        task.set_should_terminate(true);
-                        interrupts::enable();
-                        loop {
-                            hlt();
-                        }
-                    }
-                    MemoryRegion::FileBacked(_file_backed_memory_region) => {
-                        // TODO: invoke an access on the nested lazy memory region, then read from
-                        // the node and write data accordingly
-                    }
-                }
-            }) {
-                // Region was found and handled
-                return;
             }
         }
     }
+
+    // Lazy/file-backed fault resolution is not implemented yet. Returning to
+    // the same user instruction would just fault forever, so fail the task.
+    terminate_current_task_on_user_exception("PAGE FAULT", &stack_frame);
 
     panic!(
         "EXCEPTION: PAGE FAULT:\naccessed address: {accessed_address:?}\nerror code: {error_code:#?}\n{stack_frame:#?}"

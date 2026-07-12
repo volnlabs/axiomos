@@ -1,6 +1,10 @@
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::cell::UnsafeCell;
+use core::fmt;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
 #[cfg(target_arch = "x86_64")]
 use spin::Mutex;
 #[cfg(target_arch = "x86_64")]
@@ -16,9 +20,57 @@ use x86_64::structures::tss::TaskStateSegment;
 use crate::arch::gdt::Selectors;
 #[cfg(target_arch = "x86_64")]
 use crate::mcore::lapic::Lapic;
-use crate::mcore::mtask::process::{Process, ProcessId};
+use crate::mcore::mtask::process::Process;
 use crate::mcore::mtask::scheduler::Scheduler;
 use crate::mcore::mtask::task::Task;
+
+struct BpfCpuStack {
+    data: UnsafeCell<Box<[u8]>>,
+    in_use: AtomicBool,
+}
+
+impl BpfCpuStack {
+    fn new() -> Self {
+        Self {
+            data: UnsafeCell::new(
+                alloc::vec![0u8; <ActiveProfile as PhysicalProfile>::MAX_STACK_SIZE]
+                    .into_boxed_slice(),
+            ),
+            in_use: AtomicBool::new(false),
+        }
+    }
+
+    fn with_mut<R>(&self, f: impl FnOnce(&mut [u8]) -> R) -> Option<R> {
+        if self
+            .in_use
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return None;
+        }
+
+        struct Reset<'a>(&'a AtomicBool);
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let _reset = Reset(&self.in_use);
+
+        // SAFETY: this stack belongs to one CPU context and the atomic guard
+        // rejects nested execution on that CPU before forming a second borrow.
+        Some(f(unsafe { &mut **self.data.get() }))
+    }
+}
+
+impl fmt::Debug for BpfCpuStack {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BpfCpuStack")
+            .field("len", &<ActiveProfile as PhysicalProfile>::MAX_STACK_SIZE)
+            .field("in_use", &self.in_use.load(Ordering::Relaxed))
+            .finish()
+    }
+}
 
 #[derive(Debug)]
 pub struct ExecutionContext {
@@ -39,6 +91,8 @@ pub struct ExecutionContext {
     tss: UnsafeCell<&'static mut TaskStateSegment>,
 
     scheduler: UnsafeCell<Scheduler>,
+    current_pid: AtomicU64,
+    bpf_stack: BpfCpuStack,
     #[cfg(target_arch = "aarch64")]
     need_reschedule: core::sync::atomic::AtomicBool,
 }
@@ -62,6 +116,8 @@ impl ExecutionContext {
             _idt: idt,
             tss: UnsafeCell::new(tss),
             scheduler: UnsafeCell::new(Scheduler::new_cpu_local()),
+            current_pid: AtomicU64::new(0),
+            bpf_stack: BpfCpuStack::new(),
         }
     }
 
@@ -70,6 +126,8 @@ impl ExecutionContext {
         ExecutionContext {
             cpu_id,
             scheduler: UnsafeCell::new(Scheduler::new_cpu_local()),
+            current_pid: AtomicU64::new(0),
+            bpf_stack: BpfCpuStack::new(),
             need_reschedule: core::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -170,8 +228,16 @@ impl ExecutionContext {
         }
     }
 
-    pub fn pid(&self) -> ProcessId {
-        self.scheduler().current_task().process().pid()
+    pub fn pid(&self) -> u64 {
+        self.current_pid.load(Ordering::Relaxed)
+    }
+
+    pub fn set_current_pid(&self, pid: u64) {
+        self.current_pid.store(pid, Ordering::Relaxed);
+    }
+
+    pub fn with_bpf_stack<R>(&self, f: impl FnOnce(&mut [u8]) -> R) -> Option<R> {
+        self.bpf_stack.with_mut(f)
     }
 
     pub fn current_task(&self) -> &Task {

@@ -13,6 +13,8 @@ kernel_memapi = { path = "crates/kernel_memapi" }
 kernel_pci = { path = "crates/kernel_pci" }
 kernel_physical_memory = { path = "crates/kernel_physical_memory" }
 kernel_syscall = { path = "crates/kernel_syscall" }
+kernel_time = { path = "crates/kernel_time" }
+kernel_usermem = { path = "crates/kernel_usermem" }
 kernel_vfs = { path = "crates/kernel_vfs" }
 kernel_virtual_memory = { path = "crates/kernel_virtual_memory" }
 shrike_link = { path = "crates/shrike_link" }

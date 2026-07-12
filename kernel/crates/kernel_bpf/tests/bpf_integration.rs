@@ -373,20 +373,15 @@ mod control_flow {
     use super::*;
 
     #[test]
-    fn unconditional_jump_forward() {
-        // Skip over mov r0, 99; set r0 = 42 instead
-        let program = ProgramBuilder::<ActiveProfile>::new(BpfProgType::SocketFilter)
+    fn unreachable_after_unconditional_jump_is_rejected() {
+        let result = ProgramBuilder::<ActiveProfile>::new(BpfProgType::SocketFilter)
             .insn(BpfInsn::ja(1)) // Jump over next instruction
-            .insn(BpfInsn::mov64_imm(0, 99)) // Skipped
+            .insn(BpfInsn::mov64_imm(0, 99)) // Unreachable
             .insn(BpfInsn::mov64_imm(0, 42))
             .insn(BpfInsn::exit())
-            .build()
-            .expect("valid program");
+            .build();
 
-        let interp = interpreter();
-        let result = interp.execute(&program, &BpfContext::empty());
-
-        assert_eq!(result, Ok(42));
+        assert!(matches!(result, Err(ProgramError::VerificationFailed(_))));
     }
 
     #[test]
@@ -461,12 +456,23 @@ mod control_flow {
             // jle_reg: opcode 0xbd (JLE with reg source)
             .insn(BpfInsn::new(0xbd, 1, 2, -3, 0)) // if counter <= limit, jump back
             .insn(BpfInsn::exit())
-            .build()
-            .expect("valid program");
+            .build();
 
+        #[cfg(feature = "embedded-profile")]
+        {
+            assert!(program.is_err());
+            return;
+        }
+
+        #[cfg(feature = "cloud-profile")]
+        let program = program.expect("cloud profile permits loops with a runtime limit");
+
+        #[cfg(feature = "cloud-profile")]
         let interp = interpreter();
+        #[cfg(feature = "cloud-profile")]
         let result = interp.execute(&program, &BpfContext::empty());
 
+        #[cfg(feature = "cloud-profile")]
         assert_eq!(result, Ok(15));
     }
 }

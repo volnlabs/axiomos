@@ -146,11 +146,7 @@ pub fn sys_waitpid(pid: isize, status_ptr: usize, options: usize) -> Result<usiz
 
         if let Some(pid) = reaped_pid {
             if status_ptr != 0 {
-                // Copy status to userspace
-                let slice = unsafe {
-                    core::slice::from_raw_parts(&reaped_status as *const _ as *const u8, 4)
-                };
-                copy_to_userspace(status_ptr, slice)?;
+                copy_to_userspace(status_ptr, &reaped_status.to_ne_bytes())?;
             }
             use crate::U64Ext;
             return Ok(pid.as_u64().into_usize());

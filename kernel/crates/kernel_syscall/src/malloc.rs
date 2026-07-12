@@ -1,4 +1,4 @@
-use kernel_abi::{EINVAL, ENOMEM, Errno};
+use kernel_abi::{EINVAL, ENOMEM, Errno, ProtFlags};
 
 use crate::UserspacePtr;
 use crate::access::{AllocationStrategy, CreateMappingError, Location, MemoryRegionAccess};
@@ -10,7 +10,12 @@ pub fn sys_malloc<Cx: MemoryRegionAccess>(cx: &Cx, size: usize) -> Result<usize,
 
     // AllocationStrategy::Eager is what we support for now
     let mapped_addr = cx
-        .create_and_track_mapping(Location::Anywhere, size, AllocationStrategy::Eager)
+        .create_and_track_mapping(
+            Location::Anywhere,
+            size,
+            AllocationStrategy::Eager,
+            ProtFlags::READ | ProtFlags::WRITE,
+        )
         .map_err(|e| match e {
             CreateMappingError::LocationAlreadyMapped => EINVAL,
             CreateMappingError::OutOfMemory => ENOMEM,

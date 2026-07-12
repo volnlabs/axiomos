@@ -24,6 +24,19 @@ use crate::bytecode::program::{BpfProgType, BpfProgram};
 use crate::bytecode::registers::Register;
 use crate::profile::{ActiveProfile, PhysicalProfile};
 
+/// Unforgeable capability consumed by `VerifiedProgram` construction.
+///
+/// The tuple field and constructor are private to this module, so no other
+/// safe crate code can bypass the verifier even though the program type lives
+/// in a sibling module.
+pub(crate) struct VerificationToken(());
+
+impl VerificationToken {
+    fn new() -> Self {
+        Self(())
+    }
+}
+
 /// Sizes the verifier cannot infer from bytecode alone and must be told by the
 /// caller (eventually the `sys_bpf` load path, #48): the byte size of the
 /// context struct reachable through R1 (`PtrToCtx`) at entry, and the byte
@@ -275,7 +288,13 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
         };
 
         // Build the verified program
-        let prog = BpfProgram::new(prog_type, insns.to_vec(), stack_size).map_err(|e| match e {
+        let prog = BpfProgram::from_verified_parts(
+            prog_type,
+            insns.to_vec(),
+            stack_size,
+            VerificationToken::new(),
+        )
+        .map_err(|e| match e {
             crate::bytecode::program::ProgramError::StackSizeExceeded { required, limit } => {
                 VerifyError::StackExceeded {
                     used: required,
@@ -1694,7 +1713,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn ctx_read_bounded_to_bpfcontext_size() {
-        let ctx_size = core::mem::size_of::<crate::execution::BpfContext>() as u32;
+        let ctx_size = core::mem::size_of::<crate::execution::BpfContext<'static>>() as u32;
         let cfg = VerifyConfig {
             ctx_size,
             map_value_size: 0,
@@ -1753,7 +1772,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     fn ctx_data_pointer_ringbuf_output_verifies_when_declared_size_covers_helper_size() {
         let cfg = VerifyConfig {
-            ctx_size: core::mem::size_of::<crate::execution::BpfContext>() as u32,
+            ctx_size: core::mem::size_of::<crate::execution::BpfContext<'static>>() as u32,
             ctx_data_size: core::mem::size_of::<crate::execution::SchedSwitchContext>() as u32,
             map_perms: &[MapPerm::ReadWrite],
             ..VerifyConfig::default()
@@ -1778,7 +1797,7 @@ mod tests {
     fn ctx_data_pointer_ringbuf_output_rejects_oversized_helper_size() {
         let declared = core::mem::size_of::<crate::execution::SchedSwitchContext>() as u32;
         let cfg = VerifyConfig {
-            ctx_size: core::mem::size_of::<crate::execution::BpfContext>() as u32,
+            ctx_size: core::mem::size_of::<crate::execution::BpfContext<'static>>() as u32,
             ctx_data_size: declared,
             map_perms: &[MapPerm::ReadWrite],
             ..VerifyConfig::default()
@@ -1912,7 +1931,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     fn store_through_dynamic_map_lookup_is_rejected_when_perms_are_authoritative() {
         let cfg = VerifyConfig {
-            ctx_size: core::mem::size_of::<crate::execution::BpfContext>() as u32,
+            ctx_size: core::mem::size_of::<crate::execution::BpfContext<'static>>() as u32,
             map_value_sizes: &[8, 8],
             map_perms: &[MapPerm::ReadWrite, MapPerm::ReadWrite],
             ..VerifyConfig::default()
@@ -1946,7 +1965,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     fn read_through_read_only_and_dynamic_map_lookup_is_accepted() {
         let cfg = VerifyConfig {
-            ctx_size: core::mem::size_of::<crate::execution::BpfContext>() as u32,
+            ctx_size: core::mem::size_of::<crate::execution::BpfContext<'static>>() as u32,
             map_value_sizes: &[8, 8],
             map_perms: &[MapPerm::ReadOnly, MapPerm::ReadWrite],
             ..VerifyConfig::default()
@@ -2085,7 +2104,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     fn mutating_helpers_reject_dynamic_map_ids_when_perms_are_authoritative() {
         let cfg = VerifyConfig {
-            ctx_size: core::mem::size_of::<crate::execution::BpfContext>() as u32,
+            ctx_size: core::mem::size_of::<crate::execution::BpfContext<'static>>() as u32,
             map_perms: &[MapPerm::ReadWrite, MapPerm::ReadWrite],
             ..VerifyConfig::default()
         };

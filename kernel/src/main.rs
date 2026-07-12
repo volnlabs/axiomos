@@ -18,7 +18,7 @@ use kernel::limine::BASE_REVISION;
 use kernel::mcore;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use kernel::mcore::mtask::process::Process;
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(target_arch = "x86_64")]
 use kernel::serial_println;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use kernel::{

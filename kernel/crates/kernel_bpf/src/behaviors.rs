@@ -135,7 +135,7 @@ mod tests {
 
     fn iio_config() -> VerifyConfig<'static> {
         VerifyConfig {
-            ctx_size: core::mem::size_of::<crate::execution::BpfContext>() as u32,
+            ctx_size: core::mem::size_of::<crate::execution::BpfContext<'static>>() as u32,
             ctx_data_size: core::mem::size_of::<crate::attach::IioEvent>() as u32,
             map_perms: &[MapPerm::ReadWrite],
             ..VerifyConfig::default()
@@ -188,15 +188,9 @@ mod tests {
             value: echo,
             scale: 1_000_000,
             offset: 0,
+            reserved: 0,
         };
-        // SAFETY: IioEvent is repr(C); view its bytes as the ctx data slice.
-        let bytes = unsafe {
-            core::slice::from_raw_parts(
-                &event as *const _ as *const u8,
-                core::mem::size_of::<IioEvent>(),
-            )
-        };
-        let ctx = BpfContext::from_slice(bytes);
+        let ctx = BpfContext::from_struct(&event);
         helpers_stub::record_pwm(|| {
             let _ = Interpreter::<ActiveProfile>::new().execute(&prog, &ctx);
         })

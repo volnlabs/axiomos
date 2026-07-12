@@ -604,8 +604,7 @@ impl SymtabSection<'_> {
     pub fn symbols(&self) -> impl Iterator<Item = &Symbol> {
         self.data
             .chunks_exact(size_of::<Symbol>())
-            .map(Symbol::try_ref_from_bytes)
-            .map(Result::unwrap)
+            .filter_map(|chunk| Symbol::try_ref_from_bytes(chunk).ok())
     }
 }
 

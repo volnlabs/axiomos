@@ -74,33 +74,9 @@ impl IioManager {
     ///
     /// This is called by hardware drivers (or simulation) when new data is available.
     pub fn dispatch_event(&self, event: IioEvent) {
-        // Create BPF context from the event
-        // SAFETY: We are creating a slice from a stack-allocated struct.
-        // The slice is only used within this scope to create the BpfContext.
-        let slice = unsafe {
-            core::slice::from_raw_parts(
-                &event as *const _ as *const u8,
-                core::mem::size_of::<IioEvent>(),
-            )
-        };
+        let ctx = BpfContext::from_struct(&event);
 
-        let ctx = BpfContext::from_slice(slice);
-
-        // Execute BPF hooks (lock-free pattern)
-        //
-        // Clone programs and release lock BEFORE execution so that BPF
-        // helpers can re-acquire the lock without deadlocking.
-        if let Some(manager) = crate::BPF_MANAGER.get() {
-            let programs = manager
-                .lock()
-                .get_hook_programs(crate::bpf::ATTACH_TYPE_IIO);
-            for (prog_id, program) in &programs {
-                match crate::bpf::BpfManager::execute_program(program, &ctx) {
-                    Ok(res) => log::info!("IIO BPF Hook [id={}] returned: {}", prog_id, res),
-                    Err(e) => log::error!("IIO BPF Hook [id={}] failed: {:?}", prog_id, e),
-                }
-            }
-        }
+        let _ = crate::bpf::BpfManager::run_hook_programs(crate::bpf::ATTACH_TYPE_IIO, &ctx, "iio");
     }
 }
 
@@ -142,6 +118,7 @@ extern "C" fn iio_simulation_task(_arg: *mut c_void) {
             value: counter,
             scale: 1_000_000,
             offset: 0,
+            reserved: 0,
         };
 
         if let Some(manager_lock) = IIO_MANAGER.get() {

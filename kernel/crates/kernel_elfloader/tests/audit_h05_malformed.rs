@@ -20,7 +20,133 @@
 
 #![allow(clippy::unwrap_used)]
 
-use kernel_elfloader::{ElfFile, ElfParseError, SectionHeader, SectionHeaderType};
+use core::alloc::Layout;
+use core::mem::size_of;
+
+use kernel_elfloader::{
+    ElfFile, ElfLoader, ElfParseError, ElfType, LoadElfError, ProgramHeaderFlags, SectionHeader,
+    SectionHeaderFlags, SectionHeaderType, Symbol,
+};
+use kernel_memapi::{Allocation, Guarded, Location, MemoryApi, UserAccessible, WritableAllocation};
+
+fn set_elf_header_basics(buf: &mut [u8], elf_type: u16, phoff: u64, phnum: u16) {
+    buf[0..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
+    buf[4] = 2; // ELFCLASS64
+    buf[5] = 1; // ELFDATA2LSB
+    buf[6] = 1; // EV_CURRENT
+    buf[7] = 0; // ELFOSABI_NONE
+    buf[16..18].copy_from_slice(&elf_type.to_le_bytes());
+    buf[18..20].copy_from_slice(&62u16.to_le_bytes()); // EM_X86_64
+    buf[20..24].copy_from_slice(&1u32.to_le_bytes()); // e_version
+    buf[32..40].copy_from_slice(&phoff.to_le_bytes());
+    buf[52..54].copy_from_slice(&64u16.to_le_bytes()); // e_ehsize
+    buf[54..56].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize
+    buf[56..58].copy_from_slice(&phnum.to_le_bytes());
+    buf[58..60].copy_from_slice(&64u16.to_le_bytes()); // e_shentsize
+}
+
+fn write_program_header(
+    out: &mut Vec<u8>,
+    typ: u16,
+    flags: u32,
+    offset: u64,
+    filesz: u64,
+    memsz: u64,
+) {
+    let mut ph = [0u8; 56];
+    ph[0..2].copy_from_slice(&typ.to_le_bytes());
+    ph[4..8].copy_from_slice(&flags.to_le_bytes());
+    ph[8..16].copy_from_slice(&offset.to_le_bytes());
+    ph[16..24].copy_from_slice(&0x400000u64.to_le_bytes());
+    ph[24..32].copy_from_slice(&0x400000u64.to_le_bytes());
+    ph[32..40].copy_from_slice(&filesz.to_le_bytes());
+    ph[40..48].copy_from_slice(&memsz.to_le_bytes());
+    out.extend_from_slice(&ph);
+}
+
+#[derive(Clone, Debug)]
+struct TestAllocation {
+    data: Vec<u8>,
+    layout: Layout,
+}
+
+impl TestAllocation {
+    fn new(layout: Layout) -> Self {
+        Self {
+            data: vec![0; layout.size()],
+            layout,
+        }
+    }
+}
+
+impl AsRef<[u8]> for TestAllocation {
+    fn as_ref(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+impl AsMut<[u8]> for TestAllocation {
+    fn as_mut(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+}
+
+impl Allocation for TestAllocation {
+    fn layout(&self) -> Layout {
+        self.layout
+    }
+}
+
+impl WritableAllocation for TestAllocation {}
+
+#[derive(Clone, Debug, Default)]
+struct TestMemoryApi;
+
+impl MemoryApi for TestMemoryApi {
+    type ReadonlyAllocation = TestAllocation;
+    type WritableAllocation = TestAllocation;
+    type ExecutableAllocation = TestAllocation;
+
+    fn allocate(
+        &mut self,
+        _location: Location,
+        layout: Layout,
+        _user_accessible: UserAccessible,
+        _guarded: Guarded,
+    ) -> Option<Self::WritableAllocation> {
+        Some(TestAllocation::new(layout))
+    }
+
+    fn make_executable(
+        &mut self,
+        allocation: Self::WritableAllocation,
+    ) -> Result<Self::ExecutableAllocation, Self::WritableAllocation> {
+        Ok(allocation)
+    }
+
+    fn make_writable(
+        &mut self,
+        allocation: Self::ExecutableAllocation,
+    ) -> Result<Self::WritableAllocation, Self::ExecutableAllocation> {
+        Ok(allocation)
+    }
+
+    fn make_readonly(
+        &mut self,
+        allocation: Self::WritableAllocation,
+    ) -> Result<Self::ReadonlyAllocation, Self::WritableAllocation> {
+        Ok(allocation)
+    }
+}
+
+fn loader_err<M: MemoryApi>(
+    result: Result<kernel_elfloader::ElfImage<'_, M>, LoadElfError>,
+) -> LoadElfError {
+    match result {
+        Ok(_) => panic!("expected ELF loader error"),
+        Err(err) => err,
+    }
+}
 
 /// 64-byte ELF64 header for x86_64 (little-endian). All-zero magic.
 fn zero_header() -> [u8; 64] {
@@ -337,4 +463,114 @@ fn section_data_returns_none_when_offset_plus_size_past_eof() {
     assert!(elf.section_data(&fake).is_none());
     fake.offset = usize::MAX;
     assert!(elf.section_data(&fake).is_none());
+}
+
+#[test]
+fn loader_rejects_non_exec_elf_without_panic() {
+    let mut buf = vec![0u8; 64];
+    set_elf_header_basics(&mut buf, 3, 0, 0); // ET_DYN, not ET_EXEC
+    let elf = ElfFile::try_parse(&buf).expect("header parses");
+    let err = loader_err(ElfLoader::new(TestMemoryApi).load(elf));
+    assert_eq!(err, LoadElfError::UnsupportedFileType(ElfType::Dyn));
+}
+
+#[test]
+fn loader_rejects_load_segment_with_filesz_greater_than_memsz_without_panic() {
+    let mut buf = vec![0u8; 64];
+    set_elf_header_basics(&mut buf, 2, 64, 1);
+    write_program_header(&mut buf, 1, ProgramHeaderFlags::READABLE.0, 120, 8, 4);
+    buf.extend_from_slice(&[0xAA; 8]);
+
+    let elf = ElfFile::try_parse(&buf).expect("header parses");
+    let err = loader_err(ElfLoader::new(TestMemoryApi).load(elf));
+    assert_eq!(err, LoadElfError::SegmentFileLargerThanMemory);
+}
+
+#[test]
+fn loader_rejects_writable_executable_load_segment_without_panic() {
+    let mut buf = vec![0u8; 64];
+    set_elf_header_basics(&mut buf, 2, 64, 1);
+    write_program_header(
+        &mut buf,
+        1,
+        ProgramHeaderFlags::READABLE.0
+            | ProgramHeaderFlags::WRITABLE.0
+            | ProgramHeaderFlags::EXECUTABLE.0,
+        120,
+        4,
+        4,
+    );
+    buf.extend_from_slice(&[0xAA; 4]);
+
+    let elf = ElfFile::try_parse(&buf).expect("header parses");
+    let err = loader_err(ElfLoader::new(TestMemoryApi).load(elf));
+    assert_eq!(err, LoadElfError::WritableExecutableSegment);
+}
+
+#[test]
+fn loader_rejects_tls_with_filesz_greater_than_memsz_without_panic() {
+    let mut buf = vec![0u8; 64];
+    set_elf_header_basics(&mut buf, 2, 64, 1);
+    write_program_header(&mut buf, 7, ProgramHeaderFlags::READABLE.0, 120, 8, 4);
+    buf.extend_from_slice(&[0xAA; 8]);
+
+    let elf = ElfFile::try_parse(&buf).expect("header parses");
+    let err = loader_err(ElfLoader::new(TestMemoryApi).load(elf));
+    assert_eq!(err, LoadElfError::SegmentFileLargerThanMemory);
+}
+
+#[test]
+fn symtab_symbols_skips_trailing_partial_symbol_without_panic() {
+    let mut buf = valid_elf_with_oversize_section_name();
+    let mut symtab_section = [0u8; 64];
+    symtab_section[4..8].copy_from_slice(&2u32.to_le_bytes()); // SHT_SYMTAB
+    symtab_section[24..32].copy_from_slice(&(buf.len() as u64 + 64).to_le_bytes());
+    symtab_section[32..40].copy_from_slice(&(size_of::<Symbol>() as u64 + 1).to_le_bytes());
+    buf.extend_from_slice(&symtab_section);
+    buf.resize(buf.len() + size_of::<Symbol>() + 1, 0xAA);
+    buf[60..62].copy_from_slice(&3u16.to_le_bytes()); // e_shnum
+
+    let elf = ElfFile::try_parse(&buf).expect("header parses");
+    let symtab_header: SectionHeader = elf
+        .section_headers()
+        .nth(2)
+        .expect("symtab section present")
+        .expect("symtab section parses")
+        .clone();
+    let symtab = elf
+        .symtab_data(&symtab_header)
+        .expect("symtab_data succeeds");
+
+    assert_eq!(symtab.symbols().count(), 1);
+}
+
+#[test]
+fn symbol_name_handles_bad_strtab_link_without_panic() {
+    let buf = valid_elf_with_oversize_section_name();
+    let elf = ElfFile::try_parse(&buf).expect("header parses");
+    let bad_symtab_header = SectionHeader {
+        name: 0,
+        typ: SectionHeaderType::SYMTAB,
+        flags: SectionHeaderFlags(0),
+        addr: 0,
+        offset: 0,
+        size: 0,
+        link: u32::MAX,
+        info: 0,
+        addralign: 0,
+        entsize: 0,
+    };
+    let symtab = elf
+        .symtab_data(&bad_symtab_header)
+        .expect("symtab_data succeeds for zero-sized section");
+    let sym = Symbol {
+        name: 0,
+        value: 0,
+        size: 0,
+        info: 0,
+        other: 0,
+        shndx: 0,
+    };
+
+    assert!(elf.symbol_name(&symtab, &sym).is_none());
 }

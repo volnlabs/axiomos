@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 #![cfg_attr(target_arch = "x86_64", feature(abi_x86_interrupt))]
-#![feature(negative_impls, vec_push_within_capacity)]
+#![feature(negative_impls)]
 extern crate alloc;
 
 use ::log::info;

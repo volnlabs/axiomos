@@ -11,6 +11,7 @@ kernel_virtual_memory = { path = "../kernel_virtual_memory" }
 log.workspace = true
 spin.workspace = true
 thiserror.workspace = true
+zerocopy.workspace = true
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86_64.workspace = true

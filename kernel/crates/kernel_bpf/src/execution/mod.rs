@@ -5,14 +5,15 @@
 //!
 //! | Mode        | Cloud Build | Embedded Build |
 //! |-------------|-------------|----------------|
-//! | JIT         | default     | **erased**     |
-//! | Interpreter | fallback    | primary        |
+//! | JIT         | **erased**  | **erased**     |
+//! | Interpreter | primary     | primary        |
 //! | AOT         | rare        | encouraged     |
 //!
 //! # Compile-Time Erasure
 //!
-//! The JIT module is completely erased from embedded builds. This ensures
-//! that embedded deployments cannot accidentally enable JIT compilation.
+//! The unsafe AArch64 JIT is erased from shipped builds. It is available only
+//! to explicit `experimental-aarch64-jit` builds while its code-image lifetime
+//! and W^X design are being replaced.
 
 extern crate alloc;
 
@@ -60,35 +61,35 @@ pub mod helpers_stub {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "C" fn bpf_get_interrupt_latency_ns(ctx: *const BpfContext) -> u64 {
+    pub extern "C" fn bpf_get_interrupt_latency_ns(ctx: *const BpfContext<'_>) -> u64 {
         if ctx.is_null() {
             return 0;
         }
-        unsafe { (*ctx).interrupt_latency_ns }
+        unsafe { (*ctx).interrupt_latency_ns() }
     }
 
     #[unsafe(no_mangle)]
-    pub extern "C" fn bpf_get_boot_time_ms(ctx: *const BpfContext) -> u64 {
+    pub extern "C" fn bpf_get_boot_time_ms(ctx: *const BpfContext<'_>) -> u64 {
         if ctx.is_null() {
             return 0;
         }
-        unsafe { (*ctx).boot_time_ms }
+        unsafe { (*ctx).boot_time_ms() }
     }
 
     #[unsafe(no_mangle)]
-    pub extern "C" fn bpf_get_kernel_heap_kb(ctx: *const BpfContext) -> u64 {
+    pub extern "C" fn bpf_get_kernel_heap_kb(ctx: *const BpfContext<'_>) -> u64 {
         if ctx.is_null() {
             return 0;
         }
-        unsafe { (*ctx).kernel_heap_kb }
+        unsafe { (*ctx).kernel_heap_kb() }
     }
 
     #[unsafe(no_mangle)]
-    pub extern "C" fn bpf_get_kernel_image_mb(ctx: *const BpfContext) -> u64 {
+    pub extern "C" fn bpf_get_kernel_image_mb(ctx: *const BpfContext<'_>) -> u64 {
         if ctx.is_null() {
             return 0;
         }
-        unsafe { (*ctx).kernel_image_mb }
+        unsafe { (*ctx).kernel_image_mb() }
     }
 
     #[unsafe(no_mangle)]
@@ -171,37 +172,108 @@ pub mod helpers_stub {
 #[cfg(all(feature = "cloud-profile", target_arch = "x86_64"))]
 pub mod jit;
 
-// ARM64 JIT is available for aarch64 target or for testing on any platform
-#[cfg(any(target_arch = "aarch64", test))]
+// Never select the AArch64 JIT implicitly through a production profile.
+#[cfg(any(
+    all(target_arch = "aarch64", feature = "experimental-aarch64-jit"),
+    test
+))]
 pub mod jit_aarch64;
 
+use core::marker::PhantomData;
+
 pub use interpreter::Interpreter;
-#[cfg(any(target_arch = "aarch64", test))]
+#[cfg(any(
+    all(target_arch = "aarch64", feature = "experimental-aarch64-jit"),
+    test
+))]
 pub use jit_aarch64::{Arm64JitCompiler, Arm64JitExecutor};
 
-use crate::bytecode::program::BpfProgram;
+use crate::bytecode::program::VerifiedProgram;
 use crate::profile::{ActiveProfile, PhysicalProfile};
+
+/// Private ABI representation passed to BPF programs.
+///
+/// Keeping the pointers private prevents safe code from forging unrelated
+/// `data`/`data_end` pairs. `BpfContext` is transparent over this value, so the
+/// bytecode ABI remains data/data_end/data_meta followed by the metric fields.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+struct RawBpfContext {
+    data: *const u8,
+    data_end: *const u8,
+    data_meta: *const u8,
+    interrupt_latency_ns: u64,
+    boot_time_ms: u64,
+    kernel_heap_kb: u64,
+    kernel_image_mb: u64,
+}
+
+mod pod_private {
+    pub trait Sealed {}
+}
+
+/// Marker for context payloads whose complete object representation is
+/// initialized data (no implicit or uninitialized padding).
+///
+/// This trait is sealed; only layouts audited in this crate can be passed to
+/// [`BpfContext::from_struct`].
+///
+/// # Safety
+///
+/// Implementors must have no uninitialized bytes in their object
+/// representation for any valid value.
+pub unsafe trait BpfPod: pod_private::Sealed {}
+
+macro_rules! impl_bpf_pod {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl pod_private::Sealed for $ty {}
+            // SAFETY: These repr(C) records contain only integer fields and
+            // have no implicit padding (IioEvent names its trailing padding).
+            unsafe impl BpfPod for $ty {}
+        )+
+    };
+}
 
 /// Execution context passed to BPF programs.
 ///
-/// This contains pointers to the program's input data and metadata.
+/// The lifetime prevents the context from outliving the payload referenced by
+/// its private raw pointers. Raw-pointer auto traits are intentionally not
+/// overridden; the additional `Rc` marker makes the synchronous context
+/// explicitly `!Send + !Sync`.
+///
+/// ```compile_fail
+/// use kernel_bpf::execution::BpfContext;
+///
+/// fn dangling() -> BpfContext<'static> {
+///     let bytes = [1_u8, 2, 3];
+///     BpfContext::from_slice(&bytes)
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use kernel_bpf::execution::BpfContext;
+///
+/// struct HasPadding {
+///     small: u8,
+///     large: u64,
+/// }
+/// let value = HasPadding { small: 1, large: 2 };
+/// let _ = BpfContext::from_struct(&value);
+/// ```
+///
+/// ```compile_fail
+/// use kernel_bpf::execution::BpfContext;
+///
+/// fn require_send<T: Send>() {}
+/// require_send::<BpfContext<'static>>();
+/// ```
 #[derive(Debug, Clone, Copy)]
-#[repr(C)]
-pub struct BpfContext {
-    /// Pointer to start of packet/data
-    pub data: *const u8,
-    /// Pointer to end of packet/data
-    pub data_end: *const u8,
-    /// Pointer to packet metadata
-    pub data_meta: *const u8,
-    /// Interrupt latency in nanoseconds (time from IRQ entry to BPF execution)
-    pub interrupt_latency_ns: u64,
-    /// Boot time in milliseconds (kernel start to init)
-    pub boot_time_ms: u64,
-    /// Kernel heap usage in KB
-    pub kernel_heap_kb: u64,
-    /// Kernel image size in MB
-    pub kernel_image_mb: u64,
+#[repr(transparent)]
+pub struct BpfContext<'data> {
+    raw: RawBpfContext,
+    _data: PhantomData<&'data [u8]>,
+    _not_send_sync: PhantomData<alloc::rc::Rc<()>>,
 }
 
 /// Context for syscall tracepoints.
@@ -239,36 +311,57 @@ pub struct SchedSwitchContext {
     pub next_tid: u64,
 }
 
-impl BpfContext {
+impl_bpf_pod!(
+    SyscallTraceContext,
+    SyscallExitContext,
+    SchedSwitchContext,
+    crate::attach::GpioEvent,
+    crate::attach::IioEvent,
+    crate::attach::PwmEvent,
+);
+
+impl BpfContext<'static> {
     /// Create an empty context.
     pub const fn empty() -> Self {
         Self {
-            data: core::ptr::null(),
-            data_end: core::ptr::null(),
-            data_meta: core::ptr::null(),
-            interrupt_latency_ns: 0,
-            boot_time_ms: 0,
-            kernel_heap_kb: 0,
-            kernel_image_mb: 0,
+            raw: RawBpfContext {
+                data: core::ptr::null(),
+                data_end: core::ptr::null(),
+                data_meta: core::ptr::null(),
+                interrupt_latency_ns: 0,
+                boot_time_ms: 0,
+                kernel_heap_kb: 0,
+                kernel_image_mb: 0,
+            },
+            _data: PhantomData,
+            _not_send_sync: PhantomData,
         }
     }
+}
 
+impl<'data> BpfContext<'data> {
     /// Create a context from a data slice.
-    pub fn from_slice(data: &[u8]) -> Self {
+    pub fn from_slice(data: &'data [u8]) -> Self {
         Self {
-            data: data.as_ptr(),
-            // SAFETY: data is a valid slice, so adding its length to the pointer remains within the object.
-            data_end: unsafe { data.as_ptr().add(data.len()) },
-            data_meta: core::ptr::null(),
-            interrupt_latency_ns: 0,
-            boot_time_ms: 0,
-            kernel_heap_kb: 0,
-            kernel_image_mb: 0,
+            raw: RawBpfContext {
+                data: data.as_ptr(),
+                // SAFETY: the pointer and length come from the same valid slice.
+                data_end: unsafe { data.as_ptr().add(data.len()) },
+                data_meta: core::ptr::null(),
+                interrupt_latency_ns: 0,
+                boot_time_ms: 0,
+                kernel_heap_kb: 0,
+                kernel_image_mb: 0,
+            },
+            _data: PhantomData,
+            _not_send_sync: PhantomData,
         }
     }
 
-    /// Create a context from any `repr(C)` POD-like value.
-    pub fn from_struct<T>(value: &T) -> Self {
+    /// Create a context from an audited byte-safe record.
+    pub fn from_struct<T: BpfPod>(value: &'data T) -> Self {
+        // SAFETY: BpfPod is sealed to audited layouts with no uninitialized
+        // padding, and the returned context retains `value`'s lifetime.
         let data = unsafe {
             core::slice::from_raw_parts(value as *const T as *const u8, core::mem::size_of::<T>())
         };
@@ -277,20 +370,49 @@ impl BpfContext {
 
     /// Get the data length.
     pub fn data_len(&self) -> usize {
-        if self.data.is_null() || self.data_end.is_null() {
-            0
-        } else {
-            // SAFETY: data and data_end are pointers derived from the same object (slice),
-            // so offset_from is well-defined.
-            unsafe { self.data_end.offset_from(self.data) as usize }
-        }
+        (self.raw.data_end as usize).saturating_sub(self.raw.data as usize)
+    }
+
+    /// Interrupt latency in nanoseconds.
+    pub const fn interrupt_latency_ns(&self) -> u64 {
+        self.raw.interrupt_latency_ns
+    }
+
+    /// Boot time in milliseconds.
+    pub const fn boot_time_ms(&self) -> u64 {
+        self.raw.boot_time_ms
+    }
+
+    /// Kernel heap usage in KiB.
+    pub const fn kernel_heap_kb(&self) -> u64 {
+        self.raw.kernel_heap_kb
+    }
+
+    /// Kernel image size in MiB.
+    pub const fn kernel_image_mb(&self) -> u64 {
+        self.raw.kernel_image_mb
+    }
+
+    /// Set metrics sampled for this synchronous execution.
+    pub fn set_kernel_metrics(&mut self, boot_time_ms: u64, heap_kb: u64, image_mb: u64) {
+        self.raw.boot_time_ms = boot_time_ms;
+        self.raw.kernel_heap_kb = heap_kb;
+        self.raw.kernel_image_mb = image_mb;
+    }
+
+    /// Set the sampled interrupt latency.
+    pub fn set_interrupt_latency_ns(&mut self, latency_ns: u64) {
+        self.raw.interrupt_latency_ns = latency_ns;
+    }
+
+    pub(crate) const fn data_ptr(&self) -> *const u8 {
+        self.raw.data
+    }
+
+    pub(crate) const fn data_end_ptr(&self) -> *const u8 {
+        self.raw.data_end
     }
 }
-
-// SAFETY: BpfContext only contains raw pointers that are used read-only
-unsafe impl Send for BpfContext {}
-// SAFETY: BpfContext only contains raw pointers that are used read-only
-unsafe impl Sync for BpfContext {}
 
 /// Result of BPF program execution.
 pub type BpfResult = Result<u64, BpfError>;
@@ -322,6 +444,15 @@ pub enum BpfError {
     /// Out of memory
     OutOfMemory,
 
+    /// A manager-wide object, byte, dimension, or ID-space quota was reached.
+    ResourceLimit,
+
+    /// An object cannot be reclaimed while attached, pinned, or executing.
+    ObjectBusy,
+
+    /// The same CPU attempted nested BPF execution while its scratch stack was live.
+    ReentrantExecution,
+
     /// The program failed static verification and was rejected at load time.
     VerificationFailed,
 
@@ -352,6 +483,9 @@ impl core::fmt::Display for BpfError {
             Self::InvalidInstruction => write!(f, "invalid instruction"),
             Self::NotLoaded => write!(f, "program not loaded"),
             Self::OutOfMemory => write!(f, "out of memory"),
+            Self::ResourceLimit => write!(f, "BPF resource limit exceeded"),
+            Self::ObjectBusy => write!(f, "BPF object is still in use"),
+            Self::ReentrantExecution => write!(f, "nested BPF execution on one CPU"),
             Self::VerificationFailed => write!(f, "program failed verification"),
             Self::SignatureRejected => write!(f, "program failed signature authentication"),
             Self::AdmissionRejected => write!(f, "attach exceeds hook WCET admission capacity"),
@@ -378,7 +512,7 @@ pub trait BpfExecutor<P: PhysicalProfile = ActiveProfile> {
     ///
     /// The return value from the BPF program (R0) on success,
     /// or a `BpfError` on failure.
-    fn execute(&self, program: &BpfProgram<P>, ctx: &BpfContext) -> BpfResult;
+    fn execute(&self, program: &VerifiedProgram<P>, ctx: &BpfContext<'_>) -> BpfResult;
 }
 
 /// Get the default executor for the active profile.

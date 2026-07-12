@@ -32,49 +32,52 @@ pub extern "C" fn bpf_ktime_get_ns() -> u64 {
 ///
 /// # Safety
 ///
-/// # Safety
-///
 /// This function expects the BPF context to be passed in R1 by the executor.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[unsafe(no_mangle)]
 pub extern "C" fn bpf_get_interrupt_latency_ns(
-    ctx: *const kernel_bpf::execution::BpfContext,
+    ctx: *const kernel_bpf::execution::BpfContext<'_>,
 ) -> u64 {
     if ctx.is_null() {
         return 0;
     }
     // SAFETY: The executor guarantees that R1 points to a valid BpfContext.
-    unsafe { (*ctx).interrupt_latency_ns }
+    unsafe { (*ctx).interrupt_latency_ns() }
 }
 
 /// BPF helper: Get boot time in milliseconds.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[unsafe(no_mangle)]
-pub extern "C" fn bpf_get_boot_time_ms(ctx: *const kernel_bpf::execution::BpfContext) -> u64 {
+pub extern "C" fn bpf_get_boot_time_ms(ctx: *const kernel_bpf::execution::BpfContext<'_>) -> u64 {
     if ctx.is_null() {
         return 0;
     }
-    unsafe { (*ctx).boot_time_ms }
+    // SAFETY: The executor guarantees that R1 points to a live BpfContext.
+    unsafe { (*ctx).boot_time_ms() }
 }
 
 /// BPF helper: Get kernel heap usage in KB.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[unsafe(no_mangle)]
-pub extern "C" fn bpf_get_kernel_heap_kb(ctx: *const kernel_bpf::execution::BpfContext) -> u64 {
+pub extern "C" fn bpf_get_kernel_heap_kb(ctx: *const kernel_bpf::execution::BpfContext<'_>) -> u64 {
     if ctx.is_null() {
         return 0;
     }
-    unsafe { (*ctx).kernel_heap_kb }
+    // SAFETY: The executor guarantees that R1 points to a live BpfContext.
+    unsafe { (*ctx).kernel_heap_kb() }
 }
 
 /// BPF helper: Get kernel image size in MB.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[unsafe(no_mangle)]
-pub extern "C" fn bpf_get_kernel_image_mb(ctx: *const kernel_bpf::execution::BpfContext) -> u64 {
+pub extern "C" fn bpf_get_kernel_image_mb(
+    ctx: *const kernel_bpf::execution::BpfContext<'_>,
+) -> u64 {
     if ctx.is_null() {
         return 0;
     }
-    unsafe { (*ctx).kernel_image_mb }
+    // SAFETY: The executor guarantees that R1 points to a live BpfContext.
+    unsafe { (*ctx).kernel_image_mb() }
 }
 
 /// BPF helper: Read GPIO pin value
