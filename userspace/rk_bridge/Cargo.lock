@@ -233,6 +233,7 @@ name = "kernel_abi"
 version = "0.1.0"
 dependencies = [
  "bitflags",
+ "zerocopy",
 ]
 
 [[package]]
@@ -497,6 +498,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "zerocopy"
+version = "0.9.0-alpha.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c9c378180b968f2e98efa0c4bba8c49fd4cd247dc82a7f01e72dc137d447d8c"
+dependencies = [
+ "zerocopy-derive",
+]
+
+[[package]]
+name = "zerocopy-derive"
+version = "0.9.0-alpha.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36811c5ea90dd441f941919fc99163e702f150a8e1495d72a268106a0100df09"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
