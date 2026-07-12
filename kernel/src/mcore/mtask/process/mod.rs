@@ -713,9 +713,7 @@ extern "C" fn trampoline(_arg: *mut c_void) {
     log::info!("Trampoline started");
     let ctx = ExecutionContext::load();
     log::info!("Trampoline: context loaded");
-    let current_task = ctx.scheduler().current_task();
-    log::info!("Trampoline: current task got");
-    let current_process = current_task.process().clone();
+    let current_process = ctx.current_process();
     log::info!("Trampoline: current process got");
 
     #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
@@ -796,7 +794,7 @@ extern "C" fn trampoline(_arg: *mut c_void) {
             }
             Err(err) => {
                 log::error!("Trampoline: {err}");
-                current_task.set_should_terminate(true);
+                ctx.with_current_task(|task| task.set_should_terminate(true));
                 Task::exit();
                 unreachable!("Task::exit never returns");
             }
@@ -810,7 +808,7 @@ extern "C" fn trampoline(_arg: *mut c_void) {
             }
             Err(err) => {
                 log::error!("Trampoline: {err}");
-                current_task.set_should_terminate(true);
+                ctx.with_current_task(|task| task.set_should_terminate(true));
                 Task::exit();
                 unreachable!("Task::exit never returns");
             }
@@ -868,9 +866,11 @@ extern "C" fn trampoline(_arg: *mut c_void) {
         }
 
         {
-            let mut guard = current_task.tls().write();
-            assert!(guard.is_none(), "TLS should not exist yet");
-            *guard = Some(tls_alloc);
+            ctx.with_current_task(|task| {
+                let mut guard = task.tls().write();
+                assert!(guard.is_none(), "TLS should not exist yet");
+                *guard = Some(tls_alloc);
+            });
         }
     }
 
@@ -907,9 +907,11 @@ extern "C" fn trampoline(_arg: *mut c_void) {
         code_ptr
     );
     {
-        let mut ustack_guard = current_task.ustack().write();
-        assert!(ustack_guard.is_none(), "ustack should not exist yet");
-        *ustack_guard = Some(ustack_allocation);
+        ctx.with_current_task(|task| {
+            let mut ustack_guard = task.ustack().write();
+            assert!(ustack_guard.is_none(), "ustack should not exist yet");
+            *ustack_guard = Some(ustack_allocation);
+        });
     }
     // assert!(ustack_rsp.is_aligned(16_u64));
 

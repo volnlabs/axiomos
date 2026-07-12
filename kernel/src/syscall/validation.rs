@@ -19,7 +19,7 @@ struct CurrentUserMemory {
 impl CurrentUserMemory {
     fn new() -> Self {
         Self {
-            process: ExecutionContext::load().current_process().clone(),
+            process: ExecutionContext::load().current_process(),
         }
     }
 
