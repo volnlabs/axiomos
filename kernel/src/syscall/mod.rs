@@ -131,7 +131,7 @@ pub fn dispatch_syscall(
             // exception entry). reschedule() context-switches away; since should_terminate is
             // set, this task will be cleaned up and never re-enqueued.
             unsafe {
-                ctx.scheduler_mut().reschedule();
+                ctx.reschedule();
             }
             loop {
                 hlt();
@@ -166,7 +166,7 @@ pub fn dispatch_syscall(
             *process.exit_code().write() = Some(status);
             task.set_should_terminate(true);
             unsafe {
-                ctx.scheduler_mut().reschedule();
+                ctx.reschedule();
             }
             loop {
                 hlt();

@@ -169,7 +169,7 @@ impl Task {
             use crate::arch::traits::Architecture;
             crate::arch::aarch64::Aarch64::disable_interrupts();
             unsafe {
-                ExecutionContext::load().scheduler_mut().reschedule();
+                ExecutionContext::load().reschedule();
             }
         }
         loop {

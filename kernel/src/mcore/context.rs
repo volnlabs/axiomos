@@ -211,6 +211,27 @@ impl ExecutionContext {
         unsafe { &mut *self.scheduler.get() }
     }
 
+    /// Prepare a scheduler transition under an exclusive borrow, end that
+    /// borrow, and only then transfer control to the incoming task.
+    ///
+    /// # Safety
+    /// The caller must ensure interrupts are disabled for the complete call.
+    pub unsafe fn reschedule(&self) {
+        let context_switch = {
+            // SAFETY: The caller guarantees this CPU cannot re-enter scheduler
+            // access while the short preparation borrow is live.
+            let scheduler = unsafe { self.scheduler_mut() };
+            // SAFETY: Forwarding the same interrupt/exclusivity guarantee.
+            unsafe { scheduler.prepare_context_switch() }
+        };
+
+        if let Some(context_switch) = context_switch {
+            // SAFETY: The scheduler borrow ended above. Its pinned outgoing and
+            // incoming task storage remains owned by the scheduler.
+            unsafe { context_switch.execute() };
+        }
+    }
+
     pub fn scheduler(&self) -> &Scheduler {
         // SAFETY: We are accessing the scheduler immutably.
         // This is safe because everything in the context is cpu-local and we are not

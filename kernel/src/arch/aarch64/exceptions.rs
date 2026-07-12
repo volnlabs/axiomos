@@ -164,7 +164,7 @@ pub extern "C" fn check_preemption(_frame: *mut ExceptionContext) {
             // SAFETY: We are in the exception return path, interrupts are disabled.
             // It is safe to call reschedule here as we haven't started restoring registers yet.
             unsafe {
-                ctx.scheduler_mut().reschedule();
+                ctx.reschedule();
             }
         }
     }

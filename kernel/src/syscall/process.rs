@@ -164,9 +164,7 @@ pub fn sys_waitpid(pid: isize, status_ptr: usize, options: usize) -> Result<usiz
         // SAFETY: Interrupts are disabled during syscall handling. Reschedule
         // switches to another task; when we're rescheduled, we re-check the child.
         unsafe {
-            crate::mcore::context::ExecutionContext::load()
-                .scheduler_mut()
-                .reschedule();
+            crate::mcore::context::ExecutionContext::load().reschedule();
         }
     }
 }

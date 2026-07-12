@@ -298,7 +298,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     // SAFETY: Rescheduling is safe here as we are in an interrupt handler
     // and the scheduler handles context switching.
     unsafe {
-        ctx.scheduler_mut().reschedule();
+        ctx.reschedule();
     }
 }
 

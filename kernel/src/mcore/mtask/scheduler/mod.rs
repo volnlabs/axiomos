@@ -67,6 +67,34 @@ pub struct Scheduler {
     dummy_old_stack_ptr: UnsafeCell<usize>,
 }
 
+/// Raw context-switch inputs prepared while the scheduler is exclusively
+/// borrowed, then consumed only after that Rust borrow has ended.
+pub(crate) struct ContextSwitch {
+    old_stack_ptr: *mut usize,
+    new_stack_ptr: usize,
+    new_cr3_value: usize,
+}
+
+impl ContextSwitch {
+    /// Perform the architecture context switch.
+    ///
+    /// # Safety
+    /// The scheduler that produced this value must remain alive, interrupts
+    /// must remain disabled, and this switch must be executed exactly once.
+    pub(crate) unsafe fn execute(self) {
+        // SAFETY: `prepare_context_switch` derives both stack pointers from
+        // pinned tasks retained by the scheduler and records the target page
+        // table value before ending its exclusive borrow.
+        unsafe {
+            switch_impl(
+                self.old_stack_ptr,
+                self.new_stack_ptr as *const u8,
+                self.new_cr3_value,
+            );
+        }
+    }
+}
+
 impl Scheduler {
     #[must_use]
     pub fn new_cpu_local() -> Self {
@@ -80,11 +108,16 @@ impl Scheduler {
         }
     }
 
+    /// Mutate scheduler state and prepare a context switch without executing it.
+    ///
+    /// Ending the `&mut Scheduler` borrow before [`ContextSwitch::execute`] is
+    /// essential: the incoming task may access this CPU's scheduler before the
+    /// outgoing task eventually resumes and returns from the assembly switch.
+    ///
     /// # Safety
-    /// Trivially unsafe. If you don't know why, please don't call this function.
-    // SAFETY: This function performs a context switch, which is inherently unsafe.
-    // It manipulates raw pointers and CPU state.
-    pub unsafe fn reschedule(&mut self) {
+    /// Interrupts must be disabled and the returned switch must be executed at
+    /// most once before interrupts are re-enabled.
+    pub(crate) unsafe fn prepare_context_switch(&mut self) -> Option<ContextSwitch> {
         // log::info!("reschedule: entering");
         #[cfg(target_arch = "x86_64")]
         assert!(!interrupts::are_enabled());
@@ -107,7 +140,7 @@ impl Scheduler {
                 // log::info!("reschedule: no next task, staying on current task {}", self.current_task.id());
             }
             let Some(next_task) = next_task_opt else {
-                return;
+                return None;
             };
 
             #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
@@ -207,32 +240,11 @@ impl Scheduler {
 
         ExecutionContext::load().set_current_pid(self.current_task.process().pid().as_u64());
 
-        // log::trace!("reschedule: calling switch_impl (old_sp_ptr={:p}, new_sp={:#x}, ttbr0={:#x})",
-        //     old_stack_ptr, *self.current_task.last_stack_ptr(), cr3_value);
-
-        // SAFETY: Performing the actual context switch.
-        // We provide valid pointers to the old task's stack pointer location and the new task's stack.
-        // new_cr3_value is derived from the new task's address space.
-        unsafe {
-            Self::switch(
-                &mut *old_stack_ptr, // yay, UB (but how else are we going to do this?)
-                *self.current_task.last_stack_ptr(),
-                cr3_value,
-            );
-        }
-        // log::trace!("reschedule: switch_impl returned");
-    }
-
-    // SAFETY: Low-level context switch implementation.
-    unsafe fn switch(old_stack_ptr: &mut usize, new_stack_ptr: usize, new_cr3_value: usize) {
-        // SAFETY: Calling the assembly implementation of context switch.
-        unsafe {
-            switch_impl(
-                core::ptr::from_mut::<usize>(old_stack_ptr),
-                new_stack_ptr as *const u8,
-                new_cr3_value,
-            );
-        }
+        Some(ContextSwitch {
+            old_stack_ptr,
+            new_stack_ptr: *self.current_task.last_stack_ptr(),
+            new_cr3_value: cr3_value,
+        })
     }
 
     #[must_use]
