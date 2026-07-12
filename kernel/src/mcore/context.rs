@@ -24,6 +24,18 @@ use crate::mcore::mtask::process::Process;
 use crate::mcore::mtask::scheduler::Scheduler;
 use crate::mcore::mtask::task::Task;
 
+static ONLINE_CPU_MASK: AtomicU64 = AtomicU64::new(0);
+
+fn cpu_bit(cpu_id: usize) -> u64 {
+    1u64.checked_shl(u32::try_from(cpu_id).expect("CPU id must fit u32"))
+        .filter(|bit| *bit != 0)
+        .expect("axiomos supports at most 64 tracked CPUs")
+}
+
+pub fn online_cpu_mask() -> u64 {
+    ONLINE_CPU_MASK.load(Ordering::Acquire)
+}
+
 struct BpfCpuStack {
     data: UnsafeCell<Box<[u8]>>,
     in_use: AtomicBool,
@@ -228,6 +240,10 @@ impl ExecutionContext {
     #[must_use]
     pub fn cpu_id(&self) -> usize {
         self.cpu_id
+    }
+
+    pub fn mark_online(&self) {
+        ONLINE_CPU_MASK.fetch_or(cpu_bit(self.cpu_id), Ordering::Release);
     }
 
     #[cfg(target_arch = "x86_64")]

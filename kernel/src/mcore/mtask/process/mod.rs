@@ -318,6 +318,14 @@ impl Process {
         }
     }
 
+    pub(crate) fn mark_address_space_resident(&self, cpu_id: usize) {
+        let guard = self.address_space.read();
+        guard
+            .as_ref()
+            .unwrap_or(AddressSpace::kernel())
+            .mark_cpu_resident(cpu_id);
+    }
+
     pub fn vmm(self: &Arc<Self>) -> impl VirtualMemoryAllocator {
         self.lower_half_memory.clone()
     }

@@ -166,6 +166,10 @@ impl Scheduler {
 
             log::trace!("reschedule: switching to task {}", next_task.id());
 
+            next_task
+                .process()
+                .mark_address_space_resident(ExecutionContext::load().cpu_id());
+
             #[cfg(target_arch = "x86_64")]
             let cr3_value = next_task
                 .process()

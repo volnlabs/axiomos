@@ -154,6 +154,7 @@ unsafe extern "C" fn cpu_init_and_return(cpu: &limine::mp::Cpu) {
 
     // load it back and print a message
     let ctx = ExecutionContext::load();
+    ctx.mark_online();
     info!("cpu {} initialized", ctx.cpu_id());
 
     #[cfg(target_arch = "x86_64")]

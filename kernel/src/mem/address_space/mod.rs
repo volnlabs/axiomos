@@ -1,5 +1,6 @@
 use core::fmt::{Debug, Formatter};
 use core::ptr::{with_exposed_provenance, with_exposed_provenance_mut};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use conquer_once::spin::OnceCell;
 use kernel_physical_memory::{PhysicalFrameAllocator, PhysicalMemoryManager};
@@ -188,6 +189,7 @@ pub struct AddressSpace {
     #[cfg(target_arch = "aarch64")]
     level0_frame: crate::arch::aarch64::phys::PhysFrame,
     inner: RwLock<AddressSpaceMapper>,
+    resident_cpus: AtomicU64,
 }
 
 impl Debug for AddressSpace {
@@ -200,6 +202,10 @@ impl Debug for AddressSpace {
         ds.field("level0_frame", &self.level0_frame);
 
         ds.field("active", &self.inner.read().is_active())
+            .field(
+                "resident_cpus",
+                &format_args!("{:#x}", self.resident_cpus.load(Ordering::Relaxed)),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -367,6 +373,7 @@ impl AddressSpace {
         Self {
             level4_frame,
             inner: RwLock::new(AddressSpaceMapper::new(level4_frame, level4_vaddr)),
+            resident_cpus: AtomicU64::new(0),
         }
     }
 
@@ -381,6 +388,7 @@ impl AddressSpace {
         Self {
             level0_frame,
             inner: RwLock::new(AddressSpaceMapper::new(level0_frame, level0_vaddr)),
+            resident_cpus: AtomicU64::new(0),
         }
     }
 
@@ -477,6 +485,10 @@ impl AddressSpace {
     where
         F: FnOnce(&Self) -> R,
     {
+        if let Some(context) = crate::mcore::context::ExecutionContext::try_load() {
+            self.mark_cpu_resident(context.cpu_id());
+        }
+
         #[cfg(target_arch = "x86_64")]
         {
             let current_cr3 = Cr3::read();
@@ -532,6 +544,25 @@ impl AddressSpace {
             }
 
             result
+        }
+    }
+
+    pub(crate) fn mark_cpu_resident(&self, cpu_id: usize) {
+        let bit = 1u64
+            .checked_shl(u32::try_from(cpu_id).expect("CPU id must fit u32"))
+            .filter(|bit| *bit != 0)
+            .expect("axiomos supports at most 64 tracked CPUs");
+        self.resident_cpus.fetch_or(bit, Ordering::Release);
+    }
+
+    pub(crate) fn shootdown_targets(&self) -> u64 {
+        if KERNEL_ADDRESS_SPACE
+            .get()
+            .is_some_and(|kernel| core::ptr::eq(self, kernel))
+        {
+            crate::mcore::context::online_cpu_mask()
+        } else {
+            self.resident_cpus.load(Ordering::Acquire)
         }
     }
 
