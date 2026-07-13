@@ -4,7 +4,7 @@ use core::cell::UnsafeCell;
 use core::fmt;
 #[cfg(target_arch = "x86_64")]
 use core::sync::atomic::AtomicU32;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
 #[cfg(target_arch = "x86_64")]
@@ -162,6 +162,7 @@ pub struct ExecutionContext {
     scheduler: SchedulerSlot,
     current_pid: AtomicU64,
     bpf_stack: BpfCpuStack,
+    bpf_execution: AtomicPtr<()>,
     #[cfg(target_arch = "aarch64")]
     need_reschedule: core::sync::atomic::AtomicBool,
 }
@@ -187,6 +188,7 @@ impl ExecutionContext {
             scheduler: SchedulerSlot::new(Scheduler::new_cpu_local()),
             current_pid: AtomicU64::new(0),
             bpf_stack: BpfCpuStack::new(),
+            bpf_execution: AtomicPtr::new(core::ptr::null_mut()),
         }
     }
 
@@ -197,6 +199,7 @@ impl ExecutionContext {
             scheduler: SchedulerSlot::new(Scheduler::new_cpu_local()),
             current_pid: AtomicU64::new(0),
             bpf_stack: BpfCpuStack::new(),
+            bpf_execution: AtomicPtr::new(core::ptr::null_mut()),
             need_reschedule: core::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -311,6 +314,39 @@ impl ExecutionContext {
 
     pub fn with_bpf_stack<R>(&self, f: impl FnOnce(&mut [u8]) -> R) -> Option<R> {
         self.bpf_stack.with_mut(f)
+    }
+
+    pub(crate) fn with_bpf_execution<R>(
+        &self,
+        execution: *mut (),
+        f: impl FnOnce() -> R,
+    ) -> Option<R> {
+        if execution.is_null()
+            || self
+                .bpf_execution
+                .compare_exchange(
+                    core::ptr::null_mut(),
+                    execution,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_err()
+        {
+            return None;
+        }
+
+        struct Reset<'a>(&'a AtomicPtr<()>);
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                self.0.store(core::ptr::null_mut(), Ordering::Release);
+            }
+        }
+        let _reset = Reset(&self.bpf_execution);
+        Some(f())
+    }
+
+    pub(crate) fn current_bpf_execution(&self) -> *mut () {
+        self.bpf_execution.load(Ordering::Acquire)
     }
 
     pub(crate) fn with_interrupts_masked<R>(&self, f: impl FnOnce() -> R) -> R {

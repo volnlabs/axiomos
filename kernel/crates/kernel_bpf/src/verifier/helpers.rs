@@ -372,6 +372,8 @@ pub struct HelperSignature {
     /// Whether the helper can change physical device state. Caller trust and
     /// program authenticity do not imply authority to actuate hardware.
     pub requires_actuation: bool,
+    /// Whether the helper emits output to a logging or tracing sink.
+    pub may_log: bool,
 }
 
 impl HelperSignature {
@@ -383,6 +385,7 @@ impl HelperSignature {
             ret,
             min_tier: super::LoadCaller::Unprivileged,
             requires_actuation: false,
+            may_log: false,
         }
     }
 
@@ -395,6 +398,12 @@ impl HelperSignature {
     /// Mark this helper as requiring explicit hardware-actuation authority.
     const fn requiring_actuation(mut self) -> Self {
         self.requires_actuation = true;
+        self
+    }
+
+    /// Mark this helper as potentially emitting log output.
+    const fn with_logging_effect(mut self) -> Self {
+        self.may_log = true;
         self
     }
 
@@ -414,7 +423,8 @@ pub fn get_helper_signature(id: HelperId) -> HelperSignature {
             id,
             &[ArgType::PtrToMem, ArgType::MemSize],
             ReturnType::Integer,
-        ),
+        )
+        .with_logging_effect(),
 
         HelperId::GetPrandomU32 => HelperSignature::new(id, &[], ReturnType::Integer),
 
@@ -665,6 +675,13 @@ mod tests {
         assert_eq!(sig.args[0], ArgType::Scalar);
         assert_eq!(sig.args[1], ArgType::PtrToMapKey);
         assert_eq!(sig.ret, ReturnType::PtrToMapValueOrNull);
+    }
+
+    #[test]
+    fn only_trace_printk_is_marked_as_logging() {
+        assert!(get_helper_signature(HelperId::TracePrintk).may_log);
+        assert!(!get_helper_signature(HelperId::KtimeGetNs).may_log);
+        assert!(!get_helper_signature(HelperId::MapUpdateElem).may_log);
     }
 
     #[test]

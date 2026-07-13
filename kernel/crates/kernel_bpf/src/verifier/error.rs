@@ -120,6 +120,14 @@ pub enum VerifyError {
         helper_id: i32,
     },
 
+    /// The load policy forbids helpers that can emit log output.
+    LoggingHelperForbidden {
+        /// Instruction index
+        insn_idx: usize,
+        /// Helper ID (raw)
+        helper_id: i32,
+    },
+
     /// Unprivileged program returns a pointer (kernel-address leak) (#88).
     PointerLeakUnprivileged {
         /// Instruction index of the EXIT
@@ -351,6 +359,13 @@ impl fmt::Display for VerifyError {
             } => write!(
                 f,
                 "helper {helper_id} requires hardware-actuation authority at instruction {insn_idx}"
+            ),
+            Self::LoggingHelperForbidden {
+                insn_idx,
+                helper_id,
+            } => write!(
+                f,
+                "logging helper {helper_id} is forbidden by load policy at instruction {insn_idx}"
             ),
             Self::PointerLeakUnprivileged { insn_idx } => write!(
                 f,

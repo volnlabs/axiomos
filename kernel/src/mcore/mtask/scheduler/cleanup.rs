@@ -76,7 +76,6 @@ impl TaskCleanup {
 
             if !pending_bpf_owners.is_empty() {
                 crate::mcore::context::ExecutionContext::load().with_interrupts_masked(|| {
-                    let _runtime = crate::bpf::lock_runtime();
                     if let Some(manager) = crate::BPF_MANAGER.get() {
                         let mut manager = manager.lock();
                         pending_bpf_owners.retain(|owner| !manager.reclaim_owner(*owner));

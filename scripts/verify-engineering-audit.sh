@@ -271,7 +271,7 @@ qemu_smoke() {
         LIFECYCLE_EXIT_WAIT_OK LIFECYCLE_FAULT_WAIT_OK LIFECYCLE_EXEC_REJECT_OK \
         LIFECYCLE_EXEC_WAIT_OK BPF_FOREIGN_OWNER_DENY_OK BPF_HANDLE_REUSE_OK \
         BPF_OWNER_EXIT_OK BPF_OWNER_RECLAIM_OK \
-        BPF_PINNED_WRITE_ONLY_OK \
+        BPF_PINNED_WRITE_ONLY_OK BPF_HOOK_SNAPSHOT_SMP_OK \
         BPF_CAPABILITY_PROBE_STARTED BPF_UNPRIVILEGED_DENY_OK \
         BPF_UNPRIVILEGED_TIER_DENY_OK BPF_ATTACH_DENY_OK; do
         if ! grep -qF "$marker" "$log"; then
@@ -366,6 +366,11 @@ run_step workflow-yaml python3 -c \
     'import yaml; [yaml.safe_load(open(p, encoding="utf-8")) for p in (".github/workflows/build.yml", ".github/workflows/fuzz.yml", ".github/workflows/bpf-profiles.yml")]'
 run_step nanosleep-waitq-static python3 -c \
     'from pathlib import Path; source=Path("kernel/src/syscall/mod.rs").read_text(); body=source.split("fn dispatch_sys_nanosleep", 1)[1].split("\nfn ", 1)[0]; assert "abort_sleep_before_switch" in body and body.count("ExecutionContext::load()") >= 2; assert all(token not in body for token in ("enable_and_hlt", "spin_loop", "Busy wait loop"))'
+run_step bpf-hook-hotpath-static python3 -c \
+    'from pathlib import Path; source=Path("kernel/src/bpf/mod.rs").read_text(); dispatch=source.split("pub fn run_gpio_programs", 1)[1].split("\n    // --- Map operations ---", 1)[0]; gpio=Path("kernel/src/arch/aarch64/platform/rpi5/gpio.rs").read_text().split("// 3. Execute the immutable route snapshot", 1)[1].split("// Bench (Task 11)", 1)[0]; helpers=Path("kernel/src/bpf/helpers.rs").read_text().split("pub extern \"C\" fn bpf_map_lookup_elem", 1)[1]; interpreter=Path("kernel/crates/kernel_bpf/src/execution/interpreter.rs").read_text().split("pub fn execute_with_stack", 1)[1].split("\n    }\n}", 1)[0]; verifier=Path("kernel/crates/kernel_bpf/src/verifier/core.rs").read_text(); assert "BPF_RUNTIME" not in source and "lock_runtime" not in source; assert all(token not in dispatch for token in ("BPF_MANAGER", ".lock()", ".clone()", "Vec", "log::", ".filter(")); assert "snapshot.gpio(" in dispatch and "snapshot.generic(" in dispatch; assert "[Option<Arc<ProgramRuntime>>; N]" in source and "forbid_logging_helpers = is_latency_sensitive_attach_type" in source; assert "referenced_map_handles" in source and "Arc::strong_count(&entry.runtime)" in source; assert all(token not in gpio for token in ("BPF_MANAGER", ".lock()", ".clone()", "Vec", "log::")); assert "BPF_MANAGER" not in helpers; assert "vec![" not in interpreter; assert "sig.may_log && self.config.forbid_logging_helpers" in verifier'
+run_step bpf-snapshot-test-build rustc --edition 2021 -D warnings --test \
+    kernel/src/bpf/snapshot.rs -o "$OUTPUT_DIR/bpf-snapshot-tests"
+run_step bpf-snapshot-tests "$OUTPUT_DIR/bpf-snapshot-tests"
 run_cargo_step focused-host-tests test \
     -p kernel_abi -p kernel_elfloader -p kernel_physical_memory -p kernel_syscall \
     -p kernel_time -p kernel_usermem -p kernel_vfs -p kernel_virtual_memory -p shrike_link

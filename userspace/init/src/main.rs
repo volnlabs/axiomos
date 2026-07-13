@@ -85,6 +85,13 @@ pub extern "C" fn _start() -> ! {
     }
 
     #[cfg(feature = "bpf-unsigned-development")]
+    if bpf_hook_snapshot_smp_probe() {
+        write(1, b"BPF_HOOK_SNAPSHOT_SMP_OK\n");
+    } else {
+        write(1, b"BPF_HOOK_SNAPSHOT_SMP_FAIL\n");
+    }
+
+    #[cfg(feature = "bpf-unsigned-development")]
     if bpf_owner_exit_probe() {
         write(1, b"BPF_HANDLE_REUSE_OK\n");
         write(1, b"BPF_OWNER_EXIT_OK\n");
@@ -366,6 +373,233 @@ pub extern "C" fn _start() -> ! {
             minilib::pause();
         }
     */
+}
+
+#[cfg(feature = "bpf-unsigned-development")]
+fn bpf_hook_snapshot_smp_probe() -> bool {
+    let attr_size = core::mem::size_of::<kernel_abi::BpfAttr>() as i32;
+    let map_attr = kernel_abi::BpfAttr {
+        prog_type: 2,
+        insn_cnt: 4,
+        insns: 8 | (1u64 << 32),
+        ..kernel_abi::BpfAttr::default()
+    };
+    let map = minilib::bpf(
+        kernel_abi::BPF_MAP_CREATE as i32,
+        (&raw const map_attr).cast(),
+        attr_size,
+    );
+    if map < 0 {
+        return false;
+    }
+
+    const fn regs(dst: u8, src: u8) -> u8 {
+        (src << 4) | (dst & 0x0f)
+    }
+
+    let instructions = [
+        // key = 0 at r10 - 4
+        BpfInsn {
+            code: 0xb7,
+            dst_src: regs(1, 0),
+            off: 0,
+            imm: 0,
+        },
+        BpfInsn {
+            code: 0x63,
+            dst_src: regs(10, 1),
+            off: -4,
+            imm: 0,
+        },
+        // value = bpf_map_lookup_elem(map, &key)
+        BpfInsn {
+            code: 0xb7,
+            dst_src: regs(1, 0),
+            off: 0,
+            imm: map,
+        },
+        BpfInsn {
+            code: 0xbf,
+            dst_src: regs(2, 10),
+            off: 0,
+            imm: 0,
+        },
+        BpfInsn {
+            code: 0x07,
+            dst_src: regs(2, 0),
+            off: 0,
+            imm: -4,
+        },
+        BpfInsn {
+            code: 0x85,
+            dst_src: 0,
+            off: 0,
+            imm: 5,
+        },
+        BpfInsn {
+            code: 0x15,
+            dst_src: regs(0, 0),
+            off: 4,
+            imm: 0,
+        },
+        BpfInsn {
+            code: 0x79,
+            dst_src: regs(1, 0),
+            off: 0,
+            imm: 0,
+        },
+        BpfInsn {
+            code: 0x07,
+            dst_src: regs(1, 0),
+            off: 0,
+            imm: 1,
+        },
+        BpfInsn {
+            code: 0x7b,
+            dst_src: regs(0, 1),
+            off: 0,
+            imm: 0,
+        },
+        BpfInsn {
+            code: 0xb7,
+            dst_src: regs(0, 0),
+            off: 0,
+            imm: 0,
+        },
+        BpfInsn {
+            code: 0x95,
+            dst_src: 0,
+            off: 0,
+            imm: 0,
+        },
+    ];
+    let load = kernel_abi::BpfAttr {
+        insn_cnt: instructions.len() as u32,
+        insns: instructions.as_ptr() as u64,
+        ..kernel_abi::BpfAttr::default()
+    };
+    let program = minilib::bpf(
+        kernel_abi::BPF_PROG_LOAD as i32,
+        (&raw const load).cast(),
+        attr_size,
+    );
+    let mut probe_ok = program >= 0;
+    let mut workers = [0i32; 2];
+    let mut worker_count = 0;
+    let mut attached = false;
+
+    if program >= 0 {
+        for worker in &mut workers {
+            let child = minilib::fork();
+            if child < 0 {
+                probe_ok = false;
+                break;
+            }
+            if child == 0 {
+                for _ in 0..192 {
+                    minilib::msleep(1);
+                }
+                minilib::exit(0);
+            }
+            *worker = child;
+            worker_count += 1;
+        }
+
+        let attachment = kernel_abi::BpfAttr {
+            attach_btf_id: 7,
+            attach_prog_fd: program as u32,
+            ..kernel_abi::BpfAttr::default()
+        };
+        if worker_count == workers.len() {
+            for _ in 0..128 {
+                if minilib::bpf(
+                    kernel_abi::BPF_PROG_ATTACH as i32,
+                    (&raw const attachment).cast(),
+                    attr_size,
+                ) != 0
+                {
+                    probe_ok = false;
+                    break;
+                }
+                attached = true;
+                minilib::msleep(1);
+                if minilib::bpf(
+                    kernel_abi::BPF_PROG_DETACH as i32,
+                    (&raw const attachment).cast(),
+                    attr_size,
+                ) != 0
+                {
+                    probe_ok = false;
+                    break;
+                }
+                attached = false;
+            }
+        } else {
+            probe_ok = false;
+        }
+    }
+
+    let mut workers_ok = true;
+    for &child in &workers[..worker_count] {
+        let mut status = 0;
+        workers_ok &= minilib::waitpid(child, &raw mut status, 0) == child && status == 0;
+    }
+    probe_ok &= workers_ok;
+
+    if attached {
+        let attachment = kernel_abi::BpfAttr {
+            attach_btf_id: 7,
+            attach_prog_fd: program as u32,
+            ..kernel_abi::BpfAttr::default()
+        };
+        if minilib::bpf(
+            kernel_abi::BPF_PROG_DETACH as i32,
+            (&raw const attachment).cast(),
+            attr_size,
+        ) != 0
+        {
+            probe_ok = false;
+        }
+    }
+
+    let key = 0u32;
+    let mut observed = 0u64;
+    let lookup = kernel_abi::BpfAttr {
+        map_fd: map as u32,
+        key: (&raw const key) as u64,
+        value: (&raw mut observed) as u64,
+        ..kernel_abi::BpfAttr::default()
+    };
+    let execution_seen = minilib::bpf(
+        kernel_abi::BPF_MAP_LOOKUP_ELEM as i32,
+        (&raw const lookup).cast(),
+        attr_size,
+    ) == 0
+        && observed > 0;
+
+    let mut cleanup_ok = true;
+    if program >= 0 {
+        let unload = kernel_abi::BpfAttr {
+            attach_prog_fd: program as u32,
+            ..kernel_abi::BpfAttr::default()
+        };
+        cleanup_ok &= minilib::bpf(
+            kernel_abi::BPF_PROG_UNLOAD as i32,
+            (&raw const unload).cast(),
+            attr_size,
+        ) == 0;
+    }
+    let destroy = kernel_abi::BpfAttr {
+        map_fd: map as u32,
+        ..kernel_abi::BpfAttr::default()
+    };
+    cleanup_ok &= minilib::bpf(
+        kernel_abi::BPF_MAP_DESTROY as i32,
+        (&raw const destroy).cast(),
+        attr_size,
+    ) == 0;
+
+    probe_ok && execution_seen && cleanup_ok
 }
 
 fn lifecycle_exit_wait_probe() -> bool {

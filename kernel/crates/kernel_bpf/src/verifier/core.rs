@@ -90,6 +90,9 @@ pub struct VerifyConfig<'a> {
     /// Explicit authority to call helpers that can change physical device
     /// state. Signature trust alone never grants this capability.
     pub allow_actuation: bool,
+    /// Reject helpers that may emit log output. Disabled by default to preserve
+    /// the existing verifier API; hot-path loaders opt in to the stricter rule.
+    pub forbid_logging_helpers: bool,
 }
 
 fn map_handle_slot(id: u64, config: &VerifyConfig) -> Option<usize> {
@@ -191,6 +194,17 @@ fn mutating_helper_map_arg(helper: HelperId) -> Option<Register> {
     }
 }
 
+fn referenced_map_helper_arg(helper: HelperId) -> Option<Register> {
+    match helper {
+        HelperId::MapLookupElem
+        | HelperId::MapUpdateElem
+        | HelperId::MapDeleteElem
+        | HelperId::RingbufOutput
+        | HelperId::TimeseriesPush => Some(Register::R1),
+        _ => None,
+    }
+}
+
 /// Cost of a verification run, returned by [`Verifier::verify_with_stats`].
 ///
 /// `states_explored` is the number of distinct verifier states the pruner
@@ -199,7 +213,7 @@ fn mutating_helper_map_arg(helper: HelperId) -> Option<Register> {
 /// state each). For the loop-free embedded fragment this is bounded by the
 /// program size; this is the figure the bounded-verification / verifier-WCET
 /// work measures. See `docs/verifier-fragment.md`.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct VerifyStats {
     /// Distinct verifier states explored during verification.
     pub states_explored: usize,
@@ -207,6 +221,9 @@ pub struct VerifyStats {
     /// most expensive path through the loop-free CFG (Track C / #43). Relative
     /// units pending A76 calibration; see [`crate::verifier::cost`].
     pub wcet_cycles: u64,
+    /// Proven constant map handles referenced by helper calls on any explored
+    /// path. Dynamic handles are intentionally omitted rather than guessed.
+    pub referenced_map_handles: Vec<u32>,
 }
 
 /// BPF program verifier.
@@ -241,6 +258,9 @@ pub struct Verifier<'a, P: PhysicalProfile = ActiveProfile> {
     /// value range), and `verify_memory` (bounds checks).
     config: VerifyConfig<'a>,
 
+    /// Map handles proven constant at helper call sites during path exploration.
+    referenced_map_handles: Vec<u32>,
+
     /// Profile marker
     _profile: PhantomData<P>,
 }
@@ -254,6 +274,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
             pruner: StatePruner::new(),
             liveness: None,
             config: VerifyConfig::default(),
+            referenced_map_handles: Vec::new(),
             _profile: PhantomData,
         }
     }
@@ -325,9 +346,12 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
         // longest-path cycle bound over the now-built CFG (execution cost).
         // Both are read before building the program so they reflect exactly the
         // verified bytecode.
+        verifier.referenced_map_handles.sort_unstable();
+        verifier.referenced_map_handles.dedup();
         let stats = VerifyStats {
             states_explored: verifier.pruner.recorded(),
             wcet_cycles: super::cost::wcet_cycles(insns, verifier.cfg.as_ref().unwrap()),
+            referenced_map_handles: verifier.referenced_map_handles,
         };
 
         // Build the verified program
@@ -558,7 +582,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
 
     /// Verify a single instruction.
     fn verify_insn(
-        &self,
+        &mut self,
         insn: &BpfInsn,
         state: &mut VerifierState,
         idx: usize,
@@ -886,7 +910,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
 
     /// Verify a call instruction.
     fn verify_call(
-        &self,
+        &mut self,
         insn: &BpfInsn,
         state: &mut VerifierState,
         idx: usize,
@@ -918,11 +942,26 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                         helper_id,
                     });
                 }
+                if sig.may_log && self.config.forbid_logging_helpers {
+                    return Err(VerifyError::LoggingHelperForbidden {
+                        insn_idx: idx,
+                        helper_id,
+                    });
+                }
                 if let Some(map_arg) = mutating_helper_map_arg(sig.id) {
                     let writability = map_lookup_writability(state.reg(map_arg), &self.config);
                     check_map_write_writability(writability, idx)?;
                 }
                 check_helper_mem_bounds(sig.args, state, idx)?;
+                if let Some(map_arg) = referenced_map_helper_arg(sig.id)
+                    && let Some(handle) = state
+                        .reg(map_arg)
+                        .scalar_value
+                        .and_then(|value| value.value)
+                        .and_then(|value| u32::try_from(value).ok())
+                {
+                    self.referenced_map_handles.push(handle);
+                }
                 // Determine R0's region size *before* clobbering caller-saved
                 // registers, since a map lookup's value size depends on the map
                 // id still held in R1 (#123).
@@ -1514,6 +1553,120 @@ mod tests {
     #[test]
     fn verify_config_default_caller_is_privileged() {
         assert_eq!(VerifyConfig::default().caller, LoadCaller::Privileged);
+        assert!(!VerifyConfig::default().forbid_logging_helpers);
+    }
+
+    #[test]
+    fn referenced_map_helper_set_matches_runtime_map_operations() {
+        for helper in [
+            HelperId::MapLookupElem,
+            HelperId::MapUpdateElem,
+            HelperId::MapDeleteElem,
+            HelperId::RingbufOutput,
+            HelperId::TimeseriesPush,
+        ] {
+            assert_eq!(referenced_map_helper_arg(helper), Some(Register::R1));
+        }
+        assert_eq!(referenced_map_helper_arg(HelperId::KtimeGetNs), None);
+        assert_eq!(referenced_map_helper_arg(HelperId::RingbufReserve), None);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn verify_stats_collect_constant_map_handles_across_branch_paths() {
+        let insns = [
+            BpfInsn::call(HelperId::GetPrandomU32 as i32),
+            BpfInsn::jeq_imm(0, 0, 7),
+            BpfInsn::mov64_imm(1, 7),
+            BpfInsn::new(0x7b, 10, 1, -8, 0),
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::add64_imm(2, -8),
+            BpfInsn::call(HelperId::MapDeleteElem as i32),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+            BpfInsn::mov64_imm(1, 11),
+            BpfInsn::new(0x7b, 10, 1, -8, 0),
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::add64_imm(2, -8),
+            BpfInsn::call(HelperId::MapDeleteElem as i32),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ];
+
+        let (_, stats) = Verifier::<ActiveProfile>::verify_with_stats(
+            BpfProgType::SocketFilter,
+            &insns,
+            VerifyConfig::default(),
+        )
+        .expect("both map-reference branches verify");
+
+        assert_eq!(stats.referenced_map_handles, alloc::vec![7, 11]);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn verify_stats_omit_dynamic_map_handles() {
+        let insns = [
+            BpfInsn::call(HelperId::GetPrandomU32 as i32),
+            BpfInsn::mov64_reg(1, 0),
+            BpfInsn::new(0x7b, 10, 1, -8, 0),
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::add64_imm(2, -8),
+            BpfInsn::call(HelperId::MapLookupElem as i32),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ];
+
+        let (_, stats) = Verifier::<ActiveProfile>::verify_with_stats(
+            BpfProgType::SocketFilter,
+            &insns,
+            VerifyConfig::default(),
+        )
+        .expect("dynamic map handle remains valid under the legacy config");
+
+        assert!(stats.referenced_map_handles.is_empty());
+    }
+
+    #[cfg(feature = "cloud-profile")]
+    fn trace_printk_program() -> [BpfInsn; 4] {
+        [
+            BpfInsn::mov64_imm(2, 0),
+            BpfInsn::call(HelperId::TracePrintk as i32),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ]
+    }
+
+    #[test]
+    #[cfg(feature = "cloud-profile")]
+    fn logging_helpers_remain_allowed_by_default() {
+        Verifier::<ActiveProfile>::verify_with_config(
+            BpfProgType::SocketFilter,
+            &trace_printk_program(),
+            VerifyConfig::default(),
+        )
+        .expect("default config must preserve logging-helper compatibility");
+    }
+
+    #[test]
+    #[cfg(feature = "cloud-profile")]
+    fn logging_helpers_are_rejected_when_policy_forbids_them() {
+        let result = Verifier::<ActiveProfile>::verify_with_config(
+            BpfProgType::SocketFilter,
+            &trace_printk_program(),
+            VerifyConfig {
+                forbid_logging_helpers: true,
+                ..VerifyConfig::default()
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(VerifyError::LoggingHelperForbidden {
+                insn_idx: 1,
+                helper_id
+            }) if helper_id == HelperId::TracePrintk as i32
+        ));
     }
 
     #[test]

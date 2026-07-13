@@ -1,4 +1,5 @@
 pub mod helpers;
+mod snapshot;
 
 #[cfg(all(
     feature = "bpf-production-signed",
@@ -11,6 +12,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use kernel_abi::{BpfObjectInfo, BPF_OBJECT_KIND_MAP};
 use kernel_bpf::actuation::EnvelopeMap;
@@ -26,18 +28,7 @@ use kernel_bpf::signing::SignatureVerifier;
 use kernel_bpf::signing::TrustedKey;
 use kernel_bpf::verifier::admission::AdmissionLedger;
 use kernel_bpf::verifier::{LoadCaller, MapPerm, Verifier, VerifyConfig};
-use spin::{Mutex, MutexGuard};
-
-/// Serializes BPF execution against userspace map reads/mutations. Map lookup
-/// helpers currently return raw value pointers after dropping the map's inner
-/// lock; keeping one runtime guard live until program return prevents another
-/// CPU from updating, deleting, polling, or destroying that storage meanwhile.
-static BPF_RUNTIME: Mutex<()> = Mutex::new(());
-
-pub(crate) fn lock_runtime() -> MutexGuard<'static, ()> {
-    BPF_RUNTIME.lock()
-}
-
+use snapshot::EpochSnapshot;
 /// Context size used for load-time verification (#122).
 ///
 /// R1 at program entry points at a [`BpfContext`] — *uniformly for every attach
@@ -190,11 +181,6 @@ fn insert_handle_slot<T>(
     Ok(encode_handle(slot, 0))
 }
 
-/// One resolved GPIO program slot for the zero-alloc dispatch buffer (#65):
-/// `(prog_id, Arc<program>)`. Aliased so the hot-path buffer type stays legible.
-pub type GpioProgramSlot = Option<(u32, Arc<BpfProgram<ActiveProfile>>)>;
-/// One resolved generic hook slot for allocation-free dispatch.
-pub type HookProgramSlot = Option<(u32, Arc<BpfProgram<ActiveProfile>>)>;
 /// Maximum GPIO programs resolved for one IRQ edge. Must match the stack buffer
 /// used by the Pi 5 GPIO IRQ handler.
 pub const GPIO_IRQ_FANOUT_LIMIT: usize = 8;
@@ -204,6 +190,93 @@ pub const HOOK_FANOUT_LIMIT: usize = 16;
 /// Maximum byte length (including the trailing NUL supplied by userspace) for
 /// a pinned-object path.
 pub const BPF_PIN_PATH_MAX: usize = 256;
+const BPF_GPIO_PIN_COUNT: u8 = 28;
+
+const GENERIC_HOOK_SLOTS: usize = ATTACH_TYPE_SCHED_SWITCH as usize + 1;
+const GPIO_EDGE_SLOTS: usize = 3;
+const GPIO_ROUTE_SLOTS: usize = BPF_GPIO_PIN_COUNT as usize * GPIO_EDGE_SLOTS;
+
+struct HookProgramList<const N: usize> {
+    programs: [Option<Arc<ProgramRuntime>>; N],
+    len: usize,
+}
+
+impl<const N: usize> HookProgramList<N> {
+    fn empty() -> Self {
+        Self {
+            programs: core::array::from_fn(|_| None),
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, runtime: &Arc<ProgramRuntime>) -> Result<(), BpfError> {
+        let slot = self
+            .programs
+            .get_mut(self.len)
+            .ok_or(BpfError::ResourceLimit)?;
+        *slot = Some(runtime.clone());
+        self.len += 1;
+        Ok(())
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &Arc<ProgramRuntime>> {
+        self.programs[..self.len].iter().flatten()
+    }
+}
+
+struct HookSnapshot {
+    generic: [HookProgramList<HOOK_FANOUT_LIMIT>; GENERIC_HOOK_SLOTS],
+    gpio: [HookProgramList<GPIO_IRQ_FANOUT_LIMIT>; GPIO_ROUTE_SLOTS],
+}
+
+impl HookSnapshot {
+    fn empty() -> Self {
+        Self {
+            generic: core::array::from_fn(|_| HookProgramList::empty()),
+            gpio: core::array::from_fn(|_| HookProgramList::empty()),
+        }
+    }
+
+    fn generic(&self, attach_type: u32) -> Option<&HookProgramList<HOOK_FANOUT_LIMIT>> {
+        self.generic.get(attach_type as usize)
+    }
+
+    fn generic_mut(&mut self, attach_type: u32) -> Option<&mut HookProgramList<HOOK_FANOUT_LIMIT>> {
+        self.generic.get_mut(attach_type as usize)
+    }
+
+    fn gpio_index(chip: u8, pin: u8, edge_flags: u32) -> Option<usize> {
+        if chip != 0 || pin >= BPF_GPIO_PIN_COUNT || !(1..=3).contains(&edge_flags) {
+            return None;
+        }
+        Some(pin as usize * GPIO_EDGE_SLOTS + edge_flags as usize - 1)
+    }
+
+    fn gpio(
+        &self,
+        chip: u8,
+        pin: u8,
+        edge_flags: u32,
+    ) -> Option<&HookProgramList<GPIO_IRQ_FANOUT_LIMIT>> {
+        self.gpio.get(Self::gpio_index(chip, pin, edge_flags)?)
+    }
+
+    fn gpio_mut(
+        &mut self,
+        chip: u8,
+        pin: u8,
+        edge_flags: u32,
+    ) -> Option<&mut HookProgramList<GPIO_IRQ_FANOUT_LIMIT>> {
+        self.gpio.get_mut(Self::gpio_index(chip, pin, edge_flags)?)
+    }
+}
+
+static HOOK_SNAPSHOTS: EpochSnapshot<HookSnapshot> = EpochSnapshot::empty();
+
+#[cfg(not(test))]
+struct PreparedHookSnapshot {
+    snapshot: Box<HookSnapshot>,
+}
 
 #[derive(Debug, Clone, Copy)]
 struct BpfLimits {
@@ -275,7 +348,7 @@ impl BpfLimits {
 }
 
 struct ProgramEntry {
-    program: Arc<BpfProgram<ActiveProfile>>,
+    program: Arc<ProgramRuntime>,
     wcet_cycles: u64,
     charged_bytes: usize,
     owner: u64,
@@ -305,11 +378,40 @@ impl BpfLoadAuthorization {
 }
 
 struct MapEntry {
-    map: Box<dyn BpfMap<ActiveProfile>>,
+    runtime: Arc<MapRuntime>,
     perm: MapPerm,
     charged_bytes: usize,
     owner: u64,
     grants: Vec<MapGrant>,
+}
+
+struct MapRuntime {
+    map: Box<dyn BpfMap<ActiveProfile>>,
+    leased: AtomicBool,
+}
+
+impl MapRuntime {
+    fn new(map: Box<dyn BpfMap<ActiveProfile>>) -> Self {
+        Self {
+            map,
+            leased: AtomicBool::new(false),
+        }
+    }
+
+    fn try_lease(&self) -> Result<MapLease<'_>, BpfError> {
+        self.leased
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .map_err(|_| BpfError::ObjectBusy)?;
+        Ok(MapLease(self))
+    }
+}
+
+struct MapLease<'a>(&'a MapRuntime);
+
+impl Drop for MapLease<'_> {
+    fn drop(&mut self) {
+        self.0.leased.store(false, Ordering::Release);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -328,6 +430,100 @@ impl MapAccess {
     const fn intersect(self, other: Self) -> Self {
         Self(self.0 & other.0)
     }
+}
+
+struct ProgramMapRuntime {
+    generation: u32,
+    perm: MapPerm,
+    runtime: Arc<MapRuntime>,
+}
+
+pub(crate) struct ProgramRuntime {
+    program: BpfProgram<ActiveProfile>,
+    maps: Vec<Option<ProgramMapRuntime>>,
+}
+
+impl ProgramRuntime {
+    fn map(&self, handle: u32, required: MapAccess) -> Option<&MapRuntime> {
+        let slot = (handle & BPF_HANDLE_SLOT_MASK) as usize;
+        let generation = handle >> BPF_HANDLE_SLOT_BITS;
+        let entry = self.maps.get(slot)?.as_ref()?;
+        if entry.generation != generation {
+            return None;
+        }
+        let permitted = match entry.perm {
+            MapPerm::ReadWrite => MapAccess::READ_WRITE,
+            MapPerm::ReadOnly => MapAccess::READ,
+            MapPerm::WriteOnly => MapAccess::WRITE,
+            MapPerm::Unavailable => MapAccess::NONE,
+        };
+        permitted
+            .contains(required)
+            .then_some(entry.runtime.as_ref())
+    }
+}
+
+const MAX_EXECUTION_MAP_LEASES: usize = 128;
+
+struct BpfExecution<'a> {
+    runtime: &'a ProgramRuntime,
+    leased: [*const MapRuntime; MAX_EXECUTION_MAP_LEASES],
+    leased_count: usize,
+}
+
+impl<'a> BpfExecution<'a> {
+    fn new(runtime: &'a ProgramRuntime) -> Self {
+        Self {
+            runtime,
+            leased: [core::ptr::null(); MAX_EXECUTION_MAP_LEASES],
+            leased_count: 0,
+        }
+    }
+
+    fn map(&mut self, handle: u32, required: MapAccess) -> Option<&MapRuntime> {
+        let map = self.runtime.map(handle, required)?;
+        let ptr = core::ptr::from_ref(map);
+        if self.leased[..self.leased_count].contains(&ptr) {
+            return Some(map);
+        }
+        if self.leased_count == self.leased.len()
+            || map
+                .leased
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+        {
+            return None;
+        }
+        self.leased[self.leased_count] = ptr;
+        self.leased_count += 1;
+        Some(map)
+    }
+}
+
+impl Drop for BpfExecution<'_> {
+    fn drop(&mut self) {
+        for ptr in &self.leased[..self.leased_count] {
+            // SAFETY: each pointer comes from the live ProgramRuntime and is
+            // retained by its Arc until this execution returns.
+            unsafe { &**ptr }.leased.store(false, Ordering::Release);
+        }
+    }
+}
+
+fn with_current_execution_map<R>(
+    handle: u32,
+    required: MapAccess,
+    f: impl FnOnce(&MapRuntime) -> R,
+) -> Option<R> {
+    let cpu = crate::mcore::context::ExecutionContext::try_load()?;
+    let execution = cpu.current_bpf_execution().cast::<BpfExecution<'static>>();
+    if execution.is_null() {
+        return None;
+    }
+    // SAFETY: execute_program installs this CPU-local pointer for the dynamic
+    // extent of interpreter execution, and nested execution is rejected.
+    let execution = unsafe { &mut *execution };
+    execution.map(handle, required).map(f)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -382,9 +578,8 @@ pub struct BpfResourceUsage {
 }
 
 pub struct BpfManager {
-    // Arc so the hot dispatch path (gpio_programs_into/get_hook_programs) clones
-    // a refcount, not the whole instruction Vec — the IRQ handler runs this per
-    // edge at up to ~200k/s (#65), where a deep BpfProgram::clone drops edges.
+    // Arc ownership changes only when control-plane snapshots are published;
+    // hook readers borrow immutable ProgramRuntime entries under an epoch pin.
     programs: Vec<Option<ProgramEntry>>,
     program_generations: Vec<u32>,
     attachments: BTreeMap<u32, Vec<u32>>,
@@ -455,6 +650,13 @@ const fn is_supported_attach_type(attach_type: u32) -> bool {
     )
 }
 
+const fn is_latency_sensitive_attach_type(attach_type: u32) -> bool {
+    matches!(
+        attach_type,
+        ATTACH_TYPE_TIMER | ATTACH_TYPE_GPIO | ATTACH_TYPE_SCHED_SWITCH
+    )
+}
+
 impl Default for BpfManager {
     fn default() -> Self {
         Self::new()
@@ -464,6 +666,56 @@ impl Default for BpfManager {
 impl BpfManager {
     pub fn new() -> Self {
         Self::new_with_limits(BpfLimits::for_active_profile())
+    }
+
+    #[cfg(not(test))]
+    fn prepare_hook_snapshot(&self) -> Result<PreparedHookSnapshot, BpfError> {
+        let mut container = Vec::new();
+        container
+            .try_reserve_exact(1)
+            .map_err(|_| BpfError::OutOfMemory)?;
+        container.push(HookSnapshot::empty());
+        let snapshot = container.into_boxed_slice();
+        debug_assert_eq!(snapshot.len(), 1);
+        let raw = Box::into_raw(snapshot).cast::<HookSnapshot>();
+        // SAFETY: a boxed one-element slice has the same allocation layout as
+        // its element. EpochSnapshot later reclaims it as that element type.
+        Ok(PreparedHookSnapshot {
+            snapshot: unsafe { Box::from_raw(raw) },
+        })
+    }
+
+    #[cfg(not(test))]
+    fn publish_hook_snapshot(&self, mut prepared: PreparedHookSnapshot) {
+        let snapshot = &mut prepared.snapshot;
+        for (&attach_type, program_ids) in &self.attachments {
+            let programs = snapshot
+                .generic_mut(attach_type)
+                .expect("supported attach types have direct snapshot slots");
+            for &prog_id in program_ids {
+                if let Some(entry) = self.program_entry(prog_id) {
+                    programs
+                        .push(&entry.program)
+                        .expect("attach admission enforces the fixed hook fanout");
+                }
+            }
+        }
+        for pin in 0..BPF_GPIO_PIN_COUNT {
+            for edge_flags in [1, 2, 3] {
+                let fired = GpioEdge::from_flags(edge_flags);
+                let programs = snapshot
+                    .gpio_mut(0, pin, edge_flags)
+                    .expect("validated GPIO routes have direct snapshot slots");
+                self.gpio_routes.for_each_program(0, pin, fired, |prog_id| {
+                    if let Some(entry) = self.program_entry(prog_id) {
+                        programs
+                            .push(&entry.program)
+                            .expect("GPIO route admission enforces the fixed IRQ fanout");
+                    }
+                });
+            }
+        }
+        HOOK_SNAPSHOTS.publish(prepared.snapshot);
     }
 
     fn new_with_limits(limits: BpfLimits) -> Self {
@@ -508,7 +760,7 @@ impl BpfManager {
     fn register_reserved_map(&mut self, map: Box<dyn BpfMap<ActiveProfile>>, perm: MapPerm) -> u32 {
         let slot = self.maps.len();
         self.maps.push(Some(MapEntry {
-            map,
+            runtime: Arc::new(MapRuntime::new(map)),
             perm,
             charged_bytes: 0,
             owner: 0,
@@ -529,7 +781,7 @@ impl BpfManager {
             &mut self.map_generations,
             self.limits.max_map_slots,
             MapEntry {
-                map,
+                runtime: Arc::new(MapRuntime::new(map)),
                 perm: MapPerm::ReadWrite,
                 charged_bytes: charge,
                 owner,
@@ -573,12 +825,12 @@ impl BpfManager {
                 Some(entry) if entry.charged_bytes == 0 => {
                     let access = MapAccess::READ_WRITE.intersect(authorized);
                     if access.contains(MapAccess::READ) && access.contains(MapAccess::WRITE) {
-                        (entry.map.def().value_size, entry.perm)
+                        (entry.runtime.map.def().value_size, entry.perm)
                     } else if access.contains(MapAccess::READ) {
-                        (entry.map.def().value_size, MapPerm::ReadOnly)
+                        (entry.runtime.map.def().value_size, MapPerm::ReadOnly)
                     } else if access.contains(MapAccess::WRITE) && entry.perm == MapPerm::ReadWrite
                     {
-                        (entry.map.def().value_size, MapPerm::WriteOnly)
+                        (entry.runtime.map.def().value_size, MapPerm::WriteOnly)
                     } else {
                         (0, MapPerm::Unavailable)
                     }
@@ -591,16 +843,16 @@ impl BpfManager {
                         if access.contains(MapAccess::READ)
                             && access.contains(MapAccess::WRITE) =>
                     {
-                        (entry.map.def().value_size, entry.perm)
+                        (entry.runtime.map.def().value_size, entry.perm)
                     }
                     Some(access) if access.contains(MapAccess::READ) => {
-                        (entry.map.def().value_size, MapPerm::ReadOnly)
+                        (entry.runtime.map.def().value_size, MapPerm::ReadOnly)
                     }
                     Some(access)
                         if access.contains(MapAccess::WRITE)
                             && entry.perm == MapPerm::ReadWrite =>
                     {
-                        (entry.map.def().value_size, MapPerm::WriteOnly)
+                        (entry.runtime.map.def().value_size, MapPerm::WriteOnly)
                     }
                     _ => (0, MapPerm::Unavailable),
                 },
@@ -608,6 +860,33 @@ impl BpfManager {
             })
             .unzip();
         (sizes, perms, self.map_generations.clone())
+    }
+
+    fn program_maps_for_owner(
+        &self,
+        owner: u64,
+        authorized: MapAccess,
+        referenced_map_handles: &[u32],
+    ) -> Result<Vec<Option<ProgramMapRuntime>>, BpfError> {
+        let (_, perms, generations) = self.map_metadata_for_owner(owner, authorized);
+        let mut maps = Vec::new();
+        maps.try_reserve_exact(self.maps.len())
+            .map_err(|_| BpfError::OutOfMemory)?;
+        maps.resize_with(self.maps.len(), || None);
+        for &handle in referenced_map_handles {
+            let slot = self.map_slot(handle).ok_or(BpfError::NotLoaded)?;
+            let entry = self.maps[slot].as_ref().ok_or(BpfError::NotLoaded)?;
+            let perm = perms[slot];
+            if perm == MapPerm::Unavailable {
+                return Err(BpfError::PermissionDenied);
+            }
+            maps[slot] = Some(ProgramMapRuntime {
+                generation: generations[slot],
+                perm,
+                runtime: entry.runtime.clone(),
+            });
+        }
+        Ok(maps)
     }
 
     fn program_slot(&self, handle: u32) -> Option<usize> {
@@ -641,9 +920,6 @@ impl BpfManager {
     }
 
     fn reclaim_unpinned_orphan_maps_if_quiescent(&mut self) {
-        if self.live_programs != 0 {
-            return;
-        }
         let pinned_maps = &self.pinned_maps;
         let map_generations = &self.map_generations;
         for (map_slot, slot) in self.maps.iter_mut().enumerate() {
@@ -654,7 +930,9 @@ impl BpfManager {
                 continue;
             }
             let map_id = encode_handle(map_slot, map_generations[map_slot]);
-            if pinned_maps.iter().any(|pin| pin.map_id == map_id) {
+            if pinned_maps.iter().any(|pin| pin.map_id == map_id)
+                || Arc::strong_count(&entry.runtime) != 1
+            {
                 continue;
             }
             let entry = slot.take().expect("orphan map entry was present");
@@ -665,10 +943,8 @@ impl BpfManager {
 
     /// Detach and reclaim every object charged to `owner`.
     ///
-    /// The caller must hold [`lock_runtime`] so map backing storage cannot be
-    /// reclaimed while an interpreter helper is using it. A `false` result
-    /// means an already-captured program snapshot is still in flight; the
-    /// caller should retry after releasing the runtime lock.
+    /// A `false` result means snapshot preparation could not reserve memory or
+    /// an independently cloned program reference is still in flight.
     pub(crate) fn reclaim_owner(&mut self, owner: u64) -> bool {
         let had_owned_objects = self
             .programs
@@ -680,6 +956,11 @@ impl BpfManager {
                 .iter()
                 .filter_map(Option::as_ref)
                 .any(|entry| entry.owner == owner && entry.charged_bytes != 0);
+        #[cfg(not(test))]
+        let snapshot = match self.prepare_hook_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(_) => return false,
+        };
         let programs = &self.programs;
         let program_generations = &self.program_generations;
         let (attachments, admission) = (&mut self.attachments, &mut self.admission);
@@ -707,6 +988,9 @@ impl BpfManager {
                     .remove(encode_handle(slot, self.program_generations[slot]));
             }
         }
+
+        #[cfg(not(test))]
+        self.publish_hook_snapshot(snapshot);
 
         for entry in self.maps.iter_mut().filter_map(Option::as_mut) {
             entry.grants.retain(|grant| grant.owner != owner);
@@ -749,6 +1033,10 @@ impl BpfManager {
             }
             let map_id = encode_handle(map_slot, map_generations[map_slot]);
             if pinned_maps.iter().any(|pin| pin.map_id == map_id) {
+                slot.as_mut().expect("owned map entry was present").owner = PINNED_MAP_OWNER;
+                continue;
+            }
+            if Arc::strong_count(&entry.runtime) != 1 {
                 slot.as_mut().expect("owned map entry was present").owner = PINNED_MAP_OWNER;
                 continue;
             }
@@ -808,17 +1096,20 @@ impl BpfManager {
         &mut self,
         program: BpfProgram<ActiveProfile>,
         wcet_cycles: u64,
+        referenced_map_handles: &[u32],
         charge: usize,
         owner: u64,
         authorization: BpfLoadAuthorization,
     ) -> Result<u32, BpfError> {
         self.ensure_program_quota(owner, charge)?;
+        let maps =
+            self.program_maps_for_owner(owner, authorization.map_access, referenced_map_handles)?;
         let id = insert_handle_slot(
             &mut self.programs,
             &mut self.program_generations,
             self.limits.max_program_slots,
             ProgramEntry {
-                program: Arc::new(program),
+                program: Arc::new(ProgramRuntime { program, maps }),
                 wcet_cycles,
                 charged_bytes: charge,
                 owner,
@@ -871,6 +1162,7 @@ impl BpfManager {
             map_handle_slot_bits: BPF_HANDLE_SLOT_BITS as u8,
             caller: authorization.caller,
             allow_actuation: authorization.allow_actuation,
+            forbid_logging_helpers: false,
         }
     }
 
@@ -942,8 +1234,14 @@ impl BpfManager {
             #[cfg(feature = "verifier-cost")]
             let verify_cycles = read_cycles().wrapping_sub(start_cycles);
 
-            let id =
-                self.register_program(bpf_prog, stats.wcet_cycles, charge, owner, authorization)?;
+            let id = self.register_program(
+                bpf_prog,
+                stats.wcet_cycles,
+                &stats.referenced_map_handles,
+                charge,
+                owner,
+                authorization,
+            )?;
             #[cfg(feature = "verifier-cost")]
             crate::serial_println!(
                 "{}",
@@ -1018,8 +1316,14 @@ impl BpfManager {
         #[cfg(feature = "verifier-cost")]
         let verify_cycles = read_cycles().wrapping_sub(start_cycles);
 
-        let id =
-            self.register_program(bpf_prog, stats.wcet_cycles, charge, owner, authorization)?;
+        let id = self.register_program(
+            bpf_prog,
+            stats.wcet_cycles,
+            &stats.referenced_map_handles,
+            charge,
+            owner,
+            authorization,
+        )?;
         #[cfg(feature = "verifier-cost")]
         crate::serial_println!(
             "{}",
@@ -1043,12 +1347,12 @@ impl BpfManager {
         self.attach_for(0, attach_type, prog_id)
     }
 
-    fn attach_verified_for(
-        &mut self,
+    fn validate_attach_for(
+        &self,
         owner: u64,
         attach_type: u32,
         prog_id: u32,
-    ) -> Result<(), BpfError> {
+    ) -> Result<bool, BpfError> {
         if !is_supported_attach_type(attach_type) {
             return Err(BpfError::InvalidInstruction);
         }
@@ -1070,17 +1374,19 @@ impl BpfManager {
         let (map_value_sizes, map_perms, map_generations) =
             self.map_metadata_for_owner(owner, program_entry.authorization.map_access);
         let ctx_data_size = attach_ctx_data_size(attach_type);
-        let program = &program_entry.program;
+        let program = &program_entry.program.program;
+        let mut verify_config = self.verify_config_with_ctx_data(
+            &map_value_sizes,
+            &map_perms,
+            &map_generations,
+            ctx_data_size,
+            program_entry.authorization,
+        );
+        verify_config.forbid_logging_helpers = is_latency_sensitive_attach_type(attach_type);
         Verifier::<ActiveProfile>::verify_with_stats(
             program.prog_type(),
             program.instructions(),
-            self.verify_config_with_ctx_data(
-                &map_value_sizes,
-                &map_perms,
-                &map_generations,
-                ctx_data_size,
-                program_entry.authorization,
-            ),
+            verify_config,
         )
         .map_err(|e| {
             log::error!(
@@ -1092,35 +1398,57 @@ impl BpfManager {
             BpfError::VerificationFailed
         })?;
 
-        // Utilization admission (#43): attaching commits the CPU to running
-        // this program on every fire; refuse if `Σ WCETᵢ·freqᵢ` across all
-        // admitted hooks would exceed the profile's utilization budget.
-        // Safe-but-unschedulable is rejected.
         let already_attached = self
             .attachments
             .get(&attach_type)
             .is_some_and(|list| list.contains(&prog_id));
-        if !already_attached {
-            if self
+        if !already_attached
+            && self
                 .attachments
                 .get(&attach_type)
                 .is_some_and(|programs| programs.len() >= HOOK_FANOUT_LIMIT)
-            {
-                return Err(BpfError::ResourceLimit);
-            }
-            let wcet = program_entry.wcet_cycles;
-            let freq = hook_frequency_hz(attach_type);
-            if let Err(e) = self.admission.admit(attach_type, prog_id, wcet, freq) {
-                log::error!("BpfManager: {}", e);
-                return Err(BpfError::AdmissionRejected);
-            }
-            let programs = self.attachments.entry(attach_type).or_default();
-            if programs.try_reserve(1).is_err() {
-                self.admission.release(attach_type, prog_id);
-                return Err(BpfError::OutOfMemory);
-            }
-            programs.push(prog_id);
+        {
+            return Err(BpfError::ResourceLimit);
         }
+        Ok(already_attached)
+    }
+
+    fn commit_attach(&mut self, attach_type: u32, prog_id: u32) -> Result<(), BpfError> {
+        // Utilization admission (#43): attaching commits the CPU to running
+        // this program on every fire; refuse if `Σ WCETᵢ·freqᵢ` across all
+        // admitted hooks would exceed the profile's utilization budget.
+        let wcet = self
+            .program_entry(prog_id)
+            .ok_or(BpfError::NotLoaded)?
+            .wcet_cycles;
+        let freq = hook_frequency_hz(attach_type);
+        if let Err(e) = self.admission.admit(attach_type, prog_id, wcet, freq) {
+            log::error!("BpfManager: {}", e);
+            return Err(BpfError::AdmissionRejected);
+        }
+        let programs = self.attachments.entry(attach_type).or_default();
+        if programs.try_reserve(1).is_err() {
+            self.admission.release(attach_type, prog_id);
+            return Err(BpfError::OutOfMemory);
+        }
+        programs.push(prog_id);
+        Ok(())
+    }
+
+    fn attach_verified_for(
+        &mut self,
+        owner: u64,
+        attach_type: u32,
+        prog_id: u32,
+    ) -> Result<(), BpfError> {
+        if self.validate_attach_for(owner, attach_type, prog_id)? {
+            return Ok(());
+        }
+        #[cfg(not(test))]
+        let snapshot = self.prepare_hook_snapshot()?;
+        self.commit_attach(attach_type, prog_id)?;
+        #[cfg(not(test))]
+        self.publish_hook_snapshot(snapshot);
         Ok(())
     }
 
@@ -1135,12 +1463,16 @@ impl BpfManager {
     }
 
     pub fn detach(&mut self, attach_type: u32, prog_id: u32) -> Result<(), BpfError> {
+        #[cfg(not(test))]
+        let snapshot = self.prepare_hook_snapshot()?;
         if let Some(list) = self.attachments.get_mut(&attach_type) {
             if let Some(pos) = list.iter().position(|&id| id == prog_id) {
                 list.remove(pos);
                 // Return this attachment's utilization to the budget.
                 self.admission.release(attach_type, prog_id);
                 self.gpio_routes.remove(prog_id);
+                #[cfg(not(test))]
+                self.publish_hook_snapshot(snapshot);
                 return Ok(());
             }
         }
@@ -1211,32 +1543,27 @@ impl BpfManager {
         Self::execute_program(&program.program, ctx)
     }
 
-    /// Execute a BPF program directly (without needing &self).
-    ///
-    /// This is useful when the caller has already cloned the program
-    /// and released the BpfManager lock, allowing BPF helpers to
-    /// re-acquire the lock for map operations.
-    pub fn execute_program(
-        program: &BpfProgram<ActiveProfile>,
+    /// Execute a BPF program directly against its immutable runtime view.
+    pub(crate) fn execute_program(
+        runtime: &ProgramRuntime,
         ctx: &BpfContext<'_>,
     ) -> Result<u64, BpfError> {
-        let _runtime = lock_runtime();
         let cpu = crate::mcore::context::ExecutionContext::try_load()
             .ok_or(BpfError::ReentrantExecution)?;
         cpu.with_bpf_stack(|stack| {
-            let interpreter = Interpreter::<ActiveProfile>::new();
-            interpreter.execute_with_stack(program, ctx, stack)
+            let mut execution = BpfExecution::new(runtime);
+            cpu.with_bpf_execution(core::ptr::from_mut(&mut execution).cast(), || {
+                let interpreter = Interpreter::<ActiveProfile>::new();
+                interpreter.execute_with_stack(&runtime.program, ctx, stack)
+            })
+            .ok_or(BpfError::ReentrantExecution)?
         })
         .ok_or(BpfError::ReentrantExecution)?
     }
 
-    /// Clone a loaded program by id (verifier-cost instrumentation only).
-    ///
-    /// The bench path clones and then executes *outside* the manager lock,
-    /// same as `run_hook_programs` — helpers like `bpf_map_lookup_elem`
-    /// re-acquire the lock and would deadlock if it were held during runs.
+    /// Clone a loaded runtime by id (verifier-cost instrumentation only).
     #[cfg(feature = "verifier-cost")]
-    pub fn get_program(&self, prog_id: u32) -> Option<Arc<BpfProgram<ActiveProfile>>> {
+    pub(crate) fn get_program(&self, prog_id: u32) -> Option<Arc<ProgramRuntime>> {
         self.program_entry(prog_id)
             .map(|entry| entry.program.clone())
     }
@@ -1246,7 +1573,7 @@ impl BpfManager {
         &self,
         owner: u64,
         prog_id: u32,
-    ) -> Result<Arc<BpfProgram<ActiveProfile>>, BpfError> {
+    ) -> Result<Arc<ProgramRuntime>, BpfError> {
         self.ensure_program_owner(owner, prog_id)?;
         self.get_program(prog_id).ok_or(BpfError::NotLoaded)
     }
@@ -1259,7 +1586,7 @@ impl BpfManager {
     /// manager lock held (see `get_program`).
     #[cfg(feature = "verifier-cost")]
     pub fn bench_execute(
-        program: &BpfProgram<ActiveProfile>,
+        program: &ProgramRuntime,
         prog_id: u32,
         runs: u32,
     ) -> Result<(), BpfError> {
@@ -1273,29 +1600,12 @@ impl BpfManager {
             "{}",
             kernel_bpf::cost_corpus::ExecRecord {
                 prog_id,
-                insns: program.instructions().len(),
+                insns: program.program.instructions().len(),
                 runs,
                 cycles,
             }
         );
         Ok(())
-    }
-
-    /// Resolve one hook into caller-owned slots without touching the heap.
-    pub fn hook_programs_into(&self, attach_type: u32, out: &mut [HookProgramSlot]) -> usize {
-        let mut count = 0;
-        if let Some(progs) = self.attachments.get(&attach_type) {
-            for &prog_id in progs {
-                if count >= out.len() {
-                    break;
-                }
-                if let Some(program) = self.program_entry(prog_id) {
-                    out[count] = Some((prog_id, program.program.clone()));
-                    count += 1;
-                }
-            }
-        }
-        count
     }
 
     /// Return true if a GPIO route can be admitted without overflowing the
@@ -1335,8 +1645,17 @@ impl BpfManager {
             return Err(BpfError::GpioFanoutExceeded);
         }
 
-        self.attach_for(owner, ATTACH_TYPE_GPIO, prog_id)?;
-        self.register_gpio_route(chip, pin, edge, prog_id)
+        self.ensure_program_owner(owner, prog_id)?;
+        let already_attached = self.validate_attach_for(owner, ATTACH_TYPE_GPIO, prog_id)?;
+        #[cfg(not(test))]
+        let snapshot = self.prepare_hook_snapshot()?;
+        if !already_attached {
+            self.commit_attach(ATTACH_TYPE_GPIO, prog_id)?;
+        }
+        self.gpio_routes.insert(chip, pin, edge, prog_id);
+        #[cfg(not(test))]
+        self.publish_hook_snapshot(snapshot);
+        Ok(())
     }
 
     /// Record a GPIO attachment route. Called from `BPF_PROG_ATTACH` after the
@@ -1357,70 +1676,57 @@ impl BpfManager {
             );
             return Err(BpfError::GpioFanoutExceeded);
         }
+        #[cfg(not(test))]
+        let snapshot = self.prepare_hook_snapshot()?;
         self.gpio_routes.insert(chip, pin, edge, prog_id);
+        #[cfg(not(test))]
+        self.publish_hook_snapshot(snapshot);
         Ok(())
     }
 
-    /// Resolve the programs attached to a fired GPIO `(chip, pin, edge)` into a
-    /// caller-provided stack buffer, returning how many slots were filled.
-    ///
-    /// Zero heap allocation: the GPIO IRQ handler calls this per edge at up to
-    /// ~200k/s (#65), and the global allocator is a spin-locked free list
-    /// (`mem/heap.rs`), so a Vec here would serialize every edge on the heap
-    /// lock and drop edges. Each entry is an `Arc` refcount clone (no bytecode
-    /// copy). GPIO route admission keeps the configured IRQ fan-out within the
-    /// Pi 5 handler's stack buffer; callers that pass a smaller scratch buffer
-    /// still get a bounded prefix. Caller clones + drops the lock before
-    /// executing so helpers can re-acquire the manager lock without deadlocking.
-    pub fn gpio_programs_into(
-        &self,
+    pub fn run_gpio_programs(
         chip: u8,
         pin: u8,
         fired: GpioEdge,
-        out: &mut [GpioProgramSlot],
-    ) -> usize {
-        let mut n = 0;
-        self.gpio_routes
-            .for_each_program(chip, pin, fired, |prog_id| {
-                if n >= out.len() {
-                    return;
-                }
-                if let Some(program) = self.program_entry(prog_id) {
-                    out[n] = Some((prog_id, program.program.clone()));
-                    n += 1;
-                }
-            });
-        n
+        ctx: &BpfContext<'_>,
+    ) -> Result<usize, BpfError> {
+        let edge_flags = match fired {
+            GpioEdge::Rising => 1,
+            GpioEdge::Falling => 2,
+            GpioEdge::Both => 3,
+        };
+        let Some(snapshot) = HOOK_SNAPSHOTS.read() else {
+            return Ok(0);
+        };
+        let Some(programs) = snapshot.gpio(chip, pin, edge_flags) else {
+            return Ok(0);
+        };
+        Self::run_snapshot(programs.iter(), ctx)
     }
 
     pub fn run_hook_programs(
         attach_type: u32,
         ctx: &BpfContext<'_>,
-        hook_name: &str,
+        _hook_name: &str,
     ) -> Result<usize, BpfError> {
-        let Some(manager) = crate::BPF_MANAGER.get() else {
+        let Some(snapshot) = HOOK_SNAPSHOTS.read() else {
             return Ok(0);
         };
+        let Some(programs) = snapshot.generic(attach_type) else {
+            return Ok(0);
+        };
+        Self::run_snapshot(programs.iter(), ctx)
+    }
 
-        let mut programs: [HookProgramSlot; HOOK_FANOUT_LIMIT] = core::array::from_fn(|_| None);
-        let count = manager
-            .lock()
-            .hook_programs_into(attach_type, &mut programs);
-        for slot in programs.iter_mut().take(count) {
-            let (prog_id, program) = slot.take().expect("resolved hook slot must be populated");
-            match Self::execute_program(&program, ctx) {
-                Ok(res) => {
-                    if res != 0 {
-                        log::trace!("{hook_name} BPF Hook [id={prog_id}] returned: {res}");
-                    }
-                }
-                Err(e) => {
-                    log::error!("{hook_name} BPF Hook [id={prog_id}] failed: {:?}", e);
-                    return Err(e);
-                }
-            }
+    fn run_snapshot<'a>(
+        programs: impl Iterator<Item = &'a Arc<ProgramRuntime>>,
+        ctx: &BpfContext<'_>,
+    ) -> Result<usize, BpfError> {
+        let mut count = 0;
+        for program in programs {
+            Self::execute_program(program, ctx)?;
+            count += 1;
         }
-
         Ok(count)
     }
 
@@ -1568,7 +1874,9 @@ impl BpfManager {
     }
 
     pub fn map_lookup(&self, map_id: u32, key: &[u8]) -> Option<Vec<u8>> {
-        self.map_entry(map_id)?.map.lookup(key)
+        let map = &self.map_entry(map_id)?.runtime;
+        let _lease = map.try_lease().ok()?;
+        map.map.lookup(key)
     }
 
     pub fn map_lookup_for(
@@ -1578,18 +1886,9 @@ impl BpfManager {
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, BpfError> {
         self.ensure_map_access(owner, map_id, MapAccess::READ)?;
-        Ok(self.map_lookup(map_id, key))
-    }
-
-    /// Look up a value by key and return a raw pointer.
-    ///
-    /// # Safety
-    /// The caller must ensure the map will not be resized or deleted while the
-    /// pointer is in use. The returned pointer is only valid while the map lock
-    /// is held by the caller.
-    pub unsafe fn map_lookup_ptr(&self, map_id: u32, key: &[u8]) -> Option<*mut u8> {
-        // SAFETY: caller ensures map will not be resized or deleted while pointer is in use
-        unsafe { self.map_entry(map_id)?.map.lookup_ptr(key) }
+        let map = &self.map_entry(map_id).ok_or(BpfError::NotLoaded)?.runtime;
+        let _lease = map.try_lease()?;
+        Ok(map.map.lookup(key))
     }
 
     fn ensure_map_writable(&self, map_id: u32) -> Result<(), BpfError> {
@@ -1636,7 +1935,8 @@ impl BpfManager {
         flags: u64,
     ) -> Result<(), BpfError> {
         self.ensure_map_writable(map_id)?;
-        let map = self.map_entry(map_id).ok_or(BpfError::NotLoaded)?;
+        let map = &self.map_entry(map_id).ok_or(BpfError::NotLoaded)?.runtime;
+        let _lease = map.try_lease()?;
         map.map
             .update(key, value, flags)
             .map_err(|_| BpfError::OutOfMemory)
@@ -1656,7 +1956,8 @@ impl BpfManager {
 
     pub fn map_delete(&self, map_id: u32, key: &[u8]) -> Result<(), BpfError> {
         self.ensure_map_writable(map_id)?;
-        let map = self.map_entry(map_id).ok_or(BpfError::NotLoaded)?;
+        let map = &self.map_entry(map_id).ok_or(BpfError::NotLoaded)?.runtime;
+        let _lease = map.try_lease()?;
         map.map.delete(key).map_err(|_| BpfError::NotLoaded)
     }
 
@@ -1666,7 +1967,7 @@ impl BpfManager {
     }
 
     pub fn get_map_def(&self, map_id: u32) -> Option<&kernel_bpf::maps::MapDef> {
-        self.map_entry(map_id).map(|entry| entry.map.def())
+        self.map_entry(map_id).map(|entry| entry.runtime.map.def())
     }
 
     pub fn get_map_def_for(
@@ -1805,9 +2106,8 @@ impl BpfManager {
 
     /// Destroy an unpinned user map and reclaim its backing allocation.
     ///
-    /// Until verified programs record their referenced map IDs, destruction is
-    /// conservatively refused while any program is loaded. This prevents a map
-    /// from disappearing under a helper's escaped raw value pointer.
+    /// Destruction is refused while the map is pinned or retained by a verified
+    /// program runtime, so helper-visible storage cannot disappear in flight.
     pub fn destroy_map(&mut self, map_id: u32) -> Result<(), BpfError> {
         self.destroy_map_for(0, map_id)
     }
@@ -1818,7 +2118,12 @@ impl BpfManager {
             return Err(BpfError::ReadOnlyMap);
         }
         self.ensure_map_owner(owner, map_id)?;
-        if self.pinned_maps.iter().any(|pin| pin.map_id == map_id) || self.live_programs != 0 {
+        let entry = self.maps[slot]
+            .as_ref()
+            .expect("map ownership was checked above");
+        if self.pinned_maps.iter().any(|pin| pin.map_id == map_id)
+            || Arc::strong_count(&entry.runtime) != 1
+        {
             return Err(BpfError::ObjectBusy);
         }
 
@@ -1853,14 +2158,17 @@ impl BpfManager {
     /// Returns the event data if available, or None if the ringbuf is empty.
     /// This is used by the BPF_RINGBUF_POLL syscall command.
     pub fn ringbuf_poll(&self, map_id: u32) -> Option<Vec<u8>> {
-        let map = self.map_entry(map_id)?;
+        let map = &self.map_entry(map_id)?.runtime;
+        let _lease = map.try_lease().ok()?;
         // RingBufMap::lookup() delegates to poll(), which reads and advances the tail
         map.map.lookup(&[])
     }
 
     pub fn ringbuf_poll_for(&self, owner: u64, map_id: u32) -> Result<Option<Vec<u8>>, BpfError> {
         self.ensure_map_access(owner, map_id, MapAccess::READ)?;
-        Ok(self.ringbuf_poll(map_id))
+        let map = &self.map_entry(map_id).ok_or(BpfError::NotLoaded)?.runtime;
+        let _lease = map.try_lease()?;
+        Ok(map.map.lookup(&[]))
     }
 
     /// Output data to a ring buffer map.
@@ -1869,7 +2177,8 @@ impl BpfManager {
     /// the key is ignored and value is the event data.
     pub fn ringbuf_output(&self, map_id: u32, data: &[u8], flags: u64) -> Result<(), BpfError> {
         self.ensure_map_writable(map_id)?;
-        let map = self.map_entry(map_id).ok_or(BpfError::NotLoaded)?;
+        let map = &self.map_entry(map_id).ok_or(BpfError::NotLoaded)?.runtime;
+        let _lease = map.try_lease()?;
 
         // Ring buffer maps use update() with empty key to output data
         map.map
@@ -1958,6 +2267,203 @@ mod tests {
             manager.ringbuf_output(ENVELOPE_MAP_ID, &value, 0),
             Err(BpfError::ReadOnlyMap)
         );
+    }
+
+    #[test]
+    fn map_execution_leases_are_nonblocking_and_per_map() {
+        let mut manager = BpfManager::new();
+        let first = manager
+            .create_map(MapType::Array as u32, 4, 8, 1)
+            .expect("create first map");
+        let second = manager
+            .create_map(MapType::Array as u32, 4, 8, 1)
+            .expect("create second map");
+        let first_runtime = manager.map_entry(first).unwrap().runtime.clone();
+        let _lease = first_runtime.try_lease().expect("acquire first map lease");
+        let key = 0u32.to_ne_bytes();
+        let value = 1u64.to_ne_bytes();
+
+        assert_eq!(
+            manager.map_update(first, &key, &value, 0),
+            Err(BpfError::ObjectBusy)
+        );
+        manager
+            .map_update(second, &key, &value, 0)
+            .expect("unrelated map remains available");
+    }
+
+    #[test]
+    fn program_runtime_retains_only_referenced_authorized_maps() {
+        let mut manager = BpfManager::new();
+        let referenced = manager
+            .create_map_for(7, MapType::Array as u32, 4, 8, 1)
+            .expect("create owner map");
+        let unrelated = manager
+            .create_map_for(7, MapType::Array as u32, 4, 8, 1)
+            .expect("create unrelated owner map");
+        let lookup = vec![
+            BpfInsn::mov64_imm(1, 0),
+            BpfInsn::new(0x7b, 10, 1, -8, 0),
+            BpfInsn::mov64_imm(1, referenced as i32),
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::add64_imm(2, -8),
+            BpfInsn::call(HelperId::MapLookupElem as i32),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ];
+        let program_id = manager
+            .load_raw_program_authorized(
+                7,
+                lookup,
+                BpfLoadAuthorization::new(LoadCaller::Unprivileged, false, MapAccess::READ),
+            )
+            .expect("load owner program");
+        let runtime = &manager.program_entry(program_id).unwrap().program;
+
+        assert!(runtime.map(referenced, MapAccess::READ).is_some());
+        assert!(runtime.map(referenced, MapAccess::WRITE).is_none());
+        assert!(runtime.map(unrelated, MapAccess::READ).is_none());
+        assert!(runtime
+            .map(
+                referenced.wrapping_add(1 << BPF_HANDLE_SLOT_BITS),
+                MapAccess::READ
+            )
+            .is_none());
+
+        manager
+            .destroy_map_for(7, unrelated)
+            .expect("unrelated map is not retained by the program");
+        assert_eq!(manager.resource_usage().map_bytes, 8);
+        assert_eq!(
+            manager.destroy_map_for(7, referenced),
+            Err(BpfError::ObjectBusy)
+        );
+        assert_eq!(manager.resource_usage().map_bytes, 8);
+        manager
+            .unload_program_for(7, program_id)
+            .expect("unload releases the referenced map runtime");
+        manager
+            .destroy_map_for(7, referenced)
+            .expect("referenced map becomes reclaimable after unload");
+        assert_eq!(manager.resource_usage().map_bytes, 0);
+    }
+
+    #[test]
+    fn owner_reclaim_keeps_referenced_map_charged_until_foreign_program_unloads() {
+        let mut manager = BpfManager::new();
+        let map_id = manager
+            .create_map_for(1, MapType::Array as u32, 4, 8, 1)
+            .expect("owner map");
+        manager
+            .pin_map_with_access_for(1, "/shared".into(), map_id, MapAccess::READ)
+            .expect("owner offers read access");
+        assert_eq!(
+            manager
+                .get_pinned_map_for(2, "/shared", MapAccess::READ)
+                .expect("foreign process accepts read grant"),
+            map_id
+        );
+        let lookup = vec![
+            BpfInsn::mov64_imm(1, 0),
+            BpfInsn::new(0x7b, 10, 1, -8, 0),
+            BpfInsn::mov64_imm(1, map_id as i32),
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::add64_imm(2, -8),
+            BpfInsn::call(HelperId::MapLookupElem as i32),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ];
+        let foreign_program = manager
+            .load_raw_program_authorized(
+                2,
+                lookup,
+                BpfLoadAuthorization::new(LoadCaller::Unprivileged, false, MapAccess::READ),
+            )
+            .expect("foreign program captures granted map");
+        manager
+            .unpin_map_for(1, "/shared", false)
+            .expect("owner removes public pin");
+
+        assert!(manager.reclaim_owner(1));
+        assert!(manager.map_entry(map_id).is_some());
+        assert_eq!(manager.resource_usage().map_bytes, 8);
+
+        manager
+            .unload_program_for(2, foreign_program)
+            .expect("foreign program unloads");
+        assert!(manager.map_entry(map_id).is_none());
+        assert_eq!(manager.resource_usage().map_bytes, 0);
+    }
+
+    #[test]
+    fn hook_snapshots_are_directly_indexed_and_fanout_bounded() {
+        let mut manager = BpfManager::new();
+        let program_id = manager
+            .load_raw_program(vec![BpfInsn::mov64_imm(0, 0), BpfInsn::exit()])
+            .expect("load snapshot test program");
+        let runtime = manager.program_entry(program_id).unwrap().program.clone();
+        let mut snapshot = HookSnapshot::empty();
+
+        snapshot
+            .generic_mut(ATTACH_TYPE_TIMER)
+            .unwrap()
+            .push(&runtime)
+            .unwrap();
+        snapshot
+            .gpio_mut(0, 17, GpioEdge::Rising as u32)
+            .unwrap()
+            .push(&runtime)
+            .unwrap();
+
+        assert_eq!(
+            snapshot.generic(ATTACH_TYPE_TIMER).unwrap().iter().count(),
+            1
+        );
+        assert_eq!(
+            snapshot
+                .generic(ATTACH_TYPE_SCHED_SWITCH)
+                .unwrap()
+                .iter()
+                .count(),
+            0
+        );
+        assert_eq!(snapshot.gpio(0, 17, 1).unwrap().iter().count(), 1);
+        assert_eq!(snapshot.gpio(0, 17, 2).unwrap().iter().count(), 0);
+
+        let timer = snapshot.generic_mut(ATTACH_TYPE_TIMER).unwrap();
+        for _ in 1..HOOK_FANOUT_LIMIT {
+            timer.push(&runtime).unwrap();
+        }
+        assert_eq!(timer.push(&runtime), Err(BpfError::ResourceLimit));
+    }
+
+    #[test]
+    #[cfg(feature = "cloud-profile")]
+    fn latency_sensitive_hooks_reject_logging_helpers() {
+        let mut manager = BpfManager::new();
+        let program_id = manager
+            .load_raw_program(vec![
+                BpfInsn::mov64_imm(2, 0),
+                BpfInsn::call(HelperId::TracePrintk as i32),
+                BpfInsn::mov64_imm(0, 0),
+                BpfInsn::exit(),
+            ])
+            .expect("logging remains valid at load time");
+
+        manager
+            .attach(ATTACH_TYPE_SYS_ENTER, program_id)
+            .expect("non-latency trace hook may use the logging helper");
+        manager.detach(ATTACH_TYPE_SYS_ENTER, program_id).unwrap();
+        for attach_type in [
+            ATTACH_TYPE_TIMER,
+            ATTACH_TYPE_GPIO,
+            ATTACH_TYPE_SCHED_SWITCH,
+        ] {
+            assert_eq!(
+                manager.attach(attach_type, program_id),
+                Err(BpfError::VerificationFailed)
+            );
+        }
     }
 
     #[test]
@@ -2461,9 +2967,12 @@ mod tests {
             Err(BpfError::ResourceLimit)
         );
 
-        let mut slots: [HookProgramSlot; HOOK_FANOUT_LIMIT] = core::array::from_fn(|_| None);
-        let count = manager.hook_programs_into(ATTACH_TYPE_TIMER, &mut slots);
-        assert_eq!(count, HOOK_FANOUT_LIMIT);
-        assert!(slots.iter().all(Option::is_some));
+        assert_eq!(
+            manager.attachments[&ATTACH_TYPE_TIMER].len(),
+            HOOK_FANOUT_LIMIT
+        );
+        assert!(ids[..HOOK_FANOUT_LIMIT]
+            .iter()
+            .all(|id| { Arc::strong_count(&manager.program_entry(*id).unwrap().program) == 1 }));
     }
 }

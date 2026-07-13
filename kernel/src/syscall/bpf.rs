@@ -137,19 +137,6 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
 
     let owner = process.pid().as_u64();
 
-    // These commands touch map backing storage that a running BPF program may
-    // address through a raw helper-returned pointer. Serialize them with BPF
-    // execution until map APIs carry an epoch/read guard themselves.
-    let _runtime = matches!(
-        cmd_u32,
-        BPF_MAP_LOOKUP_ELEM
-            | BPF_MAP_UPDATE_ELEM
-            | BPF_MAP_DELETE_ELEM
-            | BPF_MAP_DESTROY
-            | BPF_RINGBUF_POLL
-    )
-    .then(crate::bpf::lock_runtime);
-
     match cmd_u32 {
         BPF_MAP_CREATE => {
             log::info!("sys_bpf: MAP_CREATE");

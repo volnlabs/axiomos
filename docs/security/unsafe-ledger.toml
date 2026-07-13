@@ -1,6 +1,6 @@
 version = 1
-baseline_sites = 696
-baseline_fingerprint = "sha256:126f6dd385ce6309f2ac9d763d2880d89d2154f470a29a195d41cc739cce5502"
+baseline_sites = 702
+baseline_fingerprint = "sha256:710c8075558c3f880c8c0a70182d99dc565e4c221e55868e32d7ba1583c870d0"
 
 # Rules are evaluated in order. Keep narrow, high-risk obligations before broad
 # subsystem rules. The first matching rule supplies every site-level field.
@@ -188,9 +188,9 @@ scope = "production"
 owner = "BPF runtime/security maintainers"
 invariant = "Verifier, profile, attach, scheduler, signing, and kernel registry boundaries preserve program, context, credential, quota, and lifetime invariants."
 callers = "bpf syscall, device hooks, scheduler hooks, actuation"
-tests = "cloud/embedded complete BPF suites and kernel checks; SMP attach/fire/unload stress remains missing."
+tests = "cloud/embedded complete BPF suites, epoch-snapshot concurrency tests, SMP attach/fire/detach QEMU stress, and kernel checks; model-checked reclamation remains missing."
 priority = "P0"
-reviewed = "2026-07-12"
+reviewed = "2026-07-13"
 
 [[obligation]]
 id = "DMA-MMIO-DRIVERS"
