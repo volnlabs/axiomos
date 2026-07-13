@@ -421,6 +421,95 @@ impl BpfManager {
         }
     }
 
+    /// Detach and reclaim every object charged to `owner`.
+    ///
+    /// The caller must hold [`lock_runtime`] so map backing storage cannot be
+    /// reclaimed while an interpreter helper is using it. A `false` result
+    /// means an already-captured program snapshot is still in flight; the
+    /// caller should retry after releasing the runtime lock.
+    pub(crate) fn reclaim_owner(&mut self, owner: u64) -> bool {
+        let had_owned_objects = self
+            .programs
+            .iter()
+            .filter_map(Option::as_ref)
+            .any(|entry| entry.owner == owner)
+            || self
+                .maps
+                .iter()
+                .filter_map(Option::as_ref)
+                .any(|entry| entry.owner == owner && entry.charged_bytes != 0);
+        let programs = &self.programs;
+        let (attachments, admission) = (&mut self.attachments, &mut self.admission);
+        for (&attach_type, attached) in attachments.iter_mut() {
+            let mut index = 0;
+            while index < attached.len() {
+                let prog_id = attached[index];
+                let owned = programs
+                    .get(prog_id as usize)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|entry| entry.owner == owner);
+                if owned {
+                    attached.remove(index);
+                    admission.release(attach_type, prog_id);
+                } else {
+                    index += 1;
+                }
+            }
+        }
+        attachments.retain(|_, attached| !attached.is_empty());
+
+        for (prog_id, entry) in self.programs.iter().enumerate() {
+            if entry.as_ref().is_some_and(|entry| entry.owner == owner) {
+                self.gpio_routes.remove(prog_id as u32);
+            }
+        }
+
+        let maps = &self.maps;
+        self.pinned_maps.retain(|(_, map_id)| {
+            !maps
+                .get(*map_id as usize)
+                .and_then(Option::as_ref)
+                .is_some_and(|entry| entry.owner == owner)
+        });
+
+        for slot in &mut self.programs {
+            let Some(entry) = slot.as_ref() else {
+                continue;
+            };
+            if entry.owner != owner || Arc::strong_count(&entry.program) != 1 {
+                continue;
+            }
+            let entry = slot.take().expect("owned program entry was present");
+            self.live_programs = self.live_programs.saturating_sub(1);
+            self.program_bytes = self.program_bytes.saturating_sub(entry.charged_bytes);
+        }
+
+        if self
+            .programs
+            .iter()
+            .filter_map(Option::as_ref)
+            .any(|entry| entry.owner == owner)
+        {
+            return false;
+        }
+
+        for slot in &mut self.maps {
+            let Some(entry) = slot.as_ref() else {
+                continue;
+            };
+            if entry.owner != owner || entry.charged_bytes == 0 {
+                continue;
+            }
+            let entry = slot.take().expect("owned map entry was present");
+            self.live_maps = self.live_maps.saturating_sub(1);
+            self.map_bytes = self.map_bytes.saturating_sub(entry.charged_bytes);
+        }
+        if had_owned_objects {
+            log::info!("BPF_OWNER_RECLAIM_OK owner={owner}");
+        }
+        true
+    }
+
     fn ensure_program_quota(&self, owner: u64, charge: usize) -> Result<(), BpfError> {
         if self.live_programs >= self.limits.max_live_programs
             || self.programs.len() >= self.limits.max_program_slots
@@ -1719,6 +1808,50 @@ mod tests {
         manager
             .destroy_map_for(1, map_id)
             .expect("destroy owner map");
+    }
+
+    #[test]
+    fn owner_reclamation_waits_for_inflight_program_snapshots() {
+        let mut manager = BpfManager::new_with_limits(tiny_limits());
+        let map_id = manager
+            .create_map_for(7, MapType::Array as u32, 4, 8, 1)
+            .expect("owner map");
+        manager
+            .pin_map_for(7, "/owner-map".into(), map_id)
+            .expect("pin owner map");
+        let program_id = manager
+            .load_raw_program_for(7, vec![BpfInsn::mov64_imm(0, 0), BpfInsn::exit()])
+            .expect("owner program");
+        manager
+            .attach_for(7, ATTACH_TYPE_TIMER, program_id)
+            .expect("attach owner program");
+        let in_flight = manager.programs[program_id as usize]
+            .as_ref()
+            .expect("program entry")
+            .program
+            .clone();
+
+        assert!(!manager.reclaim_owner(7));
+        assert_eq!(manager.resource_usage().live_programs, 1);
+        assert_eq!(manager.resource_usage().live_maps, 1);
+        assert_eq!(manager.resource_usage().pinned_maps, 0);
+        assert!(manager
+            .attachments
+            .values()
+            .all(|programs| !programs.contains(&program_id)));
+
+        drop(in_flight);
+        assert!(manager.reclaim_owner(7));
+        assert_eq!(
+            manager.resource_usage(),
+            BpfResourceUsage {
+                live_programs: 0,
+                program_bytes: 0,
+                live_maps: 0,
+                map_bytes: 0,
+                pinned_maps: 0,
+            }
+        );
     }
 
     #[test]

@@ -46,6 +46,12 @@ pub extern "C" fn _start() -> ! {
         write(1, b"LIFECYCLE_EXEC_WAIT_FAIL\n");
     }
 
+    if bpf_owner_exit_probe() {
+        write(1, b"BPF_OWNER_EXIT_OK\n");
+    } else {
+        write(1, b"BPF_OWNER_EXIT_FAIL\n");
+    }
+
     write(1, b"=== Axiom eBPF Init ===\n");
     write(1, b"Phase 4 demo boot: ");
     write(1, PHASE4_EXPORT_DEMO.as_bytes());
@@ -339,6 +345,66 @@ fn lifecycle_exec_reject_probe() -> bool {
         minilib::execve(MISSING_PATH.as_ptr(), core::ptr::null(), core::ptr::null()) as usize,
         kernel_abi::ENOENT,
     )
+}
+
+fn bpf_owner_exit_probe() -> bool {
+    #[repr(C)]
+    struct BpfInsn {
+        opcode: u8,
+        regs: u8,
+        offset: i16,
+        imm: i32,
+    }
+
+    let child = minilib::fork();
+    if child < 0 {
+        return false;
+    }
+    if child == 0 {
+        let map_attr = kernel_abi::BpfAttr {
+            prog_type: 2,
+            insn_cnt: 4,
+            insns: 8 | (1u64 << 32),
+            ..kernel_abi::BpfAttr::default()
+        };
+        let map_id = minilib::bpf(
+            kernel_abi::BPF_MAP_CREATE as i32,
+            (&raw const map_attr).cast(),
+            core::mem::size_of::<kernel_abi::BpfAttr>() as i32,
+        );
+        let insns = [
+            BpfInsn {
+                opcode: 0xb7,
+                regs: 0,
+                offset: 0,
+                imm: 0,
+            },
+            BpfInsn {
+                opcode: 0x95,
+                regs: 0,
+                offset: 0,
+                imm: 0,
+            },
+        ];
+        let program_attr = kernel_abi::BpfAttr {
+            insn_cnt: insns.len() as u32,
+            insns: insns.as_ptr() as u64,
+            ..kernel_abi::BpfAttr::default()
+        };
+        let program_id = minilib::bpf(
+            kernel_abi::BPF_PROG_LOAD as i32,
+            (&raw const program_attr).cast(),
+            core::mem::size_of::<kernel_abi::BpfAttr>() as i32,
+        );
+        minilib::exit(if map_id >= 0 && program_id >= 0 {
+            0
+        } else {
+            125
+        });
+    }
+
+    let mut status = 0;
+    minilib::waitpid(child, &mut status, 0) == child && status == 0
 }
 
 fn trigger_unmapped_load() -> ! {

@@ -1,4 +1,5 @@
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use core::pin::Pin;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -56,11 +57,33 @@ impl TaskCleanup {
             dbg_mark(b'c' as u32);
         }
 
-        // log::info!("TaskCleanup: running");
+        let mut pending_bpf_owners = Vec::new();
         loop {
             while let Some(task) = cleanup_queue().dequeue() {
-                // log::trace!("TaskCleanup: cleaning up task {}", task.id());
+                let exited_owner = task
+                    .process()
+                    .exit_code()
+                    .read()
+                    .is_some()
+                    .then(|| task.process().pid().as_u64());
                 drop(task);
+                if let Some(owner) = exited_owner {
+                    if !pending_bpf_owners.contains(&owner) {
+                        pending_bpf_owners.push(owner);
+                    }
+                }
+            }
+
+            if !pending_bpf_owners.is_empty() {
+                crate::mcore::context::ExecutionContext::load().with_interrupts_masked(|| {
+                    let _runtime = crate::bpf::lock_runtime();
+                    if let Some(manager) = crate::BPF_MANAGER.get() {
+                        let mut manager = manager.lock();
+                        pending_bpf_owners.retain(|owner| !manager.reclaim_owner(*owner));
+                    } else {
+                        pending_bpf_owners.clear();
+                    }
+                });
             }
 
             #[cfg(target_arch = "x86_64")]
