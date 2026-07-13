@@ -21,8 +21,8 @@ fn bpf_error_errno(error: BpfError) -> isize {
         BpfError::OutOfMemory | BpfError::ResourceLimit => -12, // ENOMEM
         BpfError::ObjectBusy => -16,                            // EBUSY
         BpfError::NotLoaded => -2,                              // ENOENT
-        BpfError::ReadOnlyMap | BpfError::SignatureRejected => -1, // EPERM
-        _ => -22,                                               // EINVAL
+        BpfError::ReadOnlyMap | BpfError::SignatureRejected | BpfError::PermissionDenied => -1, // EPERM
+        _ => -22, // EINVAL
     }
 }
 
@@ -39,6 +39,10 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
     }
 
     let cmd_u32 = cmd as u32;
+    let owner = crate::mcore::context::ExecutionContext::load()
+        .current_process()
+        .pid()
+        .as_u64();
 
     // These commands touch map backing storage that a running BPF program may
     // address through a raw helper-returned pointer. Serialize them with BPF
@@ -72,10 +76,13 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
             let max_entries = ((attr.insns >> 32) & 0xFFFFFFFF) as u32;
 
             if let Some(manager) = BPF_MANAGER.get() {
-                match manager
-                    .lock()
-                    .create_map(map_type, key_size, value_size, max_entries)
-                {
+                match manager.lock().create_map_for(
+                    owner,
+                    map_type,
+                    key_size,
+                    value_size,
+                    max_entries,
+                ) {
                     Ok(map_id) => map_id as isize,
                     Err(e) => {
                         log::error!("sys_bpf: MAP_CREATE failed: {}", e);
@@ -105,10 +112,9 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
                 let mgr = manager.lock();
 
                 // Get map definition to determine key size
-                let key_size = if let Some(def) = mgr.get_map_def(map_id) {
-                    def.key_size as usize
-                } else {
-                    return -1; // Invalid map_fd
+                let key_size = match mgr.get_map_def_for(owner, map_id) {
+                    Ok(def) => def.key_size as usize,
+                    Err(error) => return bpf_error_errno(error),
                 };
 
                 let key = match read_userspace_slice(key_ptr as usize, key_size) {
@@ -116,14 +122,15 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
                     Err(_) => return -1,
                 };
 
-                if let Some(value) = mgr.map_lookup(map_id, &key) {
-                    // Copy value to user buffer
-                    if copy_to_userspace(value_ptr as usize, &value).is_err() {
-                        return -1;
+                match mgr.map_lookup_for(owner, map_id, &key) {
+                    Ok(Some(value)) => {
+                        if copy_to_userspace(value_ptr as usize, &value).is_err() {
+                            return -1;
+                        }
+                        0
                     }
-                    0
-                } else {
-                    -2 // ENOENT
+                    Ok(None) => -2,
+                    Err(error) => bpf_error_errno(error),
                 }
             } else {
                 -1
@@ -149,10 +156,9 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
                 let mgr = manager.lock();
 
                 // Get map definition to determine sizes
-                let (key_size, value_size) = if let Some(def) = mgr.get_map_def(map_id) {
-                    (def.key_size as usize, def.value_size as usize)
-                } else {
-                    return -1; // Invalid map_fd
+                let (key_size, value_size) = match mgr.get_map_def_for(owner, map_id) {
+                    Ok(def) => (def.key_size as usize, def.value_size as usize),
+                    Err(error) => return bpf_error_errno(error),
                 };
 
                 let key = match read_userspace_slice(key_ptr as usize, key_size) {
@@ -165,11 +171,11 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
                     Err(_) => return -1,
                 };
 
-                match mgr.map_update(map_id, &key, &value, flags) {
+                match mgr.map_update_for(owner, map_id, &key, &value, flags) {
                     Ok(_) => 0,
                     Err(e) => {
                         log::error!("sys_bpf: MAP_UPDATE failed: {}", e);
-                        -1
+                        bpf_error_errno(e)
                     }
                 }
             } else {
@@ -194,10 +200,9 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
                 let mgr = manager.lock();
 
                 // Get map definition to determine key size
-                let key_size = if let Some(def) = mgr.get_map_def(map_id) {
-                    def.key_size as usize
-                } else {
-                    return -1; // Invalid map_fd
+                let key_size = match mgr.get_map_def_for(owner, map_id) {
+                    Ok(def) => def.key_size as usize,
+                    Err(error) => return bpf_error_errno(error),
                 };
 
                 let key = match read_userspace_slice(key_ptr as usize, key_size) {
@@ -205,9 +210,9 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
                     Err(_) => return -1,
                 };
 
-                match mgr.map_delete(map_id, &key) {
+                match mgr.map_delete_for(owner, map_id, &key) {
                     Ok(_) => 0,
-                    Err(_) => -2, // ENOENT
+                    Err(error) => bpf_error_errno(error),
                 }
             } else {
                 -1
@@ -230,7 +235,7 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
             };
 
             if let Some(manager) = BPF_MANAGER.get() {
-                match manager.lock().pin_map(path, map_id) {
+                match manager.lock().pin_map_for(owner, path, map_id) {
                     Ok(()) => 0,
                     Err(e) => {
                         log::error!("sys_bpf: OBJ_PIN failed: {}", e);
@@ -257,9 +262,9 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
             };
 
             if let Some(manager) = BPF_MANAGER.get() {
-                match manager.lock().get_pinned_map(&path) {
-                    Some(map_id) => map_id as isize,
-                    None => -2,
+                match manager.lock().get_pinned_map_for(owner, &path) {
+                    Ok(map_id) => map_id as isize,
+                    Err(error) => bpf_error_errno(error),
                 }
             } else {
                 -1
@@ -277,9 +282,9 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
             }
 
             if let Some(manager) = BPF_MANAGER.get() {
-                let info = match manager.lock().get_map_info(attr.map_fd) {
-                    Some(info) => info,
-                    None => return -1,
+                let info = match manager.lock().get_map_info_for(owner, attr.map_fd) {
+                    Ok(info) => info,
+                    Err(error) => return bpf_error_errno(error),
                 };
                 if copy_to_userspace(attr.info as usize, info.as_bytes()).is_err() {
                     return -1;
@@ -327,7 +332,10 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
                 let edge = kernel_bpf::attach::GpioEdge::from_flags(edge_flags);
 
                 if let Some(manager) = BPF_MANAGER.get() {
-                    match manager.lock().attach_gpio_route(0, pin, edge, prog_id) {
+                    match manager
+                        .lock()
+                        .attach_gpio_route_for(owner, 0, pin, edge, prog_id)
+                    {
                         Ok(_) => {
                             log::info!(
                                 "sys_bpf: attached prog {} to type {}",
@@ -375,7 +383,7 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
             }
 
             if let Some(manager) = BPF_MANAGER.get() {
-                let attach_result = manager.lock().attach(attach_type, prog_id);
+                let attach_result = manager.lock().attach_for(owner, attach_type, prog_id);
                 match attach_result {
                     Ok(_) => {
                         log::info!("sys_bpf: attached prog {} to type {}", prog_id, attach_type);
@@ -462,7 +470,7 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
             let prog_id = attr.attach_prog_fd;
 
             if let Some(manager) = BPF_MANAGER.get() {
-                match manager.lock().detach(attach_type, prog_id) {
+                match manager.lock().detach_for(owner, attach_type, prog_id) {
                     Ok(_) => {
                         log::info!(
                             "sys_bpf: detached prog {} from type {}",
@@ -494,7 +502,10 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
             let Some(manager) = BPF_MANAGER.get() else {
                 return -2;
             };
-            match manager.lock().unload_program(attr.attach_prog_fd) {
+            match manager
+                .lock()
+                .unload_program_for(owner, attr.attach_prog_fd)
+            {
                 Ok(()) => 0,
                 Err(error) => bpf_error_errno(error),
             }
@@ -508,7 +519,7 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
             let Some(manager) = BPF_MANAGER.get() else {
                 return -2;
             };
-            match manager.lock().destroy_map(attr.map_fd) {
+            match manager.lock().destroy_map_for(owner, attr.map_fd) {
                 Ok(()) => 0,
                 Err(error) => bpf_error_errno(error),
             }
@@ -529,7 +540,7 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
             let Some(manager) = BPF_MANAGER.get() else {
                 return -2;
             };
-            match manager.lock().unpin_map(&path) {
+            match manager.lock().unpin_map_for(owner, &path) {
                 Ok(()) => 0,
                 Err(error) => bpf_error_errno(error),
             }
@@ -574,7 +585,7 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
             }
 
             if let Some(manager) = BPF_MANAGER.get() {
-                match manager.lock().load_raw_program(insns) {
+                match manager.lock().load_raw_program_for(owner, insns) {
                     Ok(id) => {
                         log::info!("sys_bpf: program loaded with id {}", id);
                         id as isize
@@ -621,7 +632,7 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
             };
 
             if let Some(manager) = BPF_MANAGER.get() {
-                match manager.lock().load_program(&elf_bytes) {
+                match manager.lock().load_program_for(owner, &elf_bytes) {
                     Ok(id) => {
                         log::info!("sys_bpf: ELF program loaded with id {}", id);
                         id as isize
@@ -657,8 +668,8 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
 
             if let Some(manager) = BPF_MANAGER.get() {
                 let mgr = manager.lock();
-                match mgr.ringbuf_poll(map_id) {
-                    Some(data) => {
+                match mgr.ringbuf_poll_for(owner, map_id) {
+                    Ok(Some(data)) => {
                         if data.len() > buf_size {
                             log::warn!(
                                 "sys_bpf: RINGBUF_POLL buffer too small ({} < {})",
@@ -672,7 +683,8 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
                         }
                         data.len() as isize
                     }
-                    None => 0, // No event available
+                    Ok(None) => 0, // No event available
+                    Err(error) => bpf_error_errno(error),
                 }
             } else {
                 -1
@@ -695,9 +707,12 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
             let Some(manager) = BPF_MANAGER.get() else {
                 return -1;
             };
-            let Some(program) = manager.lock().get_program(prog_id) else {
-                log::error!("sys_bpf: BENCH_EXEC unknown prog id {}", prog_id);
-                return -1;
+            let program = match manager.lock().get_program_for(owner, prog_id) {
+                Ok(program) => program,
+                Err(error) => {
+                    log::error!("sys_bpf: BENCH_EXEC denied for prog id {}", prog_id);
+                    return bpf_error_errno(error);
+                }
             };
             match crate::bpf::BpfManager::bench_execute(&program, prog_id, runs) {
                 Ok(()) => 0,

@@ -450,6 +450,9 @@ pub enum BpfError {
     /// An object cannot be reclaimed while attached, pinned, or executing.
     ObjectBusy,
 
+    /// The caller does not own the requested object or capability.
+    PermissionDenied,
+
     /// The same CPU attempted nested BPF execution while its scratch stack was live.
     ReentrantExecution,
 
@@ -485,6 +488,7 @@ impl core::fmt::Display for BpfError {
             Self::OutOfMemory => write!(f, "out of memory"),
             Self::ResourceLimit => write!(f, "BPF resource limit exceeded"),
             Self::ObjectBusy => write!(f, "BPF object is still in use"),
+            Self::PermissionDenied => write!(f, "BPF object permission denied"),
             Self::ReentrantExecution => write!(f, "nested BPF execution on one CPU"),
             Self::VerificationFailed => write!(f, "program failed verification"),
             Self::SignatureRejected => write!(f, "program failed signature authentication"),

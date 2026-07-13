@@ -45,6 +45,8 @@ impl VerificationToken {
 /// assume a region size it was not given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MapPerm {
+    /// The caller cannot reference this map at all.
+    Unavailable,
     ReadOnly,
     ReadWrite,
 }
@@ -70,8 +72,9 @@ pub struct VerifyConfig<'a> {
     /// smallest entry (sound: never over-permits any reachable map). Empty means
     /// the caller supplied no per-map info and `map_value_size` is used.
     pub map_value_sizes: &'a [u32],
-    /// Per-map write permissions, indexed by map id. Empty means legacy all-RW.
-    /// When non-empty, writes require a known entry whose permission is RW.
+    /// Per-map access and write permissions, indexed by map id. Empty means
+    /// legacy all-RW. Unavailable entries reject reads and writes; otherwise,
+    /// writes require a known entry whose permission is RW.
     pub map_perms: &'a [MapPerm],
     /// Privilege tier of the loading caller (#88). Gates the unprivileged-only
     /// restrictions. Defaults (via `LoadCaller::default()`) to `Privileged`, so
@@ -93,12 +96,20 @@ fn map_lookup_value_size(map_id_reg: &RegState, config: &VerifyConfig) -> Result
     }
     match map_id_reg.scalar_value.and_then(|s| s.value) {
         // Known constant map id: exact size, or reject if it names no map.
-        Some(id) => usize::try_from(id)
-            .ok()
-            .and_then(|i| table.get(i).copied())
-            .ok_or(id),
+        Some(id) => {
+            let index = usize::try_from(id).map_err(|_| id)?;
+            if matches!(config.map_perms.get(index), Some(MapPerm::Unavailable)) {
+                return Err(id);
+            }
+            table.get(index).copied().ok_or(id)
+        }
         // Dynamic map id: bound to the smallest reachable map value (sound).
-        None => Ok(table.iter().copied().min().unwrap_or(0)),
+        None => {
+            if config.map_perms.contains(&MapPerm::Unavailable) {
+                return Err(u64::MAX);
+            }
+            Ok(table.iter().copied().min().unwrap_or(0))
+        }
     }
 }
 
@@ -123,6 +134,7 @@ fn map_lookup_writability(map_id_reg: &RegState, config: &VerifyConfig) -> MapWr
     };
 
     match perm {
+        MapPerm::Unavailable => MapWritability::Unprovable,
         MapPerm::ReadOnly => MapWritability::ReadOnly(id),
         MapPerm::ReadWrite => MapWritability::ReadWrite(Some(id)),
     }
@@ -1855,6 +1867,17 @@ mod tests {
         assert_eq!(map_lookup_value_size(&r1, &cfg), Err(5));
     }
 
+    #[test]
+    fn map_size_known_unavailable_id_is_rejected() {
+        let cfg = VerifyConfig {
+            map_value_sizes: &[8, 16],
+            map_perms: &[MapPerm::ReadWrite, MapPerm::Unavailable],
+            ..VerifyConfig::default()
+        };
+        let r1 = RegState::scalar(Some(ScalarValue::constant(1)));
+        assert_eq!(map_lookup_value_size(&r1, &cfg), Err(1));
+    }
+
     /// A dynamic (non-constant) map id is bounded to the smallest reachable map
     /// value — sound: it never over-permits any map the program could hit.
     #[test]
@@ -1871,6 +1894,17 @@ mod tests {
         // A register with no tracked scalar value is also dynamic.
         let r1_none = RegState::scalar(None);
         assert_eq!(map_lookup_value_size(&r1_none, &cfg), Ok(8));
+    }
+
+    #[test]
+    fn map_size_dynamic_id_is_rejected_when_any_map_is_unavailable() {
+        let cfg = VerifyConfig {
+            map_value_sizes: &[8, 16],
+            map_perms: &[MapPerm::ReadWrite, MapPerm::Unavailable],
+            ..VerifyConfig::default()
+        };
+        let r1 = RegState::scalar(Some(ScalarValue::unknown()));
+        assert_eq!(map_lookup_value_size(&r1, &cfg), Err(u64::MAX));
     }
 
     fn lookup_then_store_prog(map_id_insn: BpfInsn) -> alloc::vec::Vec<BpfInsn> {
