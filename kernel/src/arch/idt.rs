@@ -300,6 +300,10 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
         end_of_interrupt();
     }
 
+    crate::mcore::mtask::scheduler::sleep::TaskSleep::wake_expired(
+        crate::time::get_monotonic_time_ns(),
+    );
+
     // 2. Resolve the bounded hook snapshot without heap allocation, then run
     // outside the manager lock so map helpers can re-acquire it.
     let bpf_ctx = kernel_bpf::execution::BpfContext::empty();

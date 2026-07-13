@@ -77,6 +77,7 @@ n! {
     SYS_ESTOP = 61,
     SYS_SPAWN_RESTRICTED = 62,
     SYS_RESTRICT_BPF_CAPABILITIES = 63,
+    SYS_INTERRUPT_SLEEP = 64,
 }
 
 #[cfg(test)]
@@ -96,5 +97,7 @@ mod tests {
             syscall_name(SYS_RESTRICT_BPF_CAPABILITIES),
             "SYS_RESTRICT_BPF_CAPABILITIES"
         );
+        assert_eq!(SYS_INTERRUPT_SLEEP, 64);
+        assert_eq!(syscall_name(SYS_INTERRUPT_SLEEP), "SYS_INTERRUPT_SLEEP");
     }
 }

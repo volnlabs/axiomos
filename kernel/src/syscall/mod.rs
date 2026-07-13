@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 use access::KernelAccess;
 #[cfg(feature = "rpi5")]
 use kernel_abi::EPERM;
-use kernel_abi::{syscall_name, Errno, EINVAL, ENOSYS};
+use kernel_abi::{syscall_name, Errno, EAGAIN, EINVAL, ENOSYS, ESRCH};
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use kernel_syscall::{
     access::FileAccess,
@@ -32,6 +32,8 @@ use zerocopy::IntoBytes;
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::mcore::mtask::process::Process;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use crate::mcore::mtask::task::Task;
 
 #[cfg(not(target_arch = "x86_64"))]
 fn hlt() {
@@ -205,6 +207,7 @@ pub fn dispatch_syscall(
         }
         kernel_abi::SYS_CLOCK_GETTIME => dispatch_sys_clock_gettime(arg1, arg2),
         kernel_abi::SYS_NANOSLEEP => dispatch_sys_nanosleep(arg1, arg2),
+        kernel_abi::SYS_INTERRUPT_SLEEP => dispatch_sys_interrupt_sleep(arg1),
         kernel_abi::SYS_SPAWN => dispatch_sys_spawn(arg1, arg2),
         kernel_abi::SYS_SPAWN_RESTRICTED => dispatch_sys_spawn_restricted(arg1, arg2, arg3),
         kernel_abi::SYS_RESTRICT_BPF_CAPABILITIES => match u32::try_from(arg1)
@@ -629,31 +632,59 @@ fn dispatch_sys_clock_gettime(clock_id: usize, tp: usize) -> Result<usize, Errno
     Ok(0)
 }
 
-fn dispatch_sys_nanosleep(req: usize, _rem: usize) -> Result<usize, Errno> {
+fn dispatch_sys_nanosleep(req: usize, rem: usize) -> Result<usize, Errno> {
     let ts: kernel_abi::timespec = validation::copy_from_userspace(req)?;
 
     let duration_ns =
         kernel_time::timespec_to_duration_nanoseconds(ts.tv_sec, ts.tv_nsec).ok_or(EINVAL)?;
-
-    let start = crate::time::get_monotonic_time_ns();
-
-    // Busy wait loop
-    // TODO: Use proper scheduler sleep/wait queue
-    loop {
-        let now = crate::time::get_monotonic_time_ns();
-        if now.wrapping_sub(start) >= duration_ns {
-            break;
-        }
-
-        // On x86_64, enable interrupts and halt to save power
-        #[cfg(target_arch = "x86_64")]
-        x86_64::instructions::interrupts::enable_and_hlt();
-
-        #[cfg(not(target_arch = "x86_64"))]
-        core::hint::spin_loop();
+    if duration_ns == 0 {
+        return Ok(0);
     }
 
-    Ok(0)
+    let deadline_ns = crate::time::get_monotonic_time_ns().saturating_add(duration_ns);
+    let context = crate::mcore::context::ExecutionContext::load();
+    context.with_interrupts_masked(|| {
+        context.with_current_task(|task| task.begin_sleep(deadline_ns));
+        // SAFETY: interrupts remain masked for the complete scheduler transition.
+        if !unsafe { context.reschedule() } {
+            context.with_current_task(Task::abort_sleep_before_switch);
+        }
+    });
+
+    // A globally queued task may resume on a different CPU.
+    let resumed_context = crate::mcore::context::ExecutionContext::load();
+    let reason = resumed_context.with_current_task(|task| task.take_sleep_wake_reason());
+    if reason == crate::mcore::mtask::task::SleepWakeReason::Deadline {
+        return Ok(0);
+    }
+
+    if rem != 0 {
+        let remaining_ns = deadline_ns.saturating_sub(crate::time::get_monotonic_time_ns());
+        let remaining = kernel_abi::timespec {
+            tv_sec: (remaining_ns / kernel_time::NANOSECONDS_PER_SECOND) as i64,
+            tv_nsec: (remaining_ns % kernel_time::NANOSECONDS_PER_SECOND) as i64,
+        };
+        validation::copy_to_userspace(rem, remaining.as_bytes())?;
+    }
+    Err(kernel_abi::EINTR)
+}
+
+fn dispatch_sys_interrupt_sleep(pid: usize) -> Result<usize, Errno> {
+    let pid = u64::try_from(pid).map_err(|_| ESRCH)?;
+    let parent = crate::mcore::context::ExecutionContext::load().current_process();
+    let child = parent
+        .children()
+        .get()
+        .and_then(|mut children| children.find(|child| child.pid() == pid).cloned())
+        .ok_or(ESRCH)?;
+
+    // If the task is still scheduler-owned as a zombie, enqueue observes the
+    // process request under the same queue lock and wakes it instead of parking.
+    if crate::mcore::mtask::scheduler::sleep::TaskSleep::interrupt_process(&child) {
+        Ok(0)
+    } else {
+        Err(EAGAIN)
+    }
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]

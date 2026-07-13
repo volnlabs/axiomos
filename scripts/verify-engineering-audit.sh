@@ -267,7 +267,7 @@ qemu_smoke() {
     fi
 
     local failed=0 marker
-    for marker in QEMU_BOOT_OK USERCOPY_EFAULT_OK UNKNOWN_SYSCALL_ENOSYS_OK TLB_SHOOTDOWN_OK \
+    for marker in QEMU_BOOT_OK USERCOPY_EFAULT_OK UNKNOWN_SYSCALL_ENOSYS_OK NANOSLEEP_WAITQ_OK NANOSLEEP_INTERRUPT_OK TLB_SHOOTDOWN_OK \
         LIFECYCLE_EXIT_WAIT_OK LIFECYCLE_FAULT_WAIT_OK LIFECYCLE_EXEC_REJECT_OK \
         LIFECYCLE_EXEC_WAIT_OK BPF_FOREIGN_OWNER_DENY_OK BPF_HANDLE_REUSE_OK \
         BPF_OWNER_EXIT_OK BPF_OWNER_RECLAIM_OK \
@@ -279,6 +279,10 @@ qemu_smoke() {
             failed=1
         fi
     done
+    if ! grep -qF "NANOSLEEP_WAITQ_BENCH_NS=" "$log"; then
+        echo "missing nanosleep monotonic benchmark evidence" >>"$log"
+        failed=1
+    fi
     if ! grep -qF "started process pid=" "$log"; then
         echo "missing required marker: started process pid=" >>"$log"
         failed=1
@@ -314,12 +318,16 @@ qemu_production_smoke() {
         -- --headless --smp 2 --mem 1G >"$log" 2>&1 || rc=$?
 
     local failed=0 marker
-    for marker in QEMU_BOOT_OK SIGNED_BPF_LOAD_OK; do
+    for marker in QEMU_BOOT_OK NANOSLEEP_WAITQ_OK NANOSLEEP_INTERRUPT_OK SIGNED_BPF_LOAD_OK; do
         if ! grep -qF "$marker" "$log"; then
             echo "missing required production marker: $marker" >>"$log"
             failed=1
         fi
     done
+    if ! grep -qF "NANOSLEEP_WAITQ_BENCH_NS=" "$log"; then
+        echo "missing production nanosleep monotonic benchmark evidence" >>"$log"
+        failed=1
+    fi
     if grep -qF "Phase 4 demo boot" "$log"; then
         echo "unsigned BPF demo path ran in production image" >>"$log"
         failed=1
@@ -356,6 +364,8 @@ run_step fmt cargo fmt --all -- --check
 run_step unsafe-ledger python3 -B scripts/unsafe-ledger.py --check
 run_step workflow-yaml python3 -c \
     'import yaml; [yaml.safe_load(open(p, encoding="utf-8")) for p in (".github/workflows/build.yml", ".github/workflows/fuzz.yml", ".github/workflows/bpf-profiles.yml")]'
+run_step nanosleep-waitq-static python3 -c \
+    'from pathlib import Path; source=Path("kernel/src/syscall/mod.rs").read_text(); body=source.split("fn dispatch_sys_nanosleep", 1)[1].split("\nfn ", 1)[0]; assert "abort_sleep_before_switch" in body and body.count("ExecutionContext::load()") >= 2; assert all(token not in body for token in ("enable_and_hlt", "spin_loop", "Busy wait loop"))'
 run_cargo_step focused-host-tests test \
     -p kernel_abi -p kernel_elfloader -p kernel_physical_memory -p kernel_syscall \
     -p kernel_time -p kernel_usermem -p kernel_vfs -p kernel_virtual_memory -p shrike_link

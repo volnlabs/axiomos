@@ -282,7 +282,7 @@ impl ExecutionContext {
     ///
     /// # Safety
     /// The caller must ensure interrupts are disabled for the complete call.
-    pub unsafe fn reschedule(&self) {
+    pub unsafe fn reschedule(&self) -> bool {
         let context_switch = {
             self.scheduler.with_mut(|scheduler| {
                 // SAFETY: The caller guarantees interrupts remain disabled and
@@ -295,6 +295,9 @@ impl ExecutionContext {
             // SAFETY: The scheduler borrow ended above. Its pinned outgoing and
             // incoming task storage remains owned by the scheduler.
             unsafe { context_switch.execute() };
+            true
+        } else {
+            false
         }
     }
 

@@ -22,11 +22,13 @@ use crate::mcore::context::ExecutionContext;
 #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
 use crate::mcore::mtask::process::Process;
 use crate::mcore::mtask::scheduler::global::GlobalTaskQueue;
+use crate::mcore::mtask::scheduler::sleep::TaskSleep;
 use crate::mcore::mtask::scheduler::switch::switch_impl;
-use crate::mcore::mtask::task::Task;
+use crate::mcore::mtask::task::{State, Task};
 
 pub mod cleanup;
 pub mod global;
+pub mod sleep;
 mod switch;
 
 #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
@@ -129,7 +131,10 @@ impl Scheduler {
             // log::info!("reschedule: cleaning up zombie task {}", zombie_task.id());
             if zombie_task.should_terminate() {
                 TaskCleanup::enqueue(zombie_task);
+            } else if zombie_task.state() == State::Sleeping {
+                TaskSleep::enqueue(zombie_task);
             } else {
+                zombie_task.mark_ready();
                 GlobalTaskQueue::enqueue(zombie_task);
             }
         }
@@ -165,6 +170,7 @@ impl Scheduler {
             }
 
             log::trace!("reschedule: switching to task {}", next_task.id());
+            next_task.mark_running();
 
             next_task
                 .process()

@@ -9,7 +9,8 @@ use core::ffi::c_void;
 use core::fmt::{Debug, Display, Formatter};
 use core::ptr;
 #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use conquer_once::spin::OnceCell;
 use kernel_elfloader::{ElfFile, ElfLoader, LoadElfError};
@@ -166,6 +167,7 @@ pub struct Process {
     credentials: RwLock<Credentials>,
 
     exit_code: RwLock<Option<i32>>,
+    interruptible_sleep_state: AtomicU64,
 
     executable_path: Option<AbsoluteOwnedPath>,
     executable_file_data: RwLock<Option<LowerHalfAllocation<Executable>>>,
@@ -193,6 +195,7 @@ impl Process {
                 ppid: RwLock::new(pid),
                 credentials: RwLock::new(Credentials::kernel()),
                 exit_code: RwLock::new(None),
+                interruptible_sleep_state: AtomicU64::new(0),
                 executable_path: None,
                 executable_file_data: RwLock::new(None),
                 current_working_directory: RwLock::new(ROOT.to_owned()),
@@ -232,6 +235,7 @@ impl Process {
             ppid: RwLock::new(parent_pid),
             credentials: RwLock::new(credentials),
             exit_code: RwLock::new(None),
+            interruptible_sleep_state: AtomicU64::new(0),
             executable_path: executable_path.map(|x| x.as_ref().to_owned()),
             executable_file_data: RwLock::new(None),
             current_working_directory: RwLock::new(parent.current_working_directory.read().clone()),
@@ -317,6 +321,79 @@ impl Process {
 
     pub fn exit_code(&self) -> &RwLock<Option<i32>> {
         &self.exit_code
+    }
+
+    pub(crate) fn begin_interruptible_sleep(&self) -> u64 {
+        const INACTIVE: u64 = 0;
+        const ACTIVE: u64 = 1;
+        loop {
+            let current = self.interruptible_sleep_state.load(Ordering::Acquire);
+            assert_eq!(
+                current & 3,
+                INACTIVE,
+                "process already has an interruptible sleeper"
+            );
+            let generation = (current >> 2).wrapping_add(1);
+            let next = (generation << 2) | ACTIVE;
+            if self
+                .interruptible_sleep_state
+                .compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return generation;
+            }
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn request_sleep_interrupt(&self) -> bool {
+        const ACTIVE: u64 = 1;
+        const INTERRUPT_REQUESTED: u64 = 2;
+        let current = self.interruptible_sleep_state.load(Ordering::Acquire);
+        current & 3 == ACTIVE
+            && self
+                .interruptible_sleep_state
+                .compare_exchange(
+                    current,
+                    (current & !3) | INTERRUPT_REQUESTED,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+    }
+
+    #[must_use]
+    pub(crate) fn sleep_interrupt_requested(&self, generation: u64) -> bool {
+        const INTERRUPT_REQUESTED: u64 = 2;
+        self.interruptible_sleep_state.load(Ordering::Acquire)
+            == (generation << 2) | INTERRUPT_REQUESTED
+    }
+
+    /// Complete one exact sleep generation and report whether interruption won.
+    pub(crate) fn finish_interruptible_sleep(&self, generation: u64) -> bool {
+        const INACTIVE: u64 = 0;
+        const ACTIVE: u64 = 1;
+        const INTERRUPT_REQUESTED: u64 = 2;
+        loop {
+            let current = self.interruptible_sleep_state.load(Ordering::Acquire);
+            assert_eq!(current >> 2, generation, "sleep generation changed");
+            assert!(
+                matches!(current & 3, ACTIVE | INTERRUPT_REQUESTED),
+                "sleep generation completed twice"
+            );
+            if self
+                .interruptible_sleep_state
+                .compare_exchange(
+                    current,
+                    (generation << 2) | INACTIVE,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                return current & 3 == INTERRUPT_REQUESTED;
+            }
+        }
     }
 
     pub fn pid(&self) -> ProcessId {

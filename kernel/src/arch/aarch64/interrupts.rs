@@ -165,6 +165,10 @@ fn handle_timer_interrupt(ctx: &ExceptionContext) {
     clear_timer_interrupt();
     set_next_timer();
 
+    crate::mcore::mtask::scheduler::sleep::TaskSleep::wake_expired(
+        crate::time::get_monotonic_time_ns(),
+    );
+
     // Build the timer context, then resolve the bounded hook snapshot without
     // allocating while the interrupt is active.
     {

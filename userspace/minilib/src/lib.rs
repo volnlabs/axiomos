@@ -158,6 +158,10 @@ pub fn nanosleep(req: *const timespec, rem: *mut timespec) -> c_int {
     syscall2(55, req as usize, rem as usize) as i32
 }
 
+pub fn interrupt_sleep(pid: c_int) -> c_int {
+    syscall1(64, pid as usize) as i32
+}
+
 pub fn sleep(secs: u64) {
     let req = timespec {
         tv_sec: secs as i64,

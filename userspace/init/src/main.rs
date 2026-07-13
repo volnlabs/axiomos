@@ -35,6 +35,18 @@ pub extern "C" fn _start() -> ! {
         write(1, b"UNKNOWN_SYSCALL_ENOSYS_FAIL\n");
     }
 
+    if nanosleep_wait_queue_probe() {
+        write(1, b"NANOSLEEP_WAITQ_OK\n");
+    } else {
+        write(1, b"NANOSLEEP_WAITQ_FAIL\n");
+    }
+
+    if nanosleep_interrupt_probe() {
+        write(1, b"NANOSLEEP_INTERRUPT_OK\n");
+    } else {
+        write(1, b"NANOSLEEP_INTERRUPT_FAIL\n");
+    }
+
     if lifecycle_exit_wait_probe() {
         write(1, b"LIFECYCLE_EXIT_WAIT_OK\n");
     } else {
@@ -404,6 +416,131 @@ fn lifecycle_exec_reject_probe() -> bool {
         minilib::execve(MISSING_PATH.as_ptr(), core::ptr::null(), core::ptr::null()) as usize,
         kernel_abi::ENOENT,
     )
+}
+
+fn monotonic_time_ns() -> Option<u64> {
+    let mut now = minilib::timespec::default();
+    if minilib::clock_gettime(kernel_abi::CLOCK_MONOTONIC, &raw mut now) != 0
+        || now.tv_sec < 0
+        || now.tv_nsec < 0
+        || now.tv_nsec >= 1_000_000_000
+    {
+        return None;
+    }
+    (now.tv_sec as u64)
+        .checked_mul(1_000_000_000)
+        .and_then(|seconds| seconds.checked_add(now.tv_nsec as u64))
+}
+
+fn nanosleep_wait_queue_probe() -> bool {
+    let zero = minilib::timespec::default();
+    let before_zero = match monotonic_time_ns() {
+        Some(now) => now,
+        None => return false,
+    };
+    if minilib::nanosleep(&raw const zero, core::ptr::null_mut()) != 0
+        || monotonic_time_ns().is_none_or(|after| after < before_zero)
+    {
+        return false;
+    }
+
+    let durations_ms = [300u64, 100, 200];
+    let mut children = [0i32; 3];
+    let batch_started = match monotonic_time_ns() {
+        Some(now) => now,
+        None => return false,
+    };
+    for (index, duration_ms) in durations_ms.into_iter().enumerate() {
+        let child = minilib::fork();
+        if child < 0 {
+            return false;
+        }
+        if child == 0 {
+            let started = monotonic_time_ns().unwrap_or(0);
+            let request = minilib::timespec {
+                tv_sec: 0,
+                tv_nsec: (duration_ms * 1_000_000) as i64,
+            };
+            let slept = minilib::nanosleep(&raw const request, core::ptr::null_mut()) == 0;
+            let elapsed = monotonic_time_ns().unwrap_or(0).saturating_sub(started);
+            minilib::exit(if slept && elapsed >= duration_ms * 1_000_000 {
+                0
+            } else {
+                120 + index as i32
+            });
+        }
+        children[index] = child;
+    }
+
+    let expected_order = [children[1], children[2], children[0]];
+    for expected in expected_order {
+        let mut status = 0;
+        if minilib::waitpid(-1, &raw mut status, 0) != expected || status != 0 {
+            return false;
+        }
+    }
+    let batch_elapsed = match monotonic_time_ns() {
+        Some(now) => now.saturating_sub(batch_started),
+        None => return false,
+    };
+    if batch_elapsed < 300_000_000 {
+        return false;
+    }
+    write(1, b"NANOSLEEP_WAITQ_BENCH_NS=");
+    print_num(batch_elapsed);
+    write(1, b"\n");
+    true
+}
+
+fn nanosleep_interrupt_probe() -> bool {
+    let child = minilib::fork();
+    if child < 0 {
+        return false;
+    }
+    if child == 0 {
+        let request = minilib::timespec {
+            tv_sec: 5,
+            tv_nsec: 0,
+        };
+        let mut remaining = minilib::timespec::default();
+        let result = minilib::nanosleep(&raw const request, &raw mut remaining);
+        let remaining_ns = (remaining.tv_sec as u64)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(remaining.tv_nsec as u64);
+        minilib::exit(
+            if result as isize == -isize::from(kernel_abi::EINTR)
+                && remaining.tv_sec >= 0
+                && remaining.tv_nsec >= 0
+                && remaining.tv_nsec < 1_000_000_000
+                && remaining_ns > 0
+                && remaining_ns <= 5_000_000_000
+            {
+                0
+            } else {
+                124
+            },
+        );
+    }
+
+    let interrupt_started = monotonic_time_ns().unwrap_or(0);
+    loop {
+        let result = minilib::interrupt_sleep(child);
+        if result == 0 {
+            break;
+        }
+        if !expect_errno(result as usize, kernel_abi::EAGAIN)
+            || monotonic_time_ns()
+                .unwrap_or(u64::MAX)
+                .saturating_sub(interrupt_started)
+                > 2_000_000_000
+        {
+            return false;
+        }
+        minilib::pause();
+    }
+
+    let mut status = 0;
+    minilib::waitpid(child, &raw mut status, 0) == child && status == 0
 }
 
 #[cfg(feature = "bpf-unsigned-development")]
