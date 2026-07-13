@@ -74,6 +74,13 @@ struct ElfSegments {
     writable: Vec<LowerHalfAllocation<Writable>>,
 }
 
+pub(crate) struct ExecImage {
+    pub entry_point: usize,
+    pub stack_pointer: usize,
+    pub tls: Option<LowerHalfAllocation<Writable>>,
+    pub user_stack: LowerHalfAllocation<Writable>,
+}
+
 impl ElfSegments {
     fn new() -> Self {
         Self {
@@ -423,42 +430,35 @@ impl Process {
 
         Ok(child)
     }
-    /// Replaces the current process image with a new executable.
-    ///
-    /// # Errors
-    /// Returns an error if the executable cannot be loaded or memory allocation fails.
-    pub fn execve(
-        self: &Arc<Self>,
-        current_task: &Task,
-        path: &AbsolutePath,
-        _argv: &[String],
-        _envp: &[String],
-    ) -> Result<(usize, usize), &'static str> {
-        // 1. Open and read the executable file
-        // We do this first before destroying the current process state
+
+    pub(crate) fn prepare_execve(&self, path: &AbsolutePath) -> Result<Vec<u8>, &'static str> {
         let node = vfs()
             .write()
             .open(path)
             .map_err(|_| "Failed to open executable")?;
-
         let mut stat = Stat::default();
         node.stat(&mut stat)
             .map_err(|_| "Failed to stat executable")?;
 
-        // Read file into a temporary kernel buffer
-        // TODO: This might be too large for kernel heap.
-        // For now, we assume reasonable executable sizes.
         let mut file_content = alloc::vec![0u8; stat.size];
         read_executable_file_into(&node, &mut file_content, stat.size, "execve")?;
+        ElfFile::try_parse(&file_content).map_err(|e| {
+            log::error!("execve preflight: ELF parse error: {e}");
+            "Invalid ELF file"
+        })?;
+        Ok(file_content)
+    }
 
-        // 2. Clear existing process state
-
-        // Clear task-specific allocations (User stack, TLS)
-        // These allocations (LowerHalfAllocation) will try to unmap from the *current* address space on Drop.
-        // This is what we want.
-        *current_task.ustack().write() = None;
-        *current_task.tls().write() = None;
-
+    /// Replaces the current process image with a preflight-validated executable.
+    ///
+    /// # Errors
+    /// Returns an error if the executable cannot be loaded or memory allocation fails.
+    pub(crate) fn execve(
+        self: &Arc<Self>,
+        file_content: Vec<u8>,
+        _argv: &[String],
+        _envp: &[String],
+    ) -> Result<ExecImage, &'static str> {
         // Clear process allocations
         *self.executable_file_data.write() = None;
 
@@ -475,6 +475,10 @@ impl Process {
 
             // Create fresh AddressSpace and VMM
             *as_guard = Some(AddressSpace::new());
+            as_guard
+                .as_ref()
+                .expect("exec address space was just installed")
+                .activate();
 
             *vmm_guard = VirtualMemoryManager::new(
                 #[cfg(target_arch = "x86_64")]
@@ -510,7 +514,7 @@ impl Process {
         let (exec_allocs, mut ro_allocs, wr_allocs, tls_master) = elf_image.into_inner();
 
         // 5. Setup TLS if present
-        if let Some(ref master_tls) = tls_master {
+        let tls_allocation = if let Some(ref master_tls) = tls_master {
             let mut tls_alloc = memapi
                 .allocate(
                     Location::Anywhere,
@@ -522,19 +526,10 @@ impl Process {
 
             let slice = tls_alloc.as_mut();
             slice.copy_from_slice(master_tls.as_ref());
-
-            #[cfg(target_arch = "x86_64")]
-            FsBase::write(tls_alloc.start());
-            #[cfg(target_arch = "aarch64")]
-            {
-                unsafe {
-                    let val = tls_alloc.start().as_u64();
-                    core::arch::asm!("msr tpidr_el0, {}", in(reg) val);
-                }
-            }
-
-            *current_task.tls().write() = Some(tls_alloc);
-        }
+            Some(tls_alloc)
+        } else {
+            None
+        };
 
         // 6. Allocate new User Stack
         let ustack_allocation = memapi
@@ -551,7 +546,6 @@ impl Process {
             .ok_or("Failed to allocate user stack")?;
 
         let ustack_rsp = ustack_allocation.start() + ustack_allocation.len().into_u64();
-        *current_task.ustack().write() = Some(ustack_allocation);
 
         // Store ELF segment allocations so they aren't dropped
         {
@@ -564,7 +558,12 @@ impl Process {
             segs.writable = wr_allocs;
         }
 
-        Ok((entry_point, ustack_rsp.as_u64().into_usize()))
+        Ok(ExecImage {
+            entry_point,
+            stack_pointer: ustack_rsp.as_u64().into_usize(),
+            tls: tls_allocation,
+            user_stack: ustack_allocation,
+        })
     }
 }
 

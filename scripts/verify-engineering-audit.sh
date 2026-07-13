@@ -250,7 +250,8 @@ qemu_smoke() {
 
     local failed=0 marker
     for marker in QEMU_BOOT_OK USERCOPY_EFAULT_OK UNKNOWN_SYSCALL_ENOSYS_OK TLB_SHOOTDOWN_OK \
-        LIFECYCLE_EXIT_WAIT_OK LIFECYCLE_FAULT_WAIT_OK; do
+        LIFECYCLE_EXIT_WAIT_OK LIFECYCLE_FAULT_WAIT_OK LIFECYCLE_EXEC_REJECT_OK \
+        LIFECYCLE_EXEC_WAIT_OK; do
         if ! grep -qF "$marker" "$log"; then
             echo "missing required marker: $marker" >>"$log"
             failed=1

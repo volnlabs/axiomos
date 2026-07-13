@@ -34,6 +34,18 @@ pub extern "C" fn _start() -> ! {
         write(1, b"LIFECYCLE_FAULT_WAIT_FAIL\n");
     }
 
+    if lifecycle_exec_reject_probe() {
+        write(1, b"LIFECYCLE_EXEC_REJECT_OK\n");
+    } else {
+        write(1, b"LIFECYCLE_EXEC_REJECT_FAIL\n");
+    }
+
+    if lifecycle_exec_wait_probe() {
+        write(1, b"LIFECYCLE_EXEC_WAIT_OK\n");
+    } else {
+        write(1, b"LIFECYCLE_EXEC_WAIT_FAIL\n");
+    }
+
     write(1, b"=== Axiom eBPF Init ===\n");
     write(1, b"Phase 4 demo boot: ");
     write(1, PHASE4_EXPORT_DEMO.as_bytes());
@@ -303,6 +315,30 @@ fn lifecycle_fault_wait_probe() -> bool {
 
     let mut status = 0;
     minilib::waitpid(child, &mut status, 0) == child && status == 139 << 8
+}
+
+fn lifecycle_exec_wait_probe() -> bool {
+    static EXEC_PATH: &[u8] = b"/bin/fork_test\0";
+
+    let child = minilib::fork();
+    if child < 0 {
+        return false;
+    }
+    if child == 0 {
+        let rc = minilib::execve(EXEC_PATH.as_ptr(), core::ptr::null(), core::ptr::null());
+        minilib::exit(if rc < 0 { 126 } else { 127 });
+    }
+
+    let mut status = 0;
+    minilib::waitpid(child, &mut status, 0) == child && status == 0
+}
+
+fn lifecycle_exec_reject_probe() -> bool {
+    static MISSING_PATH: &[u8] = b"/bin/does-not-exist\0";
+    expect_errno(
+        minilib::execve(MISSING_PATH.as_ptr(), core::ptr::null(), core::ptr::null()) as usize,
+        kernel_abi::ENOENT,
+    )
 }
 
 fn trigger_unmapped_load() -> ! {

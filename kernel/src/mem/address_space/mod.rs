@@ -481,6 +481,27 @@ impl AddressSpace {
         self.level0_frame.addr() as usize
     }
 
+    pub(crate) fn activate(&self) {
+        if let Some(context) = crate::mcore::context::ExecutionContext::try_load() {
+            self.mark_cpu_resident(context.cpu_id());
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            let flags = Cr3::read().1;
+            // SAFETY: This address space owns an initialized top-level page
+            // table and retains the shared kernel mappings needed to continue.
+            unsafe { Cr3::write(self.level4_frame, flags) };
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        // SAFETY: The address space owns an initialized L0 table. Kernel
+        // mappings remain available through TTBR1 while TTBR0 changes.
+        unsafe {
+            crate::arch::aarch64::paging::set_ttbr0(self.level0_frame.addr() as usize);
+        }
+    }
+
     pub fn with_active<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&Self) -> R,
