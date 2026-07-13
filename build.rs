@@ -9,6 +9,7 @@ use ovmf_prebuilt::{Arch, FileType, Prebuilt, Source};
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=limine.conf");
+    println!("cargo:rerun-if-env-changed=AXIOM_SIGNED_BPF_STARTUP_PATH");
 
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
 
@@ -94,6 +95,14 @@ fn build_os_disk_dir(target_arch: &str) -> PathBuf {
     create_dir(&disk).expect("should be able to create disk directory");
 
     build_dir(&disk, &file_structure::STRUCTURE, target_arch);
+
+    if let Some(startup) = std::env::var_os("AXIOM_SIGNED_BPF_STARTUP_PATH") {
+        copy(
+            PathBuf::from(startup),
+            disk.join("var/lib/rkbpf/programs/startup.rbpf"),
+        )
+        .expect("AXIOM_SIGNED_BPF_STARTUP_PATH must name a readable signed program");
+    }
 
     fs::write(disk.join("var/hello.txt"), "Hello, axiom-ebpf!\n")
         .expect("should be able to write hello.txt");

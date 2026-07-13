@@ -900,7 +900,11 @@ mod tests {
             .insn(BpfInsn::mov64_imm(2, 1)) // r2 = value 1
             .insn(BpfInsn::call(1003)) // r0 = bpf_gpio_write(r1, r2)
             .exit()
-            .build()
+            .build_raw()
+            .verify_with_config(crate::verifier::VerifyConfig {
+                allow_actuation: true,
+                ..crate::verifier::VerifyConfig::default()
+            })
             .expect("valid program");
 
         let interpreter = Interpreter::<ActiveProfile>::new();

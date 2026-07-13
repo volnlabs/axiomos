@@ -80,7 +80,7 @@ unsafe extern "C" fn main() -> ! {
 
         let init_path = AbsolutePath::try_new("/bin/init").unwrap();
         let _ = vfs().read().open(init_path).expect("should have /bin/init");
-        let proc = Process::create_from_executable(Process::root(), init_path).unwrap();
+        let proc = Process::create_userspace_init(Process::root(), init_path).unwrap();
         info!("started process pid={}", proc.pid());
 
         // Boot-success marker for CI smoke tests (H-06 / T-01). Placed
@@ -173,7 +173,7 @@ unsafe extern "C" fn main() -> ! {
             dbg_mark(0x68); // 'h'
             mcore::turn_idle();
         }
-        if Process::create_from_executable(Process::root(), init_path).is_err() {
+        if Process::create_userspace_init(Process::root(), init_path).is_err() {
             dbg_mark(0x69); // 'i'
             mcore::turn_idle();
         }

@@ -43,3 +43,6 @@ colored = "2.0"
 
 # Hash for program integrity
 sha3 = "0.10"
+
+[dev-dependencies]
+kernel_bpf = { path = "../../kernel/crates/kernel_bpf", default-features = false, features = ["cloud-profile"] }

@@ -185,16 +185,19 @@ impl StaticPool {
 mod tests {
     use super::*;
 
-    fn setup() {
-        // Reset pool before each test
-        // SAFETY: This is a test-only function used in a single-threaded test environment.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn setup() -> spin::MutexGuard<'static, ()> {
+        let guard = TEST_LOCK.lock();
+        // SAFETY: TEST_LOCK serializes every test that can reset or allocate
+        // from the shared test pool, and the guard lives for the full test.
         unsafe { StaticPool::reset() };
+        guard
     }
 
-    // Note: These tests must be run with --test-threads=1 due to shared global state
     #[test]
     fn allocate_basic() {
-        setup();
+        let _guard = setup();
 
         let mem = StaticPool::allocate(100).expect("allocate");
         assert_eq!(mem.len(), 100);
@@ -209,7 +212,7 @@ mod tests {
 
     #[test]
     fn allocate_multiple() {
-        setup();
+        let _guard = setup();
 
         let mem1 = StaticPool::allocate(100).expect("allocate 1");
         let mem2 = StaticPool::allocate(200).expect("allocate 2");
@@ -226,7 +229,7 @@ mod tests {
 
     #[test]
     fn allocate_alignment() {
-        setup();
+        let _guard = setup();
 
         // Allocate odd-sized chunks
         let _ = StaticPool::allocate(3).expect("allocate 3");
@@ -238,7 +241,7 @@ mod tests {
 
     #[test]
     fn pool_exhaustion() {
-        setup();
+        let _guard = setup();
 
         // Allocate most of the remaining pool capacity
         let remaining = StaticPool::remaining();
@@ -260,7 +263,7 @@ mod tests {
 
     #[test]
     fn allocation_size_overflow_is_rejected_without_moving_watermark() {
-        setup();
+        let _guard = setup();
         let before = StaticPool::used();
 
         assert!(StaticPool::allocate(usize::MAX).is_none());
@@ -269,7 +272,7 @@ mod tests {
 
     #[test]
     fn remaining_capacity() {
-        setup();
+        let _guard = setup();
 
         let initial = StaticPool::remaining();
         assert_eq!(initial, StaticPool::total_size());

@@ -42,7 +42,9 @@ use crate::mem::address_space::AddressSpace;
 use crate::mem::memapi::{Executable, LowerHalfAllocation, LowerHalfMemoryApi, Readonly, Writable};
 use crate::{U64Ext, UsizeExt};
 
+mod credentials;
 pub mod fd;
+pub use credentials::{BpfCapabilities, Credentials};
 mod id;
 pub use id::*;
 pub mod mem;
@@ -161,6 +163,8 @@ pub struct Process {
 
     ppid: RwLock<ProcessId>,
 
+    credentials: RwLock<Credentials>,
+
     exit_code: RwLock<Option<i32>>,
 
     executable_path: Option<AbsoluteOwnedPath>,
@@ -187,6 +191,7 @@ impl Process {
                 pid,
                 name: "root".to_string(),
                 ppid: RwLock::new(pid),
+                credentials: RwLock::new(Credentials::kernel()),
                 exit_code: RwLock::new(None),
                 executable_path: None,
                 executable_file_data: RwLock::new(None),
@@ -213,15 +218,19 @@ impl Process {
         parent: &Arc<Process>,
         name: String,
         executable_path: Option<impl AsRef<AbsolutePath>>,
+        allowed_bpf_capabilities: BpfCapabilities,
     ) -> Arc<Self> {
         let pid = ProcessId::new();
         let parent_pid = parent.pid;
+        let mut credentials = Credentials::inherit(parent.credentials());
+        credentials.restrict_bpf_capabilities(allowed_bpf_capabilities);
         let address_space = AddressSpace::new();
 
         let process = Self {
             pid,
             name,
             ppid: RwLock::new(parent_pid),
+            credentials: RwLock::new(credentials),
             exit_code: RwLock::new(None),
             executable_path: executable_path.map(|x| x.as_ref().to_owned()),
             executable_file_data: RwLock::new(None),
@@ -254,10 +263,31 @@ impl Process {
         parent: &Arc<Process>,
         path: impl AsRef<AbsolutePath>,
     ) -> Result<Arc<Self>, CreateProcessError> {
+        Self::create_from_executable_with_bpf_capabilities(parent, path, BpfCapabilities::NONE)
+    }
+
+    /// Create the first userspace process with the fixed, non-actuating init policy.
+    pub fn create_userspace_init(
+        parent: &Arc<Process>,
+        path: impl AsRef<AbsolutePath>,
+    ) -> Result<Arc<Self>, CreateProcessError> {
+        Self::create_from_executable_with_bpf_capabilities(
+            parent,
+            path,
+            BpfCapabilities::USERSPACE_INIT,
+        )
+    }
+
+    /// Create a child whose BPF authority is restricted before it becomes runnable.
+    pub(crate) fn create_from_executable_with_bpf_capabilities(
+        parent: &Arc<Process>,
+        path: impl AsRef<AbsolutePath>,
+        allowed: BpfCapabilities,
+    ) -> Result<Arc<Self>, CreateProcessError> {
         // TODO: validate that the executable exists and is a valid executable file
 
         let path = path.as_ref();
-        let process = Self::create_new(parent, path.to_string(), Some(path));
+        let process = Self::create_new(parent, path.to_string(), Some(path), allowed);
         {
             // register STDIN, STDOUT and STDERR
             let mut fds = process.file_descriptors().write();
@@ -295,6 +325,27 @@ impl Process {
 
     pub fn ppid(&self) -> ProcessId {
         *self.ppid.read()
+    }
+
+    /// Return an immutable snapshot of the process credentials.
+    #[must_use]
+    pub fn credentials(&self) -> Credentials {
+        *self.credentials.read()
+    }
+
+    #[must_use]
+    pub fn bpf_capabilities(&self) -> BpfCapabilities {
+        self.credentials().bpf_capabilities()
+    }
+
+    /// Permanently restrict this process to a subset of its current BPF capabilities.
+    pub fn restrict_bpf_capabilities(&self, allowed: BpfCapabilities) -> BpfCapabilities {
+        self.credentials.write().restrict_bpf_capabilities(allowed)
+    }
+
+    /// Permanently remove BPF capabilities from this process.
+    pub fn drop_bpf_capabilities(&self, removed: BpfCapabilities) -> BpfCapabilities {
+        self.credentials.write().drop_bpf_capabilities(removed)
     }
 
     pub fn name(&self) -> &str {
@@ -366,6 +417,7 @@ impl Process {
             self, // Parent is self. (Self is the parent of the child)
             name,
             executable_path.as_ref(),
+            self.bpf_capabilities(),
         );
 
         // 2. Clone File Descriptors

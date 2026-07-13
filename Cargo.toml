@@ -24,6 +24,7 @@ sched_switch_bridge_demo_x86 = { package = "sched_switch_bridge_demo", path = "u
 file_io_demo_x86 = { package = "file_io_demo", path = "userspace/file_io_demo", artifact = "bin", target = "x86_64-unknown-none", optional = true }
 fork_test_x86 = { package = "fork_test", path = "userspace/fork_test", artifact = "bin", target = "x86_64-unknown-none", optional = true }
 bpf_loader_x86 = { package = "bpf_loader", path = "userspace/bpf_loader", artifact = "bin", target = "x86_64-unknown-none", optional = true }
+signed_bpf_loader_x86 = { package = "signed_bpf_loader", path = "userspace/signed_bpf_loader", artifact = "bin", target = "x86_64-unknown-none", optional = true }
 benchmark_x86 = { package = "benchmark", path = "userspace/benchmark", artifact = "bin", target = "x86_64-unknown-none", optional = true }
 rk_uart_forwarder_x86 = { package = "rk_uart_forwarder", path = "userspace/rk_uart_forwarder", artifact = "bin", target = "x86_64-unknown-none", optional = true }
 verifier_bench_x86 = { package = "verifier_bench", path = "userspace/verifier_bench", artifact = "bin", target = "x86_64-unknown-none", optional = true }
@@ -43,6 +44,7 @@ sched_switch_bridge_demo_aarch64 = { package = "sched_switch_bridge_demo", path 
 file_io_demo_aarch64 = { package = "file_io_demo", path = "userspace/file_io_demo", artifact = "bin", target = "aarch64-unknown-none", optional = true }
 fork_test_aarch64 = { package = "fork_test", path = "userspace/fork_test", artifact = "bin", target = "aarch64-unknown-none", optional = true }
 bpf_loader_aarch64 = { package = "bpf_loader", path = "userspace/bpf_loader", artifact = "bin", target = "aarch64-unknown-none", optional = true }
+signed_bpf_loader_aarch64 = { package = "signed_bpf_loader", path = "userspace/signed_bpf_loader", artifact = "bin", target = "aarch64-unknown-none", optional = true }
 benchmark_aarch64 = { package = "benchmark", path = "userspace/benchmark", artifact = "bin", target = "aarch64-unknown-none", optional = true }
 rk_uart_forwarder_aarch64 = { package = "rk_uart_forwarder", path = "userspace/rk_uart_forwarder", artifact = "bin", target = "aarch64-unknown-none", optional = true }
 verifier_bench_aarch64 = { package = "verifier_bench", path = "userspace/verifier_bench", artifact = "bin", target = "aarch64-unknown-none", optional = true }
@@ -50,6 +52,14 @@ kernel_aarch64 = { package = "kernel", path = "kernel", artifact = "bin", target
 
 [features]
 default = ["x86_64_deps"]
+bpf-unsigned-development = [
+  "kernel_x86/bpf-unsigned-development",
+  "init_x86/bpf-unsigned-development",
+]
+bpf-unsigned-development-aarch64 = [
+  "kernel_aarch64/bpf-unsigned-development",
+  "init_aarch64/bpf-unsigned-development",
+]
 x86_64_deps = [
   "dep:init_x86",
   "dep:gpio_demo_x86",
@@ -64,6 +74,7 @@ x86_64_deps = [
   "dep:file_io_demo_x86",
   "dep:fork_test_x86",
   "dep:bpf_loader_x86",
+  "dep:signed_bpf_loader_x86",
   "dep:benchmark_x86",
   "dep:rk_uart_forwarder_x86",
   "dep:verifier_bench_x86",
@@ -83,6 +94,7 @@ aarch64_deps = [
   "dep:file_io_demo_aarch64",
   "dep:fork_test_aarch64",
   "dep:bpf_loader_aarch64",
+  "dep:signed_bpf_loader_aarch64",
   "dep:benchmark_aarch64",
   "dep:rk_uart_forwarder_aarch64",
   "dep:verifier_bench_aarch64",
@@ -112,6 +124,7 @@ members = [
   "kernel/crates/kernel_virtual_memory",
   "kernel/crates/kernel_usermem",
   "kernel/crates/shrike_link", "userspace/bpf_loader",
+  "userspace/signed_bpf_loader",
   "userspace/file_structure",
   "userspace/init",
   "userspace/minilib",

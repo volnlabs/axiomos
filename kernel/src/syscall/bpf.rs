@@ -3,18 +3,104 @@ use core::mem::size_of;
 
 use kernel_abi::{
     BpfAttr, BpfObjectInfo, BPF_MAP_CREATE, BPF_MAP_DELETE_ELEM, BPF_MAP_DESTROY,
-    BPF_MAP_LOOKUP_ELEM, BPF_MAP_UPDATE_ELEM, BPF_OBJ_GET, BPF_OBJ_GET_INFO_BY_FD, BPF_OBJ_PIN,
-    BPF_OBJ_UNPIN, BPF_PROG_ATTACH, BPF_PROG_DETACH, BPF_PROG_LOAD, BPF_PROG_LOAD_ELF,
-    BPF_PROG_UNLOAD, BPF_RINGBUF_POLL, EBUSY, EINVAL, ENOENT, ENOMEM, EPERM,
+    BPF_MAP_LOOKUP_ELEM, BPF_MAP_UPDATE_ELEM, BPF_OBJ_ACCESS_MASK, BPF_OBJ_ACCESS_READ,
+    BPF_OBJ_ACCESS_WRITE, BPF_OBJ_GET, BPF_OBJ_GET_INFO_BY_FD, BPF_OBJ_PIN, BPF_OBJ_UNPIN,
+    BPF_PROG_ATTACH, BPF_PROG_DETACH, BPF_PROG_LOAD, BPF_PROG_LOAD_ELF, BPF_PROG_UNLOAD,
+    BPF_RINGBUF_POLL, EBUSY, EINVAL, ENOENT, ENOMEM, EPERM,
 };
 use kernel_bpf::bytecode::insn::BpfInsn;
 use kernel_bpf::execution::BpfError;
+use kernel_bpf::verifier::LoadCaller;
 use zerocopy::IntoBytes;
 
 use super::validation::{
     copy_from_userspace, copy_to_userspace, read_userspace_slice, read_userspace_string,
 };
+use crate::bpf::{BpfLoadAuthorization, MapAccess};
+use crate::mcore::mtask::process::BpfCapabilities;
 use crate::BPF_MANAGER;
+
+fn required_bpf_capabilities(cmd: u32) -> Option<BpfCapabilities> {
+    match cmd {
+        BPF_MAP_CREATE => Some(BpfCapabilities::MAP_CREATE),
+        BPF_MAP_LOOKUP_ELEM | BPF_OBJ_GET_INFO_BY_FD | BPF_RINGBUF_POLL => {
+            Some(BpfCapabilities::MAP_READ)
+        }
+        BPF_MAP_UPDATE_ELEM | BPF_MAP_DELETE_ELEM | BPF_MAP_DESTROY => {
+            Some(BpfCapabilities::MAP_WRITE)
+        }
+        BPF_OBJ_PIN | BPF_OBJ_GET | BPF_OBJ_UNPIN => Some(BpfCapabilities::OBJECT_PIN),
+        BPF_PROG_LOAD | BPF_PROG_LOAD_ELF | BPF_PROG_UNLOAD => Some(BpfCapabilities::PROGRAM_LOAD),
+        kernel_abi::BPF_BENCH_EXEC => Some(BpfCapabilities::PRIVILEGED_VERIFY),
+        _ => None,
+    }
+}
+
+fn has_bpf_command_capability(cmd: u32, capabilities: BpfCapabilities) -> bool {
+    if matches!(cmd, BPF_PROG_ATTACH | BPF_PROG_DETACH) {
+        return capabilities.intersects(BpfCapabilities::PROGRAM_ATTACH);
+    }
+
+    required_bpf_capabilities(cmd).is_none_or(|required| capabilities.contains(required))
+}
+
+fn required_attach_capability(attach_type: u32) -> Option<BpfCapabilities> {
+    match attach_type {
+        crate::bpf::ATTACH_TYPE_TIMER
+        | crate::bpf::ATTACH_TYPE_SYS_ENTER
+        | crate::bpf::ATTACH_TYPE_SYS_EXIT => Some(BpfCapabilities::ATTACH_TRACE),
+        crate::bpf::ATTACH_TYPE_SCHED_SWITCH => Some(BpfCapabilities::ATTACH_SCHEDULER),
+        crate::bpf::ATTACH_TYPE_GPIO
+        | crate::bpf::ATTACH_TYPE_PWM
+        | crate::bpf::ATTACH_TYPE_IIO => Some(BpfCapabilities::ATTACH_DEVICE),
+        _ => None,
+    }
+}
+
+fn load_authorization(capabilities: BpfCapabilities) -> BpfLoadAuthorization {
+    let caller = if capabilities.contains(BpfCapabilities::PRIVILEGED_VERIFY) {
+        LoadCaller::Privileged
+    } else {
+        LoadCaller::Unprivileged
+    };
+    let map_access = match (
+        capabilities.contains(BpfCapabilities::MAP_READ),
+        capabilities.contains(BpfCapabilities::MAP_WRITE),
+    ) {
+        (true, true) => MapAccess::READ_WRITE,
+        (true, false) => MapAccess::READ,
+        (false, true) => MapAccess::WRITE,
+        (false, false) => MapAccess::NONE,
+    };
+    BpfLoadAuthorization::new(
+        caller,
+        capabilities.contains(BpfCapabilities::ACTUATE),
+        map_access,
+    )
+}
+
+fn requested_map_access(flags: u32, capabilities: BpfCapabilities) -> Result<MapAccess, isize> {
+    if flags & !BPF_OBJ_ACCESS_MASK != 0 {
+        return Err(-isize::from(EINVAL));
+    }
+    let flags = if flags == 0 {
+        BPF_OBJ_ACCESS_READ
+    } else {
+        flags
+    };
+    if flags & BPF_OBJ_ACCESS_READ != 0 && !capabilities.contains(BpfCapabilities::MAP_READ) {
+        return Err(-isize::from(EPERM));
+    }
+    if flags & BPF_OBJ_ACCESS_WRITE != 0 && !capabilities.contains(BpfCapabilities::MAP_WRITE) {
+        return Err(-isize::from(EPERM));
+    }
+    Ok(match flags {
+        BPF_OBJ_ACCESS_READ => MapAccess::READ,
+        BPF_OBJ_ACCESS_WRITE => MapAccess::WRITE,
+        BPF_OBJ_ACCESS_MASK => MapAccess::READ_WRITE,
+        _ => return Err(-isize::from(EINVAL)),
+    })
+}
 
 fn bpf_error_errno(error: BpfError) -> isize {
     match error {
@@ -29,6 +115,15 @@ fn bpf_error_errno(error: BpfError) -> isize {
 }
 
 pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
+    let Ok(cmd_u32) = u32::try_from(cmd) else {
+        return -isize::from(EINVAL);
+    };
+    let process = crate::mcore::context::ExecutionContext::load().current_process();
+    let capabilities = process.bpf_capabilities();
+    if !has_bpf_command_capability(cmd_u32, capabilities) {
+        return -isize::from(EPERM);
+    }
+
     // Security Hardening: Validate the attribute size matches expected struct size
     // This prevents reading past the end of the userspace buffer.
     if size < size_of::<BpfAttr>() {
@@ -37,14 +132,10 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
             size,
             size_of::<BpfAttr>()
         );
-        return -1; // EINVAL
+        return -isize::from(EINVAL);
     }
 
-    let cmd_u32 = cmd as u32;
-    let owner = crate::mcore::context::ExecutionContext::load()
-        .current_process()
-        .pid()
-        .as_u64();
+    let owner = process.pid().as_u64();
 
     // These commands touch map backing storage that a running BPF program may
     // address through a raw helper-returned pointer. Serialize them with BPF
@@ -158,10 +249,11 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
                 let mgr = manager.lock();
 
                 // Get map definition to determine sizes
-                let (key_size, value_size) = match mgr.get_map_def_for(owner, map_id) {
-                    Ok(def) => (def.key_size as usize, def.value_size as usize),
-                    Err(error) => return bpf_error_errno(error),
-                };
+                let (key_size, value_size) =
+                    match mgr.get_map_def_for_access(owner, map_id, MapAccess::WRITE) {
+                        Ok(def) => (def.key_size as usize, def.value_size as usize),
+                        Err(error) => return bpf_error_errno(error),
+                    };
 
                 let key = match read_userspace_slice(key_ptr as usize, key_size) {
                     Ok(k) => k,
@@ -202,7 +294,7 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
                 let mgr = manager.lock();
 
                 // Get map definition to determine key size
-                let key_size = match mgr.get_map_def_for(owner, map_id) {
+                let key_size = match mgr.get_map_def_for_access(owner, map_id, MapAccess::WRITE) {
                     Ok(def) => def.key_size as usize,
                     Err(error) => return bpf_error_errno(error),
                 };
@@ -228,6 +320,10 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
             };
 
             let map_id = attr.map_fd;
+            let offered = match requested_map_access(attr.file_flags, capabilities) {
+                Ok(access) => access,
+                Err(errno) => return errno,
+            };
             if attr.path_len == 0 || attr.path_len as usize > crate::bpf::BPF_PIN_PATH_MAX {
                 return -22;
             }
@@ -237,7 +333,10 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
             };
 
             if let Some(manager) = BPF_MANAGER.get() {
-                match manager.lock().pin_map_for(owner, path, map_id) {
+                match manager
+                    .lock()
+                    .pin_map_with_access_for(owner, path, map_id, offered)
+                {
                     Ok(()) => 0,
                     Err(e) => {
                         log::error!("sys_bpf: OBJ_PIN failed: {}", e);
@@ -254,6 +353,10 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
                 Ok(a) => a,
                 Err(_) => return -1,
             };
+            let requested = match requested_map_access(attr.file_flags, capabilities) {
+                Ok(access) => access,
+                Err(errno) => return errno,
+            };
 
             if attr.path_len == 0 || attr.path_len as usize > crate::bpf::BPF_PIN_PATH_MAX {
                 return -22;
@@ -264,7 +367,7 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
             };
 
             if let Some(manager) = BPF_MANAGER.get() {
-                match manager.lock().get_pinned_map_for(owner, &path) {
+                match manager.lock().get_pinned_map_for(owner, &path, requested) {
                     Ok(map_id) => map_id as isize,
                     Err(error) => bpf_error_errno(error),
                 }
@@ -312,6 +415,12 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
 
             let attach_type = attr.attach_btf_id;
             let prog_id = attr.attach_prog_fd;
+            let Some(required) = required_attach_capability(attach_type) else {
+                return -isize::from(EINVAL);
+            };
+            if !capabilities.contains(required) {
+                return -isize::from(EPERM);
+            }
 
             #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
             if attach_type == crate::bpf::ATTACH_TYPE_GPIO {
@@ -470,6 +579,12 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
 
             let attach_type = attr.attach_btf_id;
             let prog_id = attr.attach_prog_fd;
+            let Some(required) = required_attach_capability(attach_type) else {
+                return -isize::from(EINVAL);
+            };
+            if !capabilities.contains(required) {
+                return -isize::from(EPERM);
+            }
 
             if let Some(manager) = BPF_MANAGER.get() {
                 match manager.lock().detach_for(owner, attach_type, prog_id) {
@@ -542,7 +657,11 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
             let Some(manager) = BPF_MANAGER.get() else {
                 return -2;
             };
-            match manager.lock().unpin_map_for(owner, &path) {
+            match manager.lock().unpin_map_for(
+                owner,
+                &path,
+                capabilities.contains(BpfCapabilities::OBJECT_ADMIN),
+            ) {
                 Ok(()) => 0,
                 Err(error) => bpf_error_errno(error),
             }
@@ -587,7 +706,11 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
             }
 
             if let Some(manager) = BPF_MANAGER.get() {
-                match manager.lock().load_raw_program_for(owner, insns) {
+                match manager.lock().load_raw_program_authorized(
+                    owner,
+                    insns,
+                    load_authorization(capabilities),
+                ) {
                     Ok(id) => {
                         log::info!("sys_bpf: program loaded with id {}", id);
                         id as isize
@@ -634,7 +757,11 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
             };
 
             if let Some(manager) = BPF_MANAGER.get() {
-                match manager.lock().load_program_for(owner, &elf_bytes) {
+                match manager.lock().load_program_authorized(
+                    owner,
+                    &elf_bytes,
+                    load_authorization(capabilities),
+                ) {
                     Ok(id) => {
                         log::info!("sys_bpf: ELF program loaded with id {}", id);
                         id as isize
@@ -729,5 +856,92 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
             log::warn!("sys_bpf: Unknown command {}", cmd);
             -1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_commands_require_the_narrow_operation_capability() {
+        assert_eq!(
+            required_bpf_capabilities(BPF_MAP_LOOKUP_ELEM),
+            Some(BpfCapabilities::MAP_READ)
+        );
+        assert_eq!(
+            required_bpf_capabilities(BPF_MAP_UPDATE_ELEM),
+            Some(BpfCapabilities::MAP_WRITE)
+        );
+        assert_eq!(
+            required_bpf_capabilities(BPF_MAP_CREATE),
+            Some(BpfCapabilities::MAP_CREATE)
+        );
+    }
+
+    #[test]
+    fn attach_types_select_trace_scheduler_or_device_authority() {
+        assert_eq!(
+            required_attach_capability(crate::bpf::ATTACH_TYPE_TIMER),
+            Some(BpfCapabilities::ATTACH_TRACE)
+        );
+        assert_eq!(
+            required_attach_capability(crate::bpf::ATTACH_TYPE_SCHED_SWITCH),
+            Some(BpfCapabilities::ATTACH_SCHEDULER)
+        );
+        assert_eq!(
+            required_attach_capability(crate::bpf::ATTACH_TYPE_GPIO),
+            Some(BpfCapabilities::ATTACH_DEVICE)
+        );
+        assert_eq!(required_attach_capability(u32::MAX), None);
+    }
+
+    #[test]
+    fn attach_precheck_accepts_any_attach_tier_but_not_unrelated_authority() {
+        assert!(has_bpf_command_capability(
+            BPF_PROG_ATTACH,
+            BpfCapabilities::ATTACH_TRACE
+        ));
+        assert!(!has_bpf_command_capability(
+            BPF_PROG_ATTACH,
+            BpfCapabilities::MAP_READ
+        ));
+    }
+
+    #[test]
+    fn unknown_commands_reach_the_existing_invalid_command_path() {
+        assert!(has_bpf_command_capability(u32::MAX, BpfCapabilities::NONE));
+    }
+
+    #[test]
+    fn verifier_authority_is_derived_from_credentials() {
+        assert_eq!(
+            load_authorization(BpfCapabilities::PROGRAM_LOAD),
+            BpfLoadAuthorization::new(LoadCaller::Unprivileged, false, MapAccess::NONE)
+        );
+        assert_eq!(
+            load_authorization(
+                BpfCapabilities::PROGRAM_LOAD
+                    | BpfCapabilities::PRIVILEGED_VERIFY
+                    | BpfCapabilities::ACTUATE
+            ),
+            BpfLoadAuthorization::new(LoadCaller::Privileged, true, MapAccess::NONE)
+        );
+    }
+
+    #[test]
+    fn pin_rights_require_matching_map_capabilities() {
+        assert_eq!(
+            requested_map_access(0, BpfCapabilities::MAP_READ),
+            Ok(MapAccess::READ)
+        );
+        assert_eq!(
+            requested_map_access(BPF_OBJ_ACCESS_WRITE, BpfCapabilities::MAP_READ),
+            Err(-isize::from(EPERM))
+        );
+        assert_eq!(
+            requested_map_access(u32::MAX, BpfCapabilities::ALL),
+            Err(-isize::from(EINVAL))
+        );
     }
 }

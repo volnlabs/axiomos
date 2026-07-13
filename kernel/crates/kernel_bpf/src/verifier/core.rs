@@ -48,6 +48,8 @@ pub enum MapPerm {
     /// The caller cannot reference this map at all.
     Unavailable,
     ReadOnly,
+    /// Mutating helpers may address the map, but lookup cannot return a value pointer.
+    WriteOnly,
     ReadWrite,
 }
 
@@ -85,6 +87,9 @@ pub struct VerifyConfig<'a> {
     /// `verify()` / `VerifyConfig::default()` and existing callers see no new
     /// rule.
     pub caller: LoadCaller,
+    /// Explicit authority to call helpers that can change physical device
+    /// state. Signature trust alone never grants this capability.
+    pub allow_actuation: bool,
 }
 
 fn map_handle_slot(id: u64, config: &VerifyConfig) -> Option<usize> {
@@ -116,7 +121,10 @@ fn map_lookup_value_size(map_id_reg: &RegState, config: &VerifyConfig) -> Result
         // Known constant map id: exact size, or reject if it names no map.
         Some(id) => {
             let index = map_handle_slot(id, config).ok_or(id)?;
-            if matches!(config.map_perms.get(index), Some(MapPerm::Unavailable)) {
+            if matches!(
+                config.map_perms.get(index),
+                Some(MapPerm::Unavailable | MapPerm::WriteOnly)
+            ) {
                 return Err(id);
             }
             table.get(index).copied().ok_or(id)
@@ -124,7 +132,10 @@ fn map_lookup_value_size(map_id_reg: &RegState, config: &VerifyConfig) -> Result
         // Dynamic map id: bound to the smallest reachable map value (sound).
         None => {
             if !config.map_generations.is_empty()
-                || config.map_perms.contains(&MapPerm::Unavailable)
+                || config
+                    .map_perms
+                    .iter()
+                    .any(|perm| matches!(perm, MapPerm::Unavailable | MapPerm::WriteOnly))
             {
                 return Err(u64::MAX);
             }
@@ -155,6 +166,7 @@ fn map_lookup_writability(map_id_reg: &RegState, config: &VerifyConfig) -> MapWr
     match perm {
         MapPerm::Unavailable => MapWritability::Unprovable,
         MapPerm::ReadOnly => MapWritability::ReadOnly(id),
+        MapPerm::WriteOnly => MapWritability::ReadWrite(Some(id)),
         MapPerm::ReadWrite => MapWritability::ReadWrite(Some(id)),
     }
 }
@@ -898,6 +910,12 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                         insn_idx: idx,
                         helper_id,
                         required: sig.min_tier,
+                    });
+                }
+                if sig.requires_actuation && !self.config.allow_actuation {
+                    return Err(VerifyError::ActuationCapabilityRequired {
+                        insn_idx: idx,
+                        helper_id,
                     });
                 }
                 if let Some(map_arg) = mutating_helper_map_arg(sig.id) {
@@ -1898,6 +1916,17 @@ mod tests {
     }
 
     #[test]
+    fn map_lookup_rejects_write_only_id() {
+        let cfg = VerifyConfig {
+            map_value_sizes: &[8],
+            map_perms: &[MapPerm::WriteOnly],
+            ..VerifyConfig::default()
+        };
+        let r1 = RegState::scalar(Some(ScalarValue::constant(0)));
+        assert_eq!(map_lookup_value_size(&r1, &cfg), Err(0));
+    }
+
+    #[test]
     fn map_size_rejects_stale_generation_handle() {
         const SLOT_BITS: u8 = 10;
         let current_handle = (3u32 << SLOT_BITS) | 1;
@@ -2172,6 +2201,26 @@ mod tests {
             let insns = mutating_helper_prog(helper, BpfInsn::mov64_imm(1, 0));
             Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, cfg)
                 .unwrap_or_else(|e| panic!("{helper:?} to RW map must verify: {e}"));
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn mutating_helpers_accept_write_only_map_ids() {
+        let cfg = VerifyConfig {
+            map_perms: &[MapPerm::WriteOnly],
+            ..VerifyConfig::default()
+        };
+
+        for helper in [
+            HelperId::MapUpdateElem,
+            HelperId::MapDeleteElem,
+            HelperId::RingbufOutput,
+            HelperId::TimeseriesPush,
+        ] {
+            let insns = mutating_helper_prog(helper, BpfInsn::mov64_imm(1, 0));
+            Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, cfg)
+                .unwrap_or_else(|e| panic!("{helper:?} to write-only map must verify: {e}"));
         }
     }
 
@@ -2617,6 +2666,44 @@ mod tests {
         assert!(
             verify_as(BpfProgType::SocketFilter, &insns, LoadCaller::Unprivileged).is_ok(),
             "ordinary helper must be callable unprivileged"
+        );
+    }
+
+    #[test]
+    fn actuation_helper_requires_explicit_capability() {
+        let insns = alloc::vec![
+            BpfInsn::mov64_imm(1, 0),
+            BpfInsn::mov64_imm(2, 0),
+            BpfInsn::mov64_imm(3, 0),
+            BpfInsn::call(HelperId::PwmWrite as i32),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ];
+        let denied = Verifier::<ActiveProfile>::verify_with_config(
+            BpfProgType::SocketFilter,
+            &insns,
+            VerifyConfig {
+                caller: LoadCaller::Trusted,
+                ..VerifyConfig::default()
+            },
+        );
+        assert!(matches!(
+            denied,
+            Err(VerifyError::ActuationCapabilityRequired { .. })
+        ));
+
+        let allowed = Verifier::<ActiveProfile>::verify_with_config(
+            BpfProgType::SocketFilter,
+            &insns,
+            VerifyConfig {
+                caller: LoadCaller::Unprivileged,
+                allow_actuation: true,
+                ..VerifyConfig::default()
+            },
+        );
+        assert!(
+            allowed.is_ok(),
+            "explicit actuation authority should verify"
         );
     }
 

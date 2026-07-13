@@ -79,7 +79,9 @@ mod verifier;
 pub use error::{SigningError, SigningResult};
 pub use hash::{ProgramHash, SHA3_256_LEN};
 pub use signature::{SIGNATURE_LEN, Signature, SignedProgram, SignedProgramHeader};
-pub use verifier::{PUBLIC_KEY_LEN, SignatureVerifier, TrustedKey};
+pub use verifier::{
+    AuthenticatedProgram, AuthenticationProvenance, PUBLIC_KEY_LEN, SignatureVerifier, TrustedKey,
+};
 
 /// Magic bytes identifying a signed BPF program.
 pub const SIGNED_PROGRAM_MAGIC: &[u8; 4] = b"RBPF";

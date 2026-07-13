@@ -3,9 +3,22 @@
 
 use minilib::write;
 
+#[cfg(feature = "bpf-unsigned-development")]
 const PHASE4_EXPORT_DEMO: &str = "/bin/sched_switch_export_demo";
+#[cfg(feature = "bpf-unsigned-development")]
 const PHASE4_BRIDGE_DEMO: &str = "/bin/sched_switch_bridge_demo";
+#[cfg(not(feature = "bpf-unsigned-development"))]
+const SIGNED_BPF_LOADER: &str = "/bin/signed_bpf_loader";
 const UNMAPPED_USER_ADDRESS: usize = 0x0000_7000_0000_0000;
+
+#[cfg(feature = "bpf-unsigned-development")]
+#[repr(C)]
+struct BpfInsn {
+    code: u8,
+    dst_src: u8,
+    off: i16,
+    imm: i32,
+}
 
 // SAFETY: Entry point for the init process, called by the kernel/loader.
 #[unsafe(no_mangle)]
@@ -46,6 +59,20 @@ pub extern "C" fn _start() -> ! {
         write(1, b"LIFECYCLE_EXEC_WAIT_FAIL\n");
     }
 
+    if bpf_foreign_owner_probe() {
+        write(1, b"BPF_FOREIGN_OWNER_DENY_OK\n");
+    } else {
+        write(1, b"BPF_FOREIGN_OWNER_DENY_FAIL\n");
+    }
+
+    #[cfg(feature = "bpf-unsigned-development")]
+    if bpf_pinned_write_only_probe() {
+        write(1, b"BPF_PINNED_WRITE_ONLY_OK\n");
+    } else {
+        write(1, b"BPF_PINNED_WRITE_ONLY_FAIL\n");
+    }
+
+    #[cfg(feature = "bpf-unsigned-development")]
     if bpf_owner_exit_probe() {
         write(1, b"BPF_HANDLE_REUSE_OK\n");
         write(1, b"BPF_OWNER_EXIT_OK\n");
@@ -54,16 +81,46 @@ pub extern "C" fn _start() -> ! {
         write(1, b"BPF_OWNER_EXIT_FAIL\n");
     }
 
-    write(1, b"=== Axiom eBPF Init ===\n");
-    write(1, b"Phase 4 demo boot: ");
-    write(1, PHASE4_EXPORT_DEMO.as_bytes());
-    write(1, b" -> ");
-    write(1, PHASE4_BRIDGE_DEMO.as_bytes());
-    write(1, b"\n");
+    #[cfg(feature = "bpf-unsigned-development")]
+    if bpf_capability_denial_probe() {
+        write(1, b"BPF_CAPABILITY_PROBE_STARTED\n");
+    } else {
+        write(1, b"BPF_CAPABILITY_PROBE_START_FAIL\n");
+    }
 
-    spawn_demo(PHASE4_EXPORT_DEMO);
-    minilib::msleep(100);
-    spawn_demo(PHASE4_BRIDGE_DEMO);
+    write(1, b"=== Axiom eBPF Init ===\n");
+    #[cfg(feature = "bpf-unsigned-development")]
+    {
+        write(1, b"Phase 4 demo boot: ");
+        write(1, PHASE4_EXPORT_DEMO.as_bytes());
+        write(1, b" -> ");
+        write(1, PHASE4_BRIDGE_DEMO.as_bytes());
+        write(1, b"\n");
+    }
+
+    #[cfg(not(feature = "bpf-unsigned-development"))]
+    spawn_demo(
+        SIGNED_BPF_LOADER,
+        kernel_abi::BPF_CAP_PROGRAM_LOAD | kernel_abi::BPF_CAP_MAP_READ,
+    );
+
+    #[cfg(feature = "bpf-unsigned-development")]
+    {
+        spawn_demo(
+            PHASE4_EXPORT_DEMO,
+            kernel_abi::BPF_CAP_PROGRAM_LOAD
+                | kernel_abi::BPF_CAP_MAP_CREATE
+                | kernel_abi::BPF_CAP_MAP_READ
+                | kernel_abi::BPF_CAP_MAP_WRITE
+                | kernel_abi::BPF_CAP_ATTACH_SCHEDULER
+                | kernel_abi::BPF_CAP_OBJECT_PIN,
+        );
+        minilib::msleep(100);
+        spawn_demo(
+            PHASE4_BRIDGE_DEMO,
+            kernel_abi::BPF_CAP_MAP_READ | kernel_abi::BPF_CAP_OBJECT_PIN,
+        );
+    }
 
     loop {
         minilib::pause();
@@ -349,6 +406,7 @@ fn lifecycle_exec_reject_probe() -> bool {
     )
 }
 
+#[cfg(feature = "bpf-unsigned-development")]
 fn bpf_owner_exit_probe() -> bool {
     #[repr(C)]
     struct BpfInsn {
@@ -471,6 +529,326 @@ fn bpf_owner_exit_probe() -> bool {
     minilib::waitpid(child, &mut status, 0) == child && status == 0
 }
 
+fn bpf_foreign_owner_probe() -> bool {
+    let map_attr = kernel_abi::BpfAttr {
+        prog_type: 2,
+        insn_cnt: 4,
+        insns: 8 | (1u64 << 32),
+        ..kernel_abi::BpfAttr::default()
+    };
+    let map_id = minilib::bpf(
+        kernel_abi::BPF_MAP_CREATE as i32,
+        (&raw const map_attr).cast(),
+        core::mem::size_of::<kernel_abi::BpfAttr>() as i32,
+    );
+    if map_id < 0 {
+        return false;
+    }
+
+    let child = minilib::fork();
+    if child < 0 {
+        return false;
+    }
+    if child == 0 {
+        let key = 0u32;
+        let mut value = 0u64;
+        let lookup = kernel_abi::BpfAttr {
+            map_fd: map_id as u32,
+            key: (&raw const key) as u64,
+            value: (&raw mut value) as u64,
+            ..kernel_abi::BpfAttr::default()
+        };
+        let result = minilib::bpf(
+            kernel_abi::BPF_MAP_LOOKUP_ELEM as i32,
+            (&raw const lookup).cast(),
+            core::mem::size_of::<kernel_abi::BpfAttr>() as i32,
+        );
+        minilib::exit(if expect_errno(result as usize, kernel_abi::EPERM) {
+            0
+        } else {
+            126
+        });
+    }
+
+    let mut status = 0;
+    let child_denied = minilib::waitpid(child, &mut status, 0) == child && status == 0;
+    let destroy = kernel_abi::BpfAttr {
+        map_fd: map_id as u32,
+        ..kernel_abi::BpfAttr::default()
+    };
+    let destroyed = minilib::bpf(
+        kernel_abi::BPF_MAP_DESTROY as i32,
+        (&raw const destroy).cast(),
+        core::mem::size_of::<kernel_abi::BpfAttr>() as i32,
+    ) == 0;
+    child_denied && destroyed
+}
+
+#[cfg(feature = "bpf-unsigned-development")]
+fn bpf_pinned_write_only_probe() -> bool {
+    static PATH: &[u8] = b"/audit/write-only\0";
+    let attr_size = core::mem::size_of::<kernel_abi::BpfAttr>() as i32;
+    let map_attr = kernel_abi::BpfAttr {
+        prog_type: 2,
+        insn_cnt: 4,
+        insns: 8 | (1u64 << 32),
+        ..kernel_abi::BpfAttr::default()
+    };
+    let map_id = minilib::bpf(
+        kernel_abi::BPF_MAP_CREATE as i32,
+        (&raw const map_attr).cast(),
+        attr_size,
+    );
+    if map_id < 0 {
+        return false;
+    }
+
+    let pin = kernel_abi::BpfAttr {
+        map_fd: map_id as u32,
+        pathname: PATH.as_ptr() as u64,
+        path_len: PATH.len() as u32,
+        file_flags: kernel_abi::BPF_OBJ_ACCESS_WRITE,
+        ..kernel_abi::BpfAttr::default()
+    };
+    if minilib::bpf(
+        kernel_abi::BPF_OBJ_PIN as i32,
+        (&raw const pin).cast(),
+        attr_size,
+    ) != 0
+    {
+        return false;
+    }
+
+    let child = minilib::fork();
+    if child < 0 {
+        return false;
+    }
+    if child == 0 {
+        let open = kernel_abi::BpfAttr {
+            pathname: PATH.as_ptr() as u64,
+            path_len: PATH.len() as u32,
+            file_flags: kernel_abi::BPF_OBJ_ACCESS_WRITE,
+            ..kernel_abi::BpfAttr::default()
+        };
+        let foreign_map = minilib::bpf(
+            kernel_abi::BPF_OBJ_GET as i32,
+            (&raw const open).cast(),
+            attr_size,
+        );
+        if foreign_map < 0 {
+            minilib::exit(120);
+        }
+
+        let key = 0u32;
+        let value = 7u64;
+        let update = kernel_abi::BpfAttr {
+            map_fd: foreign_map as u32,
+            key: (&raw const key) as u64,
+            value: (&raw const value) as u64,
+            ..kernel_abi::BpfAttr::default()
+        };
+        if minilib::bpf(
+            kernel_abi::BPF_MAP_UPDATE_ELEM as i32,
+            (&raw const update).cast(),
+            attr_size,
+        ) != 0
+        {
+            minilib::exit(121);
+        }
+
+        let mut observed = 0u64;
+        let lookup = kernel_abi::BpfAttr {
+            map_fd: foreign_map as u32,
+            key: (&raw const key) as u64,
+            value: (&raw mut observed) as u64,
+            ..kernel_abi::BpfAttr::default()
+        };
+        let denied = expect_errno(
+            minilib::bpf(
+                kernel_abi::BPF_MAP_LOOKUP_ELEM as i32,
+                (&raw const lookup).cast(),
+                attr_size,
+            ) as usize,
+            kernel_abi::EPERM,
+        );
+        minilib::exit(if denied { 0 } else { 122 });
+    }
+
+    let mut status = 0;
+    let child_ok = minilib::waitpid(child, &mut status, 0) == child && status == 0;
+    let unpin = kernel_abi::BpfAttr {
+        pathname: PATH.as_ptr() as u64,
+        path_len: PATH.len() as u32,
+        ..kernel_abi::BpfAttr::default()
+    };
+    let unpinned = minilib::bpf(
+        kernel_abi::BPF_OBJ_UNPIN as i32,
+        (&raw const unpin).cast(),
+        attr_size,
+    ) == 0;
+    let destroy = kernel_abi::BpfAttr {
+        map_fd: map_id as u32,
+        ..kernel_abi::BpfAttr::default()
+    };
+    let destroyed = minilib::bpf(
+        kernel_abi::BPF_MAP_DESTROY as i32,
+        (&raw const destroy).cast(),
+        attr_size,
+    ) == 0;
+
+    child_ok && unpinned && destroyed
+}
+
+#[cfg(feature = "bpf-unsigned-development")]
+fn bpf_capability_denial_probe() -> bool {
+    let unprivileged_denied = run_restricted_bpf_probe(0, unprivileged_bpf_probe);
+    if unprivileged_denied {
+        write(1, b"BPF_UNPRIVILEGED_DENY_OK\n");
+    }
+
+    let tier_denied = run_restricted_bpf_probe(
+        kernel_abi::BPF_CAP_PROGRAM_LOAD,
+        unprivileged_verifier_tier_probe,
+    );
+    if tier_denied {
+        write(1, b"BPF_UNPRIVILEGED_TIER_DENY_OK\n");
+    }
+
+    let attach_denied = run_restricted_bpf_probe(
+        kernel_abi::BPF_CAP_PROGRAM_LOAD | kernel_abi::BPF_CAP_PRIVILEGED_VERIFY,
+        unauthorized_attach_probe,
+    );
+    if attach_denied {
+        write(1, b"BPF_ATTACH_DENY_OK\n");
+    }
+
+    unprivileged_denied && tier_denied && attach_denied
+}
+
+#[cfg(feature = "bpf-unsigned-development")]
+fn run_restricted_bpf_probe(capabilities: u32, probe: fn() -> bool) -> bool {
+    let child = minilib::fork();
+    if child < 0 {
+        return false;
+    }
+    if child == 0 {
+        let retained = minilib::restrict_bpf_capabilities(capabilities);
+        if retained < 0 || retained as u32 != capabilities {
+            minilib::exit(126);
+        }
+        minilib::exit(if probe() { 0 } else { 125 });
+    }
+
+    let mut status = 0;
+    minilib::waitpid(child, &mut status, 0) == child && status == 0
+}
+
+#[cfg(feature = "bpf-unsigned-development")]
+fn unprivileged_bpf_probe() -> bool {
+    let attr = kernel_abi::BpfAttr {
+        prog_type: 2,
+        insn_cnt: 4,
+        insns: 8 | (1u64 << 32),
+        ..kernel_abi::BpfAttr::default()
+    };
+    let result = minilib::bpf(
+        kernel_abi::BPF_MAP_CREATE as i32,
+        (&raw const attr).cast(),
+        core::mem::size_of::<kernel_abi::BpfAttr>() as i32,
+    );
+    expect_errno(result as usize, kernel_abi::EPERM)
+}
+
+#[cfg(feature = "bpf-unsigned-development")]
+fn unprivileged_verifier_tier_probe() -> bool {
+    let instructions = [
+        BpfInsn {
+            code: 0x85,
+            dst_src: 0,
+            off: 0,
+            imm: 16,
+        },
+        BpfInsn {
+            code: 0xb7,
+            dst_src: 0,
+            off: 0,
+            imm: 0,
+        },
+        BpfInsn {
+            code: 0x95,
+            dst_src: 0,
+            off: 0,
+            imm: 0,
+        },
+    ];
+    let attr = kernel_abi::BpfAttr {
+        prog_type: 1,
+        insn_cnt: instructions.len() as u32,
+        insns: instructions.as_ptr() as u64,
+        ..kernel_abi::BpfAttr::default()
+    };
+    let result = minilib::bpf(
+        kernel_abi::BPF_PROG_LOAD as i32,
+        (&raw const attr).cast(),
+        core::mem::size_of::<kernel_abi::BpfAttr>() as i32,
+    );
+    expect_errno(result as usize, kernel_abi::EINVAL)
+}
+
+#[cfg(feature = "bpf-unsigned-development")]
+fn unauthorized_attach_probe() -> bool {
+    let instructions = [
+        BpfInsn {
+            code: 0xb7,
+            dst_src: 0,
+            off: 0,
+            imm: 0,
+        },
+        BpfInsn {
+            code: 0x95,
+            dst_src: 0,
+            off: 0,
+            imm: 0,
+        },
+    ];
+    let load = kernel_abi::BpfAttr {
+        prog_type: 1,
+        insn_cnt: instructions.len() as u32,
+        insns: instructions.as_ptr() as u64,
+        ..kernel_abi::BpfAttr::default()
+    };
+    let program = minilib::bpf(
+        kernel_abi::BPF_PROG_LOAD as i32,
+        (&raw const load).cast(),
+        core::mem::size_of::<kernel_abi::BpfAttr>() as i32,
+    );
+    if program < 0 {
+        return false;
+    }
+
+    let attach = kernel_abi::BpfAttr {
+        attach_btf_id: 1,
+        attach_prog_fd: program as u32,
+        ..kernel_abi::BpfAttr::default()
+    };
+    let attach_result = minilib::bpf(
+        kernel_abi::BPF_PROG_ATTACH as i32,
+        (&raw const attach).cast(),
+        core::mem::size_of::<kernel_abi::BpfAttr>() as i32,
+    );
+    let unload = kernel_abi::BpfAttr {
+        attach_prog_fd: program as u32,
+        ..kernel_abi::BpfAttr::default()
+    };
+    let unload_result = minilib::bpf(
+        kernel_abi::BPF_PROG_UNLOAD as i32,
+        (&raw const unload).cast(),
+        core::mem::size_of::<kernel_abi::BpfAttr>() as i32,
+    );
+
+    expect_errno(attach_result as usize, kernel_abi::EPERM) && unload_result == 0
+}
+
 fn trigger_unmapped_load() -> ! {
     let value: usize;
     // SAFETY: This is an intentional userspace fault probe. The kernel must
@@ -523,12 +901,12 @@ fn expect_errno(result: usize, errno: kernel_abi::Errno) -> bool {
     result as isize == -isize::from(errno)
 }
 
-fn spawn_demo(path: &str) {
+fn spawn_demo(path: &str, bpf_capabilities: u32) {
     write(1, b"Spawning ");
     write(1, path.as_bytes());
     write(1, b"...\n");
 
-    let pid = minilib::spawn(path);
+    let pid = minilib::spawn_restricted(path, bpf_capabilities);
     if pid < 0 {
         write(1, b"Failed to spawn demo, errno=");
         print_num((-pid) as u64);

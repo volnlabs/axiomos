@@ -73,6 +73,7 @@ pub const BPF_LINK_DETACH: u32 = 34;
 pub const BPF_PROG_BIND_MAP: u32 = 35;
 pub const BPF_PROG_LOAD_ELF: u32 = 36; // Custom command for loading ELF files
 pub const BPF_RINGBUF_POLL: u32 = 37; // Custom command for polling ringbuf events
+
 // Custom command: execute a loaded program N times and emit an
 // `AXIOM EXEC COST` timing marker over serial. Only honoured by kernels built
 // with the `verifier-cost` measurement feature; rejected otherwise.
@@ -83,6 +84,36 @@ pub const BPF_BENCH_EXEC: u32 = 100;
 pub const BPF_PROG_UNLOAD: u32 = 101;
 pub const BPF_MAP_DESTROY: u32 = 102;
 pub const BPF_OBJ_UNPIN: u32 = 103;
+
+/// Requested/offered access rights in [`BpfAttr::file_flags`] for object pin/open.
+/// Zero is accepted as a backwards-compatible read-only request.
+pub const BPF_OBJ_ACCESS_READ: u32 = 1 << 0;
+pub const BPF_OBJ_ACCESS_WRITE: u32 = 1 << 1;
+pub const BPF_OBJ_ACCESS_MASK: u32 = BPF_OBJ_ACCESS_READ | BPF_OBJ_ACCESS_WRITE;
+
+/// Capability bits accepted by `SYS_SPAWN_RESTRICTED`.
+pub const BPF_CAP_PROGRAM_LOAD: u32 = 1 << 0;
+pub const BPF_CAP_MAP_CREATE: u32 = 1 << 1;
+pub const BPF_CAP_MAP_READ: u32 = 1 << 2;
+pub const BPF_CAP_MAP_WRITE: u32 = 1 << 3;
+pub const BPF_CAP_ATTACH_TRACE: u32 = 1 << 4;
+pub const BPF_CAP_ATTACH_SCHEDULER: u32 = 1 << 5;
+pub const BPF_CAP_ATTACH_DEVICE: u32 = 1 << 6;
+pub const BPF_CAP_OBJECT_PIN: u32 = 1 << 7;
+pub const BPF_CAP_ACTUATE: u32 = 1 << 8;
+pub const BPF_CAP_PRIVILEGED_VERIFY: u32 = 1 << 9;
+pub const BPF_CAP_OBJECT_ADMIN: u32 = 1 << 10;
+pub const BPF_CAP_ALL: u32 = BPF_CAP_PROGRAM_LOAD
+    | BPF_CAP_MAP_CREATE
+    | BPF_CAP_MAP_READ
+    | BPF_CAP_MAP_WRITE
+    | BPF_CAP_ATTACH_TRACE
+    | BPF_CAP_ATTACH_SCHEDULER
+    | BPF_CAP_ATTACH_DEVICE
+    | BPF_CAP_OBJECT_PIN
+    | BPF_CAP_ACTUATE
+    | BPF_CAP_PRIVILEGED_VERIFY
+    | BPF_CAP_OBJECT_ADMIN;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, FromBytes, KnownLayout, Immutable)]
@@ -146,3 +177,35 @@ pub struct BpfObjectInfo {
 }
 
 pub const BPF_OBJECT_KIND_MAP: u32 = 1;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bpf_capabilities_are_independent_and_covered_by_all() {
+        let capabilities = [
+            BPF_CAP_PROGRAM_LOAD,
+            BPF_CAP_MAP_CREATE,
+            BPF_CAP_MAP_READ,
+            BPF_CAP_MAP_WRITE,
+            BPF_CAP_ATTACH_TRACE,
+            BPF_CAP_ATTACH_SCHEDULER,
+            BPF_CAP_ATTACH_DEVICE,
+            BPF_CAP_OBJECT_PIN,
+            BPF_CAP_ACTUATE,
+            BPF_CAP_PRIVILEGED_VERIFY,
+            BPF_CAP_OBJECT_ADMIN,
+        ];
+
+        for (index, capability) in capabilities.iter().enumerate() {
+            assert_eq!(capability.count_ones(), 1);
+            assert_ne!(BPF_CAP_ALL & capability, 0);
+            assert!(
+                capabilities[index + 1..]
+                    .iter()
+                    .all(|other| capability & other == 0)
+            );
+        }
+    }
+}

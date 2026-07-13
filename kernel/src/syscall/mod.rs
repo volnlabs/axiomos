@@ -5,6 +5,8 @@ use core::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use access::KernelAccess;
+#[cfg(feature = "rpi5")]
+use kernel_abi::EPERM;
 use kernel_abi::{syscall_name, Errno, EINVAL, ENOSYS};
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use kernel_syscall::{
@@ -69,6 +71,18 @@ static EXPORTED_RINGBUF_MAP_ID: AtomicU32 = AtomicU32::new(u32::MAX);
 
 const DEBUG_OP_SET_EXPORTED_RINGBUF_MAP_ID: usize = 1;
 const DEBUG_OP_GET_EXPORTED_RINGBUF_MAP_ID: usize = 2;
+
+#[cfg(feature = "rpi5")]
+fn require_current_bpf_capability(
+    required: crate::mcore::mtask::process::BpfCapabilities,
+) -> Result<(), Errno> {
+    let process = crate::mcore::context::ExecutionContext::load().current_process();
+    if process.bpf_capabilities().contains(required) {
+        Ok(())
+    } else {
+        Err(EPERM)
+    }
+}
 
 #[cfg(feature = "rpi5")]
 #[inline(always)]
@@ -175,14 +189,34 @@ pub fn dispatch_syscall(
         kernel_abi::SYS_MALLOC => dispatch_sys_malloc(arg1),
         kernel_abi::SYS_FREE => dispatch_sys_free(arg1),
         #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
-        kernel_abi::SYS_PWM_CONFIG => dispatch_sys_pwm_config(arg1, arg2),
+        kernel_abi::SYS_PWM_CONFIG => {
+            require_current_bpf_capability(crate::mcore::mtask::process::BpfCapabilities::ACTUATE)
+                .and_then(|()| dispatch_sys_pwm_config(arg1, arg2))
+        }
         #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
-        kernel_abi::SYS_PWM_WRITE => dispatch_sys_pwm_write(arg1, arg2, arg3),
+        kernel_abi::SYS_PWM_WRITE => {
+            require_current_bpf_capability(crate::mcore::mtask::process::BpfCapabilities::ACTUATE)
+                .and_then(|()| dispatch_sys_pwm_write(arg1, arg2, arg3))
+        }
         #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
-        kernel_abi::SYS_PWM_ENABLE => dispatch_sys_pwm_enable(arg1, arg2, arg3),
+        kernel_abi::SYS_PWM_ENABLE => {
+            require_current_bpf_capability(crate::mcore::mtask::process::BpfCapabilities::ACTUATE)
+                .and_then(|()| dispatch_sys_pwm_enable(arg1, arg2, arg3))
+        }
         kernel_abi::SYS_CLOCK_GETTIME => dispatch_sys_clock_gettime(arg1, arg2),
         kernel_abi::SYS_NANOSLEEP => dispatch_sys_nanosleep(arg1, arg2),
         kernel_abi::SYS_SPAWN => dispatch_sys_spawn(arg1, arg2),
+        kernel_abi::SYS_SPAWN_RESTRICTED => dispatch_sys_spawn_restricted(arg1, arg2, arg3),
+        kernel_abi::SYS_RESTRICT_BPF_CAPABILITIES => match u32::try_from(arg1)
+            .ok()
+            .and_then(crate::mcore::mtask::process::BpfCapabilities::from_bits)
+        {
+            Some(allowed) => {
+                let process = crate::mcore::context::ExecutionContext::load().current_process();
+                Ok(process.restrict_bpf_capabilities(allowed).bits() as usize)
+            }
+            None => Err(EINVAL),
+        },
         kernel_abi::SYS_FORK => dispatch_sys_fork(ctx),
         kernel_abi::SYS_EXECVE => dispatch_sys_execve(ctx, arg1, arg2, arg3),
         kernel_abi::SYS_WAITPID => dispatch_sys_waitpid(arg1, arg2, arg3),
@@ -624,6 +658,43 @@ fn dispatch_sys_nanosleep(req: usize, _rem: usize) -> Result<usize, Errno> {
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn dispatch_sys_spawn(path_ptr: usize, path_len: usize) -> Result<usize, Errno> {
+    dispatch_sys_spawn_with_bpf_capabilities(path_ptr, path_len, None)
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn child_bpf_capabilities(
+    parent: crate::mcore::mtask::process::BpfCapabilities,
+    delegated: Option<crate::mcore::mtask::process::BpfCapabilities>,
+) -> Result<crate::mcore::mtask::process::BpfCapabilities, Errno> {
+    use crate::mcore::mtask::process::BpfCapabilities;
+
+    let child = delegated.unwrap_or(BpfCapabilities::NONE);
+    if parent.contains(child) {
+        Ok(child)
+    } else {
+        Err(kernel_abi::EPERM)
+    }
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn dispatch_sys_spawn_restricted(
+    path_ptr: usize,
+    path_len: usize,
+    bpf_capabilities: usize,
+) -> Result<usize, Errno> {
+    use crate::mcore::mtask::process::BpfCapabilities;
+
+    let bits = u32::try_from(bpf_capabilities).map_err(|_| EINVAL)?;
+    let capabilities = BpfCapabilities::from_bits(bits).ok_or(EINVAL)?;
+    dispatch_sys_spawn_with_bpf_capabilities(path_ptr, path_len, Some(capabilities))
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn dispatch_sys_spawn_with_bpf_capabilities(
+    path_ptr: usize,
+    path_len: usize,
+    delegated_capabilities: Option<crate::mcore::mtask::process::BpfCapabilities>,
+) -> Result<usize, Errno> {
     use kernel_abi::{ENAMETOOLONG, ENOMEM};
 
     use crate::mcore::mtask::process::CreateProcessError;
@@ -632,8 +703,13 @@ fn dispatch_sys_spawn(path_ptr: usize, path_len: usize) -> Result<usize, Errno> 
     #[cfg(feature = "rpi5")]
     dbg_mark(b's' as u32);
 
-    // 1. Read path from userspace
-    // We reuse logic similar to sys_open
+    let parent = crate::mcore::context::ExecutionContext::load().current_process();
+    let parent_capabilities = parent.bpf_capabilities();
+    // Plain spawn is intentionally capability-free. Authority crosses a spawn
+    // boundary only through SYS_SPAWN_RESTRICTED's explicit subset mask.
+    let child_capabilities = child_bpf_capabilities(parent_capabilities, delegated_capabilities)?;
+
+    // Validate delegation before reading the userspace path or allocating the child.
     if path_len > kernel_abi::PATH_MAX {
         return Err(ENAMETOOLONG);
     }
@@ -648,11 +724,12 @@ fn dispatch_sys_spawn(path_ptr: usize, path_len: usize) -> Result<usize, Errno> 
         Err(_) => return Err(EINVAL),
     };
 
-    // 3. Create Process
-    let parent = crate::mcore::context::ExecutionContext::load().current_process();
-
-    // Process::create_from_executable handles task creation and enqueuing
-    let child_proc = match Process::create_from_executable(&parent, abs_path) {
+    // Restriction occurs inside process construction before its task is enqueued.
+    let child_proc = match Process::create_from_executable_with_bpf_capabilities(
+        &parent,
+        abs_path,
+        child_capabilities,
+    ) {
         Ok(p) => p,
         Err(CreateProcessError::StackAllocationError(StackAllocationError::OutOfVirtualMemory)) => {
             #[cfg(feature = "rpi5")]
@@ -680,6 +757,15 @@ fn dispatch_sys_spawn(path_ptr: usize, path_len: usize) -> Result<usize, Errno> 
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 fn dispatch_sys_spawn(_path: usize, _len: usize) -> Result<usize, Errno> {
+    Err(EINVAL)
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn dispatch_sys_spawn_restricted(
+    _path: usize,
+    _len: usize,
+    _bpf_capabilities: usize,
+) -> Result<usize, Errno> {
     Err(EINVAL)
 }
 
@@ -721,4 +807,28 @@ fn dispatch_sys_execve(
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 fn dispatch_sys_waitpid(_pid: usize, _status: usize, _options: usize) -> Result<usize, Errno> {
     Err(EINVAL)
+}
+
+#[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
+mod tests {
+    use super::*;
+    use crate::mcore::mtask::process::BpfCapabilities;
+
+    #[test]
+    fn plain_spawn_is_unprivileged_and_explicit_delegation_is_monotonic() {
+        let parent = BpfCapabilities::MAP_READ | BpfCapabilities::OBJECT_PIN;
+
+        assert_eq!(
+            child_bpf_capabilities(parent, None),
+            Ok(BpfCapabilities::NONE)
+        );
+        assert_eq!(
+            child_bpf_capabilities(parent, Some(BpfCapabilities::MAP_READ)),
+            Ok(BpfCapabilities::MAP_READ)
+        );
+        assert_eq!(
+            child_bpf_capabilities(parent, Some(BpfCapabilities::PROGRAM_LOAD)),
+            Err(kernel_abi::EPERM)
+        );
+    }
 }

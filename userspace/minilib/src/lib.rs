@@ -273,6 +273,20 @@ pub fn spawn(path: &str) -> c_int {
     syscall2(56, path.as_ptr() as usize, path.len()) as i32
 }
 
+pub fn spawn_restricted(path: &str, bpf_capabilities: u32) -> c_int {
+    syscall3(
+        62,
+        path.as_ptr() as usize,
+        path.len(),
+        bpf_capabilities as usize,
+    ) as i32
+}
+
+/// Permanently retain only the supplied BPF capability bits for this process.
+pub fn restrict_bpf_capabilities(bpf_capabilities: u32) -> c_int {
+    syscall1(63, bpf_capabilities as usize) as i32
+}
+
 pub fn abort() -> ! {
     syscall0(32);
     loop {

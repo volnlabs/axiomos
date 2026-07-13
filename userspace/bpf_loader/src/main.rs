@@ -61,6 +61,9 @@ pub extern "C" fn _start() -> ! {
         write(1, b"FAILED (error ");
         print_num((-array_map_id) as u64);
         write(1, b")\n");
+        if array_map_id as isize == -isize::from(kernel_abi::EPERM) {
+            write(1, b"BPF_UNPRIVILEGED_DENY_OK\n");
+        }
         exit(1);
     }
 
@@ -100,6 +103,55 @@ pub extern "C" fn _start() -> ! {
     print_num(ringbuf_map_id as u64);
     write(1, b")\n");
 
+    // Credential-derived verifier tier probe. A caller without
+    // PRIVILEGED_VERIFY must not load a program using a privileged helper.
+    let privileged_insns = [
+        BpfInsn {
+            code: 0x85,
+            dst_src: 0,
+            off: 0,
+            imm: 16, // bpf_get_kernel_heap_kb
+        },
+        BpfInsn {
+            code: 0xb7,
+            dst_src: 0,
+            off: 0,
+            imm: 0,
+        },
+        BpfInsn {
+            code: 0x95,
+            dst_src: 0,
+            off: 0,
+            imm: 0,
+        },
+    ];
+    let privileged_attr = BpfAttr {
+        insn_cnt: privileged_insns.len() as u32,
+        insns: privileged_insns.as_ptr() as u64,
+        ..Default::default()
+    };
+    let privileged_program = bpf(
+        kernel_abi::BPF_PROG_LOAD as i32,
+        (&raw const privileged_attr).cast(),
+        attr_size,
+    );
+    if privileged_program < 0 {
+        write(1, b"BPF_UNPRIVILEGED_TIER_DENY_OK\n");
+        exit(0);
+    }
+    let unload_privileged = BpfAttr {
+        attach_prog_fd: privileged_program as u32,
+        ..Default::default()
+    };
+    if bpf(
+        kernel_abi::BPF_PROG_UNLOAD as i32,
+        (&raw const unload_privileged).cast(),
+        attr_size,
+    ) != 0
+    {
+        exit(1);
+    }
+
     // ==================================================================
     // Step 3: Construct BPF program (27 instructions, 3 helpers)
     //
@@ -113,8 +165,8 @@ pub extern "C" fn _start() -> ! {
     //
     // Helper IDs (from interpreter dispatch):
     //   2 = bpf_trace_printk(fmt_ptr, size)
-    //   3 = bpf_map_lookup_elem(map_id, key_ptr) -> returns *mut u8
-    //   6 = bpf_ringbuf_output(map_id, data_ptr, data_size, flags)
+    //   5 = bpf_map_lookup_elem(map_id, key_ptr) -> returns *mut u8
+    //   8 = bpf_ringbuf_output(map_id, data_ptr, data_size, flags)
     //
     // Stack layout (r10-relative):
     //   r10 - 4  : key (u32 = 0)       [4 bytes]
@@ -168,12 +220,12 @@ pub extern "C" fn _start() -> ! {
             off: 0,
             imm: -4,
         },
-        // Insn 5: call bpf_map_lookup_elem (helper 3)
+        // Insn 5: call bpf_map_lookup_elem (helper 5)
         BpfInsn {
             code: 0x85,
             dst_src: 0x00,
             off: 0,
-            imm: 3,
+            imm: 5,
         },
         // --- Check if lookup returned NULL; skip map+ringbuf if so ---
         // Insn 6: if r0 == 0 goto +11 -> target = insn 18 (trace_printk)
@@ -257,12 +309,12 @@ pub extern "C" fn _start() -> ! {
             off: 0,
             imm: 0,
         },
-        // Insn 17: call bpf_ringbuf_output (helper 6)
+        // Insn 17: call bpf_ringbuf_output (helper 8)
         BpfInsn {
             code: 0x85,
             dst_src: 0x00,
             off: 0,
-            imm: 6,
+            imm: 8,
         },
         // --- Call bpf_trace_printk("Tick!", 6) for serial visibility ---
         // Insn 18: LD_DW_IMM r1, "Tick!\0" (occupies 2 instruction slots)
@@ -381,6 +433,9 @@ pub extern "C" fn _start() -> ! {
         write(1, b"FAILED (error ");
         print_num((-attach_res) as u64);
         write(1, b")\n");
+        if attach_res as isize == -isize::from(kernel_abi::EPERM) {
+            write(1, b"BPF_ATTACH_DENY_OK\n");
+        }
         exit(1);
     }
 

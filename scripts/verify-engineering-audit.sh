@@ -77,10 +77,25 @@ OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 RESULTS="$OUTPUT_DIR/results.tsv"
 MANIFEST="$OUTPUT_DIR/manifest.txt"
 ARTIFACTS="$OUTPUT_DIR/artifacts.sha256"
+PRODUCTION_ARTIFACTS="$OUTPUT_DIR/production-artifacts.sha256"
 LOCKFILES_BEFORE="$OUTPUT_DIR/lockfiles.before.sha256"
+COMPILE_TRUSTED_KEY_FIXTURE="$OUTPUT_DIR/compile-only-rfc8032.pub"
+SIGNING_KEY_PREFIX="$OUTPUT_DIR/audit-bpf-ed25519"
+SIGNING_PRIVATE_KEY="$SIGNING_KEY_PREFIX.key"
+TRUSTED_KEY_FIXTURE="$SIGNING_KEY_PREFIX.pub"
+SIGNED_BPF_OBJECT="$OUTPUT_DIR/startup.bpf.o"
+SIGNED_BPF_CONTAINER="$OUTPUT_DIR/startup.rbpf"
+
+# Quick mode still compiles the fail-closed kernel before the end-to-end
+# signing fixture is generated. Production builds below replace this key with
+# the freshly generated fixture key before constructing artifacts.
+printf '\xd7\x5a\x98\x01\x82\xb1\x0a\xb7\xd5\x4b\xfe\xd3\xc9\x64\x07\x3a\x0e\xe1\x72\xf3\xda\xa6\x23\x25\xaf\x02\x1a\x68\xf7\x07\x51\x1a' \
+    >"$COMPILE_TRUSTED_KEY_FIXTURE"
+export AXIOM_BPF_TRUSTED_KEY_PATH="$COMPILE_TRUSTED_KEY_FIXTURE"
 
 printf 'step\tstatus\tduration_seconds\tlog\tcommand\n' >"$RESULTS"
 : >"$ARTIFACTS"
+: >"$PRODUCTION_ARTIFACTS"
 
 failures=0
 passes=0
@@ -212,10 +227,12 @@ write_manifest() {
         echo "skips=$skips"
         echo "results=$RESULTS"
         echo "artifact_hashes=$ARTIFACTS"
+        echo "production_artifact_hashes=$PRODUCTION_ARTIFACTS"
     } >"$MANIFEST"
 }
 
 hash_release_artifacts() {
+    local output="$1"
     local path_report="$OUTPUT_DIR/artifact-paths.txt"
     local paths=()
     local path
@@ -233,16 +250,17 @@ hash_release_artifacts() {
             return 1
         fi
     done
-    sha256sum "${paths[@]}" >"$ARTIFACTS"
+    sha256sum "${paths[@]}" >"$output"
 }
 
 qemu_smoke() {
     local log="$OUTPUT_DIR/qemu-serial.log"
-    local command="timeout ${QEMU_TIMEOUT}s cargo run --locked --release -- --headless --smp 2 --mem 1G"
+    local command="timeout ${QEMU_TIMEOUT}s cargo run --locked --release --features bpf-unsigned-development -- --headless --smp 2 --mem 1G"
     local start end rc=0
     start="$(date +%s)"
     printf '[audit] %-34s' "qemu-release-smoke"
-    timeout "${QEMU_TIMEOUT}s" cargo run --locked --release -- --headless --smp 2 --mem 1G >"$log" 2>&1 || rc=$?
+    timeout "${QEMU_TIMEOUT}s" cargo run --locked --release --features bpf-unsigned-development \
+        -- --headless --smp 2 --mem 1G >"$log" 2>&1 || rc=$?
 
     if [[ "$rc" -ne 0 && "$rc" -ne 124 ]]; then
         echo "QEMU command failed with status $rc" >>"$log"
@@ -251,7 +269,11 @@ qemu_smoke() {
     local failed=0 marker
     for marker in QEMU_BOOT_OK USERCOPY_EFAULT_OK UNKNOWN_SYSCALL_ENOSYS_OK TLB_SHOOTDOWN_OK \
         LIFECYCLE_EXIT_WAIT_OK LIFECYCLE_FAULT_WAIT_OK LIFECYCLE_EXEC_REJECT_OK \
-        LIFECYCLE_EXEC_WAIT_OK BPF_HANDLE_REUSE_OK BPF_OWNER_EXIT_OK BPF_OWNER_RECLAIM_OK; do
+        LIFECYCLE_EXEC_WAIT_OK BPF_FOREIGN_OWNER_DENY_OK BPF_HANDLE_REUSE_OK \
+        BPF_OWNER_EXIT_OK BPF_OWNER_RECLAIM_OK \
+        BPF_PINNED_WRITE_ONLY_OK \
+        BPF_CAPABILITY_PROBE_STARTED BPF_UNPRIVILEGED_DENY_OK \
+        BPF_UNPRIVILEGED_TIER_DENY_OK BPF_ATTACH_DENY_OK; do
         if ! grep -qF "$marker" "$log"; then
             echo "missing required marker: $marker" >>"$log"
             failed=1
@@ -282,7 +304,52 @@ qemu_smoke() {
     return 0
 }
 
-require_commands cargo rustc rustup git python3 timeout sha256sum
+qemu_production_smoke() {
+    local log="$OUTPUT_DIR/qemu-production-serial.log"
+    local command="timeout ${QEMU_TIMEOUT}s cargo run --locked --release -- --headless --smp 2 --mem 1G"
+    local start end rc=0
+    start="$(date +%s)"
+    printf '[audit] %-34s' "qemu-production-signed-smoke"
+    timeout "${QEMU_TIMEOUT}s" cargo run --locked --release \
+        -- --headless --smp 2 --mem 1G >"$log" 2>&1 || rc=$?
+
+    local failed=0 marker
+    for marker in QEMU_BOOT_OK SIGNED_BPF_LOAD_OK; do
+        if ! grep -qF "$marker" "$log"; then
+            echo "missing required production marker: $marker" >>"$log"
+            failed=1
+        fi
+    done
+    if grep -qF "Phase 4 demo boot" "$log"; then
+        echo "unsigned BPF demo path ran in production image" >>"$log"
+        failed=1
+    fi
+    if grep -qE 'SIGNED_BPF_(INPUT_MISSING|INPUT_INVALID|LOAD_REJECTED)' "$log"; then
+        echo "signed BPF production loader reported a failure marker" >>"$log"
+        failed=1
+    fi
+    if grep -qiE 'kernel panicked|KERNEL_MODE.*PAGE FAULT' "$log"; then
+        echo "forbidden production panic/page-fault marker found" >>"$log"
+        failed=1
+    fi
+
+    if [[ "$failed" -eq 0 && ("$rc" -eq 0 || "$rc" -eq 124) ]]; then
+        passes=$((passes + 1))
+        printf ' PASS\n'
+        rc=0
+    else
+        failures=$((failures + 1))
+        printf ' FAIL\n'
+        tail -n 120 "$log" >&2 || true
+        rc=1
+    fi
+    end="$(date +%s)"
+    record "qemu-production-signed-smoke" "$([[ "$rc" -eq 0 ]] && echo PASS || echo FAIL)" \
+        "$((end - start))" "$log" "$command"
+    return 0
+}
+
+require_commands cargo clang rustc rustup git python3 timeout sha256sum
 hash_tracked_lockfiles "$LOCKFILES_BEFORE"
 
 run_step fmt cargo fmt --all -- --check
@@ -325,9 +392,25 @@ if [[ "$MODE" != "quick" ]]; then
     run_cargo_step clippy-riscv clippy --manifest-path kernel/demos/riscv/Cargo.toml \
         --target riscv64gc-unknown-none-elf -- -D clippy::all
 
-    run_cargo_step release-build build --release
+    run_step signed-bpf-test-key cargo run --locked \
+        --manifest-path userspace/rk_cli/Cargo.toml -- key generate --output "$SIGNING_KEY_PREFIX"
+    run_step signed-bpf-test-object clang -target bpf -O2 -c examples/bpf/hello.bpf.c \
+        -o "$SIGNED_BPF_OBJECT"
+    run_step signed-bpf-test-container cargo run --locked \
+        --manifest-path userspace/rk_cli/Cargo.toml -- sign --input "$SIGNED_BPF_OBJECT" \
+        --output "$SIGNED_BPF_CONTAINER" --key "$SIGNING_PRIVATE_KEY"
+    export AXIOM_BPF_TRUSTED_KEY_PATH="$TRUSTED_KEY_FIXTURE"
+    export AXIOM_SIGNED_BPF_STARTUP_PATH="$SIGNED_BPF_CONTAINER"
+    run_cargo_step production-release-build build --release
+    run_step production-artifact-manifest hash_release_artifacts "$PRODUCTION_ARTIFACTS"
+    if [[ "$RUN_QEMU" -eq 1 ]]; then
+        qemu_production_smoke
+    else
+        skip_step qemu-production-signed-smoke "disabled by option"
+    fi
+    run_cargo_step release-build build --release --features bpf-unsigned-development
     run_step_in_dir elfloader-fuzz-build kernel/crates/kernel_elfloader cargo fuzz build
-    run_step artifact-manifest hash_release_artifacts
+    run_step artifact-manifest hash_release_artifacts "$ARTIFACTS"
 
     if [[ "$RUN_QEMU" -eq 1 ]]; then
         qemu_smoke

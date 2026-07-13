@@ -1,5 +1,11 @@
 pub mod helpers;
 
+#[cfg(all(
+    feature = "bpf-production-signed",
+    feature = "bpf-unsigned-development"
+))]
+compile_error!("signed production and unsigned development BPF policies are mutually exclusive");
+
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -15,7 +21,9 @@ use kernel_bpf::execution::{BpfContext, BpfError, Interpreter};
 use kernel_bpf::loader::BpfLoader;
 use kernel_bpf::maps::{ArrayMap, BpfMap, HashMap as BpfHashMap, RingBufMap, TimeSeriesMap};
 use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
-use kernel_bpf::signing::{SignatureVerifier, TrustedKey};
+use kernel_bpf::signing::SignatureVerifier;
+#[cfg(all(not(feature = "bpf-unsigned-development"), not(test)))]
+use kernel_bpf::signing::TrustedKey;
 use kernel_bpf::verifier::admission::AdmissionLedger;
 use kernel_bpf::verifier::{LoadCaller, MapPerm, Verifier, VerifyConfig};
 use spin::{Mutex, MutexGuard};
@@ -116,6 +124,26 @@ const BPF_HANDLE_SLOT_MASK: u32 = (1 << BPF_HANDLE_SLOT_BITS) - 1;
 // Keep the top bit clear: userspace returns handles through c_int and BPF map
 // handles are commonly materialized through signed 32-bit immediates.
 const BPF_HANDLE_MAX_GENERATION: u32 = (i32::MAX as u32) >> BPF_HANDLE_SLOT_BITS;
+const PINNED_MAP_OWNER: u64 = u64::MAX;
+const MAX_MAP_GRANTS: usize = 64;
+
+#[cfg(all(not(feature = "bpf-unsigned-development"), not(test)))]
+static PRODUCTION_BPF_TRUSTED_KEY: &[u8; 32] = include_bytes!(env!("AXIOM_BPF_TRUSTED_KEY_PATH"));
+
+fn signing_policy() -> (SignatureVerifier, bool) {
+    #[cfg(all(not(feature = "bpf-unsigned-development"), not(test)))]
+    {
+        let key = TrustedKey::from_bytes(PRODUCTION_BPF_TRUSTED_KEY)
+            .expect("AXIOM_BPF_TRUSTED_KEY_PATH must contain a valid Ed25519 public key");
+        let verifier = SignatureVerifier::from_trusted_keys(&[key])
+            .expect("the production BPF trust store must fit the active profile");
+        (verifier, false)
+    }
+    #[cfg(any(feature = "bpf-unsigned-development", test))]
+    {
+        (SignatureVerifier::new(), true)
+    }
+}
 
 fn encode_handle(slot: usize, generation: u32) -> u32 {
     debug_assert!(slot <= BPF_HANDLE_SLOT_MASK as usize);
@@ -251,6 +279,29 @@ struct ProgramEntry {
     wcet_cycles: u64,
     charged_bytes: usize,
     owner: u64,
+    authorization: BpfLoadAuthorization,
+}
+
+/// Immutable authority snapshot captured before entering the BPF manager.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BpfLoadAuthorization {
+    caller: LoadCaller,
+    allow_actuation: bool,
+    map_access: MapAccess,
+}
+
+impl BpfLoadAuthorization {
+    pub const fn new(caller: LoadCaller, allow_actuation: bool, map_access: MapAccess) -> Self {
+        Self {
+            caller,
+            allow_actuation,
+            map_access,
+        }
+    }
+
+    const fn kernel() -> Self {
+        Self::new(LoadCaller::Trusted, true, MapAccess::READ_WRITE)
+    }
 }
 
 struct MapEntry {
@@ -258,6 +309,65 @@ struct MapEntry {
     perm: MapPerm,
     charged_bytes: usize,
     owner: u64,
+    grants: Vec<MapGrant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapAccess(u8);
+
+impl MapAccess {
+    pub const NONE: Self = Self(0);
+    pub const READ: Self = Self(1 << 0);
+    pub const WRITE: Self = Self(1 << 1);
+    pub const READ_WRITE: Self = Self(Self::READ.0 | Self::WRITE.0);
+
+    pub const fn contains(self, required: Self) -> bool {
+        self.0 & required.0 == required.0
+    }
+
+    const fn intersect(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MapGrant {
+    owner: u64,
+    access: MapAccess,
+}
+
+struct PinnedMap {
+    path: String,
+    map_id: u32,
+    owner: u64,
+    offered: MapAccess,
+}
+
+impl MapEntry {
+    fn access_for(&self, owner: u64) -> Option<MapAccess> {
+        if self.owner == owner {
+            return Some(MapAccess::READ_WRITE);
+        }
+        self.grants
+            .iter()
+            .find(|grant| grant.owner == owner)
+            .map(|grant| grant.access)
+    }
+
+    fn grant(&mut self, owner: u64, access: MapAccess) -> Result<(), BpfError> {
+        if let Some(grant) = self.grants.iter_mut().find(|grant| grant.owner == owner) {
+            grant.access = MapAccess(grant.access.0 | access.0);
+            return Ok(());
+        }
+        if self.grants.len() >= MAX_MAP_GRANTS {
+            return Err(BpfError::ResourceLimit);
+        }
+        self.grants
+            .try_reserve(1)
+            .map_err(|_| BpfError::OutOfMemory)?;
+        self.grants.push(MapGrant { owner, access });
+        Ok(())
+    }
 }
 
 /// Global BPF resource usage. Per-process ceilings are enforced separately
@@ -280,7 +390,7 @@ pub struct BpfManager {
     attachments: BTreeMap<u32, Vec<u32>>,
     maps: Vec<Option<MapEntry>>,
     map_generations: Vec<u32>,
-    pinned_maps: Vec<(String, u32)>,
+    pinned_maps: Vec<PinnedMap>,
     /// Trust store for program provenance (#20). A program is authentic if it
     /// is an RBPF [`SignedProgram`] signed by a key in here.
     signature_verifier: SignatureVerifier,
@@ -357,6 +467,7 @@ impl BpfManager {
     }
 
     fn new_with_limits(limits: BpfLimits) -> Self {
+        let (signature_verifier, allow_unsigned) = signing_policy();
         let mut manager = Self {
             programs: Vec::new(),
             program_generations: Vec::new(),
@@ -364,8 +475,8 @@ impl BpfManager {
             maps: Vec::new(),
             map_generations: Vec::new(),
             pinned_maps: Vec::new(),
-            signature_verifier: SignatureVerifier::new(),
-            allow_unsigned: true,
+            signature_verifier,
+            allow_unsigned,
             admission: AdmissionLedger::new(
                 <ActiveProfile as PhysicalProfile>::UTILIZATION_BUDGET_NS_PER_S,
                 <ActiveProfile as PhysicalProfile>::CYCLE_UNIT_NS,
@@ -387,17 +498,9 @@ impl BpfManager {
         manager
     }
 
-    /// Register a trusted signing key (the kernel-held root of trust). Keys come
-    /// from the kernel build, never from the untrusted syscall caller — that is
-    /// what makes the signature check a provenance check rather than theater.
-    pub fn add_trusted_key(&mut self, key: TrustedKey) -> Result<(), BpfError> {
-        self.signature_verifier
-            .add_trusted_key(key)
-            .map_err(|_| BpfError::SignatureRejected)
-    }
-
     /// Enable or disable signature enforcement. When `false`, only programs
     /// signed by a trusted key load.
+    #[cfg(test)]
     pub fn set_allow_unsigned(&mut self, allow: bool) {
         self.allow_unsigned = allow;
     }
@@ -409,6 +512,7 @@ impl BpfManager {
             perm,
             charged_bytes: 0,
             owner: 0,
+            grants: Vec::new(),
         }));
         self.map_generations.push(0);
         encode_handle(slot, 0)
@@ -429,6 +533,7 @@ impl BpfManager {
                 perm: MapPerm::ReadWrite,
                 charged_bytes: charge,
                 owner,
+                grants: Vec::new(),
             },
         )?;
         self.live_maps = self
@@ -456,15 +561,50 @@ impl BpfManager {
             .collect()
     }
 
-    fn map_metadata_for_owner(&self, owner: u64) -> (Vec<u32>, Vec<MapPerm>, Vec<u32>) {
+    fn map_metadata_for_owner(
+        &self,
+        owner: u64,
+        authorized: MapAccess,
+    ) -> (Vec<u32>, Vec<MapPerm>, Vec<u32>) {
         let (sizes, perms) = self
             .maps
             .iter()
             .map(|slot| match slot.as_ref() {
-                Some(entry) if entry.owner == owner || entry.charged_bytes == 0 => {
-                    (entry.map.def().value_size, entry.perm)
+                Some(entry) if entry.charged_bytes == 0 => {
+                    let access = MapAccess::READ_WRITE.intersect(authorized);
+                    if access.contains(MapAccess::READ) && access.contains(MapAccess::WRITE) {
+                        (entry.map.def().value_size, entry.perm)
+                    } else if access.contains(MapAccess::READ) {
+                        (entry.map.def().value_size, MapPerm::ReadOnly)
+                    } else if access.contains(MapAccess::WRITE) && entry.perm == MapPerm::ReadWrite
+                    {
+                        (entry.map.def().value_size, MapPerm::WriteOnly)
+                    } else {
+                        (0, MapPerm::Unavailable)
+                    }
                 }
-                _ => (0, MapPerm::Unavailable),
+                Some(entry) => match entry
+                    .access_for(owner)
+                    .map(|access| access.intersect(authorized))
+                {
+                    Some(access)
+                        if access.contains(MapAccess::READ)
+                            && access.contains(MapAccess::WRITE) =>
+                    {
+                        (entry.map.def().value_size, entry.perm)
+                    }
+                    Some(access) if access.contains(MapAccess::READ) => {
+                        (entry.map.def().value_size, MapPerm::ReadOnly)
+                    }
+                    Some(access)
+                        if access.contains(MapAccess::WRITE)
+                            && entry.perm == MapPerm::ReadWrite =>
+                    {
+                        (entry.map.def().value_size, MapPerm::WriteOnly)
+                    }
+                    _ => (0, MapPerm::Unavailable),
+                },
+                None => (0, MapPerm::Unavailable),
             })
             .unzip();
         (sizes, perms, self.map_generations.clone())
@@ -497,6 +637,29 @@ impl BpfManager {
             live_maps: self.live_maps,
             map_bytes: self.map_bytes,
             pinned_maps: self.pinned_maps.len(),
+        }
+    }
+
+    fn reclaim_unpinned_orphan_maps_if_quiescent(&mut self) {
+        if self.live_programs != 0 {
+            return;
+        }
+        let pinned_maps = &self.pinned_maps;
+        let map_generations = &self.map_generations;
+        for (map_slot, slot) in self.maps.iter_mut().enumerate() {
+            let Some(entry) = slot.as_ref() else {
+                continue;
+            };
+            if entry.owner != PINNED_MAP_OWNER || entry.charged_bytes == 0 {
+                continue;
+            }
+            let map_id = encode_handle(map_slot, map_generations[map_slot]);
+            if pinned_maps.iter().any(|pin| pin.map_id == map_id) {
+                continue;
+            }
+            let entry = slot.take().expect("orphan map entry was present");
+            self.live_maps = self.live_maps.saturating_sub(1);
+            self.map_bytes = self.map_bytes.saturating_sub(entry.charged_bytes);
         }
     }
 
@@ -545,14 +708,14 @@ impl BpfManager {
             }
         }
 
-        let maps = &self.maps;
-        let map_generations = &self.map_generations;
-        self.pinned_maps.retain(|(_, map_id)| {
-            !decode_handle(map_generations, *map_id)
-                .and_then(|slot| maps.get(slot))
-                .and_then(Option::as_ref)
-                .is_some_and(|entry| entry.owner == owner)
-        });
+        for entry in self.maps.iter_mut().filter_map(Option::as_mut) {
+            entry.grants.retain(|grant| grant.owner != owner);
+        }
+        for pin in &mut self.pinned_maps {
+            if pin.owner == owner {
+                pin.owner = PINNED_MAP_OWNER;
+            }
+        }
 
         for slot in &mut self.programs {
             let Some(entry) = slot.as_ref() else {
@@ -575,11 +738,18 @@ impl BpfManager {
             return false;
         }
 
-        for slot in &mut self.maps {
+        let pinned_maps = &self.pinned_maps;
+        let map_generations = &self.map_generations;
+        for (map_slot, slot) in self.maps.iter_mut().enumerate() {
             let Some(entry) = slot.as_ref() else {
                 continue;
             };
             if entry.owner != owner || entry.charged_bytes == 0 {
+                continue;
+            }
+            let map_id = encode_handle(map_slot, map_generations[map_slot]);
+            if pinned_maps.iter().any(|pin| pin.map_id == map_id) {
+                slot.as_mut().expect("owned map entry was present").owner = PINNED_MAP_OWNER;
                 continue;
             }
             let entry = slot.take().expect("owned map entry was present");
@@ -589,6 +759,7 @@ impl BpfManager {
         if had_owned_objects {
             log::info!("BPF_OWNER_RECLAIM_OK owner={owner}");
         }
+        self.reclaim_unpinned_orphan_maps_if_quiescent();
         true
     }
 
@@ -639,6 +810,7 @@ impl BpfManager {
         wcet_cycles: u64,
         charge: usize,
         owner: u64,
+        authorization: BpfLoadAuthorization,
     ) -> Result<u32, BpfError> {
         self.ensure_program_quota(owner, charge)?;
         let id = insert_handle_slot(
@@ -650,6 +822,7 @@ impl BpfManager {
                 wcet_cycles,
                 charged_bytes: charge,
                 owner,
+                authorization,
             },
         )?;
         self.live_programs = self
@@ -669,8 +842,15 @@ impl BpfManager {
         sizes: &'a [u32],
         perms: &'a [MapPerm],
         generations: &'a [u32],
+        authorization: BpfLoadAuthorization,
     ) -> VerifyConfig<'a> {
-        self.verify_config_with_ctx_data(sizes, perms, generations, VERIFY_CTX_DATA_SIZE_MAX)
+        self.verify_config_with_ctx_data(
+            sizes,
+            perms,
+            generations,
+            VERIFY_CTX_DATA_SIZE_MAX,
+            authorization,
+        )
     }
 
     fn verify_config_with_ctx_data<'a>(
@@ -679,6 +859,7 @@ impl BpfManager {
         perms: &'a [MapPerm],
         generations: &'a [u32],
         ctx_data_size: u32,
+        authorization: BpfLoadAuthorization,
     ) -> VerifyConfig<'a> {
         VerifyConfig {
             ctx_size: VERIFY_CTX_SIZE,
@@ -688,10 +869,8 @@ impl BpfManager {
             map_perms: perms,
             map_generations: generations,
             map_handle_slot_bits: BPF_HANDLE_SLOT_BITS as u8,
-            // No process-credential system yet: every load comes from the
-            // privileged init context. TODO: derive Trusted from signature
-            // authentication (#20) and Unprivileged from caller UID (#67).
-            caller: LoadCaller::Privileged,
+            caller: authorization.caller,
+            allow_actuation: authorization.allow_actuation,
         }
     }
 
@@ -700,6 +879,15 @@ impl BpfManager {
     }
 
     pub fn load_program_for(&mut self, owner: u64, elf_bytes: &[u8]) -> Result<u32, BpfError> {
+        self.load_program_authorized(owner, elf_bytes, BpfLoadAuthorization::kernel())
+    }
+
+    pub fn load_program_authorized(
+        &mut self,
+        owner: u64,
+        elf_bytes: &[u8],
+        authorization: BpfLoadAuthorization,
+    ) -> Result<u32, BpfError> {
         if elf_bytes.len() > self.limits.max_elf_bytes {
             return Err(BpfError::ResourceLimit);
         }
@@ -709,13 +897,14 @@ impl BpfManager {
         // Authenticate provenance before parsing (#20): a signed RBPF container
         // is verified against the trust store and unwrapped to its inner ELF; a
         // plain ELF is accepted only when unsigned loads are permitted.
-        let elf_bytes = self
+        let authenticated = self
             .signature_verifier
-            .authenticate(elf_bytes, self.allow_unsigned)
+            .authenticate_with_provenance(elf_bytes, self.allow_unsigned)
             .map_err(|e| {
                 log::error!("BpfManager: ELF program failed authentication: {}", e);
                 BpfError::SignatureRejected
             })?;
+        let elf_bytes = authenticated.program_data();
 
         let mut loader = BpfLoader::<ActiveProfile>::new();
         let obj = loader.load(elf_bytes).map_err(|_| BpfError::NotLoaded)?;
@@ -730,7 +919,8 @@ impl BpfManager {
 
             // Verify before accepting: rejects unsafe bytecode and computes the
             // real stack usage (no longer the hardcoded 0). #48.
-            let (map_value_sizes, map_perms, map_generations) = self.map_metadata_for_owner(owner);
+            let (map_value_sizes, map_perms, map_generations) =
+                self.map_metadata_for_owner(owner, authorization.map_access);
             #[cfg(feature = "verifier-cost")]
             let insn_count = loaded_prog.insns().len();
             #[cfg(feature = "verifier-cost")]
@@ -738,7 +928,12 @@ impl BpfManager {
             let (bpf_prog, stats) = Verifier::<ActiveProfile>::verify_with_stats(
                 loaded_prog.prog_type(),
                 loaded_prog.insns(),
-                self.verify_config(&map_value_sizes, &map_perms, &map_generations),
+                self.verify_config(
+                    &map_value_sizes,
+                    &map_perms,
+                    &map_generations,
+                    authorization,
+                ),
             )
             .map_err(|e| {
                 log::error!("BpfManager: ELF program rejected by verifier: {}", e);
@@ -747,7 +942,8 @@ impl BpfManager {
             #[cfg(feature = "verifier-cost")]
             let verify_cycles = read_cycles().wrapping_sub(start_cycles);
 
-            let id = self.register_program(bpf_prog, stats.wcet_cycles, charge, owner)?;
+            let id =
+                self.register_program(bpf_prog, stats.wcet_cycles, charge, owner, authorization)?;
             #[cfg(feature = "verifier-cost")]
             crate::serial_println!(
                 "{}",
@@ -774,6 +970,15 @@ impl BpfManager {
         owner: u64,
         insns: Vec<BpfInsn>,
     ) -> Result<u32, BpfError> {
+        self.load_raw_program_authorized(owner, insns, BpfLoadAuthorization::kernel())
+    }
+
+    pub fn load_raw_program_authorized(
+        &mut self,
+        owner: u64,
+        insns: Vec<BpfInsn>,
+        authorization: BpfLoadAuthorization,
+    ) -> Result<u32, BpfError> {
         // Raw instruction loads carry no signature container, so they cannot be
         // authenticated (#20). Reject them when enforcement is on.
         if !self.allow_unsigned {
@@ -790,7 +995,8 @@ impl BpfManager {
         // Verify before accepting: this is the gate that makes the verifier
         // load-bearing — unsafe bytecode is rejected and the real stack usage is
         // computed rather than trusting a hardcoded 0. #48.
-        let (map_value_sizes, map_perms, map_generations) = self.map_metadata_for_owner(owner);
+        let (map_value_sizes, map_perms, map_generations) =
+            self.map_metadata_for_owner(owner, authorization.map_access);
         #[cfg(feature = "verifier-cost")]
         let insn_count = insns.len();
         #[cfg(feature = "verifier-cost")]
@@ -798,7 +1004,12 @@ impl BpfManager {
         let (bpf_prog, stats) = Verifier::<ActiveProfile>::verify_with_stats(
             BpfProgType::Unspec,
             &insns,
-            self.verify_config(&map_value_sizes, &map_perms, &map_generations),
+            self.verify_config(
+                &map_value_sizes,
+                &map_perms,
+                &map_generations,
+                authorization,
+            ),
         )
         .map_err(|e| {
             log::error!("BpfManager: raw program rejected by verifier: {}", e);
@@ -807,7 +1018,8 @@ impl BpfManager {
         #[cfg(feature = "verifier-cost")]
         let verify_cycles = read_cycles().wrapping_sub(start_cycles);
 
-        let id = self.register_program(bpf_prog, stats.wcet_cycles, charge, owner)?;
+        let id =
+            self.register_program(bpf_prog, stats.wcet_cycles, charge, owner, authorization)?;
         #[cfg(feature = "verifier-cost")]
         crate::serial_println!(
             "{}",
@@ -855,7 +1067,8 @@ impl BpfManager {
             return Err(BpfError::NotLoaded);
         };
 
-        let (map_value_sizes, map_perms, map_generations) = self.map_metadata_for_owner(owner);
+        let (map_value_sizes, map_perms, map_generations) =
+            self.map_metadata_for_owner(owner, program_entry.authorization.map_access);
         let ctx_data_size = attach_ctx_data_size(attach_type);
         let program = &program_entry.program;
         Verifier::<ActiveProfile>::verify_with_stats(
@@ -866,6 +1079,7 @@ impl BpfManager {
                 &map_perms,
                 &map_generations,
                 ctx_data_size,
+                program_entry.authorization,
             ),
         )
         .map_err(|e| {
@@ -987,6 +1201,7 @@ impl BpfManager {
         self.live_programs = self.live_programs.saturating_sub(1);
         self.program_bytes = self.program_bytes.saturating_sub(charge);
         self.gpio_routes.remove(prog_id);
+        self.reclaim_unpinned_orphan_maps_if_quiescent();
         Ok(())
     }
 
@@ -1362,7 +1577,7 @@ impl BpfManager {
         map_id: u32,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, BpfError> {
-        self.ensure_map_owner(owner, map_id)?;
+        self.ensure_map_access(owner, map_id, MapAccess::READ)?;
         Ok(self.map_lookup(map_id, key))
     }
 
@@ -1380,7 +1595,7 @@ impl BpfManager {
     fn ensure_map_writable(&self, map_id: u32) -> Result<(), BpfError> {
         match self.map_entry(map_id).ok_or(BpfError::NotLoaded)?.perm {
             MapPerm::Unavailable => Err(BpfError::PermissionDenied),
-            MapPerm::ReadWrite => Ok(()),
+            MapPerm::WriteOnly | MapPerm::ReadWrite => Ok(()),
             MapPerm::ReadOnly => Err(BpfError::ReadOnlyMap),
         }
     }
@@ -1388,6 +1603,25 @@ impl BpfManager {
     fn ensure_map_owner(&self, owner: u64, map_id: u32) -> Result<(), BpfError> {
         let entry = self.map_entry(map_id).ok_or(BpfError::NotLoaded)?;
         if entry.owner == owner {
+            Ok(())
+        } else {
+            Err(BpfError::PermissionDenied)
+        }
+    }
+
+    fn ensure_map_access(
+        &self,
+        owner: u64,
+        map_id: u32,
+        required: MapAccess,
+    ) -> Result<(), BpfError> {
+        let entry = self.map_entry(map_id).ok_or(BpfError::NotLoaded)?;
+        let access = if entry.charged_bytes == 0 {
+            MapAccess::READ_WRITE
+        } else {
+            entry.access_for(owner).ok_or(BpfError::PermissionDenied)?
+        };
+        if access.contains(required) {
             Ok(())
         } else {
             Err(BpfError::PermissionDenied)
@@ -1416,7 +1650,7 @@ impl BpfManager {
         value: &[u8],
         flags: u64,
     ) -> Result<(), BpfError> {
-        self.ensure_map_owner(owner, map_id)?;
+        self.ensure_map_access(owner, map_id, MapAccess::WRITE)?;
         self.map_update(map_id, key, value, flags)
     }
 
@@ -1427,7 +1661,7 @@ impl BpfManager {
     }
 
     pub fn map_delete_for(&self, owner: u64, map_id: u32, key: &[u8]) -> Result<(), BpfError> {
-        self.ensure_map_owner(owner, map_id)?;
+        self.ensure_map_access(owner, map_id, MapAccess::WRITE)?;
         self.map_delete(map_id, key)
     }
 
@@ -1440,24 +1674,47 @@ impl BpfManager {
         owner: u64,
         map_id: u32,
     ) -> Result<&kernel_bpf::maps::MapDef, BpfError> {
-        self.ensure_map_owner(owner, map_id)?;
+        self.get_map_def_for_access(owner, map_id, MapAccess::READ)
+    }
+
+    pub(crate) fn get_map_def_for_access(
+        &self,
+        owner: u64,
+        map_id: u32,
+        required: MapAccess,
+    ) -> Result<&kernel_bpf::maps::MapDef, BpfError> {
+        self.ensure_map_access(owner, map_id, required)?;
         self.get_map_def(map_id).ok_or(BpfError::NotLoaded)
     }
 
     pub fn pin_map(&mut self, path: String, map_id: u32) -> Result<(), BpfError> {
+        self.pin_map_for(0, path, map_id)
+    }
+
+    pub fn pin_map_for(&mut self, owner: u64, path: String, map_id: u32) -> Result<(), BpfError> {
+        self.pin_map_with_access_for(owner, path, map_id, MapAccess::READ_WRITE)
+    }
+
+    pub fn pin_map_with_access_for(
+        &mut self,
+        owner: u64,
+        path: String,
+        map_id: u32,
+        offered: MapAccess,
+    ) -> Result<(), BpfError> {
         if path.is_empty() || path.len() >= BPF_PIN_PATH_MAX {
             return Err(BpfError::ResourceLimit);
         }
-        if self.map_entry(map_id).is_none() {
-            return Err(BpfError::NotLoaded);
+        if !offered.contains(MapAccess::READ) && !offered.contains(MapAccess::WRITE) {
+            return Err(BpfError::PermissionDenied);
         }
+        self.ensure_map_owner(owner, map_id)?;
 
-        if let Some((_, existing_id)) = self
-            .pinned_maps
-            .iter()
-            .find(|(existing_path, _)| existing_path == &path)
-        {
-            return if *existing_id == map_id {
+        if let Some(existing) = self.pinned_maps.iter().find(|pin| pin.path == path) {
+            return if existing.map_id == map_id
+                && existing.owner == owner
+                && existing.offered == offered
+            {
                 Ok(())
             } else {
                 Err(BpfError::ObjectBusy)
@@ -1469,42 +1726,81 @@ impl BpfManager {
         self.pinned_maps
             .try_reserve(1)
             .map_err(|_| BpfError::OutOfMemory)?;
-        self.pinned_maps.push((path, map_id));
+        self.pinned_maps.push(PinnedMap {
+            path,
+            map_id,
+            owner,
+            offered,
+        });
         Ok(())
-    }
-
-    pub fn pin_map_for(&mut self, owner: u64, path: String, map_id: u32) -> Result<(), BpfError> {
-        self.ensure_map_owner(owner, map_id)?;
-        self.pin_map(path, map_id)
     }
 
     pub fn get_pinned_map(&self, path: &str) -> Option<u32> {
         self.pinned_maps
             .iter()
-            .find(|(pinned_path, _)| pinned_path == path)
-            .map(|(_, map_id)| *map_id)
+            .find(|pin| pin.path == path)
+            .map(|pin| pin.map_id)
     }
 
-    pub fn get_pinned_map_for(&self, owner: u64, path: &str) -> Result<u32, BpfError> {
-        let map_id = self.get_pinned_map(path).ok_or(BpfError::NotLoaded)?;
-        self.ensure_map_owner(owner, map_id)?;
+    pub fn get_pinned_map_for(
+        &mut self,
+        owner: u64,
+        path: &str,
+        requested: MapAccess,
+    ) -> Result<u32, BpfError> {
+        let (map_id, offered) = self
+            .pinned_maps
+            .iter()
+            .find(|pin| pin.path == path)
+            .map(|pin| (pin.map_id, pin.offered))
+            .ok_or(BpfError::NotLoaded)?;
+        if !offered.contains(requested) {
+            return Err(BpfError::PermissionDenied);
+        }
+        let entry = self.map_entry(map_id).ok_or(BpfError::NotLoaded)?;
+        if entry.owner != owner {
+            let slot = self.map_slot(map_id).ok_or(BpfError::NotLoaded)?;
+            self.maps[slot]
+                .as_mut()
+                .ok_or(BpfError::NotLoaded)?
+                .grant(owner, requested)?;
+        }
         Ok(map_id)
     }
 
     pub fn unpin_map(&mut self, path: &str) -> Result<(), BpfError> {
+        self.unpin_map_for(0, path, true)
+    }
+
+    pub fn unpin_map_for(
+        &mut self,
+        owner: u64,
+        path: &str,
+        allow_orphan_cleanup: bool,
+    ) -> Result<(), BpfError> {
         let index = self
             .pinned_maps
             .iter()
-            .position(|(pinned_path, _)| pinned_path == path)
+            .position(|pin| pin.path == path)
             .ok_or(BpfError::NotLoaded)?;
+        let pin = &self.pinned_maps[index];
+        if pin.owner != owner && (pin.owner != PINNED_MAP_OWNER || !allow_orphan_cleanup) {
+            return Err(BpfError::PermissionDenied);
+        }
+        let map_id = pin.map_id;
+        let last_pin = !self
+            .pinned_maps
+            .iter()
+            .enumerate()
+            .any(|(other_index, pin)| other_index != index && pin.map_id == map_id);
+        let orphaned = self
+            .map_entry(map_id)
+            .is_some_and(|entry| entry.owner == PINNED_MAP_OWNER);
         self.pinned_maps.remove(index);
+        if last_pin && orphaned {
+            self.reclaim_unpinned_orphan_maps_if_quiescent();
+        }
         Ok(())
-    }
-
-    pub fn unpin_map_for(&mut self, owner: u64, path: &str) -> Result<(), BpfError> {
-        let map_id = self.get_pinned_map(path).ok_or(BpfError::NotLoaded)?;
-        self.ensure_map_owner(owner, map_id)?;
-        self.unpin_map(path)
     }
 
     /// Destroy an unpinned user map and reclaim its backing allocation.
@@ -1522,12 +1818,7 @@ impl BpfManager {
             return Err(BpfError::ReadOnlyMap);
         }
         self.ensure_map_owner(owner, map_id)?;
-        if self
-            .pinned_maps
-            .iter()
-            .any(|(_, pinned_map_id)| *pinned_map_id == map_id)
-            || self.live_programs != 0
-        {
+        if self.pinned_maps.iter().any(|pin| pin.map_id == map_id) || self.live_programs != 0 {
             return Err(BpfError::ObjectBusy);
         }
 
@@ -1553,7 +1844,7 @@ impl BpfManager {
     }
 
     pub fn get_map_info_for(&self, owner: u64, map_id: u32) -> Result<BpfObjectInfo, BpfError> {
-        self.ensure_map_owner(owner, map_id)?;
+        self.ensure_map_access(owner, map_id, MapAccess::READ)?;
         self.get_map_info(map_id).ok_or(BpfError::NotLoaded)
     }
 
@@ -1568,7 +1859,7 @@ impl BpfManager {
     }
 
     pub fn ringbuf_poll_for(&self, owner: u64, map_id: u32) -> Result<Option<Vec<u8>>, BpfError> {
-        self.ensure_map_owner(owner, map_id)?;
+        self.ensure_map_access(owner, map_id, MapAccess::READ)?;
         Ok(self.ringbuf_poll(map_id))
     }
 
@@ -1641,7 +1932,7 @@ mod tests {
             .create_map(MapType::Array as u32, 4, 8, 1)
             .expect("create user map");
 
-        let (sizes, perms, generations) = manager.map_metadata_for_owner(0);
+        let (sizes, perms, generations) = manager.map_metadata_for_owner(0, MapAccess::READ_WRITE);
 
         assert_eq!(sizes.len(), perms.len());
         assert_eq!(sizes.len(), generations.len());
@@ -1768,6 +2059,99 @@ mod tests {
     }
 
     #[test]
+    fn pinned_map_access_requires_open_and_honors_offered_rights() {
+        let mut manager = BpfManager::new();
+        let map_id = manager
+            .create_map_for(1, MapType::Array as u32, 4, 8, 1)
+            .expect("owner map");
+        manager
+            .pin_map_with_access_for(1, "/shared-read".into(), map_id, MapAccess::READ)
+            .expect("read-only pin");
+
+        assert_eq!(
+            manager.map_lookup_for(2, map_id, &0u32.to_ne_bytes()),
+            Err(BpfError::PermissionDenied)
+        );
+        assert_eq!(
+            manager.get_pinned_map_for(2, "/shared-read", MapAccess::WRITE),
+            Err(BpfError::PermissionDenied)
+        );
+        assert_eq!(
+            manager.get_pinned_map_for(2, "/shared-read", MapAccess::READ),
+            Ok(map_id)
+        );
+        assert!(manager
+            .map_lookup_for(2, map_id, &0u32.to_ne_bytes())
+            .is_ok());
+        assert_eq!(
+            manager.map_update_for(2, map_id, &0u32.to_ne_bytes(), &[1; 8], 0),
+            Err(BpfError::PermissionDenied)
+        );
+        assert_eq!(
+            manager.unpin_map_for(2, "/shared-read", false),
+            Err(BpfError::PermissionDenied)
+        );
+        manager
+            .unpin_map_for(1, "/shared-read", false)
+            .expect("pin owner unpins");
+        manager
+            .destroy_map_for(1, map_id)
+            .expect("map owner destroys unpinned map");
+    }
+
+    #[test]
+    fn pinned_write_only_grant_allows_mutation_without_disclosing_values() {
+        let mut manager = BpfManager::new();
+        let map_id = manager
+            .create_map_for(1, MapType::Array as u32, 4, 8, 1)
+            .expect("owner map");
+        manager
+            .pin_map_with_access_for(1, "/shared-write".into(), map_id, MapAccess::WRITE)
+            .expect("write-only pin");
+        assert_eq!(
+            manager.get_pinned_map_for(2, "/shared-write", MapAccess::WRITE),
+            Ok(map_id)
+        );
+
+        assert!(manager
+            .get_map_def_for_access(2, map_id, MapAccess::WRITE)
+            .is_ok());
+        manager
+            .map_update_for(2, map_id, &0u32.to_ne_bytes(), &[1; 8], 0)
+            .expect("write-only grantee updates map");
+        assert_eq!(
+            manager.map_lookup_for(2, map_id, &0u32.to_ne_bytes()),
+            Err(BpfError::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn pinned_map_grant_table_is_bounded() {
+        let mut manager = BpfManager::new();
+        let map_id = manager
+            .create_map_for(1, MapType::Array as u32, 4, 8, 1)
+            .expect("owner map");
+        manager
+            .pin_map_for(1, "/bounded-grants".into(), map_id)
+            .expect("pin map");
+
+        for owner in 2..(MAX_MAP_GRANTS as u64 + 2) {
+            assert_eq!(
+                manager.get_pinned_map_for(owner, "/bounded-grants", MapAccess::READ_WRITE),
+                Ok(map_id)
+            );
+        }
+        assert_eq!(
+            manager.get_pinned_map_for(
+                MAX_MAP_GRANTS as u64 + 2,
+                "/bounded-grants",
+                MapAccess::READ_WRITE,
+            ),
+            Err(BpfError::ResourceLimit)
+        );
+    }
+
+    #[test]
     fn program_quota_unload_and_inflight_reclamation_are_synchronous() {
         let mut manager = BpfManager::new_with_limits(tiny_limits());
         let insns = vec![BpfInsn::mov64_imm(0, 0), BpfInsn::exit()];
@@ -1874,6 +2258,80 @@ mod tests {
     }
 
     #[test]
+    fn program_map_helpers_cannot_exceed_credential_snapshot() {
+        let mut manager = BpfManager::new_with_limits(tiny_limits());
+        let owner = 1;
+        let map_id = manager
+            .create_map_for(owner, MapType::Array as u32, 4, 8, 1)
+            .expect("owner map");
+        let lookup = vec![
+            BpfInsn::mov64_imm(1, 0),
+            BpfInsn::new(0x7b, 10, 1, -8, 0),
+            BpfInsn::mov64_imm(1, map_id as i32),
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::add64_imm(2, -8),
+            BpfInsn::call(HelperId::MapLookupElem as i32),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ];
+
+        assert_eq!(
+            manager.load_raw_program_authorized(
+                owner,
+                lookup.clone(),
+                BpfLoadAuthorization::new(LoadCaller::Privileged, false, MapAccess::NONE),
+            ),
+            Err(BpfError::VerificationFailed)
+        );
+        let lookup_id = manager
+            .load_raw_program_authorized(
+                owner,
+                lookup,
+                BpfLoadAuthorization::new(LoadCaller::Privileged, false, MapAccess::READ),
+            )
+            .expect("read capability permits map lookup helper");
+        manager
+            .unload_program_for(owner, lookup_id)
+            .expect("unload lookup program");
+
+        let update = vec![
+            BpfInsn::mov64_imm(5, 0),
+            BpfInsn::new(0x7b, 10, 5, -8, 0),
+            BpfInsn::new(0x7b, 10, 5, -16, 0),
+            BpfInsn::mov64_imm(1, map_id as i32),
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::add64_imm(2, -8),
+            BpfInsn::mov64_reg(3, 10),
+            BpfInsn::add64_imm(3, -16),
+            BpfInsn::mov64_imm(4, 0),
+            BpfInsn::call(HelperId::MapUpdateElem as i32),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ];
+        assert_eq!(
+            manager.load_raw_program_authorized(
+                owner,
+                update.clone(),
+                BpfLoadAuthorization::new(LoadCaller::Privileged, false, MapAccess::READ),
+            ),
+            Err(BpfError::VerificationFailed)
+        );
+        let update_id = manager
+            .load_raw_program_authorized(
+                owner,
+                update,
+                BpfLoadAuthorization::new(LoadCaller::Privileged, false, MapAccess::WRITE),
+            )
+            .expect("write capability permits map update helper without read authority");
+        manager
+            .unload_program_for(owner, update_id)
+            .expect("unload update program");
+        manager
+            .destroy_map_for(owner, map_id)
+            .expect("destroy owner map");
+    }
+
+    #[test]
     fn owner_reclamation_waits_for_inflight_program_snapshots() {
         let mut manager = BpfManager::new_with_limits(tiny_limits());
         let map_id = manager
@@ -1900,7 +2358,7 @@ mod tests {
         assert!(!manager.reclaim_owner(7));
         assert_eq!(manager.resource_usage().live_programs, 1);
         assert_eq!(manager.resource_usage().live_maps, 1);
-        assert_eq!(manager.resource_usage().pinned_maps, 0);
+        assert_eq!(manager.resource_usage().pinned_maps, 1);
         assert!(manager
             .attachments
             .values()
@@ -1908,6 +2366,20 @@ mod tests {
 
         drop(in_flight);
         assert!(manager.reclaim_owner(7));
+        assert_eq!(manager.resource_usage().live_programs, 0);
+        assert_eq!(manager.resource_usage().live_maps, 1);
+        assert_eq!(manager.resource_usage().pinned_maps, 1);
+        assert_eq!(
+            manager.get_pinned_map_for(8, "/owner-map", MapAccess::READ_WRITE),
+            Ok(map_id)
+        );
+        assert_eq!(
+            manager.unpin_map_for(8, "/owner-map", false),
+            Err(BpfError::PermissionDenied)
+        );
+        manager
+            .unpin_map_for(8, "/owner-map", true)
+            .expect("object administrator cleans up orphaned pin");
         assert_eq!(
             manager.resource_usage(),
             BpfResourceUsage {
@@ -1918,6 +2390,33 @@ mod tests {
                 pinned_maps: 0,
             }
         );
+    }
+
+    #[test]
+    fn orphan_unpin_is_nonblocking_and_reclaims_after_program_quiescence() {
+        let mut manager = BpfManager::new_with_limits(tiny_limits());
+        let map_id = manager
+            .create_map_for(7, MapType::Array as u32, 4, 8, 1)
+            .expect("owner map");
+        manager
+            .pin_map_for(7, "/deferred-orphan".into(), map_id)
+            .expect("pin owner map");
+        let program_id = manager
+            .load_raw_program_for(8, vec![BpfInsn::mov64_imm(0, 0), BpfInsn::exit()])
+            .expect("unrelated live program");
+
+        assert!(manager.reclaim_owner(7));
+        manager
+            .unpin_map_for(9, "/deferred-orphan", true)
+            .expect("administrator removes orphan pin without waiting");
+        assert_eq!(manager.resource_usage().pinned_maps, 0);
+        assert_eq!(manager.resource_usage().live_maps, 1);
+
+        manager
+            .unload_program_for(8, program_id)
+            .expect("quiesce unrelated program");
+        assert_eq!(manager.resource_usage().live_maps, 0);
+        assert_eq!(manager.resource_usage().map_bytes, 0);
     }
 
     #[test]

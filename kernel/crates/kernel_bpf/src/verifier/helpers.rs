@@ -369,6 +369,9 @@ pub struct HelperSignature {
     /// Minimum caller tier permitted to call this helper (#88). Defaults to
     /// `Unprivileged` (callable by all); privileged-only helpers raise it.
     pub min_tier: super::LoadCaller,
+    /// Whether the helper can change physical device state. Caller trust and
+    /// program authenticity do not imply authority to actuate hardware.
+    pub requires_actuation: bool,
 }
 
 impl HelperSignature {
@@ -379,12 +382,19 @@ impl HelperSignature {
             args,
             ret,
             min_tier: super::LoadCaller::Unprivileged,
+            requires_actuation: false,
         }
     }
 
     /// Mark this helper as requiring at least caller tier `t`.
     const fn with_min_tier(mut self, t: super::LoadCaller) -> Self {
         self.min_tier = t;
+        self
+    }
+
+    /// Mark this helper as requiring explicit hardware-actuation authority.
+    const fn requiring_actuation(mut self) -> Self {
+        self.requires_actuation = true;
         self
     }
 
@@ -512,6 +522,7 @@ pub fn get_helper_signature(id: HelperId) -> HelperSignature {
 
         HelperId::GpioSet => {
             HelperSignature::new(id, &[ArgType::Scalar, ArgType::Scalar], ReturnType::Integer)
+                .requiring_actuation()
         }
 
         HelperId::GpioGet => HelperSignature::new(id, &[ArgType::Scalar], ReturnType::Integer),
@@ -520,7 +531,8 @@ pub fn get_helper_signature(id: HelperId) -> HelperSignature {
             id,
             &[ArgType::Scalar, ArgType::Scalar, ArgType::Scalar],
             ReturnType::Integer,
-        ),
+        )
+        .requiring_actuation(),
 
         HelperId::IioRead => HelperSignature::new(
             id,
@@ -532,7 +544,8 @@ pub fn get_helper_signature(id: HelperId) -> HelperSignature {
             id,
             &[ArgType::Scalar, ArgType::PtrToMem, ArgType::MemSize],
             ReturnType::Integer,
-        ),
+        )
+        .requiring_actuation(),
     }
 }
 

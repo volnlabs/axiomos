@@ -112,6 +112,14 @@ pub enum VerifyError {
         required: LoadCaller,
     },
 
+    /// Helper can actuate hardware but the load authorization lacks that right.
+    ActuationCapabilityRequired {
+        /// Instruction index
+        insn_idx: usize,
+        /// Helper ID (raw)
+        helper_id: i32,
+    },
+
     /// Unprivileged program returns a pointer (kernel-address leak) (#88).
     PointerLeakUnprivileged {
         /// Instruction index of the EXIT
@@ -336,6 +344,13 @@ impl fmt::Display for VerifyError {
             } => write!(
                 f,
                 "helper {helper_id} requires {required:?} privilege at instruction {insn_idx}"
+            ),
+            Self::ActuationCapabilityRequired {
+                insn_idx,
+                helper_id,
+            } => write!(
+                f,
+                "helper {helper_id} requires hardware-actuation authority at instruction {insn_idx}"
             ),
             Self::PointerLeakUnprivileged { insn_idx } => write!(
                 f,

@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+ed25519-dalek = { version = "2.2", default-features = false }
+# Bare-metal release builds on the pinned nightly cannot codegen SHA-NI/AVX
+# target-feature shims. Feature unification keeps dalek's SHA-512 portable.
+sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
 spin.workspace = true
 zerocopy.workspace = true
 
