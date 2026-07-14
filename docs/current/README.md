@@ -17,3 +17,8 @@ This directory is the entry point for normative documentation.
 
 The component inventory, shipped-image contents, ABI capabilities, and artifact
 provenance tables will be generated under `docs/generated/` by `cargo xtask`.
+
+Current generated authority:
+
+- [Component inventory](../generated/components.md)
+- [Immutable build inputs](../generated/build-inputs.md)

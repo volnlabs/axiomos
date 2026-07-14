@@ -6,10 +6,14 @@ use std::process::{Command, Stdio};
 use file_structure::{Dir, Kind};
 use ovmf_prebuilt::{Arch, FileType, Prebuilt, Source};
 
+const BUILD_INPUTS: &str = include_str!("ci/build-inputs.env");
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=limine.conf");
+    println!("cargo:rerun-if-changed=ci/build-inputs.env");
     println!("cargo:rerun-if-env-changed=AXIOM_SIGNED_BPF_STARTUP_PATH");
+    println!("cargo:rerun-if-env-changed=AXIOM_ARTIFACT_PATHS");
 
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
 
@@ -27,10 +31,12 @@ fn main() {
     );
     println!("cargo:rustc-env=KERNEL_BINARY={}", kernel.display());
 
+    let mut bootable_iso = None;
     if target_arch == "x86_64" {
         let limine_dir = limine();
         let iso = build_iso(&limine_dir, &kernel);
         println!("cargo:rustc-env=BOOTABLE_ISO={}", iso.display());
+        bootable_iso = Some(iso);
 
         let ovmf = ovmf();
         println!(
@@ -52,6 +58,35 @@ fn main() {
 
     let disk_image = build_os_disk_image(&target_arch);
     println!("cargo:rustc-env=DISK_IMAGE={}", disk_image.display());
+    write_artifact_paths(&kernel, &disk_image, bootable_iso.as_deref());
+}
+
+fn pinned_input(name: &str) -> &'static str {
+    BUILD_INPUTS
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .find_map(|(key, value)| (key.trim() == name).then_some(value.trim()))
+        .unwrap_or_else(|| panic!("missing {name} in ci/build-inputs.env"))
+}
+
+fn write_artifact_paths(kernel: &Path, disk: &Path, iso: Option<&Path>) {
+    let Some(path) = std::env::var_os("AXIOM_ARTIFACT_PATHS") else {
+        return;
+    };
+    let mut contents = format!(
+        "KERNEL_BINARY={}\nDISK_IMAGE={}\n",
+        kernel.display(),
+        disk.display()
+    );
+    if let Some(iso) = iso {
+        contents.push_str(&format!("BOOTABLE_ISO={}\n", iso.display()));
+    }
+    fs::write(&path, contents).unwrap_or_else(|error| {
+        panic!(
+            "failed to write artifact paths to {}: {error}",
+            PathBuf::from(path).display()
+        )
+    });
 }
 
 fn build_os_disk_image(target_arch: &str) -> PathBuf {
@@ -142,8 +177,14 @@ fn build_dir(current_path: &Path, current_dir: &Dir<'_>, target_arch: &str) {
 }
 
 fn ovmf() -> Prebuilt {
-    Prebuilt::fetch(Source::LATEST, PathBuf::from("target/ovmf"))
-        .expect("should be able to fetch OVMF prebuilt firmware")
+    Prebuilt::fetch(
+        Source {
+            tag: pinned_input("OVMF_TAG"),
+            sha256: pinned_input("OVMF_SHA256"),
+        },
+        PathBuf::from("target/ovmf"),
+    )
+    .expect("should be able to fetch OVMF prebuilt firmware")
 }
 
 fn build_iso(limine_checkout: impl AsRef<Path>, kernel_binary: impl AsRef<Path>) -> PathBuf {
@@ -246,23 +287,87 @@ fn build_iso(limine_checkout: impl AsRef<Path>, kernel_binary: impl AsRef<Path>)
 
 fn limine() -> PathBuf {
     let limine_dir = PathBuf::from("target/limine");
+    let pinned_ref = pinned_input("LIMINE_REF");
+    let expected_revision = pinned_input("LIMINE_REVISION");
 
     // check whether we've already checked it out
     if exists(&limine_dir).expect("should be able to check if limine directory exists") {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&limine_dir)
+            .arg("rev-parse")
+            .arg("HEAD")
+            .output()
+            .expect("git rev-parse should execute for cached Limine");
+        assert!(
+            output.status.success(),
+            "cached Limine must be a git checkout"
+        );
+        let actual = String::from_utf8(output.stdout).expect("Limine revision should be UTF-8");
+        assert_eq!(
+            actual.trim(),
+            expected_revision,
+            "cached Limine revision does not match ci/build-inputs.env; remove target/limine"
+        );
         return limine_dir;
     }
 
-    // check out
-    let status = std::process::Command::new("git")
-        .arg("clone")
-        .arg("https://github.com/limine-bootloader/limine.git")
-        .arg("--branch=v9.x-binary")
-        .arg("--depth=1")
+    let status = Command::new("git")
+        .arg("init")
         .arg(&limine_dir)
         .stderr(Stdio::inherit())
         .stdout(Stdio::inherit())
         .status()
-        .expect("git clone command should execute");
+        .expect("git init command should execute");
+    assert!(status.success());
+
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(&limine_dir)
+        .arg("remote")
+        .arg("add")
+        .arg("origin")
+        .arg(pinned_input("LIMINE_REPOSITORY"))
+        .status()
+        .expect("git remote add should execute");
+    assert!(status.success());
+
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(&limine_dir)
+        .arg("fetch")
+        .arg("--depth=1")
+        .arg("origin")
+        .arg(pinned_ref)
+        .stderr(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .status()
+        .expect("git fetch should execute");
+    assert!(status.success());
+
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&limine_dir)
+        .arg("rev-parse")
+        .arg("FETCH_HEAD^{commit}")
+        .output()
+        .expect("git rev-parse should execute for fetched Limine");
+    assert!(output.status.success(), "fetched Limine ref must resolve");
+    let actual = String::from_utf8(output.stdout).expect("Limine revision should be UTF-8");
+    assert_eq!(
+        actual.trim(),
+        expected_revision,
+        "pinned Limine ref moved away from LIMINE_REVISION"
+    );
+
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(&limine_dir)
+        .arg("checkout")
+        .arg("--detach")
+        .arg(expected_revision)
+        .status()
+        .expect("git checkout should execute");
     assert!(status.success());
 
     // build

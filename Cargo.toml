@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0 OR MPL-2.0"
 default-run = "axiomos"
 
 [build-dependencies]
-ovmf-prebuilt = "0.2.3"
+ovmf-prebuilt = "=0.2.4"
 file_structure = { path = "userspace/file_structure" }
 
 # x86_64 dependencies

@@ -34,30 +34,24 @@ fi
 
 # Step 1: Build disk image with userspace binaries
 echo "Building userspace binaries and disk image..."
+ARTIFACT_PATHS=$(mktemp "$PROJECT_DIR/target/rpi5-artifacts.XXXXXX")
+trap 'rm -f "$ARTIFACT_PATHS"' EXIT
+export AXIOM_ARTIFACT_PATHS="$ARTIFACT_PATHS"
+
+# Run the image assembly with a unique artifact-manifest path. The environment
+# value makes build.rs emit the paths from this invocation;
+# no filesystem timestamp or stale target-directory search is involved.
 cargo build -p axiomos --target "$TARGET" --no-default-features --features aarch64_deps
 
-# Find the disk.img produced by THIS build. Restrict to axiomos build outputs:
-# `find -name disk.img` across the whole target dir also turns up stale copies
-# the kernel build.rs leaves in kernel-*/out/ and disk.img from other feature
-# sets, and picking the newest of those by mtime can select a stale rootfs — you
-# then flash a kernel with an out-of-date embedded filesystem (old init/binaries)
-# while everything reports success. Scope to axiomos/out and take the newest.
-DISK_PATH=$(find "target/$TARGET" -path "*axiomos-*/out/disk.img" -printf "%T@ %p\n" | sort -n | tail -n 1 | awk '{print $2}')
-if [ -z "$DISK_PATH" ]; then
-    echo "Error: disk.img not found in any axiomos build output"
+DISK_PATH=$(sed -n 's/^DISK_IMAGE=//p' "$ARTIFACT_PATHS")
+if [ -z "$DISK_PATH" ] || [ ! -f "$DISK_PATH" ]; then
+    echo "Error: build did not report a valid DISK_IMAGE in $ARTIFACT_PATHS"
     exit 1
 fi
 echo "Using disk image: $DISK_PATH ($(stat -c%s "$DISK_PATH" 2>/dev/null || stat -f%z "$DISK_PATH") bytes)"
 
-# Force the kernel to re-embed this disk. The kernel embeds the rootfs via
-# include_bytes!(env!("EMBEDDED_DISK_PATH")), and build.rs has a
-# rerun-if-changed on AXIOM_DISK_IMAGE — but cargo only reruns the copy + relink
-# if it sees the path as changed. Bumping the mtime guarantees that rerun, so a
-# rebuilt rootfs is never silently dropped in favour of a previously embedded one.
-touch "$DISK_PATH"
-
 # Step 2: Build the kernel with embedded disk image
-export AXIOM_DISK_IMAGE="$PROJECT_DIR/$DISK_PATH"
+export AXIOM_DISK_IMAGE="$DISK_PATH"
 echo "Building kernel (AXIOM_DISK_IMAGE=$AXIOM_DISK_IMAGE)..."
 if [ "$PROFILE" = "release" ]; then
     cargo build --target "$TARGET" --features "$FEATURES" --release -p kernel

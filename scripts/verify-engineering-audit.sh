@@ -228,6 +228,8 @@ write_manifest() {
         echo "results=$RESULTS"
         echo "artifact_hashes=$ARTIFACTS"
         echo "production_artifact_hashes=$PRODUCTION_ARTIFACTS"
+        echo "build_inputs=$ROOT/ci/build-inputs.env"
+        echo "build_inputs_sha256=$(sha256sum ci/build-inputs.env | awk '{print $1}')"
     } >"$MANIFEST"
 }
 
