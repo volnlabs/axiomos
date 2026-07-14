@@ -867,6 +867,20 @@ mod tests {
         assert_ne!(result.unwrap(), 0);
     }
 
+    /// # Miri safety contract
+    ///
+    /// This test is the regression test for the Stacked Borrows bug that
+    /// arose when `bpf_map_update_elem` formed a `&u64` reference through an
+    /// integer-derived raw pointer passed across the BPF helper ABI. Under
+    /// `cargo miri test -p kernel_bpf --no-default-features --features
+    /// cloud-profile` the test must pass — a regression that re-introduces
+    /// `*(value as *const u64)` (or any other ref-forming deref) inside the
+    /// helper fails Miri on the read.
+    ///
+    /// Miri proves the read is aliasing-clean under sequential single-
+    /// threaded execution. It does NOT prove concurrent safety; that
+    /// requires Loom or true kernel concurrency, tracked under
+    /// "Loom/Miri epoch reclamation tests" in `ENGINEERING_AUDIT.md`.
     #[test]
     fn execute_map_update_helper() {
         // Test that calling bpf_map_update_elem helper works
