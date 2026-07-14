@@ -360,7 +360,7 @@ impl ReturnType {
 }
 
 /// Helper function signature.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct HelperSignature {
     /// Helper ID
     pub id: HelperId,
@@ -415,8 +415,76 @@ impl HelperSignature {
     }
 }
 
+/// Runtime operation paired with a verified helper signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeHelper {
+    KtimeGetNs,
+    TracePrintk,
+    MapLookupElem,
+    MapUpdateElem,
+    MapDeleteElem,
+    GetInterruptLatencyNs,
+    GetBootTimeMs,
+    GetKernelHeapKb,
+    GetKernelImageMb,
+    RingbufOutput,
+    TimeseriesPush,
+    GpioSet,
+    GpioGet,
+    PwmWrite,
+}
+
+/// Shared verifier/runtime contract for one helper.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct HelperDescriptor {
+    signature: HelperSignature,
+    runtime: Option<RuntimeHelper>,
+}
+
+impl HelperDescriptor {
+    pub(crate) const fn signature(self) -> HelperSignature {
+        self.signature
+    }
+
+    pub(crate) const fn runtime(self) -> Option<RuntimeHelper> {
+        self.runtime
+    }
+}
+
 /// Get the signature for a helper function.
 pub fn get_helper_signature(id: HelperId) -> HelperSignature {
+    get_helper_descriptor(id).signature()
+}
+
+/// Get the shared verifier/runtime descriptor for a helper.
+pub(crate) fn get_helper_descriptor(id: HelperId) -> HelperDescriptor {
+    HelperDescriptor {
+        signature: helper_signature(id),
+        runtime: runtime_helper(id),
+    }
+}
+
+const fn runtime_helper(id: HelperId) -> Option<RuntimeHelper> {
+    match id {
+        HelperId::KtimeGetNs => Some(RuntimeHelper::KtimeGetNs),
+        HelperId::TracePrintk => Some(RuntimeHelper::TracePrintk),
+        HelperId::MapLookupElem => Some(RuntimeHelper::MapLookupElem),
+        HelperId::MapUpdateElem => Some(RuntimeHelper::MapUpdateElem),
+        HelperId::MapDeleteElem => Some(RuntimeHelper::MapDeleteElem),
+        HelperId::GetInterruptLatencyNs => Some(RuntimeHelper::GetInterruptLatencyNs),
+        HelperId::GetBootTimeMs => Some(RuntimeHelper::GetBootTimeMs),
+        HelperId::GetKernelHeapKb => Some(RuntimeHelper::GetKernelHeapKb),
+        HelperId::GetKernelImageMb => Some(RuntimeHelper::GetKernelImageMb),
+        HelperId::RingbufOutput => Some(RuntimeHelper::RingbufOutput),
+        HelperId::TimeseriesPush => Some(RuntimeHelper::TimeseriesPush),
+        HelperId::GpioSet => Some(RuntimeHelper::GpioSet),
+        HelperId::GpioGet => Some(RuntimeHelper::GpioGet),
+        HelperId::PwmWrite => Some(RuntimeHelper::PwmWrite),
+        _ => None,
+    }
+}
+
+const fn helper_signature(id: HelperId) -> HelperSignature {
     match id {
         // Core helpers
         HelperId::KtimeGetNs => HelperSignature::new(id, &[], ReturnType::Integer),
@@ -661,6 +729,52 @@ mod tests {
         assert_eq!(HelperId::from_raw(1003), Some(HelperId::GpioSet));
         assert_eq!(HelperId::from_raw(1004), Some(HelperId::GpioGet));
         assert_eq!(HelperId::from_raw(1005), Some(HelperId::PwmWrite));
+    }
+
+    #[test]
+    fn runtime_descriptors_match_the_published_helper_catalog() {
+        for entry in abi::SUPPORTED_BPF_HELPERS {
+            let id = HelperId::from_raw(entry.id as i32).expect("catalog helper must be known");
+            assert!(
+                get_helper_descriptor(id).runtime().is_some(),
+                "published helper {} has no runtime operation",
+                entry.name
+            );
+        }
+
+        let all = [
+            HelperId::KtimeGetNs,
+            HelperId::TracePrintk,
+            HelperId::GetPrandomU32,
+            HelperId::GetSmpProcessorId,
+            HelperId::MapLookupElem,
+            HelperId::MapUpdateElem,
+            HelperId::MapDeleteElem,
+            HelperId::RingbufOutput,
+            HelperId::TimeseriesPush,
+            HelperId::GetCurrentPidTgid,
+            HelperId::GetCurrentUidGid,
+            HelperId::GetCurrentComm,
+            HelperId::GetInterruptLatencyNs,
+            HelperId::ProbeRead,
+            HelperId::GetBootTimeMs,
+            HelperId::GetKernelHeapKb,
+            HelperId::GetKernelImageMb,
+            HelperId::RingbufReserve,
+            HelperId::RingbufSubmit,
+            HelperId::RingbufDiscard,
+            HelperId::SensorLastTimestamp,
+            HelperId::GpioSet,
+            HelperId::GpioGet,
+            HelperId::PwmWrite,
+            HelperId::IioRead,
+            HelperId::CanSend,
+        ];
+        let runtime_count = all
+            .iter()
+            .filter(|id| get_helper_descriptor(**id).runtime().is_some())
+            .count();
+        assert_eq!(runtime_count, abi::SUPPORTED_BPF_HELPERS.len());
     }
 
     #[test]

@@ -100,11 +100,12 @@ def main() -> None:
             re.MULTILINE,
         )
     )
-    interpreter = source("kernel/crates/kernel_bpf/src/execution/interpreter.rs")
-    helper_dispatch = interpreter.split("fn call_helper", 1)[1].split(
-        "fn execute_load", 1
+    runtime_helpers = helper_source.split("const fn runtime_helper", 1)[1].split(
+        "const fn helper_signature", 1
     )[0]
-    dispatched_variants = set(re.findall(r"Some\(HelperId::(\w+)\)", helper_dispatch))
+    dispatched_variants = set(
+        re.findall(r"HelperId::(\w+)\s*=>\s*Some\(RuntimeHelper::", runtime_helpers)
+    )
     dispatched_helpers = {variant_constants[variant] for variant in dispatched_variants}
     require_equal("BPF helper", helper_catalog, dispatched_helpers)
 

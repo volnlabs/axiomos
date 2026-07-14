@@ -23,6 +23,7 @@ use crate::bytecode::program::BpfProgram;
 use crate::bytecode::registers::{Register, RegisterFile};
 use crate::profile::{ActiveProfile, PhysicalProfile};
 use crate::verifier::HelperId;
+use crate::verifier::helpers::{RuntimeHelper, get_helper_descriptor};
 
 // SAFETY: These functions are defined in the kernel and linked into the final binary.
 // They follow the C calling convention which matches the interpreter's expectations.
@@ -267,59 +268,64 @@ impl<P: PhysicalProfile> Interpreter<P> {
         args: [u64; 5],
         ctx: &BpfContext<'_>,
     ) -> Result<u64, BpfError> {
+        let Some(id) = HelperId::from_raw(helper_id) else {
+            return Err(BpfError::InvalidHelper(helper_id));
+        };
+        let Some(runtime) = get_helper_descriptor(id).runtime() else {
+            return Err(BpfError::InvalidHelper(helper_id));
+        };
+
         // SAFETY: Calling BPF helpers is inherently unsafe as they are extern "C" functions.
         // We rely on the BPF verifier (in a full implementation) to ensure arguments are valid.
         // In this interpreter, we assume arguments are reasonably well-formed or the helper handles invalid inputs.
-        // Dispatch keys off `HelperId` (the shared ABI enum) rather than bare
-        // literals, so the interpreter and verifier can never disagree on which
-        // number means which helper (#121).
+        // Dispatch uses the runtime operation paired with the verifier signature.
         unsafe {
-            match HelperId::from_raw(helper_id) {
-                Some(HelperId::KtimeGetNs) => Ok(bpf_ktime_get_ns()),
+            match runtime {
+                RuntimeHelper::KtimeGetNs => Ok(bpf_ktime_get_ns()),
 
-                Some(HelperId::GetInterruptLatencyNs) => {
+                RuntimeHelper::GetInterruptLatencyNs => {
                     Ok(bpf_get_interrupt_latency_ns(ctx as *const BpfContext<'_>))
                 }
 
-                Some(HelperId::GetBootTimeMs) => {
+                RuntimeHelper::GetBootTimeMs => {
                     Ok(bpf_get_boot_time_ms(ctx as *const BpfContext<'_>))
                 }
 
-                Some(HelperId::GetKernelHeapKb) => {
+                RuntimeHelper::GetKernelHeapKb => {
                     Ok(bpf_get_kernel_heap_kb(ctx as *const BpfContext<'_>))
                 }
 
-                Some(HelperId::GetKernelImageMb) => {
+                RuntimeHelper::GetKernelImageMb => {
                     Ok(bpf_get_kernel_image_mb(ctx as *const BpfContext<'_>))
                 }
 
-                Some(HelperId::TracePrintk) => {
+                RuntimeHelper::TracePrintk => {
                     Ok(bpf_trace_printk(args[0] as *const u8, args[1] as u32) as u64)
                 }
 
-                Some(HelperId::MapLookupElem) => {
+                RuntimeHelper::MapLookupElem => {
                     Ok(bpf_map_lookup_elem(args[0] as u32, args[1] as *const u8) as u64)
                 }
 
-                Some(HelperId::MapUpdateElem) => Ok(bpf_map_update_elem(
+                RuntimeHelper::MapUpdateElem => Ok(bpf_map_update_elem(
                     args[0] as u32,
                     args[1] as *const u8,
                     args[2] as *const u8,
                     args[3],
                 ) as u64),
 
-                Some(HelperId::MapDeleteElem) => {
+                RuntimeHelper::MapDeleteElem => {
                     Ok(bpf_map_delete_elem(args[0] as u32, args[1] as *const u8) as u64)
                 }
 
-                Some(HelperId::RingbufOutput) => {
+                RuntimeHelper::RingbufOutput => {
                     Ok(
                         bpf_ringbuf_output(args[0] as u32, args[1] as *const u8, args[2], args[3])
                             as u64,
                     )
                 }
 
-                Some(HelperId::TimeseriesPush) => Ok(bpf_timeseries_push(
+                RuntimeHelper::TimeseriesPush => Ok(bpf_timeseries_push(
                     args[0] as u32,
                     args[1] as *const u8,
                     args[2] as *const u8,
@@ -327,19 +333,14 @@ impl<P: PhysicalProfile> Interpreter<P> {
 
                 // Robotics Helpers
                 // bpf_gpio_set (1003) -> bpf_gpio_write
-                Some(HelperId::GpioSet) => {
-                    Ok(bpf_gpio_write(args[0] as u32, args[1] as u32) as u64)
-                }
+                RuntimeHelper::GpioSet => Ok(bpf_gpio_write(args[0] as u32, args[1] as u32) as u64),
 
                 // bpf_gpio_get (1004) -> bpf_gpio_read
-                Some(HelperId::GpioGet) => Ok(bpf_gpio_read(args[0] as u32) as u64),
+                RuntimeHelper::GpioGet => Ok(bpf_gpio_read(args[0] as u32) as u64),
 
-                Some(HelperId::PwmWrite) => {
+                RuntimeHelper::PwmWrite => {
                     Ok(bpf_pwm_write(args[0] as u32, args[1] as u32, args[2] as u32) as u64)
                 }
-
-                // Known to the verifier but not yet implemented here, or unknown.
-                _ => Err(BpfError::InvalidHelper(helper_id)),
             }
         }
     }
