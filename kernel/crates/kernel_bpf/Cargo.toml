@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+kernel_abi = { path = "../kernel_abi" }
 ed25519-dalek = { version = "2.2", default-features = false }
 # Bare-metal release builds on the pinned nightly cannot codegen SHA-NI/AVX
 # target-feature shims. Feature unification keeps dalek's SHA-512 portable.

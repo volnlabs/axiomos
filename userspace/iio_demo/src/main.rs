@@ -1,11 +1,11 @@
 #![no_std]
 #![no_main]
 
-use kernel_abi::BpfAttr;
+use kernel_abi::{
+    BpfAttr, BPF_ATTACH_TYPE_IIO as ATTACH_TYPE_IIO,
+    BPF_HELPER_RINGBUF_OUTPUT as HELPER_RINGBUF_OUTPUT,
+};
 use minilib::{bpf, exit, msleep, write};
-
-// BPF Helper IDs
-const HELPER_RINGBUF_OUTPUT: i32 = 8;
 
 #[repr(C)]
 struct BpfInsn {
@@ -14,9 +14,6 @@ struct BpfInsn {
     off: i16,
     imm: i32,
 }
-
-// ATTACH_TYPE_IIO = 4
-const ATTACH_TYPE_IIO: u32 = 4;
 
 // IioEvent struct layout (must match kernel/crates/kernel_bpf/src/attach/iio.rs)
 // timestamp: u64 at offset 0
@@ -44,8 +41,8 @@ pub extern "C" fn _start() -> ! {
     print("Creating ringbuf map...\n");
 
     let map_attr = BpfAttr {
-        prog_type: 27, // map_type = RingBuf
-        insn_cnt: 4,   // key_size = 4 bytes (unused for ringbuf)
+        prog_type: kernel_abi::BPF_MAP_TYPE_RINGBUF,
+        insn_cnt: 4, // key_size = 4 bytes (unused for ringbuf)
         // Pack value_size and max_entries (buffer size must be power of 2)
         insns: 4096 | (4096u64 << 32), // value_size=4096, max_entries=4096
         ..Default::default()

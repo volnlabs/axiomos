@@ -14,7 +14,18 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use kernel_abi::{BpfObjectInfo, BPF_OBJECT_KIND_MAP};
+use kernel_abi::{
+    BpfObjectInfo, BPF_MAP_TYPE_ARRAY, BPF_MAP_TYPE_HASH, BPF_MAP_TYPE_RINGBUF,
+    BPF_MAP_TYPE_TIMESERIES, BPF_OBJECT_KIND_MAP,
+};
+pub use kernel_abi::{
+    BPF_ATTACH_TYPE_GPIO as ATTACH_TYPE_GPIO, BPF_ATTACH_TYPE_IIO as ATTACH_TYPE_IIO,
+    BPF_ATTACH_TYPE_PWM as ATTACH_TYPE_PWM,
+    BPF_ATTACH_TYPE_SCHED_SWITCH as ATTACH_TYPE_SCHED_SWITCH,
+    BPF_ATTACH_TYPE_SYSCALL as ATTACH_TYPE_SYSCALL,
+    BPF_ATTACH_TYPE_SYS_ENTER as ATTACH_TYPE_SYS_ENTER,
+    BPF_ATTACH_TYPE_SYS_EXIT as ATTACH_TYPE_SYS_EXIT, BPF_ATTACH_TYPE_TIMER as ATTACH_TYPE_TIMER,
+};
 use kernel_bpf::actuation::EnvelopeMap;
 use kernel_bpf::attach::{GpioEdge, GpioRouteTable};
 use kernel_bpf::bytecode::insn::BpfInsn;
@@ -97,15 +108,6 @@ fn read_cycles() -> u64 {
         0
     }
 }
-
-pub const ATTACH_TYPE_TIMER: u32 = 1;
-pub const ATTACH_TYPE_GPIO: u32 = 2;
-pub const ATTACH_TYPE_PWM: u32 = 3;
-pub const ATTACH_TYPE_IIO: u32 = 4;
-pub const ATTACH_TYPE_SYSCALL: u32 = 5;
-pub const ATTACH_TYPE_SYS_ENTER: u32 = ATTACH_TYPE_SYSCALL;
-pub const ATTACH_TYPE_SYS_EXIT: u32 = 6;
-pub const ATTACH_TYPE_SCHED_SWITCH: u32 = 7;
 
 pub const ENVELOPE_MAP_ID: u32 = 0;
 pub const RESERVED_MAP_COUNT: u32 = 1;
@@ -1753,19 +1755,24 @@ impl BpfManager {
         }
 
         let charge = match map_type {
-            1 if key_size != 0 && value_size != 0 => {
+            BPF_MAP_TYPE_HASH if key_size != 0 && value_size != 0 => {
                 BpfHashMap::<ActiveProfile>::allocation_size(key_size, value_size, max_entries)
             }
-            2 if key_size == 4 && value_size != 0 => {
+            BPF_MAP_TYPE_ARRAY if key_size == 4 && value_size != 0 => {
                 ArrayMap::<ActiveProfile>::allocation_size(value_size, max_entries)
             }
-            27 if key_size == 0 && value_size == 0 && max_entries.is_power_of_two() => {
+            BPF_MAP_TYPE_RINGBUF
+                if key_size == 0 && value_size == 0 && max_entries.is_power_of_two() =>
+            {
                 Some(max_entries as usize)
             }
-            100 if key_size == 8 && value_size != 0 => {
+            BPF_MAP_TYPE_TIMESERIES if key_size == 8 && value_size != 0 => {
                 TimeSeriesMap::<ActiveProfile>::allocation_size(value_size, max_entries)
             }
-            1 | 2 | 27 | 100 => return Err(BpfError::InvalidInstruction),
+            BPF_MAP_TYPE_HASH
+            | BPF_MAP_TYPE_ARRAY
+            | BPF_MAP_TYPE_RINGBUF
+            | BPF_MAP_TYPE_TIMESERIES => return Err(BpfError::InvalidInstruction),
             _ => return Err(BpfError::InvalidInstruction),
         }
         .ok_or(BpfError::ResourceLimit)?;
@@ -1831,28 +1838,28 @@ impl BpfManager {
         let charge =
             self.map_allocation_charge(owner, map_type, key_size, value_size, max_entries)?;
         let map: Box<dyn BpfMap<ActiveProfile>> = match map_type {
-            1 => {
+            BPF_MAP_TYPE_HASH => {
                 // Hash map
                 Box::new(
                     BpfHashMap::<ActiveProfile>::with_sizes(key_size, value_size, max_entries)
                         .map_err(|_| BpfError::OutOfMemory)?,
                 )
             }
-            2 => {
+            BPF_MAP_TYPE_ARRAY => {
                 // Array map
                 Box::new(
                     ArrayMap::<ActiveProfile>::with_entries(value_size, max_entries)
                         .map_err(|_| BpfError::OutOfMemory)?,
                 )
             }
-            27 => {
+            BPF_MAP_TYPE_RINGBUF => {
                 // Ring buffer map - max_entries is the buffer size (must be power of 2)
                 Box::new(
                     RingBufMap::<ActiveProfile>::new(max_entries as usize)
                         .map_err(|_| BpfError::OutOfMemory)?,
                 )
             }
-            100 => {
+            BPF_MAP_TYPE_TIMESERIES => {
                 // Time-series map
                 Box::new(
                     TimeSeriesMap::<ActiveProfile>::new(value_size, max_entries)

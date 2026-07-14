@@ -1,18 +1,13 @@
 #![no_std]
 #![no_main]
 
-use kernel_abi::BpfAttr;
+use kernel_abi::{
+    BpfAttr, BPF_ATTACH_TYPE_TIMER as ATTACH_TYPE_TIMER,
+    BPF_HELPER_KTIME_GET_NS as HELPER_KTIME_GET_NS,
+    BPF_HELPER_TIMESERIES_PUSH as HELPER_TIMESERIES_PUSH,
+    BPF_MAP_TYPE_TIMESERIES as MAP_TYPE_TIMESERIES,
+};
 use minilib::{bpf, exit, sleep, write};
-
-// Helper IDs
-const HELPER_KTIME_GET_NS: i32 = 1;
-const HELPER_TIMESERIES_PUSH: i32 = 9;
-
-// Attach Types
-const ATTACH_TYPE_TIMER: u32 = 1;
-
-// Map Types
-const MAP_TYPE_TIMESERIES: u32 = 100;
 
 #[repr(C)]
 struct BpfInsn {

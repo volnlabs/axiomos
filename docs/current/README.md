@@ -15,10 +15,12 @@ This directory is the entry point for normative documentation.
 - [Unsafe ledger](../security/unsafe-ledger.md)
 - [Threat model](../THREAT_MODEL.md)
 
-The component inventory, shipped-image contents, ABI capabilities, and artifact
-provenance tables will be generated under `docs/generated/` by `cargo xtask`.
+Generated authorities are refreshed by `cargo xtask docs` and checked by the
+local audit gate.
 
 Current generated authority:
 
 - [Component inventory](../generated/components.md)
 - [Immutable build inputs](../generated/build-inputs.md)
+- [Versioned userspace ABI](../generated/abi.md)
+- [Supported target and feature matrix](../generated/targets.md)

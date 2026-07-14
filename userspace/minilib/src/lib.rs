@@ -56,7 +56,7 @@ pub fn syscall_debug(n: usize) -> usize {
 }
 
 pub fn debug_syscall(op: usize, value: usize) -> isize {
-    syscall2(60, op, value) as isize
+    syscall2(kernel_abi::SYS_DEBUG, op, value) as isize
 }
 
 pub fn syscall1(n: usize, arg1: usize) -> usize {
@@ -114,7 +114,7 @@ pub fn syscall4(n: usize, arg1: usize, arg2: usize, arg3: usize, arg4: usize) ->
 // --- libc-like functions ---
 
 pub fn exit(code: i32) -> ! {
-    syscall1(1, code as usize);
+    syscall1(kernel_abi::SYS_EXIT, code as usize);
     loop {
         #[cfg(target_arch = "x86_64")]
         _mm_pause();
@@ -126,19 +126,34 @@ pub fn exit(code: i32) -> ! {
 }
 
 pub fn read(fd: c_int, buf: &mut [u8]) -> c_int {
-    syscall3(36, fd as usize, buf.as_mut_ptr() as usize, buf.len()) as i32
+    syscall3(
+        kernel_abi::SYS_READ,
+        fd as usize,
+        buf.as_mut_ptr() as usize,
+        buf.len(),
+    ) as i32
 }
 
 pub fn write(fd: c_int, buf: &[u8]) -> c_int {
-    syscall3(37, fd as usize, buf.as_ptr() as usize, buf.len()) as i32
+    syscall3(
+        kernel_abi::SYS_WRITE,
+        fd as usize,
+        buf.as_ptr() as usize,
+        buf.len(),
+    ) as i32
 }
 
 pub fn bpf(cmd: c_int, attr: *const u8, size: c_int) -> c_int {
-    syscall3(50, cmd as usize, attr as usize, size as usize) as i32
+    syscall3(
+        kernel_abi::SYS_BPF,
+        cmd as usize,
+        attr as usize,
+        size as usize,
+    ) as i32
 }
 
 pub fn estop_trigger() -> c_int {
-    syscall1(61, 1) as i32
+    syscall1(kernel_abi::SYS_ESTOP, kernel_abi::ESTOP_TRIGGER) as i32
 }
 
 // --- Time ---
@@ -151,15 +166,19 @@ pub struct timespec {
 }
 
 pub fn clock_gettime(clock_id: c_int, tp: *mut timespec) -> c_int {
-    syscall2(54, clock_id as usize, tp as usize) as i32
+    syscall2(
+        kernel_abi::SYS_CLOCK_GETTIME,
+        clock_id as usize,
+        tp as usize,
+    ) as i32
 }
 
 pub fn nanosleep(req: *const timespec, rem: *mut timespec) -> c_int {
-    syscall2(55, req as usize, rem as usize) as i32
+    syscall2(kernel_abi::SYS_NANOSLEEP, req as usize, rem as usize) as i32
 }
 
 pub fn interrupt_sleep(pid: c_int) -> c_int {
-    syscall1(64, pid as usize) as i32
+    syscall1(kernel_abi::SYS_INTERRUPT_SLEEP, pid as usize) as i32
 }
 
 pub fn sleep(secs: u64) {
@@ -196,39 +215,32 @@ pub const SEEK_CUR: i32 = 1;
 pub const SEEK_END: i32 = 2;
 
 pub fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
-    syscall3(39, fd as usize, offset as usize, whence as usize) as i64
+    syscall3(
+        kernel_abi::SYS_LSEEK,
+        fd as usize,
+        offset as usize,
+        whence as usize,
+    ) as i64
 }
 
 pub fn close(fd: c_int) -> c_int {
-    syscall1(40, fd as usize) as i32
+    syscall1(kernel_abi::SYS_CLOSE, fd as usize) as i32
 }
 
 pub fn dup(oldfd: c_int) -> c_int {
-    syscall1(42, oldfd as usize) as i32
+    syscall1(kernel_abi::SYS_DUP, oldfd as usize) as i32
 }
 
 pub fn dup2(oldfd: c_int, newfd: c_int) -> c_int {
-    syscall2(43, oldfd as usize, newfd as usize) as i32
+    syscall2(kernel_abi::SYS_DUP2, oldfd as usize, newfd as usize) as i32
 }
 
 pub fn pipe(pipefd: *mut c_int) -> c_int {
-    syscall1(44, pipefd as usize) as i32
-}
-
-pub fn chdir(path: &str) -> c_int {
-    syscall2(45, path.as_ptr() as usize, path.len()) as i32
-}
-
-pub fn mkdir(path: &str, mode: c_int) -> c_int {
-    syscall3(46, path.as_ptr() as usize, path.len(), mode as usize) as i32
-}
-
-pub fn rmdir(path: &str) -> c_int {
-    syscall2(47, path.as_ptr() as usize, path.len()) as i32
+    syscall1(kernel_abi::SYS_PIPE, pipefd as usize) as i32
 }
 
 pub fn getcwd(buf: &mut [u8]) -> c_int {
-    syscall2(35, buf.as_mut_ptr() as usize, buf.len()) as i32
+    syscall2(kernel_abi::SYS_GETCWD, buf.as_mut_ptr() as usize, buf.len()) as i32
 }
 
 #[repr(C)]
@@ -255,7 +267,7 @@ pub struct stat {
 }
 
 pub fn fstat(fd: c_int, buf: *mut stat) -> c_int {
-    syscall2(5, fd as usize, buf as usize) as i32
+    syscall2(kernel_abi::SYS_FSTAT, fd as usize, buf as usize) as i32
 }
 
 pub const O_CREAT: i32 = 1 << 2;
@@ -265,7 +277,7 @@ pub const O_WRONLY: i32 = 1 << 19;
 
 pub fn open(path: &str, flags: c_int, mode: c_int) -> c_int {
     syscall4(
-        3,
+        kernel_abi::SYS_OPEN,
         path.as_ptr() as usize,
         path.len(),
         flags as usize,
@@ -274,12 +286,12 @@ pub fn open(path: &str, flags: c_int, mode: c_int) -> c_int {
 }
 
 pub fn spawn(path: &str) -> c_int {
-    syscall2(56, path.as_ptr() as usize, path.len()) as i32
+    syscall2(kernel_abi::SYS_SPAWN, path.as_ptr() as usize, path.len()) as i32
 }
 
 pub fn spawn_restricted(path: &str, bpf_capabilities: u32) -> c_int {
     syscall3(
-        62,
+        kernel_abi::SYS_SPAWN_RESTRICTED,
         path.as_ptr() as usize,
         path.len(),
         bpf_capabilities as usize,
@@ -288,11 +300,14 @@ pub fn spawn_restricted(path: &str, bpf_capabilities: u32) -> c_int {
 
 /// Permanently retain only the supplied BPF capability bits for this process.
 pub fn restrict_bpf_capabilities(bpf_capabilities: u32) -> c_int {
-    syscall1(63, bpf_capabilities as usize) as i32
+    syscall1(
+        kernel_abi::SYS_RESTRICT_BPF_CAPABILITIES,
+        bpf_capabilities as usize,
+    ) as i32
 }
 
 pub fn abort() -> ! {
-    syscall0(32);
+    syscall0(kernel_abi::SYS_ABORT);
     loop {
         unsafe { asm!("nop") };
     }
@@ -306,17 +321,22 @@ pub struct iovec {
 }
 
 pub fn writev(fd: c_int, iov: &[iovec]) -> c_int {
-    syscall3(38, fd as usize, iov.as_ptr() as usize, iov.len()) as i32
+    syscall3(
+        kernel_abi::SYS_WRITEV,
+        fd as usize,
+        iov.as_ptr() as usize,
+        iov.len(),
+    ) as i32
 }
 
 // --- Memory ---
 
 pub fn malloc(size: usize) -> *mut u8 {
-    syscall1(27, size) as *mut u8
+    syscall1(kernel_abi::SYS_MALLOC, size) as *mut u8
 }
 
 pub fn free(ptr: *mut u8) {
-    syscall1(28, ptr as usize);
+    syscall1(kernel_abi::SYS_FREE, ptr as usize);
 }
 
 // --- Process Management ---
@@ -324,13 +344,23 @@ pub fn free(ptr: *mut u8) {
 pub const WNOHANG: c_int = 1;
 
 pub fn fork() -> c_int {
-    syscall0(57) as c_int
+    syscall0(kernel_abi::SYS_FORK) as c_int
 }
 
 pub fn execve(path: *const u8, argv: *const *const u8, envp: *const *const u8) -> c_int {
-    syscall3(58, path as usize, argv as usize, envp as usize) as c_int
+    syscall3(
+        kernel_abi::SYS_EXECVE,
+        path as usize,
+        argv as usize,
+        envp as usize,
+    ) as c_int
 }
 
 pub fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int {
-    syscall3(59, pid as usize, status as usize, options as usize) as c_int
+    syscall3(
+        kernel_abi::SYS_WAITPID,
+        pid as usize,
+        status as usize,
+        options as usize,
+    ) as c_int
 }

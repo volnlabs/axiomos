@@ -3,6 +3,10 @@
 
 use core::panic::PanicInfo;
 
+use kernel_abi::{
+    BPF_ATTACH_TYPE_TIMER, BPF_HELPER_GET_KERNEL_HEAP_KB, BPF_HELPER_MAP_LOOKUP_ELEM,
+    BPF_HELPER_RINGBUF_OUTPUT, BPF_HELPER_TRACE_PRINTK, BPF_MAP_TYPE_ARRAY, BPF_MAP_TYPE_RINGBUF,
+};
 use minilib::{bpf, exit, msleep, write};
 
 #[panic_handler]
@@ -45,14 +49,14 @@ pub extern "C" fn _start() -> ! {
     write(1, b"[1/5] Creating array map (counter)... ");
 
     let array_attr = BpfAttr {
-        prog_type: 2,            // map_type = BPF_MAP_TYPE_ARRAY
+        prog_type: BPF_MAP_TYPE_ARRAY,
         insn_cnt: 4,             // key_size = 4 bytes (u32 index)
         insns: 8 | (1u64 << 32), // value_size=8 (u64), max_entries=1
         ..Default::default()
     };
 
     let array_map_id = bpf(
-        0, // BPF_MAP_CREATE
+        kernel_abi::BPF_MAP_CREATE as i32,
         &array_attr as *const BpfAttr as *const u8,
         attr_size,
     );
@@ -80,14 +84,14 @@ pub extern "C" fn _start() -> ! {
     write(1, b"[2/5] Creating ringbuf map (events)... ");
 
     let ringbuf_attr = BpfAttr {
-        prog_type: 27,          // map_type = BPF_MAP_TYPE_RINGBUF
+        prog_type: BPF_MAP_TYPE_RINGBUF,
         insn_cnt: 0,            // key_size = 0 for ringbuf
         insns: (4096u64) << 32, // value_size=0, max_entries=4096
         ..Default::default()
     };
 
     let ringbuf_map_id = bpf(
-        0, // BPF_MAP_CREATE
+        kernel_abi::BPF_MAP_CREATE as i32,
         &ringbuf_attr as *const BpfAttr as *const u8,
         attr_size,
     );
@@ -110,7 +114,7 @@ pub extern "C" fn _start() -> ! {
             code: 0x85,
             dst_src: 0,
             off: 0,
-            imm: 16, // bpf_get_kernel_heap_kb
+            imm: BPF_HELPER_GET_KERNEL_HEAP_KB,
         },
         BpfInsn {
             code: 0xb7,
@@ -225,7 +229,7 @@ pub extern "C" fn _start() -> ! {
             code: 0x85,
             dst_src: 0x00,
             off: 0,
-            imm: 5,
+            imm: BPF_HELPER_MAP_LOOKUP_ELEM,
         },
         // --- Check if lookup returned NULL; skip map+ringbuf if so ---
         // Insn 6: if r0 == 0 goto +11 -> target = insn 18 (trace_printk)
@@ -300,7 +304,7 @@ pub extern "C" fn _start() -> ! {
             code: 0xb7,
             dst_src: regs(3, 0),
             off: 0,
-            imm: 8,
+            imm: BPF_HELPER_RINGBUF_OUTPUT,
         },
         // Insn 16: r4 = 0  (flags)
         BpfInsn {
@@ -314,7 +318,7 @@ pub extern "C" fn _start() -> ! {
             code: 0x85,
             dst_src: 0x00,
             off: 0,
-            imm: 8,
+            imm: BPF_HELPER_RINGBUF_OUTPUT,
         },
         // --- Call bpf_trace_printk("Tick!", 6) for serial visibility ---
         // Insn 18: LD_DW_IMM r1, "Tick!\0" (occupies 2 instruction slots)
@@ -364,7 +368,7 @@ pub extern "C" fn _start() -> ! {
             code: 0x85,
             dst_src: 0x00,
             off: 0,
-            imm: 2,
+            imm: BPF_HELPER_TRACE_PRINTK,
         },
         // --- Return 0 ---
         // Insn 25: r0 = 0
@@ -394,7 +398,7 @@ pub extern "C" fn _start() -> ! {
     };
 
     let prog_id = bpf(
-        5, // BPF_PROG_LOAD
+        kernel_abi::BPF_PROG_LOAD as i32,
         &load_attr as *const BpfAttr as *const u8,
         attr_size,
     );
@@ -418,13 +422,13 @@ pub extern "C" fn _start() -> ! {
     write(1, b"[4/5] Attaching to timer... ");
 
     let attach_attr = BpfAttr {
-        attach_btf_id: 1,               // ATTACH_TYPE_TIMER
+        attach_btf_id: BPF_ATTACH_TYPE_TIMER,
         attach_prog_fd: prog_id as u32, // program id
         ..Default::default()
     };
 
     let attach_res = bpf(
-        8, // BPF_PROG_ATTACH
+        kernel_abi::BPF_PROG_ATTACH as i32,
         &attach_attr as *const BpfAttr as *const u8,
         attr_size,
     );
@@ -466,7 +470,7 @@ pub extern "C" fn _start() -> ! {
         };
 
         let poll_res = bpf(
-            37, // BPF_RINGBUF_POLL
+            kernel_abi::BPF_RINGBUF_POLL as i32,
             &poll_attr as *const BpfAttr as *const u8,
             attr_size,
         );
@@ -492,7 +496,7 @@ pub extern "C" fn _start() -> ! {
             };
 
             let lookup_res = bpf(
-                1, // BPF_MAP_LOOKUP_ELEM
+                kernel_abi::BPF_MAP_LOOKUP_ELEM as i32,
                 &lookup_attr as *const BpfAttr as *const u8,
                 attr_size,
             );
@@ -526,7 +530,11 @@ pub extern "C" fn _start() -> ! {
                     value: &mut map_value as *mut u64 as u64,
                     ..Default::default()
                 };
-                let _ = bpf(1, &final_attr as *const BpfAttr as *const u8, attr_size);
+                let _ = bpf(
+                    kernel_abi::BPF_MAP_LOOKUP_ELEM as i32,
+                    &final_attr as *const BpfAttr as *const u8,
+                    attr_size,
+                );
                 print_num(map_value);
                 write(1, b"\n");
 

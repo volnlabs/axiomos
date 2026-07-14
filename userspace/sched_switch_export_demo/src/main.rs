@@ -3,12 +3,13 @@
 
 use core::panic::PanicInfo;
 
-use kernel_abi::{BpfAttr, BPF_MAP_CREATE, BPF_OBJ_PIN, BPF_PROG_ATTACH, BPF_PROG_LOAD};
+use kernel_abi::{
+    BpfAttr, BPF_ATTACH_TYPE_SCHED_SWITCH as ATTACH_TYPE_SCHED_SWITCH,
+    BPF_HELPER_RINGBUF_OUTPUT as HELPER_RINGBUF_OUTPUT, BPF_MAP_CREATE, BPF_MAP_TYPE_RINGBUF,
+    BPF_OBJ_PIN, BPF_PROG_ATTACH, BPF_PROG_LOAD,
+};
 use minilib::{bpf, exit, write};
 
-const BPF_MAP_TYPE_RINGBUF: u32 = 27;
-const HELPER_RINGBUF_OUTPUT: i32 = 8;
-const ATTACH_TYPE_SCHED_SWITCH: u32 = 7;
 const SCHED_SWITCH_CONTEXT_SIZE: usize = 40;
 const PINNED_RINGBUF_PATH: &[u8] = b"/sys/fs/bpf/maps/sched_switch_events\0";
 

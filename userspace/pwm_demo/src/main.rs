@@ -1,26 +1,18 @@
 #![no_std]
 #![no_main]
 
-use kernel_abi::BpfAttr;
+use kernel_abi::{
+    BpfAttr, BPF_ATTACH_TYPE_PWM as ATTACH_TYPE_PWM, BPF_ATTACH_TYPE_TIMER as ATTACH_TYPE_TIMER,
+    BPF_HELPER_KTIME_GET_NS as HELPER_KTIME_GET_NS, BPF_HELPER_PWM_WRITE as HELPER_PWM_WRITE,
+    BPF_HELPER_RINGBUF_OUTPUT as HELPER_RINGBUF_OUTPUT, BPF_MAP_TYPE_RINGBUF as MAP_TYPE_RINGBUF,
+};
 use minilib::{bpf, exit, write};
 
-// Helper IDs (runtime dispatch in interpreter/JIT)
-const HELPER_KTIME_GET_NS: i32 = 1;
-const HELPER_RINGBUF_OUTPUT: i32 = 8;
-const HELPER_PWM_WRITE: i32 = 1005;
-
-// Attach Types
-const ATTACH_TYPE_TIMER: u32 = 1;
-const ATTACH_TYPE_PWM: u32 = 3;
-
 // BPF commands
-const BPF_MAP_CREATE: i32 = 0;
-const BPF_PROG_LOAD: i32 = 5;
-const BPF_PROG_ATTACH: i32 = 8;
-const BPF_RINGBUF_POLL: i32 = 37;
-
-// Map types
-const MAP_TYPE_RINGBUF: u32 = 27;
+const BPF_MAP_CREATE: i32 = kernel_abi::BPF_MAP_CREATE as i32;
+const BPF_PROG_LOAD: i32 = kernel_abi::BPF_PROG_LOAD as i32;
+const BPF_PROG_ATTACH: i32 = kernel_abi::BPF_PROG_ATTACH as i32;
+const BPF_RINGBUF_POLL: i32 = kernel_abi::BPF_RINGBUF_POLL as i32;
 
 #[repr(C)]
 struct BpfInsn {

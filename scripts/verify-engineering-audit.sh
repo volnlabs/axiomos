@@ -367,6 +367,7 @@ run_step fmt cargo fmt --all -- --check
 run_step unsafe-ledger python3 -B scripts/unsafe-ledger.py --check
 run_step component-inventory cargo xtask inventory --check
 run_step generated-docs cargo xtask docs --check
+run_step abi-surface-static python3 -B scripts/check-abi-surface.py
 run_step workflow-yaml python3 -c \
     'import yaml; [yaml.safe_load(open(p, encoding="utf-8")) for p in (".github/workflows/build.yml", ".github/workflows/fuzz.yml", ".github/workflows/bpf-profiles.yml")]'
 run_step nanosleep-waitq-static python3 -c \

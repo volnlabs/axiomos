@@ -1,16 +1,14 @@
 #![no_std]
 #![no_main]
 
-use kernel_abi::BpfAttr;
+use kernel_abi::{
+    BpfAttr, BPF_HELPER_GPIO_GET as HELPER_GPIO_READ, BPF_HELPER_GPIO_SET as HELPER_GPIO_WRITE,
+};
 use minilib::{bpf, exit, write};
 
 // Hardcoded for RPi5 GPIO demo
 const BUTTON_PIN: u32 = 17;
 const LED_PIN: u32 = 18;
-
-// BPF Helper IDs
-const HELPER_GPIO_WRITE: i32 = 1003;
-const HELPER_GPIO_READ: i32 = 1004;
 
 #[repr(C)]
 struct BpfInsn {
@@ -155,7 +153,7 @@ pub extern "C" fn _start() -> ! {
     print("Attaching to GPIO 17 (Rising Edge)...\n");
 
     let attach_attr = BpfAttr {
-        attach_btf_id: 2, // ATTACH_TYPE_GPIO
+        attach_btf_id: kernel_abi::BPF_ATTACH_TYPE_GPIO,
         attach_prog_fd: prog_id as u32,
         key: BUTTON_PIN as u64, // Pin number
         value: 1,               // 1=Rising Edge, 2=Falling, 3=Both

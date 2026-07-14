@@ -3,14 +3,12 @@
 
 use core::panic::PanicInfo;
 
-use kernel_abi::{BpfAttr, BPF_MAP_CREATE, BPF_PROG_ATTACH, BPF_PROG_LOAD, BPF_RINGBUF_POLL};
+use kernel_abi::{
+    BpfAttr, BPF_ATTACH_TYPE_SYS_EXIT as ATTACH_TYPE_SYS_EXIT,
+    BPF_HELPER_RINGBUF_OUTPUT as HELPER_RINGBUF_OUTPUT, BPF_MAP_CREATE, BPF_MAP_TYPE_RINGBUF,
+    BPF_PROG_ATTACH, BPF_PROG_LOAD, BPF_RINGBUF_POLL, SYS_BPF, SYS_WRITE,
+};
 use minilib::{bpf, close, dup, exit, getcwd, msleep, pipe, write};
-
-const BPF_MAP_TYPE_RINGBUF: u32 = 27;
-const HELPER_RINGBUF_OUTPUT: i32 = 8;
-const ATTACH_TYPE_SYS_EXIT: u32 = 6;
-const SYS_WRITE: i32 = 37;
-const SYS_BPF: i32 = 50;
 
 const SYSCALL_EXIT_CONTEXT_SIZE: usize = 16;
 
@@ -212,13 +210,13 @@ fn build_program(ringbuf_map_id: i32) -> [BpfInsn; 13] {
             code: 0x15,
             dst_src: regs(7, 0),
             off: 6,
-            imm: SYS_WRITE,
+            imm: SYS_WRITE as i32,
         },
         BpfInsn {
             code: 0x15,
             dst_src: regs(7, 0),
             off: 5,
-            imm: SYS_BPF,
+            imm: SYS_BPF as i32,
         },
         BpfInsn {
             code: 0xb7,

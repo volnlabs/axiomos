@@ -167,7 +167,7 @@ pub extern "C" fn _start() -> ! {
         write(1, b"Creating counter map...\n");
 
         let map_attr = BpfAttr {
-            prog_type: 2, // map_type = Array
+            prog_type: kernel_abi::BPF_MAP_TYPE_ARRAY,
             insn_cnt: 4,  // key_size = 4 bytes (u32)
             // Pack value_size (8) and max_entries (1) into insns field
             // low 32 bits = value_size, high 32 bits = max_entries
@@ -326,7 +326,7 @@ pub extern "C" fn _start() -> ! {
         write(1, b"Attaching to Timer...\n");
 
         let attach_attr = BpfAttr {
-            attach_btf_id: 1, // Timer attach type
+            attach_btf_id: kernel_abi::BPF_ATTACH_TYPE_TIMER,
             attach_prog_fd: prog_id as u32,
             ..Default::default()
         };
@@ -385,7 +385,7 @@ pub extern "C" fn _start() -> ! {
 fn bpf_hook_snapshot_smp_probe() -> bool {
     let attr_size = core::mem::size_of::<kernel_abi::BpfAttr>() as i32;
     let map_attr = kernel_abi::BpfAttr {
-        prog_type: 2,
+        prog_type: kernel_abi::BPF_MAP_TYPE_ARRAY,
         insn_cnt: 4,
         insns: 8 | (1u64 << 32),
         ..kernel_abi::BpfAttr::default()
@@ -440,7 +440,7 @@ fn bpf_hook_snapshot_smp_probe() -> bool {
             code: 0x85,
             dst_src: 0,
             off: 0,
-            imm: 5,
+            imm: kernel_abi::BPF_HELPER_MAP_LOOKUP_ELEM,
         },
         BpfInsn {
             code: 0x15,
@@ -512,7 +512,7 @@ fn bpf_hook_snapshot_smp_probe() -> bool {
         }
 
         let attachment = kernel_abi::BpfAttr {
-            attach_btf_id: 7,
+            attach_btf_id: kernel_abi::BPF_ATTACH_TYPE_SCHED_SWITCH,
             attach_prog_fd: program as u32,
             ..kernel_abi::BpfAttr::default()
         };
@@ -554,7 +554,7 @@ fn bpf_hook_snapshot_smp_probe() -> bool {
 
     if attached {
         let attachment = kernel_abi::BpfAttr {
-            attach_btf_id: 7,
+            attach_btf_id: kernel_abi::BPF_ATTACH_TYPE_SCHED_SWITCH,
             attach_prog_fd: program as u32,
             ..kernel_abi::BpfAttr::default()
         };
@@ -837,7 +837,7 @@ fn bpf_owner_exit_probe() -> bool {
     }
     if child == 0 {
         let map_attr = kernel_abi::BpfAttr {
-            prog_type: 2,
+            prog_type: kernel_abi::BPF_MAP_TYPE_ARRAY,
             insn_cnt: 4,
             insns: 8 | (1u64 << 32),
             ..kernel_abi::BpfAttr::default()
@@ -946,7 +946,7 @@ fn bpf_owner_exit_probe() -> bool {
 
 fn bpf_foreign_owner_probe() -> bool {
     let map_attr = kernel_abi::BpfAttr {
-        prog_type: 2,
+        prog_type: kernel_abi::BPF_MAP_TYPE_ARRAY,
         insn_cnt: 4,
         insns: 8 | (1u64 << 32),
         ..kernel_abi::BpfAttr::default()
@@ -1004,7 +1004,7 @@ fn bpf_pinned_write_only_probe() -> bool {
     static PATH: &[u8] = b"/audit/write-only\0";
     let attr_size = core::mem::size_of::<kernel_abi::BpfAttr>() as i32;
     let map_attr = kernel_abi::BpfAttr {
-        prog_type: 2,
+        prog_type: kernel_abi::BPF_MAP_TYPE_ARRAY,
         insn_cnt: 4,
         insns: 8 | (1u64 << 32),
         ..kernel_abi::BpfAttr::default()
@@ -1161,7 +1161,7 @@ fn run_restricted_bpf_probe(capabilities: u32, probe: fn() -> bool) -> bool {
 #[cfg(feature = "bpf-unsigned-development")]
 fn unprivileged_bpf_probe() -> bool {
     let attr = kernel_abi::BpfAttr {
-        prog_type: 2,
+        prog_type: kernel_abi::BPF_MAP_TYPE_ARRAY,
         insn_cnt: 4,
         insns: 8 | (1u64 << 32),
         ..kernel_abi::BpfAttr::default()
@@ -1181,7 +1181,7 @@ fn unprivileged_verifier_tier_probe() -> bool {
             code: 0x85,
             dst_src: 0,
             off: 0,
-            imm: 16,
+            imm: kernel_abi::BPF_HELPER_GET_KERNEL_HEAP_KB,
         },
         BpfInsn {
             code: 0xb7,
@@ -1242,7 +1242,7 @@ fn unauthorized_attach_probe() -> bool {
     }
 
     let attach = kernel_abi::BpfAttr {
-        attach_btf_id: 1,
+        attach_btf_id: kernel_abi::BPF_ATTACH_TYPE_TIMER,
         attach_prog_fd: program as u32,
         ..kernel_abi::BpfAttr::default()
     };

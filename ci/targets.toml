@@ -1,0 +1,41 @@
+format_version = 1
+
+[[target]]
+name = "x86_64 QEMU/OVMF"
+triple = "x86_64-unknown-none"
+status = "supported"
+features = "x86_64_deps; kernel cloud-profile+x86_64_arch"
+artifact = "release ISO and disk image"
+evidence = "build, strict lint, host suites, signed boot, unsigned negative boot, SMP QEMU"
+
+[[target]]
+name = "Raspberry Pi 5"
+triple = "aarch64-unknown-none"
+status = "supported after HIL"
+features = "aarch64_deps; kernel embedded-rpi5"
+artifact = "raw AArch64 kernel plus root filesystem"
+evidence = "build, strict lint, signing policy, physical boot, GPIO/control/timer/storage/failsafe HIL"
+
+[[target]]
+name = "AArch64 virt"
+triple = "aarch64-unknown-none"
+status = "experimental"
+features = "kernel cloud-profile+virt"
+artifact = "kernel check only"
+evidence = "compile check; no production compatibility claim"
+
+[[target]]
+name = "RISC-V demo"
+triple = "riscv64gc-unknown-none-elf"
+status = "experimental standalone"
+features = "standalone manifest"
+artifact = "demo binary outside the axiomos release"
+evidence = "target lint and build only"
+
+[[target]]
+name = "Shrike RP2040 firmware"
+triple = "thumbv6m-none-eabi"
+status = "supported after HIL"
+features = "cloud-profile or embedded-profile"
+artifact = "standalone firmware image"
+evidence = "target lint/build, mock-HAL tests, physical control-link/watchdog/failsafe HIL"

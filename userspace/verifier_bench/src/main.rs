@@ -13,7 +13,13 @@
 //! the host `states_explored` curve, and the host wall-clock curve all describe
 //! the same programs.
 
-use kernel_abi::BpfAttr;
+use kernel_abi::{
+    BpfAttr, BPF_ATTACH_TYPE_TIMER as ATTACH_TYPE_TIMER, BPF_HELPER_GPIO_GET as HELPER_GPIO_GET,
+    BPF_HELPER_KTIME_GET_NS as HELPER_KTIME_GET_NS,
+    BPF_HELPER_MAP_LOOKUP_ELEM as HELPER_MAP_LOOKUP_ELEM,
+    BPF_HELPER_RINGBUF_OUTPUT as HELPER_RINGBUF_OUTPUT,
+    BPF_HELPER_TRACE_PRINTK as HELPER_TRACE_PRINTK, BPF_MAP_TYPE_RINGBUF,
+};
 use minilib::{bpf, exit, write};
 
 /// Measurement sizes — must match `cost_corpus::MEASUREMENT_SIZES`.
@@ -23,32 +29,21 @@ const CALIBRATION_SIZES: [usize; 2] = [100, 1000];
 const MAX_INSNS: usize = 1000;
 
 /// BPF_MAP_CREATE / BPF_MAP_UPDATE_ELEM / BPF_PROG_LOAD command numbers.
-const BPF_MAP_CREATE: i32 = 0;
-const BPF_MAP_UPDATE_ELEM: i32 = 2;
-const BPF_PROG_LOAD: i32 = 5;
+const BPF_MAP_CREATE: i32 = kernel_abi::BPF_MAP_CREATE as i32;
+const BPF_MAP_UPDATE_ELEM: i32 = kernel_abi::BPF_MAP_UPDATE_ELEM as i32;
+const BPF_PROG_LOAD: i32 = kernel_abi::BPF_PROG_LOAD as i32;
 /// BPF_PROG_ATTACH (kernel_abi). Attach commits the hook's utilization, so it
 /// is where the admission gate fires.
-const BPF_PROG_ATTACH: i32 = 8;
+const BPF_PROG_ATTACH: i32 = kernel_abi::BPF_PROG_ATTACH as i32;
 /// BPF_BENCH_EXEC: feature-gated kernel command — run a program N times and
 /// emit an `AXIOM EXEC COST` marker (kernel_abi::BPF_BENCH_EXEC).
-const BPF_BENCH_EXEC: i32 = 100;
-
-/// `bpf_trace_printk` helper id — banned on the embedded RT fragment.
-const HELPER_TRACE_PRINTK: i32 = 2;
-/// Attach type used for the admission self-test (ATTACH_TYPE_TIMER).
-const ATTACH_TYPE_TIMER: u32 = 1;
+const BPF_BENCH_EXEC: i32 = kernel_abi::BPF_BENCH_EXEC as i32;
 
 /// Back-to-back executions per timing marker.
 const EXEC_RUNS: u32 = 64;
 
-/// Runtime helper ABI ids (must match `kernel_bpf::verifier::HelperId`).
-const HELPER_KTIME_GET_NS: i32 = 1;
-const HELPER_MAP_LOOKUP_ELEM: i32 = 5;
-const HELPER_RINGBUF_OUTPUT: i32 = 8;
-const HELPER_GPIO_GET: i32 = 1004;
-
 /// Ring-buffer map type + size (bytes, power of two) for the ringbuf shape.
-const MAP_TYPE_RINGBUF: u64 = 27;
+const MAP_TYPE_RINGBUF: u64 = BPF_MAP_TYPE_RINGBUF as u64;
 const RINGBUF_BYTES: u64 = 65536;
 
 #[repr(C)]

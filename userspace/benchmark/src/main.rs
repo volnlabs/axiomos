@@ -3,6 +3,11 @@
 
 use core::panic::PanicInfo;
 
+use kernel_abi::{
+    BPF_ATTACH_TYPE_TIMER, BPF_HELPER_GET_BOOT_TIME_MS, BPF_HELPER_GET_INTERRUPT_LATENCY_NS,
+    BPF_HELPER_GET_KERNEL_HEAP_KB, BPF_HELPER_GET_KERNEL_IMAGE_MB, BPF_HELPER_KTIME_GET_NS,
+    BPF_HELPER_RINGBUF_OUTPUT, BPF_MAP_TYPE_RINGBUF,
+};
 use minilib::{bpf, clock_gettime, exit, pause, timespec, write};
 
 #[panic_handler]
@@ -136,13 +141,17 @@ pub extern "C" fn _start() -> ! {
 
     // Create ringbuf for timestamp events
     let ringbuf_attr = kernel_abi::BpfAttr {
-        prog_type: 27, // BPF_MAP_TYPE_RINGBUF
+        prog_type: BPF_MAP_TYPE_RINGBUF,
         insn_cnt: 0,
         insns: (4096u64) << 32,
         ..Default::default()
     };
 
-    let ringbuf_map_id = bpf(0, &ringbuf_attr as *const _ as *const u8, attr_size);
+    let ringbuf_map_id = bpf(
+        kernel_abi::BPF_MAP_CREATE as i32,
+        &ringbuf_attr as *const _ as *const u8,
+        attr_size,
+    );
     if ringbuf_map_id < 0 {
         write(1, b"  [ERROR] Failed to create ringbuf\n");
         exit(1);
@@ -158,7 +167,7 @@ pub extern "C" fn _start() -> ! {
             code: 0x85,
             dst_src: 0x00,
             off: 0,
-            imm: 1,
+            imm: BPF_HELPER_KTIME_GET_NS,
         },
         BpfInsn {
             code: 0x7b,
@@ -171,7 +180,7 @@ pub extern "C" fn _start() -> ! {
             code: 0x85,
             dst_src: 0x00,
             off: 0,
-            imm: 13,
+            imm: BPF_HELPER_GET_INTERRUPT_LATENCY_NS,
         },
         BpfInsn {
             code: 0x7b,
@@ -184,7 +193,7 @@ pub extern "C" fn _start() -> ! {
             code: 0x85,
             dst_src: 0x00,
             off: 0,
-            imm: 15,
+            imm: BPF_HELPER_GET_BOOT_TIME_MS,
         },
         BpfInsn {
             code: 0x7b,
@@ -197,7 +206,7 @@ pub extern "C" fn _start() -> ! {
             code: 0x85,
             dst_src: 0x00,
             off: 0,
-            imm: 16,
+            imm: BPF_HELPER_GET_KERNEL_HEAP_KB,
         },
         BpfInsn {
             code: 0x7b,
@@ -210,7 +219,7 @@ pub extern "C" fn _start() -> ! {
             code: 0x85,
             dst_src: 0x00,
             off: 0,
-            imm: 17,
+            imm: BPF_HELPER_GET_KERNEL_IMAGE_MB,
         },
         BpfInsn {
             code: 0x7b,
@@ -253,7 +262,7 @@ pub extern "C" fn _start() -> ! {
             code: 0x85,
             dst_src: 0x00,
             off: 0,
-            imm: 8,
+            imm: BPF_HELPER_RINGBUF_OUTPUT,
         },
         BpfInsn {
             code: 0xb7,
@@ -276,7 +285,11 @@ pub extern "C" fn _start() -> ! {
         ..Default::default()
     };
 
-    let timer_prog_id = bpf(5, &timer_load_attr as *const _ as *const u8, attr_size);
+    let timer_prog_id = bpf(
+        kernel_abi::BPF_PROG_LOAD as i32,
+        &timer_load_attr as *const _ as *const u8,
+        attr_size,
+    );
     if timer_prog_id < 0 {
         write(1, b"  [ERROR] Failed to load timer program\n");
         exit(1);
@@ -284,12 +297,16 @@ pub extern "C" fn _start() -> ! {
 
     // Attach to timer
     let attach_attr = kernel_abi::BpfAttr {
-        attach_btf_id: 1, // ATTACH_TYPE_TIMER
+        attach_btf_id: BPF_ATTACH_TYPE_TIMER,
         attach_prog_fd: timer_prog_id as u32,
         ..Default::default()
     };
 
-    let attach_res = bpf(8, &attach_attr as *const _ as *const u8, attr_size);
+    let attach_res = bpf(
+        kernel_abi::BPF_PROG_ATTACH as i32,
+        &attach_attr as *const _ as *const u8,
+        attr_size,
+    );
     if attach_res != 0 {
         write(1, b"  [ERROR] Failed to attach timer program\n");
         exit(1);
@@ -319,7 +336,11 @@ pub extern "C" fn _start() -> ! {
             ..Default::default()
         };
 
-        let poll_res = bpf(37, &poll_attr as *const _ as *const u8, attr_size);
+        let poll_res = bpf(
+            kernel_abi::BPF_RINGBUF_POLL as i32,
+            &poll_attr as *const _ as *const u8,
+            attr_size,
+        );
         last_poll_res = poll_res;
 
         if poll_res >= 40 {

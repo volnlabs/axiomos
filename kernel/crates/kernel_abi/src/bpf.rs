@@ -85,6 +85,50 @@ pub const BPF_PROG_UNLOAD: u32 = 101;
 pub const BPF_MAP_DESTROY: u32 = 102;
 pub const BPF_OBJ_UNPIN: u32 = 103;
 
+/// Map type identifiers accepted by shipped kernels.
+pub const BPF_MAP_TYPE_HASH: u32 = 1;
+pub const BPF_MAP_TYPE_ARRAY: u32 = 2;
+pub const BPF_MAP_TYPE_RINGBUF: u32 = 27;
+pub const BPF_MAP_TYPE_TIMESERIES: u32 = 100;
+
+/// Program attach identifiers accepted by shipped kernels.
+pub const BPF_ATTACH_TYPE_TIMER: u32 = 1;
+pub const BPF_ATTACH_TYPE_GPIO: u32 = 2;
+pub const BPF_ATTACH_TYPE_PWM: u32 = 3;
+pub const BPF_ATTACH_TYPE_IIO: u32 = 4;
+pub const BPF_ATTACH_TYPE_SYS_ENTER: u32 = 5;
+pub const BPF_ATTACH_TYPE_SYSCALL: u32 = BPF_ATTACH_TYPE_SYS_ENTER;
+pub const BPF_ATTACH_TYPE_SYS_EXIT: u32 = 6;
+pub const BPF_ATTACH_TYPE_SCHED_SWITCH: u32 = 7;
+
+/// Helper identifiers dispatched by shipped kernels.
+pub const BPF_HELPER_KTIME_GET_NS: i32 = 1;
+pub const BPF_HELPER_TRACE_PRINTK: i32 = 2;
+pub const BPF_HELPER_GET_PRANDOM_U32: i32 = 3;
+pub const BPF_HELPER_GET_SMP_PROCESSOR_ID: i32 = 4;
+pub const BPF_HELPER_MAP_LOOKUP_ELEM: i32 = 5;
+pub const BPF_HELPER_MAP_UPDATE_ELEM: i32 = 6;
+pub const BPF_HELPER_MAP_DELETE_ELEM: i32 = 7;
+pub const BPF_HELPER_RINGBUF_OUTPUT: i32 = 8;
+pub const BPF_HELPER_TIMESERIES_PUSH: i32 = 9;
+pub const BPF_HELPER_GET_CURRENT_PID_TGID: i32 = 10;
+pub const BPF_HELPER_GET_CURRENT_UID_GID: i32 = 11;
+pub const BPF_HELPER_GET_CURRENT_COMM: i32 = 12;
+pub const BPF_HELPER_GET_INTERRUPT_LATENCY_NS: i32 = 13;
+pub const BPF_HELPER_PROBE_READ: i32 = 14;
+pub const BPF_HELPER_GET_BOOT_TIME_MS: i32 = 15;
+pub const BPF_HELPER_GET_KERNEL_HEAP_KB: i32 = 16;
+pub const BPF_HELPER_GET_KERNEL_IMAGE_MB: i32 = 17;
+pub const BPF_HELPER_RINGBUF_RESERVE: i32 = 40;
+pub const BPF_HELPER_RINGBUF_SUBMIT: i32 = 41;
+pub const BPF_HELPER_RINGBUF_DISCARD: i32 = 42;
+pub const BPF_HELPER_SENSOR_LAST_TIMESTAMP: i32 = 1002;
+pub const BPF_HELPER_GPIO_SET: i32 = 1003;
+pub const BPF_HELPER_GPIO_GET: i32 = 1004;
+pub const BPF_HELPER_PWM_WRITE: i32 = 1005;
+pub const BPF_HELPER_IIO_READ: i32 = 1006;
+pub const BPF_HELPER_CAN_SEND: i32 = 1007;
+
 /// Requested/offered access rights in [`BpfAttr::file_flags`] for object pin/open.
 /// Zero is accepted as a backwards-compatible read-only request.
 pub const BPF_OBJ_ACCESS_READ: u32 = 1 << 0;

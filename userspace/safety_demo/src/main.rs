@@ -1,7 +1,10 @@
 #![no_std]
 #![no_main]
 
-use kernel_abi::BpfAttr;
+use kernel_abi::{
+    BpfAttr, BPF_ATTACH_TYPE_GPIO as ATTACH_TYPE_GPIO, BPF_ATTACH_TYPE_TIMER as ATTACH_TYPE_TIMER,
+    BPF_HELPER_PWM_WRITE as HELPER_PWM_WRITE, BPF_HELPER_TRACE_PRINTK as HELPER_TRACE_PRINTK,
+};
 use minilib::{bpf, exit, write};
 
 // === Configuration ===
@@ -12,17 +15,9 @@ const PWM_CHIP: u32 = 0;
 const PWM_CHANNEL: u32 = 1;
 const MOTOR_DUTY: i32 = 50; // 50% duty cycle simulates running motor
 
-// === BPF Helper IDs (from interpreter/JIT dispatch tables) ===
-const HELPER_TRACE_PRINTK: i32 = 2;
-const HELPER_PWM_WRITE: i32 = 1005;
-
 // === BPF commands ===
-const BPF_PROG_LOAD: i32 = 5;
-const BPF_PROG_ATTACH: i32 = 8;
-
-// === Attach types ===
-const ATTACH_TYPE_TIMER: u32 = 1;
-const ATTACH_TYPE_GPIO: u32 = 2;
+const BPF_PROG_LOAD: i32 = kernel_abi::BPF_PROG_LOAD as i32;
+const BPF_PROG_ATTACH: i32 = kernel_abi::BPF_PROG_ATTACH as i32;
 
 #[repr(C)]
 struct BpfInsn {
