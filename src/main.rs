@@ -131,6 +131,14 @@ continue"
     cmd.arg("-vga");
     cmd.arg("none");
 
+    // Exit cleanly on kernel-initiated CPU reset instead of restarting
+    // the guest and erasing the captured serial buffer with Limine
+    // VT100 escape sequences. Without this flag, a kernel panic or
+    // triple-fault loops the boot and the boot-success markers
+    // (QEMU_BOOT_OK, AUDIT_FAULT_PROBE:*) emitted before the reset
+    // are clobbered in CI logs.
+    cmd.arg("--no-reboot");
+
     let status = cmd.status().unwrap();
     assert!(status.success());
 }
