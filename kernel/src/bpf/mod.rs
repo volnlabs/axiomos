@@ -1,3 +1,4 @@
+mod authorization;
 mod handles;
 pub mod helpers;
 mod limits;
@@ -11,6 +12,10 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(test)]
+use authorization::MAX_MAP_GRANTS;
+pub use authorization::{BpfLoadAuthorization, MapAccess};
+use authorization::{MapGrants, PinnedMap};
 use kernel_abi::{
     BpfObjectInfo, BPF_MAP_TYPE_ARRAY, BPF_MAP_TYPE_HASH, BPF_MAP_TYPE_RINGBUF,
     BPF_MAP_TYPE_TIMESERIES, BPF_OBJECT_KIND_MAP,
@@ -33,7 +38,7 @@ use kernel_bpf::maps::{ArrayMap, BpfMap, HashMap as BpfHashMap, RingBufMap, Time
 use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
 use kernel_bpf::signing::SignatureVerifier;
 use kernel_bpf::verifier::admission::AdmissionLedger;
-use kernel_bpf::verifier::{LoadCaller, MapPerm, Verifier, VerifyConfig};
+use kernel_bpf::verifier::{MapPerm, Verifier, VerifyConfig};
 use limits::BpfLimits;
 use snapshot::EpochSnapshot;
 use trust::signing_policy;
@@ -110,8 +115,6 @@ pub const ENVELOPE_MAP_ID: u32 = 0;
 pub const RESERVED_MAP_COUNT: u32 = 1;
 
 const PINNED_MAP_OWNER: u64 = u64::MAX;
-const MAX_MAP_GRANTS: usize = 64;
-
 /// Maximum GPIO programs resolved for one IRQ edge. Must match the stack buffer
 /// used by the Pi 5 GPIO IRQ handler.
 pub const GPIO_IRQ_FANOUT_LIMIT: usize = 8;
@@ -217,34 +220,12 @@ struct ProgramEntry {
     authorization: BpfLoadAuthorization,
 }
 
-/// Immutable authority snapshot captured before entering the BPF manager.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BpfLoadAuthorization {
-    caller: LoadCaller,
-    allow_actuation: bool,
-    map_access: MapAccess,
-}
-
-impl BpfLoadAuthorization {
-    pub const fn new(caller: LoadCaller, allow_actuation: bool, map_access: MapAccess) -> Self {
-        Self {
-            caller,
-            allow_actuation,
-            map_access,
-        }
-    }
-
-    const fn kernel() -> Self {
-        Self::new(LoadCaller::Trusted, true, MapAccess::READ_WRITE)
-    }
-}
-
 struct MapEntry {
     runtime: Arc<MapRuntime>,
     perm: MapPerm,
     charged_bytes: usize,
     owner: u64,
-    grants: Vec<MapGrant>,
+    grants: MapGrants,
 }
 
 struct MapRuntime {
@@ -273,24 +254,6 @@ struct MapLease<'a>(&'a MapRuntime);
 impl Drop for MapLease<'_> {
     fn drop(&mut self) {
         self.0.leased.store(false, Ordering::Release);
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MapAccess(u8);
-
-impl MapAccess {
-    pub const NONE: Self = Self(0);
-    pub const READ: Self = Self(1 << 0);
-    pub const WRITE: Self = Self(1 << 1);
-    pub const READ_WRITE: Self = Self(Self::READ.0 | Self::WRITE.0);
-
-    pub const fn contains(self, required: Self) -> bool {
-        self.0 & required.0 == required.0
-    }
-
-    const fn intersect(self, other: Self) -> Self {
-        Self(self.0 & other.0)
     }
 }
 
@@ -388,43 +351,16 @@ fn with_current_execution_map<R>(
     execution.map(handle, required).map(f)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MapGrant {
-    owner: u64,
-    access: MapAccess,
-}
-
-struct PinnedMap {
-    path: String,
-    map_id: u32,
-    owner: u64,
-    offered: MapAccess,
-}
-
 impl MapEntry {
     fn access_for(&self, owner: u64) -> Option<MapAccess> {
         if self.owner == owner {
             return Some(MapAccess::READ_WRITE);
         }
-        self.grants
-            .iter()
-            .find(|grant| grant.owner == owner)
-            .map(|grant| grant.access)
+        self.grants.access_for(owner)
     }
 
     fn grant(&mut self, owner: u64, access: MapAccess) -> Result<(), BpfError> {
-        if let Some(grant) = self.grants.iter_mut().find(|grant| grant.owner == owner) {
-            grant.access = MapAccess(grant.access.0 | access.0);
-            return Ok(());
-        }
-        if self.grants.len() >= MAX_MAP_GRANTS {
-            return Err(BpfError::ResourceLimit);
-        }
-        self.grants
-            .try_reserve(1)
-            .map_err(|_| BpfError::OutOfMemory)?;
-        self.grants.push(MapGrant { owner, access });
-        Ok(())
+        self.grants.grant(owner, access)
     }
 }
 
@@ -626,7 +562,7 @@ impl BpfManager {
             perm,
             charged_bytes: 0,
             owner: 0,
-            grants: Vec::new(),
+            grants: MapGrants::new(),
         }));
         self.map_generations.push(0);
         handles::encode(slot, 0)
@@ -647,7 +583,7 @@ impl BpfManager {
                 perm: MapPerm::ReadWrite,
                 charged_bytes: charge,
                 owner,
-                grants: Vec::new(),
+                grants: MapGrants::new(),
             },
         )?;
         self.live_maps = self
@@ -856,7 +792,7 @@ impl BpfManager {
         self.publish_hook_snapshot(snapshot);
 
         for entry in self.maps.iter_mut().filter_map(Option::as_mut) {
-            entry.grants.retain(|grant| grant.owner != owner);
+            entry.grants.revoke_owner(owner);
         }
         for pin in &mut self.pinned_maps {
             if pin.owner == owner {
@@ -2064,7 +2000,7 @@ mod tests {
 
     use kernel_bpf::bytecode::insn::BpfInsn;
     use kernel_bpf::maps::MapType;
-    use kernel_bpf::verifier::{HelperId, MapPerm};
+    use kernel_bpf::verifier::{HelperId, LoadCaller, MapPerm};
 
     use super::*;
 
