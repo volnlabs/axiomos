@@ -4,13 +4,14 @@
 //! file-backed `mmap` interface. This consumer opens a pinned object path,
 //! queries the map metadata, and drains events by polling the kernel.
 
-use kernel_abi::{
-    BpfAttr, BpfObjectInfo, BpfMapTags, SYS_BPF, BPF_OBJECT_KIND_MAP, BPF_OBJ_GET,
-    BPF_OBJ_GET_INFO_BY_FD, BPF_RINGBUF_POLL,
-};
 use std::ffi::CString;
 use std::io;
 use std::path::Path;
+
+use kernel_abi::{
+    BpfAttr, BpfMapTags, BpfObjectInfo, BPF_OBJECT_KIND_MAP, BPF_OBJ_GET, BPF_OBJ_GET_INFO_BY_FD,
+    BPF_RINGBUF_POLL, SYS_BPF,
+};
 
 const DEFAULT_EVENT_BUF_SIZE: usize = 4096;
 
@@ -58,14 +59,10 @@ impl RingBufConsumer {
             source,
         })?;
 
-        let info = bpf_obj_get_info_by_fd(map_fd).map_err(|source| RingBufError::Info {
-            map_fd,
-            source,
-        })?;
+        let info = bpf_obj_get_info_by_fd(map_fd)
+            .map_err(|source| RingBufError::Info { map_fd, source })?;
 
-        if info.object_kind != BPF_OBJECT_KIND_MAP
-            || info.map_type != BpfMapTags::RINGBUF.bits()
-        {
+        if info.object_kind != BPF_OBJECT_KIND_MAP || info.map_type != BpfMapTags::RINGBUF.bits() {
             return Err(RingBufError::NotRingBuf { path: path_string });
         }
 
@@ -113,7 +110,11 @@ impl RingBufConsumer {
 
             let err = io::Error::from_raw_os_error(-result);
             if err.raw_os_error() == Some(libc::ENOSPC) {
-                let next_len = self.event_buf.len().saturating_mul(2).max(DEFAULT_EVENT_BUF_SIZE);
+                let next_len = self
+                    .event_buf
+                    .len()
+                    .saturating_mul(2)
+                    .max(DEFAULT_EVENT_BUF_SIZE);
                 self.event_buf.resize(next_len, 0);
                 continue;
             }
@@ -188,7 +189,10 @@ pub struct MockRingBuf {
 impl MockRingBuf {
     /// Create a new mock ring buffer with pre-loaded events.
     pub fn new(events: Vec<Vec<u8>>) -> Self {
-        Self { events, position: 0 }
+        Self {
+            events,
+            position: 0,
+        }
     }
 
     /// Read the next event.

@@ -6,6 +6,7 @@ on:
       - 'kernel/crates/kernel_bpf/**'
       - 'kernel/crates/kernel_elfloader/**'
       - 'kernel/crates/kernel_syscall/**'
+      - 'userspace/rk_bridge/**'
       - '.github/workflows/fuzz.yml'
   schedule:
     # 02:30 UTC weekly (Sun). Was nightly with two 8h targets ≈ 960 billed
@@ -219,4 +220,76 @@ jobs:
         with:
           name: fuzz-crash-syscall-mmap-${{ github.run_id }}
           path: kernel/crates/kernel_syscall/fuzz/artifacts/mmap_arguments
+          retention-days: 30
+
+  rk-bridge-pr-build:
+    if: github.event_name == 'pull_request'
+    name: "Fuzz build (rk_bridge event_stream)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        with:
+          components: rust-src
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version "^0.13"
+
+      - name: Build rk_bridge event_stream fuzz target
+        working-directory: userspace/rk_bridge/fuzz
+        run: cargo fuzz build
+
+      - name: Upload crash artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-rk-bridge-event-stream
+          path: userspace/rk_bridge/fuzz/artifacts/event_stream
+          retention-days: 14
+
+  rk-bridge-weekly:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: "Fuzz weekly (rk_bridge event_stream, 10m)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        with:
+          components: rust-src
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version "^0.13"
+
+      - name: Restore rk_bridge corpus
+        uses: actions/cache@v4
+        with:
+          path: userspace/rk_bridge/fuzz/corpus/event_stream
+          key: fuzz-corpus-rk-bridge-event-stream-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-rk-bridge-event-stream-
+
+      - name: Fuzz rk_bridge event stream
+        working-directory: userspace/rk_bridge/fuzz
+        run: cargo fuzz run event_stream -- -max_total_time=600 -max_len=65536
+
+      - name: Upload rk_bridge corpus
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-rk-bridge-event-stream-${{ github.run_id }}
+          path: userspace/rk_bridge/fuzz/corpus/event_stream
+          retention-days: 30
+
+      - name: Upload rk_bridge crash artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-rk-bridge-event-stream-${{ github.run_id }}
+          path: userspace/rk_bridge/fuzz/artifacts/event_stream
           retention-days: 30

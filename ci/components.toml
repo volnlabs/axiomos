@@ -199,6 +199,12 @@ role = "host robotics bridge"
 gate = "standalone host lint and tests"
 
 [[component]]
+path = "userspace/rk_bridge/fuzz/Cargo.toml"
+kind = "cargo"
+role = "rk_bridge protocol fuzz target"
+gate = "fuzz build"
+
+[[component]]
 path = "userspace/rk_cli/Cargo.toml"
 kind = "cargo"
 role = "host signing CLI"

@@ -281,60 +281,62 @@ impl RkEvent {
             return Err("data too short for event header");
         }
 
-        // SAFETY: We've verified the length is at least EventHeader::SIZE.
-        // Casting the byte slice pointer to EventHeader pointer is safe because
-        // EventHeader is repr(C) and contains only POD types. Alignment is handled
-        // by the caller ensuring the buffer is properly aligned (or we assume packed).
-        // Note: In a robust implementation, we should verify alignment or use read_unaligned.
-        let header = unsafe { &*(data.as_ptr() as *const EventHeader) };
+        // SAFETY: The length check above covers EventHeader. `data` may begin at
+        // any byte offset (as ring-buffer payloads commonly do), so copy rather
+        // than creating an aligned reference into untrusted storage.
+        let header = unsafe { core::ptr::read_unaligned(data.as_ptr().cast::<EventHeader>()) };
 
         match header.event_type {
             ImuEvent::EVENT_TYPE => {
                 if data.len() < core::mem::size_of::<ImuEvent>() {
                     return Err("data too short for IMU event");
                 }
-                // SAFETY: Length checked above. ImuEvent is repr(C).
-                let event = unsafe { *(data.as_ptr() as *const ImuEvent) };
+                // SAFETY: Length checked above; copy from possibly unaligned storage.
+                let event = unsafe { core::ptr::read_unaligned(data.as_ptr().cast::<ImuEvent>()) };
                 Ok(RkEvent::Imu(event))
             }
             MotorEvent::EVENT_TYPE => {
                 if data.len() < core::mem::size_of::<MotorEvent>() {
                     return Err("data too short for motor event");
                 }
-                // SAFETY: Length checked above. MotorEvent is repr(C).
-                let event = unsafe { *(data.as_ptr() as *const MotorEvent) };
+                // SAFETY: Length checked above; copy from possibly unaligned storage.
+                let event =
+                    unsafe { core::ptr::read_unaligned(data.as_ptr().cast::<MotorEvent>()) };
                 Ok(RkEvent::Motor(event))
             }
             SafetyEvent::EVENT_TYPE => {
                 if data.len() < core::mem::size_of::<SafetyEvent>() {
                     return Err("data too short for safety event");
                 }
-                // SAFETY: Length checked above. SafetyEvent is repr(C).
-                let event = unsafe { *(data.as_ptr() as *const SafetyEvent) };
+                // SAFETY: Length checked above; copy from possibly unaligned storage.
+                let event =
+                    unsafe { core::ptr::read_unaligned(data.as_ptr().cast::<SafetyEvent>()) };
                 Ok(RkEvent::Safety(event))
             }
             GpioEvent::EVENT_TYPE => {
                 if data.len() < core::mem::size_of::<GpioEvent>() {
                     return Err("data too short for GPIO event");
                 }
-                // SAFETY: Length checked above. GpioEvent is repr(C).
-                let event = unsafe { *(data.as_ptr() as *const GpioEvent) };
+                // SAFETY: Length checked above; copy from possibly unaligned storage.
+                let event = unsafe { core::ptr::read_unaligned(data.as_ptr().cast::<GpioEvent>()) };
                 Ok(RkEvent::Gpio(event))
             }
             TimeSeriesEvent::EVENT_TYPE => {
                 if data.len() < core::mem::size_of::<TimeSeriesEvent>() {
                     return Err("data too short for time-series event");
                 }
-                // SAFETY: Length checked above. TimeSeriesEvent is repr(C).
-                let event = unsafe { *(data.as_ptr() as *const TimeSeriesEvent) };
+                // SAFETY: Length checked above; copy from possibly unaligned storage.
+                let event =
+                    unsafe { core::ptr::read_unaligned(data.as_ptr().cast::<TimeSeriesEvent>()) };
                 Ok(RkEvent::TimeSeries(event))
             }
             SchedSwitchEvent::EVENT_TYPE => {
                 if data.len() < core::mem::size_of::<SchedSwitchEvent>() {
                     return Err("data too short for sched_switch event");
                 }
-                // SAFETY: Length checked above. SchedSwitchEvent is repr(C).
-                let event = unsafe { *(data.as_ptr() as *const SchedSwitchEvent) };
+                // SAFETY: Length checked above; copy from possibly unaligned storage.
+                let event =
+                    unsafe { core::ptr::read_unaligned(data.as_ptr().cast::<SchedSwitchEvent>()) };
                 Ok(RkEvent::SchedSwitch(event))
             }
             _ => Ok(RkEvent::Unknown {
@@ -416,6 +418,20 @@ mod tests {
                 assert_eq!(e.accel_x, 100);
                 assert_eq!(e.accel_z, 9800);
             }
+            _ => panic!("expected IMU event"),
+        }
+    }
+
+    #[test]
+    fn test_imu_event_parse_from_unaligned_bytes() {
+        let mut storage = vec![0u8; core::mem::size_of::<ImuEvent>() + 1];
+        let event = &mut storage[1..];
+        event[0..8].copy_from_slice(&123u64.to_ne_bytes());
+        event[8..12].copy_from_slice(&ImuEvent::EVENT_TYPE.to_ne_bytes());
+        event[24..28].copy_from_slice(&42i32.to_ne_bytes());
+
+        match RkEvent::from_bytes(event).expect("unaligned IMU event should parse") {
+            RkEvent::Imu(parsed) => assert_eq!(parsed.accel_x, 42),
             _ => panic!("expected IMU event"),
         }
     }

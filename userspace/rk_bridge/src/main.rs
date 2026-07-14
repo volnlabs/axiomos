@@ -16,19 +16,20 @@
 //! rk-to-ros --topic /rk/sched_switch --rate-limit 1000
 //! ```
 
-use anyhow::{Context, Result};
-use clap::{Parser, ValueEnum};
-use rk_bridge::{
-    event::RkEvent,
-    input::StreamSource,
-    publisher::{EventPublisher, OutputFormat, PublisherConfig, RosPublisher, StdoutPublisher},
-    ringbuf::RingBufConsumer,
-};
 use std::io::{self, Read};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+
+use anyhow::{Context, Result};
+use clap::{Parser, ValueEnum};
+use rk_bridge::event::RkEvent;
+use rk_bridge::input::StreamSource;
+use rk_bridge::publisher::{
+    EventPublisher, OutputFormat, PublisherConfig, RosPublisher, StdoutPublisher,
+};
+use rk_bridge::ringbuf::RingBufConsumer;
 use tokio::time::interval;
 
 #[derive(Parser, Debug)]
@@ -247,7 +248,9 @@ impl Bridge {
 
     /// Run the bridge in demo mode with synthetic events.
     async fn run_demo(&self) -> Result<()> {
-        use rk_bridge::event::{EventHeader, ImuEvent, MotorEvent, SafetyAction, SafetyEvent, SafetyType};
+        use rk_bridge::event::{
+            EventHeader, ImuEvent, MotorEvent, SafetyAction, SafetyEvent, SafetyType,
+        };
 
         let mut interval = interval(Duration::from_millis(100));
         let mut counter = 0u64;
@@ -417,11 +420,17 @@ mod tests {
 
     #[test]
     fn test_format_conversion() {
-        assert!(matches!(OutputFormat::from(FormatArg::Json), OutputFormat::Json));
+        assert!(matches!(
+            OutputFormat::from(FormatArg::Json),
+            OutputFormat::Json
+        ));
         assert!(matches!(
             OutputFormat::from(FormatArg::JsonLines),
             OutputFormat::JsonLines
         ));
-        assert!(matches!(OutputFormat::from(FormatArg::Text), OutputFormat::Text));
+        assert!(matches!(
+            OutputFormat::from(FormatArg::Text),
+            OutputFormat::Text
+        ));
     }
 }

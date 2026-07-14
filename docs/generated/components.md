@@ -38,6 +38,7 @@
 | `userspace/minilib/Cargo.toml` | cargo | userspace runtime | target build |
 | `userspace/pwm_demo/Cargo.toml` | cargo | PWM demo | target build |
 | `userspace/rk_bridge/Cargo.toml` | cargo | host robotics bridge | standalone host lint and tests |
+| `userspace/rk_bridge/fuzz/Cargo.toml` | cargo | rk_bridge protocol fuzz target | fuzz build |
 | `userspace/rk_cli/Cargo.toml` | cargo | host signing CLI | standalone host lint and tests |
 | `userspace/rk_uart_forwarder/Cargo.toml` | cargo | UART forwarder image | target build |
 | `userspace/safety_demo/Cargo.toml` | cargo | safety-state demo | target build |

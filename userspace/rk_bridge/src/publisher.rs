@@ -3,12 +3,13 @@
 //! This module provides abstractions for publishing rkBPF events to
 //! different destinations (ROS2 topics, stdout, files, etc.).
 
-use crate::event::RkEvent;
 use std::io::Write;
 #[cfg(feature = "ros2")]
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+
+use crate::event::RkEvent;
 
 /// Configuration for event publishers.
 #[derive(Debug, Clone)]
@@ -265,9 +266,8 @@ impl FilePublisher {
 impl EventPublisher for FilePublisher {
     fn publish(&self, event: &RkEvent) -> Result<(), PublishError> {
         let formatted = match self.config.format {
-            OutputFormat::Json | OutputFormat::JsonLines => {
-                serde_json::to_string(event).map_err(|e| PublishError::Serialization(e.to_string()))?
-            }
+            OutputFormat::Json | OutputFormat::JsonLines => serde_json::to_string(event)
+                .map_err(|e| PublishError::Serialization(e.to_string()))?,
             OutputFormat::Text => format!("{:?}", event),
             OutputFormat::Binary => {
                 return Err(PublishError::Serialization(
@@ -376,8 +376,8 @@ impl RosPublisher {
 
     #[cfg_attr(not(test), cfg(feature = "ros2"))]
     fn encode_event_message(&self, event: &RkEvent) -> Result<String, PublishError> {
-        let payload = serde_json::to_string(event)
-            .map_err(|e| PublishError::Serialization(e.to_string()))?;
+        let payload =
+            serde_json::to_string(event).map_err(|e| PublishError::Serialization(e.to_string()))?;
         serde_json::to_string(&serde_json::json!({ "data": payload }))
             .map_err(|e| PublishError::Serialization(e.to_string()))
     }
