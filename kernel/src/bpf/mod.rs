@@ -1,11 +1,8 @@
+mod handles;
 pub mod helpers;
+mod limits;
 mod snapshot;
-
-#[cfg(all(
-    feature = "bpf-production-signed",
-    feature = "bpf-unsigned-development"
-))]
-compile_error!("signed production and unsigned development BPF policies are mutually exclusive");
+mod trust;
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -35,11 +32,11 @@ use kernel_bpf::loader::BpfLoader;
 use kernel_bpf::maps::{ArrayMap, BpfMap, HashMap as BpfHashMap, RingBufMap, TimeSeriesMap};
 use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
 use kernel_bpf::signing::SignatureVerifier;
-#[cfg(all(not(feature = "bpf-unsigned-development"), not(test)))]
-use kernel_bpf::signing::TrustedKey;
 use kernel_bpf::verifier::admission::AdmissionLedger;
 use kernel_bpf::verifier::{LoadCaller, MapPerm, Verifier, VerifyConfig};
+use limits::BpfLimits;
 use snapshot::EpochSnapshot;
+use trust::signing_policy;
 /// Context size used for load-time verification (#122).
 ///
 /// R1 at program entry points at a [`BpfContext`] — *uniformly for every attach
@@ -112,76 +109,8 @@ fn read_cycles() -> u64 {
 pub const ENVELOPE_MAP_ID: u32 = 0;
 pub const RESERVED_MAP_COUNT: u32 = 1;
 
-const BPF_HANDLE_SLOT_BITS: u32 = 10;
-const BPF_HANDLE_SLOT_MASK: u32 = (1 << BPF_HANDLE_SLOT_BITS) - 1;
-// Keep the top bit clear: userspace returns handles through c_int and BPF map
-// handles are commonly materialized through signed 32-bit immediates.
-const BPF_HANDLE_MAX_GENERATION: u32 = (i32::MAX as u32) >> BPF_HANDLE_SLOT_BITS;
 const PINNED_MAP_OWNER: u64 = u64::MAX;
 const MAX_MAP_GRANTS: usize = 64;
-
-#[cfg(all(not(feature = "bpf-unsigned-development"), not(test)))]
-static PRODUCTION_BPF_TRUSTED_KEY: &[u8; 32] = include_bytes!(env!("AXIOM_BPF_TRUSTED_KEY_PATH"));
-
-fn signing_policy() -> (SignatureVerifier, bool) {
-    #[cfg(all(not(feature = "bpf-unsigned-development"), not(test)))]
-    {
-        let key = TrustedKey::from_bytes(PRODUCTION_BPF_TRUSTED_KEY)
-            .expect("AXIOM_BPF_TRUSTED_KEY_PATH must contain a valid Ed25519 public key");
-        let verifier = SignatureVerifier::from_trusted_keys(&[key])
-            .expect("the production BPF trust store must fit the active profile");
-        (verifier, false)
-    }
-    #[cfg(any(feature = "bpf-unsigned-development", test))]
-    {
-        (SignatureVerifier::new(), true)
-    }
-}
-
-fn encode_handle(slot: usize, generation: u32) -> u32 {
-    debug_assert!(slot <= BPF_HANDLE_SLOT_MASK as usize);
-    debug_assert!(generation <= BPF_HANDLE_MAX_GENERATION);
-    let handle = (generation << BPF_HANDLE_SLOT_BITS) | slot as u32;
-    debug_assert!(i32::try_from(handle).is_ok());
-    handle
-}
-
-fn decode_handle(generations: &[u32], handle: u32) -> Option<usize> {
-    let slot = (handle & BPF_HANDLE_SLOT_MASK) as usize;
-    let generation = handle >> BPF_HANDLE_SLOT_BITS;
-    (generations.get(slot).copied() == Some(generation)).then_some(slot)
-}
-
-fn insert_handle_slot<T>(
-    slots: &mut Vec<Option<T>>,
-    generations: &mut Vec<u32>,
-    max_slots: usize,
-    value: T,
-) -> Result<u32, BpfError> {
-    if let Some(slot) = slots
-        .iter()
-        .enumerate()
-        .find(|(slot, entry)| entry.is_none() && generations[*slot] < BPF_HANDLE_MAX_GENERATION)
-        .map(|(slot, _)| slot)
-    {
-        let generation = generations[slot];
-        let generation = generation + 1;
-        generations[slot] = generation;
-        slots[slot] = Some(value);
-        return Ok(encode_handle(slot, generation));
-    }
-    if slots.len() >= max_slots || slots.len() > BPF_HANDLE_SLOT_MASK as usize {
-        return Err(BpfError::ResourceLimit);
-    }
-    slots.try_reserve(1).map_err(|_| BpfError::OutOfMemory)?;
-    generations
-        .try_reserve(1)
-        .map_err(|_| BpfError::OutOfMemory)?;
-    let slot = slots.len();
-    slots.push(Some(value));
-    generations.push(0);
-    Ok(encode_handle(slot, 0))
-}
 
 /// Maximum GPIO programs resolved for one IRQ edge. Must match the stack buffer
 /// used by the Pi 5 GPIO IRQ handler.
@@ -278,75 +207,6 @@ static HOOK_SNAPSHOTS: EpochSnapshot<HookSnapshot> = EpochSnapshot::empty();
 #[cfg(not(test))]
 struct PreparedHookSnapshot {
     snapshot: Box<HookSnapshot>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct BpfLimits {
-    max_live_programs: usize,
-    max_program_slots: usize,
-    max_program_bytes: usize,
-    max_single_program_bytes: usize,
-    max_owner_programs: usize,
-    max_owner_program_bytes: usize,
-    max_elf_bytes: usize,
-    max_live_maps: usize,
-    max_map_slots: usize,
-    max_map_bytes: usize,
-    max_single_map_bytes: usize,
-    max_owner_maps: usize,
-    max_owner_map_bytes: usize,
-    max_pinned_maps: usize,
-    max_key_size: u32,
-    max_value_size: u32,
-    max_entries: u32,
-}
-
-impl BpfLimits {
-    #[cfg(feature = "cloud-profile")]
-    const fn for_active_profile() -> Self {
-        Self {
-            max_live_programs: 128,
-            max_program_slots: 1024,
-            max_program_bytes: 16 * 1024 * 1024,
-            max_single_program_bytes: 1024 * 1024,
-            max_owner_programs: 32,
-            max_owner_program_bytes: 4 * 1024 * 1024,
-            max_elf_bytes: 1024 * 1024,
-            max_live_maps: 64,
-            max_map_slots: 512,
-            max_map_bytes: 64 * 1024 * 1024,
-            max_single_map_bytes: 16 * 1024 * 1024,
-            max_owner_maps: 16,
-            max_owner_map_bytes: 16 * 1024 * 1024,
-            max_pinned_maps: 128,
-            max_key_size: 512,
-            max_value_size: 64 * 1024,
-            max_entries: 1024 * 1024,
-        }
-    }
-
-    #[cfg(all(feature = "embedded-profile", not(feature = "cloud-profile")))]
-    const fn for_active_profile() -> Self {
-        Self {
-            max_live_programs: 32,
-            max_program_slots: 128,
-            max_program_bytes: 2 * 1024 * 1024,
-            max_single_program_bytes: 800 * 1024,
-            max_owner_programs: 8,
-            max_owner_program_bytes: 512 * 1024,
-            max_elf_bytes: 1024 * 1024,
-            max_live_maps: 16,
-            max_map_slots: 64,
-            max_map_bytes: 64 * 1024,
-            max_single_map_bytes: 64 * 1024,
-            max_owner_maps: 4,
-            max_owner_map_bytes: 32 * 1024,
-            max_pinned_maps: 32,
-            max_key_size: 256,
-            max_value_size: 4 * 1024,
-            max_entries: 4 * 1024,
-        }
-    }
 }
 
 struct ProgramEntry {
@@ -447,8 +307,8 @@ pub(crate) struct ProgramRuntime {
 
 impl ProgramRuntime {
     fn map(&self, handle: u32, required: MapAccess) -> Option<&MapRuntime> {
-        let slot = (handle & BPF_HANDLE_SLOT_MASK) as usize;
-        let generation = handle >> BPF_HANDLE_SLOT_BITS;
+        let slot = handles::slot(handle);
+        let generation = handles::generation(handle);
         let entry = self.maps.get(slot)?.as_ref()?;
         if entry.generation != generation {
             return None;
@@ -769,7 +629,7 @@ impl BpfManager {
             grants: Vec::new(),
         }));
         self.map_generations.push(0);
-        encode_handle(slot, 0)
+        handles::encode(slot, 0)
     }
 
     fn register_user_map(
@@ -778,7 +638,7 @@ impl BpfManager {
         charge: usize,
         owner: u64,
     ) -> Result<u32, BpfError> {
-        let id = insert_handle_slot(
+        let id = handles::insert(
             &mut self.maps,
             &mut self.map_generations,
             self.limits.max_map_slots,
@@ -892,7 +752,7 @@ impl BpfManager {
     }
 
     fn program_slot(&self, handle: u32) -> Option<usize> {
-        let slot = decode_handle(&self.program_generations, handle)?;
+        let slot = handles::decode(&self.program_generations, handle)?;
         self.programs.get(slot)?.as_ref()?;
         Some(slot)
     }
@@ -902,7 +762,7 @@ impl BpfManager {
     }
 
     fn map_slot(&self, handle: u32) -> Option<usize> {
-        let slot = decode_handle(&self.map_generations, handle)?;
+        let slot = handles::decode(&self.map_generations, handle)?;
         self.maps.get(slot)?.as_ref()?;
         Some(slot)
     }
@@ -931,7 +791,7 @@ impl BpfManager {
             if entry.owner != PINNED_MAP_OWNER || entry.charged_bytes == 0 {
                 continue;
             }
-            let map_id = encode_handle(map_slot, map_generations[map_slot]);
+            let map_id = handles::encode(map_slot, map_generations[map_slot]);
             if pinned_maps.iter().any(|pin| pin.map_id == map_id)
                 || Arc::strong_count(&entry.runtime) != 1
             {
@@ -971,7 +831,7 @@ impl BpfManager {
             let mut index = 0;
             while index < attached.len() {
                 let prog_id = attached[index];
-                let owned = decode_handle(program_generations, prog_id)
+                let owned = handles::decode(program_generations, prog_id)
                     .and_then(|slot| programs.get(slot))
                     .and_then(Option::as_ref)
                     .is_some_and(|entry| entry.owner == owner);
@@ -988,7 +848,7 @@ impl BpfManager {
         for (slot, entry) in self.programs.iter().enumerate() {
             if entry.as_ref().is_some_and(|entry| entry.owner == owner) {
                 self.gpio_routes
-                    .remove(encode_handle(slot, self.program_generations[slot]));
+                    .remove(handles::encode(slot, self.program_generations[slot]));
             }
         }
 
@@ -1034,7 +894,7 @@ impl BpfManager {
             if entry.owner != owner || entry.charged_bytes == 0 {
                 continue;
             }
-            let map_id = encode_handle(map_slot, map_generations[map_slot]);
+            let map_id = handles::encode(map_slot, map_generations[map_slot]);
             if pinned_maps.iter().any(|pin| pin.map_id == map_id) {
                 slot.as_mut().expect("owned map entry was present").owner = PINNED_MAP_OWNER;
                 continue;
@@ -1060,7 +920,7 @@ impl BpfManager {
     fn ensure_program_quota(&self, owner: u64, charge: usize) -> Result<(), BpfError> {
         let has_slot = self.programs.len() < self.limits.max_program_slots
             || self.programs.iter().enumerate().any(|(slot, entry)| {
-                entry.is_none() && self.program_generations[slot] < BPF_HANDLE_MAX_GENERATION
+                entry.is_none() && handles::can_reuse(self.program_generations[slot])
             });
         if self.live_programs >= self.limits.max_live_programs
             || !has_slot
@@ -1110,7 +970,7 @@ impl BpfManager {
         self.ensure_program_quota(owner, charge)?;
         let maps =
             self.program_maps_for_owner(owner, authorization.map_access, referenced_map_handles)?;
-        let id = insert_handle_slot(
+        let id = handles::insert(
             &mut self.programs,
             &mut self.program_generations,
             self.limits.max_program_slots,
@@ -1165,7 +1025,7 @@ impl BpfManager {
             map_value_sizes: sizes,
             map_perms: perms,
             map_generations: generations,
-            map_handle_slot_bits: BPF_HANDLE_SLOT_BITS as u8,
+            map_handle_slot_bits: handles::SLOT_BITS as u8,
             caller: authorization.caller,
             allow_actuation: authorization.allow_actuation,
             forbid_logging_helpers: false,
@@ -1779,7 +1639,7 @@ impl BpfManager {
 
         let has_slot = self.maps.len() < self.limits.max_map_slots
             || self.maps.iter().enumerate().any(|(slot, entry)| {
-                entry.is_none() && self.map_generations[slot] < BPF_HANDLE_MAX_GENERATION
+                entry.is_none() && handles::can_reuse(self.map_generations[slot])
             });
         if self.live_maps >= self.limits.max_live_maps
             || !has_slot
@@ -2336,7 +2196,7 @@ mod tests {
         assert!(runtime.map(unrelated, MapAccess::READ).is_none());
         assert!(runtime
             .map(
-                referenced.wrapping_add(1 << BPF_HANDLE_SLOT_BITS),
+                referenced.wrapping_add(1 << handles::SLOT_BITS),
                 MapAccess::READ
             )
             .is_none());
@@ -2524,7 +2384,7 @@ mod tests {
         let second = manager
             .create_map(MapType::Array as u32, 4, 8, 1)
             .expect("quota reclaimed");
-        assert_eq!(second & BPF_HANDLE_SLOT_MASK, first & BPF_HANDLE_SLOT_MASK);
+        assert_eq!(second & handles::SLOT_MASK, first & handles::SLOT_MASK);
         assert_ne!(second, first, "reused slot must advance its generation");
         assert!(manager.get_map_def(first).is_none());
         assert!(manager.get_map_def(second).is_some());
@@ -2695,7 +2555,7 @@ mod tests {
         let second = manager
             .load_raw_program(insns)
             .expect("program quota reclaimed");
-        assert_eq!(second & BPF_HANDLE_SLOT_MASK, first & BPF_HANDLE_SLOT_MASK);
+        assert_eq!(second & handles::SLOT_MASK, first & handles::SLOT_MASK);
         assert_ne!(second, first, "reused slot must advance its generation");
         assert_eq!(manager.unload_program(first), Err(BpfError::NotLoaded));
         manager
