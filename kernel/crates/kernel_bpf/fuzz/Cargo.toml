@@ -34,3 +34,17 @@ path = "fuzz_targets/verify_then_exec.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "signed_container"
+path = "fuzz_targets/signed_container.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ringbuf_sequences"
+path = "fuzz_targets/ringbuf_sequences.rs"
+test = false
+doc = false
+bench = false

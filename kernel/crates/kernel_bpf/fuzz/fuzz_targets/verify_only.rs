@@ -13,11 +13,11 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use kernel_bpf::bytecode::insn::BpfInsn;
 use kernel_bpf::bytecode::program::BpfProgType;
 use kernel_bpf::profile::ActiveProfile;
 use kernel_bpf::verifier::Verifier;
+use libfuzzer_sys::fuzz_target;
 
 /// Reinterpret a byte slice as `&[BpfInsn]` if length permits.
 /// Returns an empty slice for inputs shorter than one instruction.

@@ -10,12 +10,12 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use kernel_bpf::bytecode::insn::BpfInsn;
 use kernel_bpf::bytecode::program::BpfProgType;
 use kernel_bpf::execution::{BpfContext, BpfExecutor, Interpreter};
 use kernel_bpf::profile::ActiveProfile;
 use kernel_bpf::verifier::Verifier;
+use libfuzzer_sys::fuzz_target;
 
 // BPF helper stubs. The interpreter calls these via `extern "C"`; they are
 // supplied by the kernel at link time in normal builds. The fuzz harness
@@ -31,49 +31,87 @@ mod helper_stubs {
     use kernel_bpf::execution::BpfContext;
 
     #[unsafe(no_mangle)]
-    pub extern "C" fn bpf_ktime_get_ns() -> u64 { 0 }
+    pub extern "C" fn bpf_ktime_get_ns() -> u64 {
+        0
+    }
     #[unsafe(no_mangle)]
     pub extern "C" fn bpf_get_interrupt_latency_ns(ctx: *const BpfContext) -> u64 {
-        if ctx.is_null() { 0 } else { unsafe { (*ctx).interrupt_latency_ns } }
+        if ctx.is_null() {
+            0
+        } else {
+            unsafe { (*ctx).interrupt_latency_ns() }
+        }
     }
     #[unsafe(no_mangle)]
     pub extern "C" fn bpf_get_boot_time_ms(ctx: *const BpfContext) -> u64 {
-        if ctx.is_null() { 0 } else { unsafe { (*ctx).boot_time_ms } }
+        if ctx.is_null() {
+            0
+        } else {
+            unsafe { (*ctx).boot_time_ms() }
+        }
     }
     #[unsafe(no_mangle)]
     pub extern "C" fn bpf_get_kernel_heap_kb(ctx: *const BpfContext) -> u64 {
-        if ctx.is_null() { 0 } else { unsafe { (*ctx).kernel_heap_kb } }
+        if ctx.is_null() {
+            0
+        } else {
+            unsafe { (*ctx).kernel_heap_kb() }
+        }
     }
     #[unsafe(no_mangle)]
     pub extern "C" fn bpf_get_kernel_image_mb(ctx: *const BpfContext) -> u64 {
-        if ctx.is_null() { 0 } else { unsafe { (*ctx).kernel_image_mb } }
+        if ctx.is_null() {
+            0
+        } else {
+            unsafe { (*ctx).kernel_image_mb() }
+        }
     }
     #[unsafe(no_mangle)]
-    pub extern "C" fn bpf_trace_printk(_fmt: *const u8, _len: u32) -> i32 { 0 }
+    pub extern "C" fn bpf_trace_printk(_fmt: *const u8, _len: u32) -> i32 {
+        0
+    }
     #[unsafe(no_mangle)]
     pub extern "C" fn bpf_map_lookup_elem(_map_id: u32, _key: *const u8) -> *mut u8 {
         core::ptr::null_mut()
     }
     #[unsafe(no_mangle)]
     pub extern "C" fn bpf_map_update_elem(
-        _map_id: u32, _key: *const u8, _value: *const u8, _flags: u64,
-    ) -> i32 { 0 }
+        _map_id: u32,
+        _key: *const u8,
+        _value: *const u8,
+        _flags: u64,
+    ) -> i32 {
+        0
+    }
     #[unsafe(no_mangle)]
-    pub extern "C" fn bpf_map_delete_elem(_map_id: u32, _key: *const u8) -> i32 { 0 }
+    pub extern "C" fn bpf_map_delete_elem(_map_id: u32, _key: *const u8) -> i32 {
+        0
+    }
     #[unsafe(no_mangle)]
     pub extern "C" fn bpf_ringbuf_output(
-        _map_id: u32, _data: *const u8, _size: u64, _flags: u64,
-    ) -> i64 { 0 }
+        _map_id: u32,
+        _data: *const u8,
+        _size: u64,
+        _flags: u64,
+    ) -> i64 {
+        0
+    }
     #[unsafe(no_mangle)]
-    pub extern "C" fn bpf_gpio_read(_pin: u32) -> i64 { 0 }
+    pub extern "C" fn bpf_gpio_read(_pin: u32) -> i64 {
+        0
+    }
     #[unsafe(no_mangle)]
-    pub extern "C" fn bpf_gpio_write(_pin: u32, _value: u32) -> i64 { 0 }
+    pub extern "C" fn bpf_gpio_write(_pin: u32, _value: u32) -> i64 {
+        0
+    }
     #[unsafe(no_mangle)]
-    pub extern "C" fn bpf_pwm_write(_pwm_id: u32, _channel: u32, _duty: u32) -> i64 { 0 }
+    pub extern "C" fn bpf_pwm_write(_pwm_id: u32, _channel: u32, _duty: u32) -> i64 {
+        0
+    }
     #[unsafe(no_mangle)]
-    pub extern "C" fn bpf_timeseries_push(
-        _map_id: u32, _key: *const u8, _value: *const u8,
-    ) -> i64 { 0 }
+    pub extern "C" fn bpf_timeseries_push(_map_id: u32, _key: *const u8, _value: *const u8) -> i64 {
+        0
+    }
 }
 
 fn as_insns(data: &[u8]) -> &[BpfInsn] {

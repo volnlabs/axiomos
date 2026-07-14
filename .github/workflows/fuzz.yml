@@ -78,15 +78,21 @@ jobs:
 
   nightly:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    name: "Fuzz weekly (${{ matrix.target }}, 2h)"
+    name: "Fuzz weekly (${{ matrix.target }})"
     runs-on: ubuntu-latest
     timeout-minutes: 150   # 2h + slack
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - verify_only
-          - verify_then_exec
+        include:
+          - target: verify_only
+            seconds: 7200
+          - target: verify_then_exec
+            seconds: 7200
+          - target: signed_container
+            seconds: 600
+          - target: ringbuf_sequences
+            seconds: 600
     steps:
       - uses: actions/checkout@v4
 
@@ -106,9 +112,9 @@ jobs:
           restore-keys: |
             fuzz-corpus-${{ matrix.target }}-
 
-      - name: Run ${{ matrix.target }} for 2h
+      - name: Run ${{ matrix.target }}
         working-directory: kernel/crates/kernel_bpf
-        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=7200
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=${{ matrix.seconds }}
 
       - name: Upload corpus
         if: always()
