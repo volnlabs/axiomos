@@ -47,6 +47,12 @@ pub extern "C" fn _start() -> ! {
         write(1, b"NANOSLEEP_INTERRUPT_FAIL\n");
     }
 
+    if pipe_wait_queue_probe() {
+        write(1, b"PIPE_WAITQ_OK\n");
+    } else {
+        write(1, b"PIPE_WAITQ_FAIL\n");
+    }
+
     if lifecycle_exit_wait_probe() {
         write(1, b"LIFECYCLE_EXIT_WAIT_OK\n");
     } else {
@@ -613,6 +619,44 @@ fn lifecycle_exit_wait_probe() -> bool {
 
     let mut status = 0;
     minilib::waitpid(child, &mut status, 0) == child && status == 42 << 8
+}
+
+fn pipe_wait_queue_probe() -> bool {
+    let mut fds = [-1; 2];
+    if minilib::pipe(fds.as_mut_ptr()) != 0 {
+        return false;
+    }
+
+    let child = minilib::fork();
+    if child < 0 {
+        let _ = minilib::close(fds[0]);
+        let _ = minilib::close(fds[1]);
+        return false;
+    }
+    if child == 0 {
+        let _ = minilib::close(fds[0]);
+        let delay = minilib::timespec {
+            tv_sec: 0,
+            tv_nsec: 5_000_000,
+        };
+        if minilib::nanosleep(&raw const delay, core::ptr::null_mut()) != 0 {
+            minilib::exit(1);
+        }
+        let wrote_payload = minilib::write(fds[1], b"wake") == 4;
+        let closed_writer = minilib::close(fds[1]) == 0;
+        minilib::exit(if wrote_payload && closed_writer { 0 } else { 1 });
+    }
+
+    let closed_writer = minilib::close(fds[1]) == 0;
+    let mut payload = [0; 4];
+    let received_payload = minilib::read(fds[0], &mut payload) == 4 && payload == *b"wake";
+    let mut eof_probe = [0; 1];
+    let received_eof = minilib::read(fds[0], &mut eof_probe) == 0;
+    let closed_reader = minilib::close(fds[0]) == 0;
+    let mut status = 0;
+    let reaped_child = minilib::waitpid(child, &raw mut status, 0) == child && status == 0;
+
+    closed_writer && received_payload && received_eof && closed_reader && reaped_child
 }
 
 fn lifecycle_fault_wait_probe() -> bool {

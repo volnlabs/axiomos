@@ -94,49 +94,17 @@ impl FileAccess for KernelAccess {
     fn read(&self, fd: Self::Fd, buf: &mut [u8]) -> Result<usize, ()> {
         let fds = self.process.file_descriptors();
         let guard = fds.read();
-
-        let desc = guard.get(&fd).ok_or(())?;
-        let ofd = desc.file_description();
-        let len = buf.len() as u64;
-        let offset = ofd.position().fetch_add(len, Relaxed); // TODO: respect file max len
-
-        match ofd.read(buf, offset.into_usize()) {
-            Ok(bytes_read) => {
-                let bytes_read_u64 = bytes_read as u64;
-                if bytes_read_u64 < len {
-                    ofd.position().fetch_sub(len - bytes_read_u64, Relaxed);
-                }
-                Ok(bytes_read)
-            }
-            Err(_) => {
-                ofd.position().fetch_sub(len, Relaxed);
-                Err(())
-            }
-        }
+        let ofd = guard.get(&fd).ok_or(())?.file_description().clone();
+        drop(guard);
+        ofd.read(buf).map_err(|_| ())
     }
 
     fn write(&self, fd: Self::Fd, buf: &[u8]) -> Result<usize, ()> {
         let fds = self.process.file_descriptors();
         let guard = fds.read();
-
-        let desc = guard.get(&fd).ok_or(())?;
-        let ofd = desc.file_description();
-        let len = buf.len() as u64;
-        let offset = ofd.position().fetch_add(len, Relaxed); // TODO: respect file max len
-
-        match ofd.write(buf, offset.into_usize()) {
-            Ok(bytes_written) => {
-                let bytes_written_u64 = bytes_written as u64;
-                if bytes_written_u64 < len {
-                    ofd.position().fetch_sub(len - bytes_written_u64, Relaxed);
-                }
-                Ok(bytes_written)
-            }
-            Err(_) => {
-                ofd.position().fetch_sub(len, Relaxed);
-                Err(())
-            }
-        }
+        let ofd = guard.get(&fd).ok_or(())?.file_description().clone();
+        drop(guard);
+        ofd.write(buf).map_err(|_| ())
     }
 
     fn close(&self, fd: Self::Fd) -> Result<(), ()> {
@@ -162,6 +130,9 @@ impl FileAccess for KernelAccess {
 
         let desc = guard.get(&fd).ok_or(())?;
         let ofd = desc.file_description();
+        if !ofd.is_seekable() {
+            return Err(());
+        }
         let current_pos = ofd.position().load(Relaxed);
 
         // Get file size for SEEK_END
@@ -200,31 +171,9 @@ impl FileAccess for KernelAccess {
     }
 
     fn pipe(&self) -> Result<(Self::Fd, Self::Fd), ()> {
-        use kernel_vfs::node::VfsNode;
-        use kernel_vfs::path::AbsoluteOwnedPath;
-
-        use crate::file::pipe::PIPE_FS;
-
-        let pipe_fs_lock = PIPE_FS.get().ok_or(())?;
-
-        // Create the VFS nodes for the pipe
-        // We need to cast the specific PipeFs to the generic FileSystem trait
-        // to satisfy the VfsNode requirement.
-        let fs_arc: Arc<RwLock<dyn kernel_vfs::fs::FileSystem>> = pipe_fs_lock.clone();
-        let fs_weak = Arc::downgrade(&fs_arc);
-
-        let mut guard = pipe_fs_lock.write();
-        let (read_handle, write_handle) = guard.create_pipe();
-
-        // Pipes are anonymous, but VfsNode requires a path. We use a dummy path.
-        // TODO: In a real implementation, we might want a proper pipefs mount point
-        let path = AbsoluteOwnedPath::try_from("/[pipe]").unwrap();
-
-        let read_node = VfsNode::new(path.clone(), read_handle, fs_weak.clone());
-        let write_node = VfsNode::new(path, write_handle, fs_weak);
-
-        let read_ofd = OpenFileDescription::from(read_node);
-        let write_ofd = OpenFileDescription::from(write_node);
+        let (read_endpoint, write_endpoint) = crate::file::pipe::PipeEndpoint::pair();
+        let read_ofd = OpenFileDescription::from_pipe(read_endpoint);
+        let write_ofd = OpenFileDescription::from_pipe(write_endpoint);
 
         let mut fds = self.process.file_descriptors().write();
 

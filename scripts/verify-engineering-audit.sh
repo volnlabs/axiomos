@@ -269,7 +269,7 @@ qemu_smoke() {
     fi
 
     local failed=0 marker
-    for marker in QEMU_BOOT_OK USERCOPY_EFAULT_OK UNKNOWN_SYSCALL_ENOSYS_OK NANOSLEEP_WAITQ_OK NANOSLEEP_INTERRUPT_OK TLB_SHOOTDOWN_OK \
+    for marker in QEMU_BOOT_OK USERCOPY_EFAULT_OK UNKNOWN_SYSCALL_ENOSYS_OK NANOSLEEP_WAITQ_OK NANOSLEEP_INTERRUPT_OK PIPE_WAITQ_OK TLB_SHOOTDOWN_OK \
         LIFECYCLE_EXIT_WAIT_OK LIFECYCLE_FAULT_WAIT_OK LIFECYCLE_EXEC_REJECT_OK \
         LIFECYCLE_EXEC_WAIT_OK BPF_FOREIGN_OWNER_DENY_OK BPF_HANDLE_REUSE_OK \
         BPF_OWNER_EXIT_OK BPF_OWNER_RECLAIM_OK \
@@ -320,7 +320,7 @@ qemu_production_smoke() {
         -- --headless --smp 2 --mem 1G >"$log" 2>&1 || rc=$?
 
     local failed=0 marker
-    for marker in QEMU_BOOT_OK NANOSLEEP_WAITQ_OK NANOSLEEP_INTERRUPT_OK SIGNED_BPF_LOAD_OK; do
+    for marker in QEMU_BOOT_OK NANOSLEEP_WAITQ_OK NANOSLEEP_INTERRUPT_OK PIPE_WAITQ_OK SIGNED_BPF_LOAD_OK; do
         if ! grep -qF "$marker" "$log"; then
             echo "missing required production marker: $marker" >>"$log"
             failed=1
@@ -380,6 +380,11 @@ run_step wait-protocol-test-build rustc --edition 2021 -D warnings --test \
 run_step wait-protocol-tests "$OUTPUT_DIR/wait-protocol-tests"
 run_step wait-channel-static python3 -c \
     'from pathlib import Path; wait=Path("kernel/src/mcore/mtask/scheduler/wait.rs").read_text(); scheduler=Path("kernel/src/mcore/mtask/scheduler/mod.rs").read_text(); assert wait.count("changed_since(observed_generation)") == 2; assert "self.waiters.enqueue(task)" in wait and "while let Some(task) = self.waiters.try_take()" in wait; assert all(token not in wait for token in ("Mutex", "RwLock", "Vec", "log::")); assert "State::Waiting" in scheduler and "registration.park(zombie_task)" in scheduler'
+run_step pipe-state-test-build rustc --edition 2021 -D warnings --test \
+    kernel/src/file/pipe_state.rs -o "$OUTPUT_DIR/pipe-state-tests"
+run_step pipe-state-tests "$OUTPUT_DIR/pipe-state-tests"
+run_step pipe-wait-static python3 -c \
+    'from pathlib import Path; pipe=Path("kernel/src/file/pipe.rs").read_text(); access=Path("kernel/src/syscall/access.rs").read_text(); state=Path("kernel/src/file/pipe_state.rs").read_text(); assert pipe.count("TaskWait::block_current") == 2 and "wake_all()" in pipe; assert all(token not in pipe for token in ("PipeFs", "PIPE_FS", "RwLock", "FileSystem")); assert access.count("drop(guard)") >= 2 and "PipeEndpoint::pair()" in access; assert "PIPE_CAPACITY" in state and "PipeWrite::Block" in state and "PipeRead::EndOfFile" in state'
 run_step child-wait-static python3 -c \
     'from pathlib import Path; syscall=Path("kernel/src/syscall/process.rs").read_text().split("pub fn sys_waitpid", 1)[1]; process=Path("kernel/src/mcore/mtask/process/mod.rs").read_text(); tree=Path("kernel/src/mcore/mtask/process/tree.rs").read_text(); assert "TaskWait::block_current" in syscall and all(token not in syscall for token in ("enable_and_hlt", ".reschedule()", "TODO: Use a proper wait queue")); assert "let _tree = process_tree().write()" in process and "parent_exit_wait.wake_all()" in process; assert process.index("let child_task = Task::fork") < process.index("self.publish_child(child.clone())"); assert "child process published twice" in tree'
 run_step bpf-hook-hotpath-static python3 -c \
