@@ -13,11 +13,15 @@ use super::LoadCaller;
 use super::alu::{compute_alu_result_width, scalar_from_imm};
 use super::cfg::ControlFlowGraph;
 use super::error::{VerifyError, VerifyResult};
-use super::helpers::{ArgType, HelperId, HelperValidation, ReturnType, validate_helper_call};
+use super::helpers::{ArgType, HelperValidation, ReturnType, validate_helper_call};
 use super::liveness::{Liveness, RegSet};
+use super::map_policy::{
+    check_map_write_writability, map_lookup_value_size, map_lookup_writability,
+    mutating_helper_map_arg, referenced_map_helper_arg,
+};
 use super::pruner::{PruneDecision, StatePruner};
 use super::refine::refine_scalar;
-use super::state::{MapWritability, RegState, RegType, ScalarValue, StackSlot, VerifierState};
+use super::state::{RegState, RegType, ScalarValue, StackSlot, VerifierState};
 use crate::bytecode::insn::BpfInsn;
 use crate::bytecode::opcode::{AluOp, OpcodeClass};
 use crate::bytecode::program::{BpfProgType, BpfProgram};
@@ -93,116 +97,6 @@ pub struct VerifyConfig<'a> {
     /// Reject helpers that may emit log output. Disabled by default to preserve
     /// the existing verifier API; hot-path loaders opt in to the stricter rule.
     pub forbid_logging_helpers: bool,
-}
-
-fn map_handle_slot(id: u64, config: &VerifyConfig) -> Option<usize> {
-    if config.map_generations.is_empty() {
-        return usize::try_from(id).ok();
-    }
-    let bits = u32::from(config.map_handle_slot_bits);
-    if bits == 0 || bits >= u32::BITS || id > u64::from(u32::MAX) {
-        return None;
-    }
-    let id = id as u32;
-    let slot = (id & ((1u32 << bits) - 1)) as usize;
-    let generation = id >> bits;
-    (config.map_generations.get(slot).copied() == Some(generation)).then_some(slot)
-}
-
-/// Accessible byte size for a map-value pointer returned by a map-lookup helper
-/// (`ReturnType::PtrToMapValueOrNull`), given the map-id register (R1 at the
-/// call) and the verifier config. See [`VerifyConfig::map_value_sizes`] for the
-/// soundness rationale. `Err(map_id)` means a known-constant id has no entry in
-/// the table — a reference to a nonexistent map.
-fn map_lookup_value_size(map_id_reg: &RegState, config: &VerifyConfig) -> Result<u32, u64> {
-    let table = config.map_value_sizes;
-    if table.is_empty() {
-        // No per-map info supplied: fall back to the single configured size.
-        return Ok(config.map_value_size);
-    }
-    match map_id_reg.scalar_value.and_then(|s| s.value) {
-        // Known constant map id: exact size, or reject if it names no map.
-        Some(id) => {
-            let index = map_handle_slot(id, config).ok_or(id)?;
-            if matches!(
-                config.map_perms.get(index),
-                Some(MapPerm::Unavailable | MapPerm::WriteOnly)
-            ) {
-                return Err(id);
-            }
-            table.get(index).copied().ok_or(id)
-        }
-        // Dynamic map id: bound to the smallest reachable map value (sound).
-        None => {
-            if !config.map_generations.is_empty()
-                || config
-                    .map_perms
-                    .iter()
-                    .any(|perm| matches!(perm, MapPerm::Unavailable | MapPerm::WriteOnly))
-            {
-                return Err(u64::MAX);
-            }
-            Ok(table.iter().copied().min().unwrap_or(0))
-        }
-    }
-}
-
-fn map_lookup_writability(map_id_reg: &RegState, config: &VerifyConfig) -> MapWritability {
-    let known_id = map_id_reg
-        .scalar_value
-        .and_then(|s| s.value)
-        .and_then(|id| u32::try_from(id).ok());
-
-    if config.map_perms.is_empty() {
-        return MapWritability::ReadWrite(known_id);
-    }
-
-    let Some(id) = known_id else {
-        return MapWritability::Unprovable;
-    };
-    let Some(perm) =
-        map_handle_slot(u64::from(id), config).and_then(|slot| config.map_perms.get(slot))
-    else {
-        return MapWritability::Unprovable;
-    };
-
-    match perm {
-        MapPerm::Unavailable => MapWritability::Unprovable,
-        MapPerm::ReadOnly => MapWritability::ReadOnly(id),
-        MapPerm::WriteOnly => MapWritability::ReadWrite(Some(id)),
-        MapPerm::ReadWrite => MapWritability::ReadWrite(Some(id)),
-    }
-}
-
-fn check_map_write_writability(writability: MapWritability, insn_idx: usize) -> VerifyResult<()> {
-    match writability {
-        MapWritability::ReadWrite(_) => Ok(()),
-        MapWritability::ReadOnly(map_id) => {
-            Err(VerifyError::WriteToReadOnlyMap { insn_idx, map_id })
-        }
-        MapWritability::Unprovable => Err(VerifyError::WriteMapNotProvablyWritable { insn_idx }),
-    }
-}
-
-fn mutating_helper_map_arg(helper: HelperId) -> Option<Register> {
-    match helper {
-        HelperId::MapUpdateElem
-        | HelperId::MapDeleteElem
-        | HelperId::RingbufOutput
-        | HelperId::TimeseriesPush => Some(Register::R1),
-        _ => None,
-    }
-}
-
-fn referenced_map_helper_arg(helper: HelperId) -> Option<Register> {
-    match helper {
-        HelperId::MapLookupElem
-        | HelperId::MapUpdateElem
-        | HelperId::MapDeleteElem
-        | HelperId::RingbufOutput
-        | HelperId::TimeseriesPush => Some(Register::R1),
-        _ => None,
-    }
 }
 
 /// Cost of a verification run, returned by [`Verifier::verify_with_stats`].
