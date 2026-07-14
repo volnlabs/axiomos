@@ -425,6 +425,10 @@ run_step process-module-boundaries-static python3 -c \
 run_cargo_step focused-host-tests test \
     -p kernel_abi -p kernel_elfloader -p kernel_physical_memory -p kernel_syscall \
     -p kernel_time -p kernel_usermem -p kernel_vfs -p kernel_virtual_memory -p shrike_link
+run_step fault-injection-static python3 -c \
+    'from pathlib import Path; root=Path("kernel/crates/kernel_physical_memory"); cargo=(root/"Cargo.toml").read_text(); lib=(root/"src/lib.rs").read_text(); fault=(root/"src/fault.rs").read_text(); assert "[features]" in cargo and "fault-injection = []" in cargo; assert "spin.workspace = true" in cargo, "no_std spin mutex dependency missing"; assert "pub(crate) mod fault" in lib, "fault must be crate-private (no cross-crate consumer in foundation)"; assert "cfg(feature = \"fault-injection\")" in lib; assert lib.count("crate::fault::checkpoint()") >= 2, "expected two checkpoints in allocate_frames_impl"; assert "pub(crate) fn armed" in fault and "fn drop" in fault; assert "pub(crate) fn checkpoint" in fault and "pub(crate) fn disarm" in fault and "pub(crate) fn arm" in fault, "controller API must be crate-private, not pub"; assert "pub(crate) fn is_disarmed" in fault, "is_disarmed helper must exist for the panic-restoration test"; assert "SERIAL" in fault and "spin" in fault and "Mutex" in fault, "controller must use no_std synchronization"'
+run_cargo_step fault-injection-tests test -p kernel_physical_memory \
+    --features fault-injection
 run_cargo_step bpf-cloud-tests test -p kernel_bpf --no-default-features --features cloud-profile
 run_cargo_step bpf-embedded-tests test -p kernel_bpf --no-default-features --features embedded-profile
 run_cargo_step kernel-x86-check check -p kernel --target x86_64-unknown-none \

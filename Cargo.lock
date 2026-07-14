@@ -1050,6 +1050,7 @@ dependencies = [
 name = "kernel_physical_memory"
 version = "0.1.0"
 dependencies = [
+ "spin",
  "thiserror",
  "x86_64",
 ]
