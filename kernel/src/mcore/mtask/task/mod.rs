@@ -16,6 +16,7 @@ use spin::RwLock;
 use crate::arch::UserContext;
 use crate::mcore::context::ExecutionContext;
 use crate::mcore::mtask::process::Process;
+use crate::mcore::mtask::scheduler::wait::WaitRegistration;
 use crate::mem::memapi::{LowerHalfAllocation, Writable};
 use crate::U64Ext;
 
@@ -48,6 +49,7 @@ pub struct Task {
     sleep_deadline_ns: AtomicU64,
     sleep_generation: AtomicU64,
     sleep_wake_reason: AtomicU8,
+    wait_registration: Option<WaitRegistration>,
     last_cpu: AtomicUsize,
     /// The kernel stack of the task. Every task starts with a stack in the higher half.
     /// Userspace tasks will then allocate a stack in the lower half, which will be stored in
@@ -142,6 +144,7 @@ impl Task {
             sleep_deadline_ns: AtomicU64::new(0),
             sleep_generation: AtomicU64::new(0),
             sleep_wake_reason: AtomicU8::new(SleepWakeReason::Pending as u8),
+            wait_registration: None,
             last_cpu: AtomicUsize::new(
                 ExecutionContext::try_load().map_or(0, ExecutionContext::cpu_id),
             ),
@@ -171,6 +174,7 @@ impl Task {
             sleep_deadline_ns: AtomicU64::new(0),
             sleep_generation: AtomicU64::new(0),
             sleep_wake_reason: AtomicU8::new(SleepWakeReason::Pending as u8),
+            wait_registration: None,
             last_cpu: AtomicUsize::new(0),
             kstack: None,
             ustack: RwLock::new(None),
@@ -252,6 +256,7 @@ impl Task {
             sleep_deadline_ns: AtomicU64::new(0),
             sleep_generation: AtomicU64::new(0),
             sleep_wake_reason: AtomicU8::new(SleepWakeReason::Pending as u8),
+            wait_registration: None,
             last_cpu: AtomicUsize::new(cpu_id),
             kstack: None,
             ustack: RwLock::new(None),
@@ -343,6 +348,32 @@ impl Task {
         self.sleep_wake_reason
             .store(SleepWakeReason::Interrupted as u8, Relaxed);
         let _ = self.finish_sleep();
+        self.state.store(State::Running as u8, Release);
+    }
+
+    pub(crate) fn begin_wait(&mut self, registration: WaitRegistration) {
+        assert!(
+            self.wait_registration.is_none(),
+            "task already has a wait registration"
+        );
+        self.wait_registration = Some(registration);
+        self.state.store(State::Waiting as u8, Release);
+    }
+
+    pub(crate) fn take_wait_registration(&mut self) -> WaitRegistration {
+        self.wait_registration
+            .take()
+            .expect("waiting task must own a wait registration")
+    }
+
+    pub(crate) fn wake_from_wait(&self) {
+        debug_assert_eq!(self.state(), State::Waiting);
+        self.state.store(State::Ready as u8, Release);
+    }
+
+    pub(crate) fn abort_wait_before_switch(&mut self) {
+        debug_assert_eq!(self.state(), State::Waiting);
+        self.wait_registration = None;
         self.state.store(State::Running as u8, Release);
     }
 
@@ -438,6 +469,7 @@ impl Task {
             sleep_deadline_ns: AtomicU64::new(0),
             sleep_generation: AtomicU64::new(0),
             sleep_wake_reason: AtomicU8::new(SleepWakeReason::Pending as u8),
+            wait_registration: None,
             last_cpu: AtomicUsize::new(parent_task.last_cpu()),
             kstack: Some(stack),
             ustack: RwLock::new(ustack),

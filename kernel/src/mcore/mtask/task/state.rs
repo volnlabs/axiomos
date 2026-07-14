@@ -4,6 +4,7 @@ pub enum State {
     Ready,
     Running,
     Sleeping,
+    Waiting,
     Finished,
 }
 
@@ -13,7 +14,8 @@ impl State {
             0 => Self::Ready,
             1 => Self::Running,
             2 => Self::Sleeping,
-            3 => Self::Finished,
+            3 => Self::Waiting,
+            4 => Self::Finished,
             _ => panic!("invalid task state"),
         }
     }

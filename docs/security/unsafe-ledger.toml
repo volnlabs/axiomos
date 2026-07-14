@@ -1,6 +1,6 @@
 version = 1
-baseline_sites = 702
-baseline_fingerprint = "sha256:6c4db9a7b7d55f903b455e2384fcf4f7bd656d05c1eddbbc2fa43b7b9f83bb91"
+baseline_sites = 703
+baseline_fingerprint = "sha256:b560f2120040c2c8d1b32393393f4b2cc7720b1420b5d7ffbf83e85bc837f553"
 
 # Rules are evaluated in order. Keep narrow, high-risk obligations before broad
 # subsystem rules. The first matching rule supplies every site-level field.
@@ -81,6 +81,17 @@ callers = "kernel syscall adapters and process memory operations"
 tests = "kernel_syscall and kernel_usermem unit tests; targeted Miri is required for host-capable pointer helpers."
 priority = "P0"
 reviewed = "2026-07-12"
+
+[[obligation]]
+id = "SCHEDULER-WAIT-TRANSITION"
+paths = ["kernel/src/mcore/mtask/scheduler/wait.rs"]
+scope = "production"
+owner = "scheduler/SMP maintainers"
+invariant = "The current task owns a generation-stamped wait registration, the condition lock is released, and local interrupts remain masked across the exclusive scheduler transition."
+callers = "child-exit, pipe, and device wait paths"
+tests = "wait protocol interleaving model, x86/AArch64 kernel checks, and SMP QEMU lifecycle smoke"
+priority = "P0"
+reviewed = "2026-07-14"
 
 [[obligation]]
 id = "SCHEDULER-TASK"

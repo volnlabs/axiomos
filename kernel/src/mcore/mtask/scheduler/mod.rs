@@ -31,6 +31,8 @@ pub mod run_queue;
 mod run_queue_policy;
 pub mod sleep;
 mod switch;
+pub mod wait;
+mod wait_protocol;
 
 #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
 static SCHED_SWITCH_MARKER_SENT: AtomicBool = AtomicBool::new(false);
@@ -134,6 +136,10 @@ impl Scheduler {
                 TaskCleanup::enqueue(zombie_task);
             } else if zombie_task.state() == State::Sleeping {
                 TaskSleep::enqueue(zombie_task);
+            } else if zombie_task.state() == State::Waiting {
+                let mut zombie_task = zombie_task;
+                let registration = zombie_task.take_wait_registration();
+                registration.park(zombie_task);
             } else {
                 zombie_task.mark_ready();
                 RunQueues::enqueue(zombie_task);
@@ -262,6 +268,10 @@ impl Scheduler {
     #[must_use]
     pub fn current_task(&self) -> &Task {
         &self.current_task
+    }
+
+    pub(crate) fn current_task_mut(&mut self) -> &mut Task {
+        self.current_task.as_mut().get_mut()
     }
 
     fn swap_current_task(&mut self, next_task: Pin<Box<Task>>) -> Pin<Box<Task>> {

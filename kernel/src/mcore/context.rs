@@ -388,6 +388,16 @@ impl ExecutionContext {
         self.with_interrupts_masked(|| self.scheduler.with(|scheduler| f(scheduler.current_task())))
     }
 
+    pub(crate) fn with_current_task_mut<R>(
+        &self,
+        f: impl for<'task> FnOnce(&'task mut Task) -> R,
+    ) -> R {
+        self.with_interrupts_masked(|| {
+            self.scheduler
+                .with_mut(|scheduler| f(scheduler.current_task_mut()))
+        })
+    }
+
     pub fn current_process(&self) -> Arc<Process> {
         self.with_current_task(|task| task.process().clone())
     }
