@@ -55,6 +55,7 @@ pub mod telemetry;
 
 use crate::arch::UserContext;
 use crate::mcore::mtask::scheduler::run_queue::RunQueues;
+use crate::mcore::mtask::scheduler::wait::WaitChannel;
 use crate::mem::virt::VirtualMemoryAllocator;
 
 pub mod tree;
@@ -169,6 +170,8 @@ pub struct Process {
     credentials: RwLock<Credentials>,
 
     exit_code: RwLock<Option<i32>>,
+    child_exit_wait: OnceCell<Arc<WaitChannel>>,
+    parent_exit_wait: Option<Arc<WaitChannel>>,
     interruptible_sleep_state: AtomicU64,
 
     executable_path: Option<AbsoluteOwnedPath>,
@@ -197,6 +200,8 @@ impl Process {
                 ppid: RwLock::new(pid),
                 credentials: RwLock::new(Credentials::kernel()),
                 exit_code: RwLock::new(None),
+                child_exit_wait: OnceCell::uninit(),
+                parent_exit_wait: None,
                 interruptible_sleep_state: AtomicU64::new(0),
                 executable_path: None,
                 executable_file_data: RwLock::new(None),
@@ -237,6 +242,8 @@ impl Process {
             ppid: RwLock::new(parent_pid),
             credentials: RwLock::new(credentials),
             exit_code: RwLock::new(None),
+            child_exit_wait: OnceCell::uninit(),
+            parent_exit_wait: Some(parent.child_exit_wait().clone()),
             interruptible_sleep_state: AtomicU64::new(0),
             executable_path: executable_path.map(|x| x.as_ref().to_owned()),
             executable_file_data: RwLock::new(None),
@@ -258,9 +265,7 @@ impl Process {
             elf_segments: RwLock::new(ElfSegments::new()),
         };
 
-        let res = Arc::new(process);
-        process_tree().write().processes.insert(pid, res.clone());
-        res
+        Arc::new(process)
     }
 
     // TODO: add documentation
@@ -316,6 +321,7 @@ impl Process {
 
         let kstack = HigherHalfStack::allocate(16, trampoline, ptr::null_mut(), Task::exit)?;
         let main_task = Task::create_with_stack(&process, kstack);
+        parent.publish_child(process.clone());
         RunQueues::enqueue(Box::pin(main_task));
 
         Ok(process)
@@ -323,6 +329,24 @@ impl Process {
 
     pub fn exit_code(&self) -> &RwLock<Option<i32>> {
         &self.exit_code
+    }
+
+    pub(crate) fn child_exit_wait(&self) -> &Arc<WaitChannel> {
+        self.child_exit_wait
+            .get_or_init(|| Arc::new(WaitChannel::new()))
+    }
+
+    /// Publish process exit while holding the same tree lock used by waiters.
+    pub(crate) fn mark_exited(&self, status: i32) {
+        let _tree = process_tree().write();
+        let mut exit_code = self.exit_code.write();
+        if exit_code.is_some() {
+            return;
+        }
+        *exit_code = Some(status);
+        if let Some(parent_exit_wait) = self.parent_exit_wait.as_ref() {
+            parent_exit_wait.wake_all();
+        }
     }
 
     pub(crate) fn begin_interruptible_sleep(&self) -> u64 {
@@ -551,12 +575,13 @@ impl Process {
             }
         }
 
-        // 5. Register child in process tree
-        self.children_mut().insert(child.clone());
-
-        // 6. Fork the Task
+        // 5. Build the task before publishing the child. Any earlier failure
+        // drops the unpublished process and rolls back all cloned allocations.
         let child_task = Task::fork(&child, current_task, ctx)
             .map_err(|_| "Failed to allocate stack for child task")?;
+
+        // 6. Atomically publish the fully constructed child, then make it runnable.
+        self.publish_child(child.clone());
         RunQueues::enqueue(Box::pin(child_task));
 
         Ok(child)
@@ -930,9 +955,7 @@ extern "C" fn trampoline(_arg: *mut c_void) {
             }
             Err(err) => {
                 log::error!("Trampoline: {err}");
-                ctx.with_current_task(|task| task.set_should_terminate(true));
-                Task::exit();
-                unreachable!("Task::exit never returns");
+                Task::terminate_current(1, "ELF load failed");
             }
         };
     #[cfg(not(target_arch = "aarch64"))]
@@ -944,9 +967,7 @@ extern "C" fn trampoline(_arg: *mut c_void) {
             }
             Err(err) => {
                 log::error!("Trampoline: {err}");
-                ctx.with_current_task(|task| task.set_should_terminate(true));
-                Task::exit();
-                unreachable!("Task::exit never returns");
+                Task::terminate_current(1, "ELF load failed");
             }
         };
     #[cfg(all(not(target_arch = "aarch64"), feature = "rpi5"))]

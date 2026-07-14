@@ -100,14 +100,15 @@ unsafe impl Linked<Links<Self>> for Task {
 impl Task {
     pub(crate) fn terminate_current(status: i32, reason: &'static str) -> ! {
         let context = ExecutionContext::load();
-        context.with_current_task(|task| {
+        let process = context.with_current_task(|task| {
             log::error!(
                 "terminating process '{}' task '{}' after {reason}",
                 task.process().name(),
                 task.name()
             );
-            *task.process().exit_code().write() = Some(status);
+            task.process().clone()
         });
+        process.mark_exited(status);
         Self::exit();
         unreachable!("Task::exit must not return")
     }
@@ -186,7 +187,7 @@ impl Task {
 
     pub(crate) extern "C" fn exit() {
         let context = ExecutionContext::load();
-        context.with_current_task(|task| {
+        let process = context.with_current_task(|task| {
             trace!("exiting task {}", task.name());
 
             // Known entry/trampoline call sites do not hold these task-local locks,
@@ -195,7 +196,11 @@ impl Task {
             let _ = task.tls.write().take();
             let _ = task.ustack.write().take();
             task.set_should_terminate(true);
+            task.process().clone()
         });
+        if process.pid() != Process::root().pid() {
+            process.mark_exited(0);
+        }
 
         #[cfg(target_arch = "aarch64")]
         {

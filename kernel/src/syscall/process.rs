@@ -149,47 +149,38 @@ pub fn sys_waitpid(pid: isize, status_ptr: usize, options: usize) -> Result<usiz
     let pid_arg = pid;
 
     loop {
-        let mut reaped_pid = None;
-        let mut reaped_status = 0;
+        let mut tree = crate::mcore::mtask::process::tree::process_tree().write();
+        let Some(children) = tree.children.get(&current_process.pid()) else {
+            return Err(ECHILD);
+        };
 
-        {
-            let mut tree = crate::mcore::mtask::process::tree::process_tree().write();
-            // Check if we have any children at all
-            if let Some(children) = tree.children.get_mut(&current_process.pid()) {
-                let mut index_to_remove = None;
-
-                for (i, child) in children.iter().enumerate() {
-                    // Filter by PID
-                    // pid > 0: wait for specific pid
-                    // pid == -1: wait for any child
-                    // pid == 0: wait for any child in same process group (TODO)
-                    // pid < -1: wait for any child in specific process group (TODO)
-                    if pid_arg > 0 && child.pid().as_u64() != pid_arg as u64 {
-                        continue;
-                    }
-
-                    // Check if exited
-                    if let Some(code) = *child.exit_code().read() {
-                        reaped_pid = Some(child.pid());
-                        // Construct status: (exit_code << 8) | sig (0)
-                        reaped_status = (code & 0xff) << 8;
-                        index_to_remove = Some(i);
-                        break;
-                    }
-                }
-
-                if let Some(i) = index_to_remove {
-                    let child_proc = children.remove(i);
-                    // Remove from global processes map to drop the final Arc (unless other references exist)
-                    tree.processes.remove(&child_proc.pid());
-                }
-            } else {
-                // No children at all
-                return Err(ECHILD);
+        let mut matching_child = false;
+        let mut reaped = None;
+        for (index, child) in children.iter().enumerate() {
+            // pid > 0 waits for one child. Process-group forms remain TODO and
+            // currently match any child, preserving the previous behavior.
+            if pid_arg > 0 && child.pid().as_u64() != pid_arg as u64 {
+                continue;
+            }
+            matching_child = true;
+            if let Some(code) = *child.exit_code().read() {
+                reaped = Some((index, child.pid(), (code & 0xff) << 8));
+                break;
             }
         }
 
-        if let Some(pid) = reaped_pid {
+        if !matching_child {
+            return Err(ECHILD);
+        }
+
+        if let Some((index, pid, reaped_status)) = reaped {
+            let child = tree
+                .children
+                .get_mut(&current_process.pid())
+                .expect("child list disappeared while process tree was locked")
+                .remove(index);
+            tree.processes.remove(&child.pid());
+            drop(tree);
             if status_ptr != 0 {
                 copy_to_userspace(status_ptr, &reaped_status.to_ne_bytes())?;
             }
@@ -201,15 +192,9 @@ pub fn sys_waitpid(pid: isize, status_ptr: usize, options: usize) -> Result<usiz
             return Ok(0);
         }
 
-        // Yield to scheduler so other tasks (including our child) can run.
-        // TODO: Use a proper wait queue when available
-        #[cfg(target_arch = "x86_64")]
-        x86_64::instructions::interrupts::enable_and_hlt();
-        #[cfg(target_arch = "aarch64")]
-        // SAFETY: Interrupts are disabled during syscall handling. Reschedule
-        // switches to another task; when we're rescheduled, we re-check the child.
-        unsafe {
-            crate::mcore::context::ExecutionContext::load().reschedule();
-        }
+        let wait_channel = current_process.child_exit_wait().clone();
+        crate::mcore::mtask::scheduler::wait::TaskWait::block_current(&wait_channel, move || {
+            drop(tree);
+        });
     }
 }
