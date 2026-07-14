@@ -1,19 +1,61 @@
-# axiomos `dev` Engineering Audit
+# axiomos Engineering Audit
 
-- **Audit date:** 2026-07-11
+## Current branch re-audit (2026-07-14)
+
+- **Branch:** `audit/h04-h02-h03-release-blockers`
+- **Implementation re-audited at:** `d52dc59aecf265fabe3667cd2e1a5172829f8fce`
+- **Comparison baseline:** original audited commit `661d5ede6331c5ee62d6642451ce63ce1e0d5adf`
+- **Fresh engineering score:** **7/10** (release-candidate engineering, not production assurance)
+- **Fresh production decision:** **NO-GO** for v1.0 or safety-relevant deployment
+- **Local required gate:** **44/44 passed** with production and development two-vCPU QEMU boots
+- **Hosted H-06 evidence:** externally blocked; [GitHub Actions run 29305700412](https://github.com/pro-utkarshM/axiomOS/actions/runs/29305700412) created zero-step jobs because the account spending limit/monthly usage prevented runners from starting
+
+This table is the authoritative status for the current branch. The detailed audit below is preserved as a historical review of `661d5ed`; its 3/10 score, finding descriptions, and recommendations describe that old snapshot and are not current-branch status.
+
+| Finding | Current status | Current-HEAD evidence |
+|---|---|---|
+| C-01 | **Closed** | User copies validate the complete mapped range and direction-specific permissions under the address-space guard; invalid pointers return `EFAULT`; QEMU probes exercise representative copy directions. |
+| C-02 | **Closed** | Current-task and scheduler access is interrupt-masked and non-escaping, reentrant borrowing is rejected, process handles are owned, and the scheduler borrow ends before assembly context transfer. |
+| C-03 | **Closed** | BPF execution requires verifier-produced `VerifiedProgram` values and lifetime-bound, sealed contexts instead of safe construction over arbitrary raw pointers. |
+| C-04 | **Closed** | Execution uses guarded per-CPU stacks and map leases that serialize userspace mutation and unload against escaped runtime access. |
+| C-05 | **Closed** | Mapping/remapping is transactional with rollback and protection propagation; frame references are checked; x86 performs epoch/ack shootdown before reclamation and AArch64 uses broadcast TLBI. |
+| C-06 | **Closed** | The kernel RWX JIT allocator is removed and no shipped profile enables the AArch64 JIT. |
+| C-07 | **Closed** | Checked allocation, global/per-owner quotas, ownership, generation-safe handles, lifecycle commands, busy checks, and scheduler-owned exit reclamation bound BPF object lifetime. |
+| H-01 | **Closed** | User exceptions terminate only the task, x86 fork/exec context handling is corrected, exec replacement is preflighted, and scheduler-owned teardown contains no force-unlock path. |
+| H-02 | **Closed** | Clock conversion is overflow-safe and sleeps use an allocation-free ordered deadline queue with timer wakeups, cancellation, task-exit cleanup, interruption, and monotonic timing probes. |
+| H-03 | **Closed** | Fixed-fanout immutable hook/GPIO snapshots are published through an epoch grace period; dispatch avoids manager/runtime locks, allocation, refcount changes, scans, and logging. |
+| H-04 | **Closed** | Process credentials and capabilities are inherited exactly across fork/exec; BPF operations use per-command authorization, credential-derived verifier tiers, bounded pin grants, and fail-closed production signing. |
+| H-05 | **Closed** | ELF parsing/loading is fallible, executable images are capped and fallibly allocated, malformed-input regression coverage is present, and the isolated fuzz target builds. |
+| H-06 | **Pending hosted evidence** | Workflow/toolchain/target/QEMU-gate defects are remediated and the full local gate passes 44/44. Hosted jobs cannot start until GitHub billing/quota is restored. |
+| Additional High: ACPI mapping | **Closed** | Mapping covers every page in an unaligned range, returns the offset virtual address, unmaps the complete reservation, and has four synthetic mapping-plan tests. |
+| Additional High: force unlock | **Closed** | H-01 teardown uses normal lock ownership and scheduler cleanup after task guards drain; no `force_unlock` call remains. |
+| Additional High: exec/spawn allocation | **Closed** | Executable files have a 16 MiB cap, buffers use fallible reservation, spawn rechecks layout, and load/allocation/protection failures terminate only the task. |
+| Q-04 unsafe governance | **Partial** | The generated exact-fingerprint ledger owns all 702 first-party Rust `unsafe` sites, but independent invariant review and kernel-representative dynamic analysis remain outstanding. |
+| T-01 / T-02 / T-03 / T-04 | **Partial** | The local gate and parser/signing/QEMU coverage close the original highest-risk gaps; manifest-driven workspace discovery, physical firmware HIL, broader failure injection, coverage, and mutation budgets remain open. |
+
+The score rises from 3/10 to 7/10 because the original C-01 through C-07 and H-01 through H-05 implementation defects are closed and exercised by a reproducible local release gate. It does not rise further because hosted CI has not executed, real RPi5/RP2040 hardware paths are not release-gated, the unsafe/concurrency invariants lack external review or model checking, and significant Medium architecture, error-policy, workspace, test-budget, and documentation debt remains.
+
+Current release-gate checklist:
+
+- [x] Revalidate and fix unaligned/cross-page ACPI mapping.
+- [x] Revalidate and fix executable-size caps and fallible exec/spawn allocation.
+- [x] Confirm H-01 scheduler-owned teardown fully removes force-unlock behavior.
+- [x] Pass the complete local required audit gate: 44/44 at `d52dc59`.
+- [ ] Run H-06 on hosted GitHub runners after billing/monthly quota is restored.
+- [ ] Pass physical RPi5 and RP2040 HIL, including GPIO interrupt and control-link failure cases.
+- [ ] Obtain an independent safety/concurrency review of the unsafe ledger, scheduler/VM shootdown, and BPF epoch/snapshot invariants.
+
+## Historical audit snapshot (2026-07-11)
+
 - **Audited ref:** `origin/dev`
 - **Audited commit:** `661d5ede6331c5ee62d6642451ce63ce1e0d5adf`
 - **Local state at start:** `dev` checked out, `HEAD == origin/dev`, divergence `0/0`, clean working tree
 - **Scope:** all 414 tracked files at that commit (70,346 lines of Rust and 11,347 lines of Markdown). Ignored build output and the locally ignored `TODO.md` are not part of `origin/dev` and were excluded.
-- **Post-audit update (2026-07-11):** the `audit/dev-remediation` branch subsequently standardized the root package, executable, boot image, boot-menu entry, CI artifact, build scripts, and affected documentation on `axiomos`. This naming-only delta is not contained in the audited commit; unless explicitly marked post-audit, technical findings remain scoped to `661d5ede6331c5ee62d6642451ce63ce1e0d5adf`.
-- **Post-audit update (2026-07-13) — current `audit/h04-h02-h03-release-blockers` branch state:** the historical finding text below remains the evidence for audited commit `661d5ede6331c5ee62d6642451ce63ce1e0d5adf`; this amendment records subsequent remediation without silently rewriting that snapshot.
-  - **Closed findings/safety paths:** C-01 user copies validate every mapped page and permission while the address-space guard is held, invalid user pointers return `EFAULT`, and the release QEMU probe covers write/writev/open/clock/nanosleep; C-02 exposes current-task state only through interrupt-masked, non-escaping higher-ranked callbacks, rejects reentrant scheduler borrowing, returns owned process handles, and ends the exclusive scheduler borrow before assembly transfers control; C-03 now uses `RawProgram` → `VerifiedProgram` typestate, lifetime-bound `BpfContext<'a>`, and sealed POD contexts; C-04 uses guarded per-CPU interpreter stacks and serializes escaped map-pointer lifetimes against userspace mutation/unload; C-05 has transactional map/remap rollback, protection/W^X propagation, checked `u32` frame references, monotonic address-space CPU residency, and synchronous epoch/ack x86 TLB shootdown before frame reclamation, while AArch64 uses inner-shareable broadcast TLBI; C-06 removes the RWX JIT allocator from the kernel and erases the AArch64 JIT from every shipped profile; C-07 has checked allocation, global/per-owner quotas charged before allocation, PID ownership and verifier isolation, generation-safe reusable handles, explicit lifecycle operations, synchronous busy checks, and scheduler-owned exit reclamation after in-flight snapshots drain; H-01 has architecture-neutral user-exception results, scheduler-owned teardown, private x86 writable fork frames, preflighted exec image replacement without a long scheduler borrow, and two-vCPU fault/exit/wait/rejected-exec/successful-exec probes; H-02 has correct overflow-safe monotonic/realtime conversion plus a fixed-capacity allocation-free deadline min-heap, atomic running/sleeping/wake transitions, x86 and AArch64 timer wakeups, failed-switch rollback, migration-safe resume handling, and generation-safe parent-authorized interruption with `EINTR`/remaining-time semantics; H-03 publishes immutable, direct-index, fixed-fanout hook and GPIO snapshots through an epoch grace period, performs read-side dispatch without manager/runtime locks, allocation, refcount changes, registry scans, or logging, executes with per-CPU scratch/context and nonblocking per-map leases, retains and charges only verifier-proven referenced maps until quiescent, and rejects logging helpers on timer/GPIO/scheduler hooks; H-04 has process credentials with monotonic capability restriction and exact fork/exec inheritance, per-command load/map/attach/pin/actuation enforcement, credential-derived verifier tiers, bounded read/write cross-process pin grants, and fail-closed production signing with a compile-time immutable Ed25519 trust key; H-05 has fully fallible parsing/loading, 18 malformed-input integration tests plus 1 unit test, and an isolated fuzz target/CI job.
-  - **CI and governance:** H-06 workflow fixes cover disk/OVMF discovery, explicit embedded targets, Lean PATH setup, the expanded host crate/profile matrix, ELF fuzzing, and a QEMU gate that requires boot, `EFAULT`, `ENOSYS`, two-CPU TLB-shootdown, lifecycle, timer wait-queue/interruption/monotonic-benchmark, BPF ownership/capability, lock-free hook-snapshot stress, and signed-production markers; Q-04 now has a generated, exact-fingerprint unsafe ledger covering 702 first-party Rust `unsafe` sites, each assigned to an owner/invariant/test obligation. The local required audit gate passes 40/40: production and development QEMU boots both prove ordered concurrent sleeps, zero-duration sleep, parent-authorized interruption and cleanup, and monotonic batch timing (333,678,050 ns production; 336,208,380 ns development); the two-vCPU development boot additionally proves repeated concurrent attach/fire/detach with a nonzero map-backed execution counter. The gate also builds and hashes a signed-production image, authenticates and retains a CLI-signed BPF ELF in that VM, then separately builds and boots the explicit unsigned-development image with negative checks for unsigned/unprivileged/foreign-owner/unauthorized-attach operations and controlled write-only pinned-map sharing. Hosted GitHub Actions have not been rerun because monthly usage is exhausted.
-  - **Still open/release status:** H-06 lacks a hosted GitHub Actions run while the monthly quota is exhausted; its workflow and release behavior are validated by the complete local gate only. No other Critical or High finding remains open in this branch amendment. The historical engineering score remains **3/10** and production readiness remains **NO-GO** because this amendment records remediation evidence rather than performing a new independent release audit or score recalculation.
+- **Post-audit update (2026-07-11):** the `audit/dev-remediation` branch subsequently standardized the root package, executable, boot image, boot-menu entry, CI artifact, build scripts, and affected documentation on `axiomos`. This naming-only delta is not contained in the audited commit.
 
 This is a pre-v1.0 maintenance and production-readiness review. The implementation is treated as authoritative. Historical plans, issue references, and benchmark claims were accepted only where the checked-in implementation or a reproducible command supported them.
 
-## Post-audit naming amendment
+## Historical post-audit naming amendment
 
 The remediation branch resolves the root Cargo package, inferred binary target, and `default-run` as `axiomos`; produces `axiomos.iso` from an `axiomos-*` build directory; publishes the `axiomos-boot-images` CI artifact; displays `/axiomos` in Limine; and uses `cargo build -p axiomos` in the Pi and virtual-machine scripts. A case-insensitive scan for the retired root package and ISO identifiers found no matches in tracked files, source documentation, or tracked filenames. Other older product aliases are a separate consistency issue documented in A-04 and the Consistency section.
 
@@ -28,13 +70,13 @@ Severity means:
 
 Effort is one experienced systems engineer: **S** (<2 days), **M** (2–5 days), **L** (1–3 weeks), **XL** (>3 weeks, normally several coordinated PRs).
 
-# Executive summary
+# Historical executive summary (audited commit `661d5ed`)
 
 ## Repository health
 
 **Engineering score: 3/10.** This is an ordinal release-maintenance assessment, not a weighted quality metric. axiomos is ambitious and technically interesting, but it is not close to production-safe. The verifier and the Shrike link are substantially better engineered than the kernel boundary and runtime that surround them. The repository contains multiple safe-Rust APIs that permit undefined behavior, a syscall boundary that confuses a canonical address with a mapped and accessible address, SMP aliasing in scheduler and BPF state, non-transactional virtual-memory operations, and an AArch64 JIT that recompiles and leaks executable memory on every invocation.
 
-**Production readiness: NO-GO.** Do not call the current branch v1.0, deploy it on a safety-relevant robot, or expose `sys_bpf` to mutually untrusted processes. A v1.0 release should remain blocked until C-01 through C-07 and H-01 through H-06 below are fixed and regression-tested.
+**Historical production readiness at `661d5ed`: NO-GO.** Do not call that audited snapshot v1.0, deploy it on a safety-relevant robot, or expose its `sys_bpf` to mutually untrusted processes. At that point, a v1.0 release was blocked until C-01 through C-07 and H-01 through H-06 below were fixed and regression-tested.
 
 The code does build for the supported x86_64 and AArch64 targets, both BPF profiles have large passing host suites, formatting passes, the RP2040 firmware compiles, and the Lean project builds. Those are useful signals, but they do not exercise the failure-prone seams: user copy, page faults, task teardown, address-space rollback, cross-CPU scheduling, runtime map pointers, or JIT lifetime.
 
@@ -58,7 +100,7 @@ The code does build for the supported x86_64 and AArch64 targets, both BPF profi
 - CI is not a release gate. Current GitHub jobs fail before running any steps, the profile workflow is guaranteed to fail on stable Cargo, the root Clippy command is red, and critical standalone workspaces are omitted.
 - Documentation mixes current architecture, historical pitches, completed agent plans, stale audit snapshots, and benchmark claims without a reliable status taxonomy.
 
-## Release-blocking findings
+## Historical release-blocking findings
 
 | ID | Severity | Release blocker |
 |---|---:|---|
@@ -737,7 +779,7 @@ These are ordered to establish safety and a trustworthy feedback loop before fea
 
 No feature PR should jump ahead of this P0 series. The list is the first ten PRs, not the complete release plan: the next P0 changes finish C-05 with checked frame references and SMP TLB shootdown, then repair H-02 clocks/wait queues. The P1 JIT rebuild, documentation/benchmark authority cleanup, and remaining medium-priority work follow. None of those omissions weaken the release blockers stated above.
 
-# Final assessment
+# Historical final assessment
 
 axiomos should be described as a promising research kernel with a strong verifier laboratory and a well-designed robotics safety-link component—not as a production operating system or a memory-safe runtime for hostile userspace. The most important architectural decision now is restraint: stop expanding the hook, driver, profile, and platform surface until the user boundary, scheduler ownership, BPF type invariants, VM transactions, and release gate are made real.
 
