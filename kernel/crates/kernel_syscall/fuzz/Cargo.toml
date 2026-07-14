@@ -1,0 +1,31 @@
+[package]
+name = "kernel-syscall-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Stand-alone workspace so fuzz dependencies do not affect product resolution.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+kernel_abi = { path = "../../kernel_abi" }
+kernel_syscall = { path = ".." }
+
+# Keep the stand-alone fuzz graph aligned with the root lockfile. `0.15.5`
+# uses a newer unstable `Step` trait than the pinned project nightly exposes.
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+x86_64 = "=0.15.4"
+
+[profile.release]
+debug = true
+
+[[bin]]
+name = "mmap_arguments"
+path = "fuzz_targets/mmap_arguments.rs"
+test = false
+doc = false
+bench = false

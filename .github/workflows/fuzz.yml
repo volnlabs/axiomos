@@ -5,6 +5,7 @@ on:
     paths:
       - 'kernel/crates/kernel_bpf/**'
       - 'kernel/crates/kernel_elfloader/**'
+      - 'kernel/crates/kernel_syscall/**'
       - '.github/workflows/fuzz.yml'
   schedule:
     # 02:30 UTC weekly (Sun). Was nightly with two 8h targets ≈ 960 billed
@@ -174,4 +175,48 @@ jobs:
         with:
           name: fuzz-crash-elf-parse-and-load-${{ github.run_id }}
           path: kernel/crates/kernel_elfloader/fuzz/artifacts/parse_and_load
+          retention-days: 30
+
+  syscall-weekly:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: "Fuzz weekly (syscall mmap arguments, 10m)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        with:
+          components: rust-src
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version "^0.13"
+
+      - name: Restore syscall corpus
+        uses: actions/cache@v4
+        with:
+          path: kernel/crates/kernel_syscall/fuzz/corpus/mmap_arguments
+          key: fuzz-corpus-syscall-mmap-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-syscall-mmap-
+
+      - name: Fuzz syscall mmap arguments
+        working-directory: kernel/crates/kernel_syscall
+        run: cargo fuzz run mmap_arguments -- -max_total_time=600
+
+      - name: Upload syscall corpus
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-syscall-mmap-${{ github.run_id }}
+          path: kernel/crates/kernel_syscall/fuzz/corpus/mmap_arguments
+          retention-days: 30
+
+      - name: Upload syscall crash artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-syscall-mmap-${{ github.run_id }}
+          path: kernel/crates/kernel_syscall/fuzz/artifacts/mmap_arguments
           retention-days: 30

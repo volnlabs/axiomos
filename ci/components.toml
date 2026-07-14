@@ -85,6 +85,12 @@ role = "syscall contracts"
 gate = "host lint and tests"
 
 [[component]]
+path = "kernel/crates/kernel_syscall/fuzz/Cargo.toml"
+kind = "cargo"
+role = "syscall argument fuzz target"
+gate = "fuzz build"
+
+[[component]]
 path = "kernel/crates/kernel_time/Cargo.toml"
 kind = "cargo"
 role = "time and deadline queues"

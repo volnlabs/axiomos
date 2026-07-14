@@ -19,6 +19,7 @@
 | `kernel/crates/kernel_pci/Cargo.toml` | cargo | PCI contracts | host lint and tests |
 | `kernel/crates/kernel_physical_memory/Cargo.toml` | cargo | physical memory | host lint and tests |
 | `kernel/crates/kernel_syscall/Cargo.toml` | cargo | syscall contracts | host lint and tests |
+| `kernel/crates/kernel_syscall/fuzz/Cargo.toml` | cargo | syscall argument fuzz target | fuzz build |
 | `kernel/crates/kernel_time/Cargo.toml` | cargo | time and deadline queues | host lint and tests |
 | `kernel/crates/kernel_usermem/Cargo.toml` | cargo | userspace memory boundary | host lint and tests |
 | `kernel/crates/kernel_vfs/Cargo.toml` | cargo | virtual filesystem | host lint and tests |
