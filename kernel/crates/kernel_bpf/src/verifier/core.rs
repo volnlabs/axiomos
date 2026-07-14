@@ -1165,7 +1165,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
 
                     // Mark stack slots as written
                     for i in 0..size.size_bytes() {
-                        let _ = state.stack.set(offset - i as i64, StackSlot::Scalar);
+                        let _ = state.stack.set(offset + i as i64, StackSlot::Scalar);
                     }
                 } else {
                     check_ranged_deref(dst_state, insn.offset as i64, size.size_bytes(), idx)?;
@@ -1210,7 +1210,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                         });
                     }
                     for i in 0..size.size_bytes() {
-                        let _ = state.stack.set(offset - i as i64, StackSlot::Scalar);
+                        let _ = state.stack.set(offset + i as i64, StackSlot::Scalar);
                     }
                 } else {
                     check_ranged_deref(dst_state, insn.offset as i64, size.size_bytes(), idx)?;

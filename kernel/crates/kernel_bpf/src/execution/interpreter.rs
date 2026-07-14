@@ -577,7 +577,8 @@ impl<P: PhysicalProfile> Interpreter<P> {
             return Err(BpfError::OutOfBounds);
         }
         let stack = &mut stack[..P::MAX_STACK_SIZE];
-        stack.fill(0);
+        let used_stack_start = P::MAX_STACK_SIZE - program.stack_size();
+        stack[used_stack_start..].fill(0);
 
         // Initialize register file
         let mut regs = RegisterFile::new();
@@ -721,6 +722,36 @@ mod tests {
             Ok(42)
         );
         assert_eq!(interpreter.execute(&program, &ctx), Ok(42));
+
+        // A stack-free verified program must not clear unrelated scratch bytes.
+        let mut untouched = vec![0xa5; ActiveProfile::MAX_STACK_SIZE];
+        assert_eq!(
+            interpreter.execute_with_stack(&program, &ctx, &mut untouched),
+            Ok(42)
+        );
+        assert!(untouched.iter().all(|byte| *byte == 0xa5));
+
+        // Clearing is limited to the verifier-recorded suffix while preserving
+        // the fixed top-of-stack address used by R10.
+        let stack_program = ProgramBuilder::<ActiveProfile>::new(BpfProgType::SocketFilter)
+            .insn(BpfInsn::new(0x7a, 10, 0, -16, 42))
+            .insn(BpfInsn::mov64_imm(0, 0))
+            .exit()
+            .build()
+            .expect("valid stack program");
+        assert_eq!(stack_program.stack_size(), 16);
+        let mut reused = vec![0xa5; ActiveProfile::MAX_STACK_SIZE];
+        let cleared_from = ActiveProfile::MAX_STACK_SIZE - stack_program.stack_size();
+        assert_eq!(
+            interpreter.execute_with_stack(&stack_program, &ctx, &mut reused),
+            Ok(0)
+        );
+        assert!(reused[..cleared_from].iter().all(|byte| *byte == 0xa5));
+        assert_eq!(
+            &reused[cleared_from..cleared_from + 8],
+            &42i64.to_ne_bytes()
+        );
+        assert!(reused[cleared_from + 8..].iter().all(|byte| *byte == 0));
 
         // An undersized buffer is refused, not a UB write past the end.
         let mut small = vec![0u8; ActiveProfile::MAX_STACK_SIZE - 1];

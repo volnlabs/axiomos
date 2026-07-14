@@ -27,8 +27,9 @@ interrupt and scheduler paths avoid manager locks, allocation, cloning, and
 reference-count changes.
 
 The interpreter accepts only `VerifiedProgram`. Its scratch stack is supplied
-by the kernel runtime and cannot be shared by concurrent executions. JIT
-compiler modules are retained for differential/unit testing, but
+by the kernel runtime, cannot be shared by concurrent executions, and clears
+only the verifier-recorded stack suffix before each run. JIT compiler modules
+are retained for differential/unit testing, but
 `PhysicalProfile::JIT_ALLOWED` is false for every shipped profile and the kernel
 contains no RWX allocator.
 
@@ -56,6 +57,7 @@ bounded owner/access grants rather than becoming globally accessible.
 - `BpfContext<'a>` carries the lifetime of borrowed input data.
 - Verifier helper descriptors and runtime helper dispatch share one ABI table.
 - Map allocation sizes use checked arithmetic and fallible reservation.
+- Hash buckets use one fixed-stride backing buffer rather than per-entry heaps.
 - Latency-sensitive hooks reject logging helpers.
 - Signed production input is verified against the immutable build-provisioned
   trusted key before loading.

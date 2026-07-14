@@ -7,7 +7,7 @@ Status: normative current documentation, 2026-07-14.
 | Type | Storage | Key/value behavior | Resize |
 |---|---|---|---|
 | Array | Contiguous value bytes | `u32` index, fixed value size | Cloud only |
-| Hash | Preallocated bucket storage | Fixed key/value sizes | Cloud only |
+| Hash | One flat `[state|key|value]` buffer | Fixed key/value sizes | Cloud only |
 | Ring buffer | Power-of-two byte ring | Reserve/submit/poll events | No |
 | Time series | Circular sample storage | Timestamped fixed-size values | Cloud only |
 
