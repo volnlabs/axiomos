@@ -46,6 +46,8 @@ use crate::{U64Ext, UsizeExt};
 mod credentials;
 pub mod fd;
 pub use credentials::{BpfCapabilities, Credentials};
+mod executable;
+use executable::{allocate_executable_buffer, executable_layout};
 mod id;
 pub use id::*;
 pub mod mem;
@@ -569,7 +571,8 @@ impl Process {
         node.stat(&mut stat)
             .map_err(|_| "Failed to stat executable")?;
 
-        let mut file_content = alloc::vec![0u8; stat.size];
+        let mut file_content =
+            allocate_executable_buffer(stat.size).map_err(|error| error.message())?;
         read_executable_file_into(&node, &mut file_content, stat.size, "execve")?;
         ElfFile::try_parse(&file_content).map_err(|e| {
             log::error!("execve preflight: ELF parse error: {e}");
@@ -865,12 +868,12 @@ extern "C" fn trampoline(_arg: *mut c_void) {
     let node = vfs()
         .write()
         .open(executable_path)
-        .expect("should be able to open executable");
+        .unwrap_or_else(|_| Task::terminate_current(1, "failed to open executable"));
     log::info!("Trampoline: executable opened");
     let stat = {
         let mut stat = Stat::default();
         node.stat(&mut stat)
-            .expect("should be able to stat executable");
+            .unwrap_or_else(|_| Task::terminate_current(1, "failed to stat executable"));
         stat
     };
     log::info!("Trampoline: executable stated, size={}", stat.size);
@@ -884,14 +887,11 @@ extern "C" fn trampoline(_arg: *mut c_void) {
     log::info!("Trampoline: allocating memory for executable");
     #[cfg(feature = "rpi5")]
     dbg_mark(b'A' as u32);
+    let layout = executable_layout(stat.size)
+        .unwrap_or_else(|error| Task::terminate_current(1, error.message()));
     let mut executable_file_allocation = memapi
-        .allocate(
-            Location::Anywhere,
-            Layout::from_size_align(stat.size, Size4KiB::SIZE.into_usize()).unwrap(),
-            UserAccessible::Yes,
-            Guarded::No,
-        )
-        .expect("should be able to allocate memory for executable file");
+        .allocate(Location::Anywhere, layout, UserAccessible::Yes, Guarded::No)
+        .unwrap_or_else(|| Task::terminate_current(1, "failed to allocate executable file"));
     log::info!("Trampoline: memory allocated");
     #[cfg(feature = "rpi5")]
     dbg_mark(b'B' as u32);
@@ -900,13 +900,13 @@ extern "C" fn trampoline(_arg: *mut c_void) {
     with_process_address_space_active(&current_process, || {
         let buf = executable_file_allocation.as_mut();
         read_executable_file_into(&node, buf, stat.size, "Trampoline")
-            .expect("should be able to read executable file");
+            .unwrap_or_else(|_| Task::terminate_current(1, "failed to read executable file"));
     });
     #[cfg(not(target_arch = "aarch64"))]
     {
         let buf = executable_file_allocation.as_mut();
         read_executable_file_into(&node, buf, stat.size, "Trampoline")
-            .expect("should be able to read executable file");
+            .unwrap_or_else(|_| Task::terminate_current(1, "failed to read executable file"));
     }
     log::info!("Trampoline: executable read into memory");
     #[cfg(feature = "rpi5")]
@@ -961,12 +961,12 @@ extern "C" fn trampoline(_arg: *mut c_void) {
     let executable_file_allocation = with_process_address_space_active(&current_process, || {
         memapi
             .make_executable(executable_file_allocation)
-            .expect("should be able to make allocation executable")
+            .unwrap_or_else(|_| Task::terminate_current(1, "failed to protect executable file"))
     });
     #[cfg(not(target_arch = "aarch64"))]
     let executable_file_allocation = memapi
         .make_executable(executable_file_allocation)
-        .expect("should be able to make allocation executable");
+        .unwrap_or_else(|_| Task::terminate_current(1, "failed to protect executable file"));
 
     if let Some(ref master_tls) = tls_master {
         log::info!("Trampoline: setting up TLS");
@@ -977,7 +977,7 @@ extern "C" fn trampoline(_arg: *mut c_void) {
                 UserAccessible::Yes,
                 Guarded::No,
             )
-            .expect("should be able to allocate TLS data");
+            .unwrap_or_else(|| Task::terminate_current(1, "failed to allocate executable TLS"));
 
         #[cfg(target_arch = "aarch64")]
         with_process_address_space_active(&current_process, || {
@@ -1034,7 +1034,7 @@ extern "C" fn trampoline(_arg: *mut c_void) {
             UserAccessible::Yes,
             Guarded::Yes,
         )
-        .expect("should be able to allocate userspace stack");
+        .unwrap_or_else(|| Task::terminate_current(1, "failed to allocate userspace stack"));
 
     let ustack_rsp = ustack_allocation.start() + ustack_allocation.len().into_u64();
     log::info!(

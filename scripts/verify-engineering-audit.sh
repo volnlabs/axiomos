@@ -371,6 +371,12 @@ run_step bpf-hook-hotpath-static python3 -c \
 run_step bpf-snapshot-test-build rustc --edition 2021 -D warnings --test \
     kernel/src/bpf/snapshot.rs -o "$OUTPUT_DIR/bpf-snapshot-tests"
 run_step bpf-snapshot-tests "$OUTPUT_DIR/bpf-snapshot-tests"
+run_step acpi-mapping-test-build rustc --edition 2021 -D warnings --test \
+    kernel/src/acpi/mapping.rs -o "$OUTPUT_DIR/acpi-mapping-tests"
+run_step acpi-mapping-tests "$OUTPUT_DIR/acpi-mapping-tests"
+run_step executable-limits-test-build rustc --edition 2021 -D warnings --test \
+    kernel/src/mcore/mtask/process/executable.rs -o "$OUTPUT_DIR/executable-limits-tests"
+run_step executable-limits-tests "$OUTPUT_DIR/executable-limits-tests"
 run_cargo_step focused-host-tests test \
     -p kernel_abi -p kernel_elfloader -p kernel_physical_memory -p kernel_syscall \
     -p kernel_time -p kernel_usermem -p kernel_vfs -p kernel_virtual_memory -p shrike_link
