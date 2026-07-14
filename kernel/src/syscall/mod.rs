@@ -1,5 +1,5 @@
 use core::ops::Neg;
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
@@ -65,9 +65,9 @@ mod validation;
 
 use crate::arch::UserContext;
 
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 static WRITE_MARKER_SENT: AtomicBool = AtomicBool::new(false);
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 static BPF_MARKER_SENT: AtomicBool = AtomicBool::new(false);
 static EXPORTED_RINGBUF_MAP_ID: AtomicU32 = AtomicU32::new(u32::MAX);
 
@@ -86,7 +86,7 @@ fn require_current_bpf_capability(
     }
 }
 
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 #[inline(always)]
 fn dbg_mark(_ch: u32) {
     // SAFETY: Write to Pi 5 debug UART10 data register through the
@@ -369,7 +369,7 @@ fn dispatch_sys_read(fd: usize, buf: usize, nbyte: usize) -> Result<usize, Errno
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn dispatch_sys_write(fd: usize, buf: usize, nbyte: usize) -> Result<usize, Errno> {
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     if !WRITE_MARKER_SENT.swap(true, Ordering::Relaxed) {
         dbg_mark(b'w' as u32);
     }
@@ -425,7 +425,7 @@ fn dispatch_sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> Result<usize
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn dispatch_sys_bpf(cmd: usize, attr: usize, size: usize) -> Result<usize, Errno> {
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     if !BPF_MARKER_SENT.swap(true, Ordering::Relaxed) {
         dbg_mark(b'p' as u32);
     }
@@ -733,7 +733,7 @@ fn dispatch_sys_spawn_with_bpf_capabilities(
     use crate::mcore::mtask::process::CreateProcessError;
     use crate::mcore::mtask::task::StackAllocationError;
 
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     dbg_mark(b's' as u32);
 
     let parent = crate::mcore::context::ExecutionContext::load().current_process();
@@ -765,14 +765,14 @@ fn dispatch_sys_spawn_with_bpf_capabilities(
     ) {
         Ok(p) => p,
         Err(CreateProcessError::StackAllocationError(StackAllocationError::OutOfVirtualMemory)) => {
-            #[cfg(feature = "rpi5")]
+            #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
             dbg_mark(b'v' as u32);
             return Err(ENOMEM);
         }
         Err(CreateProcessError::StackAllocationError(
             StackAllocationError::OutOfPhysicalMemory,
         )) => {
-            #[cfg(feature = "rpi5")]
+            #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
             dbg_mark(b'f' as u32);
             return Err(ENOMEM);
         }
@@ -781,7 +781,7 @@ fn dispatch_sys_spawn_with_bpf_capabilities(
     // Use .as_u64() and then cast/convert to usize
     // We defined U64Ext for u64, so we can use into_usize() on the u64 value.
     use crate::U64Ext;
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     dbg_mark(b'g' as u32);
     #[cfg(target_arch = "aarch64")]
     crate::mcore::context::ExecutionContext::load().set_need_reschedule();

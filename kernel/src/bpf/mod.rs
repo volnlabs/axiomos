@@ -946,6 +946,7 @@ impl BpfManager {
     /// A `false` result means snapshot preparation could not reserve memory or
     /// an independently cloned program reference is still in flight.
     pub(crate) fn reclaim_owner(&mut self, owner: u64) -> bool {
+        #[cfg(any(debug_assertions, feature = "audit-diagnostics"))]
         let had_owned_objects = self
             .programs
             .iter()
@@ -1044,8 +1045,11 @@ impl BpfManager {
             self.live_maps = self.live_maps.saturating_sub(1);
             self.map_bytes = self.map_bytes.saturating_sub(entry.charged_bytes);
         }
+        #[cfg(any(debug_assertions, feature = "audit-diagnostics"))]
         if had_owned_objects {
             log::info!("BPF_OWNER_RECLAIM_OK owner={owner}");
+            #[cfg(feature = "audit-diagnostics")]
+            crate::serial_println!("BPF_OWNER_RECLAIM_OK owner={}", owner);
         }
         self.reclaim_unpinned_orphan_maps_if_quiescent();
         true

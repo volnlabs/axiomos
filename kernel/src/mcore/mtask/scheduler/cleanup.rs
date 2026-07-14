@@ -3,7 +3,11 @@ use alloc::vec::Vec;
 use core::pin::Pin;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 use core::sync::atomic::{AtomicBool as Rpi5AtomicBool, Ordering as Rpi5Ordering};
 
 use conquer_once::spin::OnceCell;
@@ -15,10 +19,18 @@ use crate::mcore::mtask::task::{Task, TaskQueue};
 static CLEANUP_QUEUE: OnceCell<TaskQueue> = OnceCell::uninit();
 static CLEANUP_WORKER_SCHEDULED: AtomicBool = AtomicBool::new(false);
 
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 static CLEANUP_RUN_MARKER_SENT: Rpi5AtomicBool = Rpi5AtomicBool::new(false);
 
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 #[inline(always)]
 fn dbg_mark(_ch: u32) {
     // SAFETY: Write to Pi 5 debug UART10 data register.
@@ -52,7 +64,11 @@ impl TaskCleanup {
     }
 
     extern "C" fn run(_arg: *mut core::ffi::c_void) {
-        #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+        #[cfg(all(
+            target_arch = "aarch64",
+            feature = "rpi5",
+            feature = "bringup-diagnostics"
+        ))]
         if !CLEANUP_RUN_MARKER_SENT.swap(true, Rpi5Ordering::Relaxed) {
             dbg_mark(b'c' as u32);
         }

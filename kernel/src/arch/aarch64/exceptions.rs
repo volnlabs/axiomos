@@ -1,25 +1,25 @@
 use core::arch::asm;
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 use core::sync::atomic::{AtomicBool, Ordering};
 
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 static PREEMPT_MARKER_SENT: AtomicBool = AtomicBool::new(false);
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 static SYNC_ENTRY_MARKER_SENT: AtomicBool = AtomicBool::new(false);
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 static SYNC_DECODE_MARKER_SENT: AtomicBool = AtomicBool::new(false);
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 static SVC_MARKER_SENT: AtomicBool = AtomicBool::new(false);
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 static SVC_ENTER_MARKER_SENT: AtomicBool = AtomicBool::new(false);
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 static SVC_RETURN_MARKER_SENT: AtomicBool = AtomicBool::new(false);
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 static DATA_ABORT_MARKER_SENT: AtomicBool = AtomicBool::new(false);
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 static INSTR_ABORT_MARKER_SENT: AtomicBool = AtomicBool::new(false);
 
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 #[inline(always)]
 fn dbg_mark(_ch: u32) {
     const UART_BASE: usize = 0xFFFF_8010_7D00_1000;
@@ -33,7 +33,7 @@ fn dbg_mark(_ch: u32) {
     }
 }
 
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 #[inline(always)]
 fn dbg_hex_nibble(v: u64) -> u32 {
     match (v & 0xF) as u8 {
@@ -43,7 +43,7 @@ fn dbg_hex_nibble(v: u64) -> u32 {
     }
 }
 
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 #[inline(always)]
 fn dbg_hex_u32(v: u32) {
     for shift in (0..8).rev() {
@@ -51,7 +51,7 @@ fn dbg_hex_u32(v: u32) {
     }
 }
 
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 #[inline(always)]
 fn dbg_hex_u64(v: u64) {
     for shift in (0..16).rev() {
@@ -59,7 +59,7 @@ fn dbg_hex_u64(v: u64) {
     }
 }
 
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 #[inline(always)]
 fn el0_va_to_pa(va: u64) -> Option<usize> {
     let par: u64;
@@ -81,7 +81,7 @@ fn el0_va_to_pa(va: u64) -> Option<usize> {
     Some(pa)
 }
 
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 #[inline(always)]
 fn read_u32_at_el0_va(va: u64) -> Option<u32> {
     let pa = el0_va_to_pa(va)?;
@@ -92,7 +92,7 @@ fn read_u32_at_el0_va(va: u64) -> Option<u32> {
     Some(word)
 }
 
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 #[inline(always)]
 fn current_ttbr0_el1() -> u64 {
     let ttbr0: u64;
@@ -156,7 +156,7 @@ unsafe extern "C" {
 pub extern "C" fn check_preemption(_frame: *mut ExceptionContext) {
     if let Some(ctx) = crate::arch::aarch64::cpu::try_current() {
         if ctx.check_and_clear_reschedule() {
-            #[cfg(feature = "rpi5")]
+            #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
             if !PREEMPT_MARKER_SENT.swap(true, Ordering::Relaxed) {
                 dbg_mark(b'r' as u32);
             }
@@ -179,7 +179,7 @@ pub extern "C" fn check_preemption(_frame: *mut ExceptionContext) {
 /// saved on the stack. It must not unwind.
 #[unsafe(no_mangle)]
 pub extern "C" fn handle_sync_exception(ctx: &mut ExceptionContext) {
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     if !SYNC_ENTRY_MARKER_SENT.swap(true, Ordering::Relaxed) {
         dbg_mark(b'j' as u32);
     }
@@ -187,7 +187,7 @@ pub extern "C" fn handle_sync_exception(ctx: &mut ExceptionContext) {
     let esr: u64;
     let elr: u64;
     let far: u64;
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     let spsr: u64;
 
     // SAFETY: Reading exception registers (ESR, ELR, FAR) is safe in an exception handler.
@@ -195,19 +195,19 @@ pub extern "C" fn handle_sync_exception(ctx: &mut ExceptionContext) {
         asm!("mrs {}, esr_el1", out(reg) esr);
         asm!("mrs {}, elr_el1", out(reg) elr);
         asm!("mrs {}, far_el1", out(reg) far);
-        #[cfg(feature = "rpi5")]
+        #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
         asm!("mrs {}, spsr_el1", out(reg) spsr);
     }
 
     let ec = (esr >> 26) & 0x3F; // Exception class
     let iss = esr & 0x1FFFFFF; // Instruction specific syndrome
 
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     if !SYNC_DECODE_MARKER_SENT.swap(true, Ordering::Relaxed) {
         dbg_mark(b'k' as u32);
     }
 
-    #[cfg(not(feature = "rpi5"))]
+    #[cfg(not(all(feature = "rpi5", feature = "bringup-diagnostics")))]
     log::debug!(
         "Sync exception: EC={:#x}, ISS={:#x}, ELR={:#x}, FAR={:#x}",
         ec,
@@ -219,23 +219,23 @@ pub extern "C" fn handle_sync_exception(ctx: &mut ExceptionContext) {
     match ec {
         0x15 => {
             // SVC instruction execution in AArch64 state
-            #[cfg(feature = "rpi5")]
+            #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
             if !SVC_MARKER_SENT.swap(true, Ordering::Relaxed) {
                 dbg_mark(b'V' as u32);
             }
-            #[cfg(feature = "rpi5")]
+            #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
             if !SVC_ENTER_MARKER_SENT.swap(true, Ordering::Relaxed) {
                 dbg_mark(b'l' as u32);
             }
             crate::arch::aarch64::syscall::handle_syscall(ctx);
-            #[cfg(feature = "rpi5")]
+            #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
             if !SVC_RETURN_MARKER_SENT.swap(true, Ordering::Relaxed) {
                 dbg_mark(b'm' as u32);
             }
         }
         0x20 | 0x21 => {
             // Instruction abort from lower/same EL
-            #[cfg(feature = "rpi5")]
+            #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
             if !INSTR_ABORT_MARKER_SENT.swap(true, Ordering::Relaxed) {
                 dbg_mark(b'I' as u32);
             }
@@ -251,7 +251,7 @@ pub extern "C" fn handle_sync_exception(ctx: &mut ExceptionContext) {
         }
         0x24 | 0x25 => {
             // Data abort from lower/same EL
-            #[cfg(feature = "rpi5")]
+            #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
             if !DATA_ABORT_MARKER_SENT.swap(true, Ordering::Relaxed) {
                 dbg_mark(b'D' as u32);
             }
@@ -266,7 +266,7 @@ pub extern "C" fn handle_sync_exception(ctx: &mut ExceptionContext) {
                 .apply();
                 return;
             }
-            #[cfg(feature = "rpi5")]
+            #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
             {
                 // Unhandled sync exception class: emit Y + two hex digits of EC.
                 dbg_mark(b'Y' as u32);
@@ -310,7 +310,7 @@ pub extern "C" fn handle_sync_exception(ctx: &mut ExceptionContext) {
                     unsafe { asm!("wfi", options(nomem, nostack, preserves_flags)) };
                 }
             }
-            #[cfg(not(feature = "rpi5"))]
+            #[cfg(not(all(feature = "rpi5", feature = "bringup-diagnostics")))]
             panic!(
                 "Unhandled synchronous exception: EC={:#x}, ISS={:#x}, ELR={:#x}",
                 ec, iss, elr
@@ -452,7 +452,7 @@ fn handle_data_abort(
 
     let fault_code = DataFaultCode::from_iss(iss);
 
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     {
         // Emit compact abort telemetry so we can decode failures even when panic text is truncated.
         dbg_mark(b'X' as u32); // ELR
@@ -592,7 +592,7 @@ pub extern "C" fn handle_serror() {
 /// Invalid exception handler (called for unhandled vectors)
 #[unsafe(no_mangle)]
 pub extern "C" fn handle_invalid_exception(kind: u64, source: u64) {
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     {
         // Invalid vector taken: emit N + kind + source (low nibble each).
         dbg_mark(b'N' as u32);

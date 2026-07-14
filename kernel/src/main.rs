@@ -82,6 +82,8 @@ unsafe extern "C" fn main() -> ! {
         let _ = vfs().read().open(init_path).expect("should have /bin/init");
         let proc = Process::create_userspace_init(Process::root(), init_path).unwrap();
         info!("started process pid={}", proc.pid());
+        #[cfg(feature = "audit-diagnostics")]
+        serial_println!("INIT_PROCESS_STARTED pid={}", proc.pid());
 
         // Boot-success marker for CI smoke tests (H-06 / T-01). Placed
         // here — after kernel::init() AND root mount AND init creation —
@@ -102,14 +104,14 @@ unsafe extern "C" fn main() -> ! {
 unsafe extern "C" fn main() -> ! {
     #[inline(always)]
     fn dbg_mark(_ch: u32) {
-        #[cfg(feature = "rpi5")]
+        #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
         // SAFETY: Early debug marker write to Pi 5 debug UART10 data register.
         unsafe {
             (0x10_7D00_1000 as *mut u32).write_volatile(_ch);
         }
     }
 
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     // SAFETY: Early debug marker write to Pi 5 debug UART10 data register.
     unsafe {
         (0x10_7D00_1000 as *mut u32).write_volatile(0x37); // '7'
@@ -118,7 +120,7 @@ unsafe extern "C" fn main() -> ! {
     // SAFETY: We are initializing the kernel subsystems in the correct order.
     kernel::init();
 
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     // SAFETY: Early debug marker write to Pi 5 debug UART10 data register.
     unsafe {
         (0x10_7D00_1000 as *mut u32).write_volatile(0x38); // '8'
@@ -184,10 +186,10 @@ unsafe extern "C" fn main() -> ! {
     }
 
     #[cfg(feature = "rpi5")]
-    {
-        // Bring up the Shrike control link + its poller task (HW bring-up).
-        kernel::arch::aarch64::platform::rpi5::control_link::spawn();
+    kernel::arch::aarch64::platform::rpi5::control_link::spawn();
 
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
+    {
         // Forced scheduling probe:
         // If timer/preemption is the blocker, this should still let a runnable init task run.
         dbg_mark(0x53); // 'S'
@@ -266,7 +268,11 @@ fn rust_panic(info: &PanicInfo) -> ! {
 
 #[cfg(not(test))]
 fn handle_panic(info: &PanicInfo) {
-    #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+    #[cfg(all(
+        target_arch = "aarch64",
+        feature = "rpi5",
+        feature = "bringup-diagnostics"
+    ))]
     // SAFETY: Panic-time debug marker write to Pi 5 debug UART10 data register.
     unsafe {
         (0xFFFF_8010_7D00_1000 as *mut u32).write_volatile(0x21); // '!'

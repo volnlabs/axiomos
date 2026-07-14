@@ -89,6 +89,13 @@ bpf-production-signed = []
 # Production artifacts must never enable this feature.
 bpf-unsigned-development = []
 
+# One-shot serial markers consumed by the local audit gate. Production images
+# do not enable this feature and compile all `log` macros out in release mode.
+audit-diagnostics = []
+
+# Raw AArch64 register/UART probes used only during hardware bring-up.
+bringup-diagnostics = []
+
 # v0.3 HW bench (Task 11): on-chip latency instrumentation (M-A/M-B/M-C),
 # the physical e-stop button IRQ path, and an auto-loaded GPIO->stop reflex.
 # Off by default — measurement/demo instrumentation, not for production images.

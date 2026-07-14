@@ -257,11 +257,12 @@ hash_release_artifacts() {
 
 qemu_smoke() {
     local log="$OUTPUT_DIR/qemu-serial.log"
-    local command="timeout ${QEMU_TIMEOUT}s cargo run --locked --release --features bpf-unsigned-development -- --headless --smp 2 --mem 1G"
+    local command="timeout ${QEMU_TIMEOUT}s cargo run --locked --release --features bpf-unsigned-development,audit-diagnostics -- --headless --smp 2 --mem 1G"
     local start end rc=0
     start="$(date +%s)"
     printf '[audit] %-34s' "qemu-release-smoke"
-    timeout "${QEMU_TIMEOUT}s" cargo run --locked --release --features bpf-unsigned-development \
+    timeout "${QEMU_TIMEOUT}s" cargo run --locked --release \
+        --features bpf-unsigned-development,audit-diagnostics \
         -- --headless --smp 2 --mem 1G >"$log" 2>&1 || rc=$?
 
     if [[ "$rc" -ne 0 && "$rc" -ne 124 ]]; then
@@ -285,8 +286,8 @@ qemu_smoke() {
         echo "missing nanosleep monotonic benchmark evidence" >>"$log"
         failed=1
     fi
-    if ! grep -qF "started process pid=" "$log"; then
-        echo "missing required marker: started process pid=" >>"$log"
+    if ! grep -qF "INIT_PROCESS_STARTED pid=" "$log"; then
+        echo "missing required marker: INIT_PROCESS_STARTED pid=" >>"$log"
         failed=1
     fi
     if grep -qiE 'kernel panicked|panicked at kernel/src/arch/idt|KERNEL_MODE.*PAGE FAULT' "$log"; then
@@ -380,6 +381,8 @@ run_step wait-protocol-test-build rustc --edition 2021 -D warnings --test \
 run_step wait-protocol-tests "$OUTPUT_DIR/wait-protocol-tests"
 run_step wait-channel-static python3 -c \
     'from pathlib import Path; wait=Path("kernel/src/mcore/mtask/scheduler/wait.rs").read_text(); scheduler=Path("kernel/src/mcore/mtask/scheduler/mod.rs").read_text(); assert wait.count("changed_since(observed_generation)") == 2; assert "self.waiters.enqueue(task)" in wait and "while let Some(task) = self.waiters.try_take()" in wait; assert all(token not in wait for token in ("Mutex", "RwLock", "Vec", "log::")); assert "State::Waiting" in scheduler and "registration.park(zombie_task)" in scheduler'
+run_step release-diagnostics-static python3 -c \
+    'from pathlib import Path; root=Path("Cargo.toml").read_text(); kernel=Path("kernel/Cargo.toml").read_text(); syscall=Path("kernel/src/syscall/mod.rs").read_text(); scheduler=Path("kernel/src/mcore/mtask/scheduler/mod.rs").read_text(); assert "release_max_level_off" in root and "audit-diagnostics = []" in kernel and "bringup-diagnostics = []" in kernel; assert "INIT_PROCESS_STARTED pid=" in Path("kernel/src/main.rs").read_text(); assert syscall.count("feature = \"bringup-diagnostics\"") >= 7 and scheduler.count("feature = \"bringup-diagnostics\"") >= 8'
 run_step pipe-state-test-build rustc --edition 2021 -D warnings --test \
     kernel/src/file/pipe_state.rs -o "$OUTPUT_DIR/pipe-state-tests"
 run_step pipe-state-tests "$OUTPUT_DIR/pipe-state-tests"
@@ -450,7 +453,8 @@ if [[ "$MODE" != "quick" ]]; then
     else
         skip_step qemu-production-signed-smoke "disabled by option"
     fi
-    run_cargo_step release-build build --release --features bpf-unsigned-development
+    run_cargo_step release-build build --release \
+        --features bpf-unsigned-development,audit-diagnostics
     run_step_in_dir elfloader-fuzz-build kernel/crates/kernel_elfloader cargo fuzz build
     run_step artifact-manifest hash_release_artifacts "$ARTIFACTS"
 

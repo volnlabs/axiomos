@@ -5,10 +5,11 @@
 
 ## Context
 
-Each CPU already owns a scheduler, but runnable tasks pass through one global
-queue. Timer waits use a bounded deadline queue while child exit, pipes, and I/O
-do not share a lost-wake-safe blocking primitive. Interrupt masking and lock
-ordering are enforced inconsistently.
+The audit found one global runnable queue, polling lifecycle and pipe waits, raw
+bring-up markers in production paths, and inconsistent interrupt/preemption
+rules. The runtime now uses per-CPU queues and one generation-checked wait
+protocol for timer, child-exit, and pipe events; this ADR fixes those choices as
+the required design rather than incidental implementation detail.
 
 ## Decision
 
@@ -34,6 +35,10 @@ ordering are enforced inconsistently.
 8. Locks have explicit ranks. Acquisition is strictly increasing, except for a
    documented same-rank shard rule. Release builds rely on review and tests;
    debug/test builds assert the held-rank stack.
+9. Production release builds compile all `log` macros out. One-shot serial
+   evidence for the local/hosted gate requires `audit-diagnostics`. Raw AArch64
+   UART/register probes and forced scheduling probes require
+   `bringup-diagnostics`; neither feature is part of a shipped profile.
 
 Initial rank classes, from outermost to innermost, are:
 

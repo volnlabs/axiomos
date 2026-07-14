@@ -60,6 +60,9 @@ bpf-unsigned-development-aarch64 = [
   "kernel_aarch64/bpf-unsigned-development",
   "init_aarch64/bpf-unsigned-development",
 ]
+audit-diagnostics = ["kernel_x86/audit-diagnostics"]
+audit-diagnostics-aarch64 = ["kernel_aarch64/audit-diagnostics"]
+bringup-diagnostics = ["kernel_aarch64/bringup-diagnostics"]
 x86_64_deps = [
   "dep:init_x86",
   "dep:gpio_demo_x86",
@@ -186,7 +189,7 @@ jiff = { version = "0.2", default-features = false, features = ["alloc"] }
 limine = "0.5"
 linked_list_allocator = "0.10"
 linkme = "0.3"
-log = "0.4"
+log = { version = "0.4", features = ["release_max_level_off"] }
 mkfs-ext2 = { git = "https://github.com/tsatke/mkfs" }
 mkfs-filesystem = { git = "https://github.com/tsatke/mkfs" }
 rustc-demangle = "0.1"

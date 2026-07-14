@@ -5,7 +5,11 @@ use core::arch::x86_64::_fxsave;
 use core::cell::UnsafeCell;
 use core::mem::swap;
 use core::pin::Pin;
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use cleanup::TaskCleanup;
@@ -19,7 +23,11 @@ use crate::arch::aarch64::Aarch64 as Arch;
 #[cfg(all(target_arch = "aarch64", feature = "aarch64_arch"))]
 use crate::arch::traits::Architecture;
 use crate::mcore::context::ExecutionContext;
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 use crate::mcore::mtask::process::Process;
 use crate::mcore::mtask::scheduler::run_queue::RunQueues;
 use crate::mcore::mtask::scheduler::sleep::TaskSleep;
@@ -34,12 +42,24 @@ mod switch;
 pub mod wait;
 mod wait_protocol;
 
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 static SCHED_SWITCH_MARKER_SENT: AtomicBool = AtomicBool::new(false);
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 static SCHED_SWITCH_TARGET_MARKER_SENT: AtomicBool = AtomicBool::new(false);
 
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 #[inline(always)]
 fn dbg_mark(_ch: u32) {
     // SAFETY: Write to Pi 5 debug UART10 data register.
@@ -48,7 +68,11 @@ fn dbg_mark(_ch: u32) {
     }
 }
 
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 #[inline(always)]
 fn dbg_hex_nibble(n: u8) -> u32 {
     let v = n & 0x0F;
@@ -155,11 +179,19 @@ impl Scheduler {
                 return None;
             };
 
-            #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+            #[cfg(all(
+                target_arch = "aarch64",
+                feature = "rpi5",
+                feature = "bringup-diagnostics"
+            ))]
             if !SCHED_SWITCH_MARKER_SENT.swap(true, Ordering::Relaxed) {
                 dbg_mark(b's' as u32);
             }
-            #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+            #[cfg(all(
+                target_arch = "aarch64",
+                feature = "rpi5",
+                feature = "bringup-diagnostics"
+            ))]
             if !SCHED_SWITCH_TARGET_MARKER_SENT.swap(true, Ordering::Relaxed) {
                 // k: switched to root-process kernel task
                 // j: switched to non-root process task (expected for /bin/init)

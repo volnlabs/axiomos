@@ -1,5 +1,7 @@
 use core::hint::spin_loop;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(any(debug_assertions, feature = "audit-diagnostics"))]
+use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use x86_64::instructions::port::Port;
 use x86_64::instructions::{interrupts, tlb};
@@ -9,6 +11,7 @@ use crate::mcore::context::{online_cpu_mask, online_lapic_id, ExecutionContext};
 
 const MAX_TRACKED_CPUS: usize = 64;
 static TLB_SHOOTDOWN_EPOCH: AtomicU64 = AtomicU64::new(0);
+#[cfg(any(debug_assertions, feature = "audit-diagnostics"))]
 static TLB_SHOOTDOWN_REPORTED: AtomicBool = AtomicBool::new(false);
 static TLB_SHOOTDOWN_ACKS: [AtomicU64; MAX_TRACKED_CPUS] =
     [const { AtomicU64::new(0) }; MAX_TRACKED_CPUS];
@@ -72,8 +75,11 @@ pub fn shootdown_tlb(targets: u64) {
         spin_loop();
     }
 
+    #[cfg(any(debug_assertions, feature = "audit-diagnostics"))]
     if !TLB_SHOOTDOWN_REPORTED.swap(true, Ordering::Relaxed) {
         log::info!("TLB_SHOOTDOWN_OK epoch={epoch} targets={targets:#x}");
+        #[cfg(feature = "audit-diagnostics")]
+        crate::serial_println!("TLB_SHOOTDOWN_OK epoch={} targets={:#x}", epoch, targets);
     }
 }
 

@@ -8,7 +8,11 @@ use core::alloc::Layout;
 use core::ffi::c_void;
 use core::fmt::{Debug, Display, Formatter};
 use core::ptr;
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 use core::sync::atomic::AtomicBool;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -30,7 +34,7 @@ use x86_64::registers::rflags::RFlags;
 use x86_64::structures::idt::InterruptStackFrameValue;
 
 use crate::arch::{PageSize, Size4KiB, VirtAddr};
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 use crate::dbg_mark;
 use crate::file::{vfs, OpenFileDescription};
 use crate::mcore::context::ExecutionContext;
@@ -105,17 +109,41 @@ impl ElfSegments {
 
 static ROOT_PROCESS: OnceCell<Arc<Process>> = OnceCell::uninit();
 
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 static TRAMPOLINE_MARKER_SENT: AtomicBool = AtomicBool::new(false);
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 static TRAMPOLINE_OPEN_STAGE_SENT: AtomicBool = AtomicBool::new(false);
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 static TRAMPOLINE_READ_STAGE_SENT: AtomicBool = AtomicBool::new(false);
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 static TRAMPOLINE_ELF_STAGE_SENT: AtomicBool = AtomicBool::new(false);
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 static TRAMPOLINE_ENTER_USER_STAGE_SENT: AtomicBool = AtomicBool::new(false);
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 static TRAMPOLINE_TTBR0_STAGE_SENT: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_arch = "aarch64")]
@@ -869,7 +897,11 @@ fn trampoline_load_elf<'a>(
 }
 
 extern "C" fn trampoline(_arg: *mut c_void) {
-    #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+    #[cfg(all(
+        target_arch = "aarch64",
+        feature = "rpi5",
+        feature = "bringup-diagnostics"
+    ))]
     if !TRAMPOLINE_MARKER_SENT.swap(true, Ordering::Relaxed) {
         dbg_mark(b'u' as u32);
     }
@@ -880,7 +912,11 @@ extern "C" fn trampoline(_arg: *mut c_void) {
     let current_process = ctx.current_process();
     log::info!("Trampoline: current process got");
 
-    #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+    #[cfg(all(
+        target_arch = "aarch64",
+        feature = "rpi5",
+        feature = "bringup-diagnostics"
+    ))]
     if !TRAMPOLINE_OPEN_STAGE_SENT.swap(true, Ordering::Relaxed) {
         dbg_mark(b'q' as u32);
     }
@@ -902,7 +938,11 @@ extern "C" fn trampoline(_arg: *mut c_void) {
         stat
     };
     log::info!("Trampoline: executable stated, size={}", stat.size);
-    #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+    #[cfg(all(
+        target_arch = "aarch64",
+        feature = "rpi5",
+        feature = "bringup-diagnostics"
+    ))]
     if !TRAMPOLINE_READ_STAGE_SENT.swap(true, Ordering::Relaxed) {
         dbg_mark(b'r' as u32);
     }
@@ -910,7 +950,7 @@ extern "C" fn trampoline(_arg: *mut c_void) {
     let mut memapi = LowerHalfMemoryApi::new(current_process.clone());
 
     log::info!("Trampoline: allocating memory for executable");
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     dbg_mark(b'A' as u32);
     let layout = executable_layout(stat.size)
         .unwrap_or_else(|error| Task::terminate_current(1, error.message()));
@@ -918,7 +958,7 @@ extern "C" fn trampoline(_arg: *mut c_void) {
         .allocate(Location::Anywhere, layout, UserAccessible::Yes, Guarded::No)
         .unwrap_or_else(|| Task::terminate_current(1, "failed to allocate executable file"));
     log::info!("Trampoline: memory allocated");
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     dbg_mark(b'B' as u32);
 
     #[cfg(target_arch = "aarch64")]
@@ -934,13 +974,13 @@ extern "C" fn trampoline(_arg: *mut c_void) {
             .unwrap_or_else(|_| Task::terminate_current(1, "failed to read executable file"));
     }
     log::info!("Trampoline: executable read into memory");
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     dbg_mark(b'C' as u32);
 
     // Parse and load ELF while the file allocation is still writable (readable).
     // make_executable is deferred until after into_inner() releases the borrow.
     log::info!("Trampoline: parsing ELF");
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     dbg_mark(b'D' as u32);
 
     #[cfg(target_arch = "aarch64")]
@@ -970,9 +1010,17 @@ extern "C" fn trampoline(_arg: *mut c_void) {
                 Task::terminate_current(1, "ELF load failed");
             }
         };
-    #[cfg(all(not(target_arch = "aarch64"), feature = "rpi5"))]
+    #[cfg(all(
+        not(target_arch = "aarch64"),
+        feature = "rpi5",
+        feature = "bringup-diagnostics"
+    ))]
     dbg_mark(b'E' as u32);
-    #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+    #[cfg(all(
+        target_arch = "aarch64",
+        feature = "rpi5",
+        feature = "bringup-diagnostics"
+    ))]
     if !TRAMPOLINE_ELF_STAGE_SENT.swap(true, Ordering::Relaxed) {
         dbg_mark(b's' as u32);
     }
@@ -1139,11 +1187,19 @@ extern "C" fn trampoline(_arg: *mut c_void) {
         // We are entering userspace (EL0).
         // Before entering, we must ensure the process's address space is active.
         unsafe {
-            #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+            #[cfg(all(
+                target_arch = "aarch64",
+                feature = "rpi5",
+                feature = "bringup-diagnostics"
+            ))]
             if !TRAMPOLINE_ENTER_USER_STAGE_SENT.swap(true, Ordering::Relaxed) {
                 dbg_mark(b't' as u32);
             }
-            #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+            #[cfg(all(
+                target_arch = "aarch64",
+                feature = "rpi5",
+                feature = "bringup-diagnostics"
+            ))]
             if !TRAMPOLINE_TTBR0_STAGE_SENT.swap(true, Ordering::Relaxed) {
                 dbg_mark(b'0' as u32);
             }
@@ -1151,7 +1207,11 @@ extern "C" fn trampoline(_arg: *mut c_void) {
             let ttbr0 = current_process.with_address_space(|as_| as_.ttbr0_value());
             crate::arch::aarch64::paging::set_ttbr0(ttbr0);
 
-            #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+            #[cfg(all(
+                target_arch = "aarch64",
+                feature = "rpi5",
+                feature = "bringup-diagnostics"
+            ))]
             dbg_mark(b'Q' as u32);
 
             crate::arch::aarch64::context::enter_userspace(code_ptr, ustack_rsp.as_u64() as usize);

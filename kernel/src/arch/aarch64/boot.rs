@@ -7,7 +7,7 @@ static mut BOOT_INFO: BootInfo = BootInfo { dtb_addr: 0 };
 
 #[inline(always)]
 fn dbg_mark(_ch: u32) {
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     // SAFETY: Early debug marker write to Pi 5 debug UART10 data register.
     unsafe {
         (0x10_7D00_1000 as *mut u32).write_volatile(_ch);
