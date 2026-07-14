@@ -12,9 +12,16 @@
 //! `SERIAL: spin::Mutex<()>` serializes the controller against
 //! `cargo test`'s parallel-test-thread model. `armed(budget, f)` holds
 //! the mutex for the lifetime of `f`, so two threads cannot race-arm
-//! the controller. The lock is acquired last (after the controller is
-//! observed consistent) and released first (before the controller is
-//! mutated) on the way out via `ArmGuard::Drop`.
+//! the controller. The mutex is non-reentrant; do NOT call `is_disarmed`
+//! or any other SERIAL-acquiring helper from inside an active `armed`
+//! scope.
+//!
+//! Cross-crate surface policy (enforced by the audit-gate static check):
+//! - The module is `pub` so kernel test harnesses can name it as
+//!   `kernel_physical_memory::fault`.
+//! - Only `armed` is `pub`. `arm`, `disarm`, `checkpoint`, and
+//!   `is_disarmed` are `pub(crate)`. `ArmGuard` and the statics are
+//!   private.
 //!
 //! Default features: the entire file is `#[cfg]`-gated out of the build,
 //! so production callers see a byte-identical crate. Enable with
@@ -60,14 +67,21 @@ pub(crate) fn checkpoint() -> bool {
 }
 
 /// RAII guard that owns `SERIAL` and the previous controller state. On
-/// drop, restores `BUDGET` and `DISARMED` to their pre-armed values, then
-/// releases the mutex.
+/// drop, restores `BUDGET` and `DISARMED` to their pre-armed values via
+/// two separate atomic stores, then releases the mutex.
 ///
-/// Drop order: field drop is reverse declaration in current Rust, but we
-/// restore the controller state explicitly via `Drop::drop` before the
-/// `serial` field drops last (Rust struct field drop is declaration
-/// order; we put `serial` last so it drops last after our manual
-/// restore).
+/// The two restore stores are NOT a paired atomic state transition —
+/// they are independent `SeqCst` stores, and a panic between them could
+/// leave one restored and the other leaked. In practice the only way
+/// this happens is a double-panic (which aborts), but callers that
+/// require joint restoration should not rely on this. The single-CPU
+/// test harness is acceptable for this scenario; multi-CPU callers
+/// would need a different guarantee.
+///
+/// Rust struct field drop order is declaration order: `prev_budget`
+/// (no-op), `prev_disarmed` (no-op), then `serial` (releases the
+/// mutex). Both restore stores happen inside `Drop::drop` so they
+/// complete before the MutexGuard field drops.
 struct ArmGuard {
     prev_budget: u32,
     prev_disarmed: bool,
@@ -94,25 +108,28 @@ impl ArmGuard {
 
 impl Drop for ArmGuard {
     fn drop(&mut self) {
-        // Restore controller state BEFORE the serial field drops so any
-        // observer taking SERIAL after us sees the restored pair.
+        // Two separate atomic stores; see the type-level docstring
+        // for the joint-restoration caveat.
         BUDGET.store(self.prev_budget, Ordering::SeqCst);
         DISARMED.store(self.prev_disarmed, Ordering::SeqCst);
         // `serial` (the MutexGuard) drops after this method returns,
-        // releasing the mutex last.
+        // releasing the mutex last so any observer taking SERIAL after
+        // us sees a (possibly-not-fully-jointly-restored) but at-least
+        // stores-completed state.
     }
 }
 
 /// Run `f` under an armed controller. The serial mutex is held for the
 /// full scope; controller state is restored to whatever it was before
-/// `armed` was called. A panic inside `f` propagates after `ArmGuard`'s
+/// `armed` was called (subject to the joint-restoration caveat on
+/// `ArmGuard::drop`). A panic inside `f` propagates after `ArmGuard`'s
 /// `Drop` runs the state-restore logic.
 ///
-/// Currently only consumed by tests in this crate. Production callers
-/// can wire up cross-crate consumption in a follow-up after the
-/// feature forwarding is proven.
+/// This is the SOLE public entry point of the controller from outside
+/// the crate. Cross-crate callers (the kernel test harness) arm the
+/// controller by entering a scope; the RAII guard handles teardown.
 #[allow(dead_code)]
-pub(crate) fn armed<R>(budget: u32, f: impl FnOnce() -> R) -> R {
+pub fn armed<R>(budget: u32, f: impl FnOnce() -> R) -> R {
     let _guard = ArmGuard::enter(budget);
     f()
 }

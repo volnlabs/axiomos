@@ -426,9 +426,52 @@ run_cargo_step focused-host-tests test \
     -p kernel_abi -p kernel_elfloader -p kernel_physical_memory -p kernel_syscall \
     -p kernel_time -p kernel_usermem -p kernel_vfs -p kernel_virtual_memory -p shrike_link
 run_step fault-injection-static python3 -c \
-    'from pathlib import Path; root=Path("kernel/crates/kernel_physical_memory"); cargo=(root/"Cargo.toml").read_text(); lib=(root/"src/lib.rs").read_text(); fault=(root/"src/fault.rs").read_text(); assert "[features]" in cargo and "fault-injection = []" in cargo; assert "spin.workspace = true" in cargo, "no_std spin mutex dependency missing"; assert "pub(crate) mod fault" in lib, "fault must be crate-private (no cross-crate consumer in foundation)"; assert "cfg(feature = \"fault-injection\")" in lib; assert lib.count("crate::fault::checkpoint()") >= 2, "expected two checkpoints in allocate_frames_impl"; assert "pub(crate) fn armed" in fault and "fn drop" in fault; assert "pub(crate) fn checkpoint" in fault and "pub(crate) fn disarm" in fault and "pub(crate) fn arm" in fault, "controller API must be crate-private, not pub"; assert "pub(crate) fn is_disarmed" in fault, "is_disarmed helper must exist for the panic-restoration test"; assert "SERIAL" in fault and "spin" in fault and "Mutex" in fault, "controller must use no_std synchronization"'
+    'from pathlib import Path; root=Path("kernel/crates/kernel_physical_memory"); cargo=(root/"Cargo.toml").read_text(); lib=(root/"src/lib.rs").read_text(); fault=(root/"src/fault.rs").read_text(); audit_lib=Path("kernel/src/audit_fault_probe.rs"); audit_probe=audit_lib.read_text() if audit_lib.exists() else ""; kernel_cargo=Path("kernel/Cargo.toml").read_text(); root_cargo=Path("Cargo.toml").read_text(); assert "[features]" in cargo and "fault-injection = []" in cargo; assert "spin.workspace = true" in cargo, "no_std spin mutex dependency missing"; assert "pub mod fault" in lib, "fault module must be pub (kernel test harness needs cross-crate access path)"; assert "cfg(feature = \"fault-injection\")" in lib; assert lib.count("crate::fault::checkpoint()") >= 2, "expected two checkpoints in allocate_frames_impl"; assert "pub fn armed" in fault, "only `armed` must be pub for cross-crate consumption"; assert "pub(crate) fn checkpoint" in fault and "pub(crate) fn disarm" in fault and "pub(crate) fn arm" in fault, "only `armed` must be public; arm, disarm, checkpoint, is_disarmed stay pub(crate)"; assert "pub(crate) fn is_disarmed" in fault, "is_disarmed helper must exist for the panic-restoration test"; assert "SERIAL" in fault and "spin" in fault and "Mutex" in fault, "controller must use no_std synchronization"; assert "audit-fault-injection" in kernel_cargo and "kernel_physical_memory/fault-injection" in kernel_cargo, "kernel feature must forward to kernel_physical_memory/fault-injection"; assert "audit-fault-injection = [\"kernel_x86/audit-fault-injection\"]" in root_cargo, "workspace-root forwarder feature missing"; assert "pub fn run_probe" in audit_probe, "audit_fault_probe must expose run_probe"; main_text=Path("kernel/src/main.rs").read_text(); assert "mod audit_fault_probe" in main_text, "audit_fault_probe module not wired into main.rs"; assert "audit_fault_probe::run_probe" in main_text, "run_probe call site missing from main.rs"; assert "fault::armed" in audit_probe, "probe must use armed(...) controller"'
 run_cargo_step fault-injection-tests test -p kernel_physical_memory \
     --features fault-injection
+
+# Audit-fault-injection QEMU smoke. Runs only when RUN_AUDIT_FAULT=1.
+# Note on --smp: the kernel currently boots only with --smp 2 due to a
+# pre-existing SMP initialization dependency (single-CPU boot hangs
+# before QEMU_BOOT_OK). The user-facing justification for `--smp 1`
+# (deterministic global fault-counter) cannot yet be realized; this
+# step uses `--smp 2` to verify the probe markers, accepting that the
+# fault-counter race window is non-zero. Replace with `--smp 1` once
+# the single-CPU boot path is fixed.
+if [[ "${RUN_AUDIT_FAULT:-0}" == "1" ]]; then
+    run_step audit-fault-injection-qemu-smoke bash -c '
+        FIXTURE="$(mktemp)"
+        printf "\xd7\x5a\x98\x01\x82\xb1\x0a\xb7\xd5\x4b\xfe\xd3\xc9\x64\x07\x3a\x0e\xe1\x72\xf3\xda\xa6\x23\x25\xaf\x02\x1a\x68\xf7\x07\x51\x1a" > "$FIXTURE"
+        AXIOM_BPF_TRUSTED_KEY_PATH="$FIXTURE" \
+            timeout '"${QEMU_TIMEOUT}"'s cargo run --locked --release \
+                --features audit-fault-injection,bpf-unsigned-development,audit-diagnostics \
+                -- --headless --smp 2 --mem 1G >"'"$OUTPUT_DIR"'/audit-fault-qemu-serial.log" 2>&1 || true
+        failed=0
+        for marker in "QEMU_BOOT_OK" \
+                       "AUDIT_FAULT_PROBE: start" \
+                       "AUDIT_FAULT_PROBE: BUDGET=0 result is_some=false" \
+                       "AUDIT_FAULT_PROBE: no-fault result is_some=true" \
+                       "AUDIT_FAULT_PROBE: BUDGET=2 first=true second=false" \
+                       "AUDIT_FAULT_PROBE: done"; do
+            if ! grep -qF "$marker" "'"$OUTPUT_DIR"'/audit-fault-qemu-serial.log"; then
+                echo "missing required marker: $marker" >>"'"$OUTPUT_DIR"'/audit-fault-qemu-serial.log"
+                failed=1
+            fi
+        done
+        if [[ "$failed" == "0" ]]; then
+            printf " PASS\n"; passes=$((passes+1)); status="PASS"
+        else
+            printf " FAIL\n"; failures=$((failures+1)); status="FAIL"
+            tail -n 80 "'"$OUTPUT_DIR"'/audit-fault-qemu-serial.log" >&2 || true
+        fi
+        END="$(date +%s)"; record "audit-fault-injection-qemu-smoke" "$status" \
+            "$((END - start))" "'"$OUTPUT_DIR"'/audit-fault-qemu-serial.log" \
+            "AUDIT_FAULT=1: smoke (smp 2)"
+        rm -f "$FIXTURE"
+    '
+else
+    skip_step audit-fault-injection-qemu-smoke "RUN_AUDIT_FAULT not set"
+fi
 run_cargo_step bpf-cloud-tests test -p kernel_bpf --no-default-features --features cloud-profile
 run_cargo_step bpf-embedded-tests test -p kernel_bpf --no-default-features --features embedded-profile
 run_cargo_step kernel-x86-check check -p kernel --target x86_64-unknown-none \

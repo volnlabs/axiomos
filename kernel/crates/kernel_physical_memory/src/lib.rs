@@ -27,7 +27,7 @@ pub enum FrameState {
 }
 
 #[cfg(feature = "fault-injection")]
-pub(crate) mod fault;
+pub mod fault;
 
 impl FrameState {
     #[must_use]

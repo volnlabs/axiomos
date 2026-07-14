@@ -62,7 +62,11 @@ bpf-unsigned-development-aarch64 = [
 ]
 audit-diagnostics = ["kernel_x86/audit-diagnostics"]
 audit-diagnostics-aarch64 = ["kernel_aarch64/audit-diagnostics"]
+audit-fault-injection = ["kernel_x86/audit-fault-injection"]
 bringup-diagnostics = ["kernel_aarch64/bringup-diagnostics"]
+
+
+
 x86_64_deps = [
   "dep:init_x86",
   "dep:gpio_demo_x86",
