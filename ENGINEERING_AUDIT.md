@@ -3,11 +3,11 @@
 ## Current branch re-audit (2026-07-14)
 
 - **Branch:** `audit/runtime-architecture-hardening`
-- **Implementation re-audited at:** `aaf14d6a2d4b12d96d049018fc435596d1986a7f`
+- **Implementation re-audited at:** `346875915f85dfa843a5eadeb85cf17a11a02477`
 - **Comparison baseline:** original audited commit `661d5ede6331c5ee62d6642451ce63ce1e0d5adf`
 - **Fresh engineering score:** **7/10** (release-candidate engineering, not production assurance)
 - **Fresh production decision:** **NO-GO** for v1.0 or safety-relevant deployment
-- **Local required gate:** **59/59 passed** with production and development two-vCPU QEMU boots
+- **Local required gate:** **61/61 passed** with production and development two-vCPU QEMU boots
 - **Hosted H-06 evidence:** externally blocked; [GitHub Actions run 29305700412](https://github.com/pro-utkarshM/axiomOS/actions/runs/29305700412) created zero-step jobs because the account spending limit/monthly usage prevented runners from starting
 
 This table is the authoritative status for the current branch. The detailed audit below is preserved as a historical review of `661d5ed`; its 3/10 score, finding descriptions, and recommendations describe that old snapshot and are not current-branch status.
@@ -18,7 +18,7 @@ This table is the authoritative status for the current branch. The detailed audi
 | C-02 | **Closed** | Current-task and scheduler access is interrupt-masked and non-escaping, reentrant borrowing is rejected, process handles are owned, and the scheduler borrow ends before assembly context transfer. |
 | C-03 | **Closed** | BPF execution requires verifier-produced `VerifiedProgram` values and lifetime-bound, sealed contexts instead of safe construction over arbitrary raw pointers. |
 | C-04 | **Closed** | Execution uses guarded per-CPU stacks and map leases that serialize userspace mutation and unload against escaped runtime access. |
-| C-05 | **Closed** | Mapping/remapping is transactional with rollback and protection propagation; frame references are checked; x86 performs epoch/ack shootdown before reclamation and AArch64 uses broadcast TLBI. |
+| C-05 | **Closed** | Mapping/remapping is transactional with rollback and protection propagation; committed regions unmap before reclaiming the frames currently present in their PTEs, including COW replacements; fork snapshots and retains current mappings; x86 performs epoch/ack shootdown before reclamation and AArch64 uses broadcast TLBI. |
 | C-06 | **Closed** | The kernel RWX JIT allocator is removed and no shipped profile enables the AArch64 JIT. |
 | C-07 | **Closed** | Checked allocation, global/per-owner quotas, ownership, generation-safe handles, lifecycle commands, busy checks, and scheduler-owned exit reclamation bound BPF object lifetime. |
 | H-01 | **Closed** | User exceptions terminate only the task, x86 fork/exec context handling is corrected, exec replacement is preflighted, and scheduler-owned teardown contains no force-unlock path. |
@@ -26,10 +26,11 @@ This table is the authoritative status for the current branch. The detailed audi
 | H-03 | **Closed** | Fixed-fanout immutable hook/GPIO snapshots are published through an epoch grace period; dispatch avoids manager/runtime locks, allocation, refcount changes, scans, and logging. Hash buckets use flat backing storage and the interpreter clears only verifier-recorded stack use. |
 | H-04 | **Closed** | Process credentials and capabilities are inherited exactly across fork/exec; BPF operations use per-command authorization, credential-derived verifier tiers, bounded pin grants, and fail-closed production signing. |
 | H-05 | **Closed** | ELF parsing/loading is fallible, executable images are capped and fallibly allocated, malformed-input regression coverage is present, and the isolated fuzz target builds. |
-| H-06 | **Pending hosted evidence** | Workflow/toolchain/target/QEMU-gate defects are remediated and the full local gate passes 59/59. Hosted jobs cannot start until GitHub billing/quota is restored. |
+| H-06 | **Pending hosted evidence** | Workflow/toolchain/target/QEMU-gate defects are remediated and the full local gate passes 61/61. Hosted jobs cannot start until GitHub billing/quota is restored. |
 | Additional High: ACPI mapping | **Closed** | Mapping covers every page in an unaligned range, returns the offset virtual address, unmaps the complete reservation, and has four synthetic mapping-plan tests. |
 | Additional High: force unlock | **Closed** | H-01 teardown uses normal lock ownership and scheduler cleanup after task guards drain; no `force_unlock` call remains. |
 | Additional High: exec/spawn allocation | **Closed** | Executable files have a 16 MiB cap, buffers use fallible reservation, spawn rechecks layout, and load/allocation/protection failures terminate only the task. |
+| A-02 | **Closed** | Syscall VM traits now expose protection and commit semantics through rollback-safe mapping transactions. File/VFS traits preserve typed descriptor, path, seek, permission, unsupported-operation, broken-pipe, overflow, and I/O failures through exact errno mapping; stat carries file type; ext2/devfs user-controlled paths no longer panic. Adapter invariants are enforced by dedicated `vm-ownership-static` and `vfs-boundary-static` gate steps. |
 | Q-04 unsafe governance | **Partial** | The generated exact-fingerprint ledger owns all 697 first-party Rust `unsafe` sites, but independent invariant review and kernel-representative dynamic analysis remain outstanding. |
 | T-01 / T-02 / T-03 / T-04 | **Partial** | The local gate and parser/signing/QEMU coverage close the original highest-risk gaps; manifest-driven workspace discovery, physical firmware HIL, broader failure injection, coverage, and mutation budgets remain open. |
 
@@ -40,7 +41,7 @@ Current release-gate checklist:
 - [x] Revalidate and fix unaligned/cross-page ACPI mapping.
 - [x] Revalidate and fix executable-size caps and fallible exec/spawn allocation.
 - [x] Confirm H-01 scheduler-owned teardown fully removes force-unlock behavior.
-- [x] Pass the complete local required audit gate: 59/59 at `aaf14d6`.
+- [x] Pass the complete local required audit gate: 61/61 at `3468759`.
 - [ ] Run H-06 on hosted GitHub runners after billing/monthly quota is restored.
 - [ ] Pass physical RPi5 and RP2040 HIL, including GPIO interrupt and control-link failure cases.
 - [ ] Obtain an independent safety/concurrency review of the unsafe ledger, scheduler/VM shootdown, and BPF epoch/snapshot invariants.
