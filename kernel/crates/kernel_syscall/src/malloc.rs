@@ -17,9 +17,11 @@ pub fn sys_malloc<Cx: MemoryRegionAccess>(cx: &Cx, size: usize) -> Result<usize,
             ProtFlags::READ | ProtFlags::WRITE,
         )
         .map_err(|e| match e {
+            CreateMappingError::InvalidRequest => EINVAL,
             CreateMappingError::LocationAlreadyMapped => EINVAL,
             CreateMappingError::OutOfMemory => ENOMEM,
             CreateMappingError::NotFound => EINVAL,
+            CreateMappingError::Unsupported => EINVAL,
         })?;
 
     Ok(mapped_addr.addr())

@@ -765,19 +765,24 @@ impl Debug for Process {
 
 impl Drop for Process {
     fn drop(&mut self) {
+        if let Some(address_space) = self.address_space.get_mut().as_ref() {
+            #[cfg(target_arch = "x86_64")]
+            address_space.with_active(|active| self.memory_regions.release_all_in(active));
+
+            #[cfg(not(target_arch = "x86_64"))]
+            self.memory_regions.release_all_in(address_space);
+        }
+
         let my_ppid = *self.ppid.read();
         let mut guard = process_tree().write();
-        guard
-            .processes
-            .remove(&self.pid)
-            .expect("process should be in process tree");
+        if guard.processes.remove(&self.pid).is_none() {
+            return;
+        }
         if let Some(children) = guard.children.remove(&self.pid) {
             for child in children {
                 *child.ppid.write() = my_ppid;
             }
         }
-
-        // TODO: deallocate all physical frames that are not part of a shared mapping
     }
 }
 

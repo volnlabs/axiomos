@@ -61,6 +61,14 @@ pub extern "C" fn _start() -> ! {
 
     // 4. Test free
     free(ptr);
+    let freed_iov = [iovec {
+        iov_base: ptr,
+        iov_len: 1,
+    }];
+    if writev(1, &freed_iov) >= 0 {
+        write(1, "Freed mapping remained accessible\n".as_bytes());
+        exit(1);
+    }
 
     // 5. Test pipe
     let mut pipefd = [0i32; 2];

@@ -313,13 +313,8 @@ impl kernel_syscall::access::MemoryRegionAccess for KernelAccess {
             protection,
         )?;
 
-        let addr =
-            <crate::syscall::access::mem::KernelMapping as kernel_syscall::access::Mapping>::addr(
-                &mapping,
-            );
-
-        // Convert the mapping to a region and track it
-        let region_handle = mapping.into_region_handle();
+        let addr = kernel_syscall::access::Mapping::addr(&mapping);
+        let region_handle = kernel_syscall::access::Mapping::commit(mapping);
         self.add_memory_region(region_handle);
 
         Ok(addr)
@@ -364,5 +359,9 @@ impl kernel_syscall::access::MemoryRegion for KernelMemoryRegionHandle {
 
     fn size(&self) -> usize {
         self.size
+    }
+
+    fn protection(&self) -> kernel_abi::ProtFlags {
+        self.inner.protection()
     }
 }
