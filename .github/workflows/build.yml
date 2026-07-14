@@ -68,6 +68,10 @@ jobs:
           cargo fmt --all -- --check
       - name: Unsafe-code ledger
         run: python3 -B scripts/unsafe-ledger.py --check
+      - name: Component inventory and generated documentation
+        run: |
+          cargo xtask inventory --check
+          cargo xtask docs --check
       - name: Clippy (per-crate, matches local CI recipe)
         # Per the axiom-kernel skill: per-crate clippy avoids the
         # profile-typed kernel_bpf "no default profile" failures that bare
@@ -81,6 +85,7 @@ jobs:
           cargo clippy -p kernel_virtual_memory --all-targets -- -D clippy::all
           cargo clippy -p kernel_vfs --lib -- -D clippy::all
           cargo clippy -p kernel_physical_memory --lib -- -D clippy::all
+          cargo clippy -p xtask --all-targets -- -D clippy::all
           cargo clippy -p kernel_bpf --no-default-features --features cloud-profile --lib -- -D clippy::all
           cargo clippy -p kernel_bpf --no-default-features --features embedded-profile --lib -- -D clippy::all
 

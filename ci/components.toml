@@ -1,0 +1,265 @@
+format_version = 1
+
+[[component]]
+path = "Cargo.toml"
+kind = "cargo"
+role = "runner and image assembly"
+gate = "build, lint, artifacts, QEMU"
+
+[[component]]
+path = "tools/xtask/Cargo.toml"
+kind = "cargo"
+role = "validation authority"
+gate = "host lint and tests"
+
+[[component]]
+path = "kernel/Cargo.toml"
+kind = "cargo"
+role = "kernel"
+gate = "x86/AArch64 checks and QEMU"
+
+[[component]]
+path = "kernel/crates/kernel_abi/Cargo.toml"
+kind = "cargo"
+role = "public ABI"
+gate = "host lint and tests"
+
+[[component]]
+path = "kernel/crates/kernel_bpf/Cargo.toml"
+kind = "cargo"
+role = "BPF runtime"
+gate = "cloud/embedded lint, tests, Miri"
+
+[[component]]
+path = "kernel/crates/kernel_bpf/fuzz/Cargo.toml"
+kind = "cargo"
+role = "BPF fuzz targets"
+gate = "fuzz build"
+
+[[component]]
+path = "kernel/crates/kernel_devfs/Cargo.toml"
+kind = "cargo"
+role = "device filesystem"
+gate = "host lint and tests"
+
+[[component]]
+path = "kernel/crates/kernel_device/Cargo.toml"
+kind = "cargo"
+role = "device contracts"
+gate = "host lint and tests"
+
+[[component]]
+path = "kernel/crates/kernel_elfloader/Cargo.toml"
+kind = "cargo"
+role = "ELF loader"
+gate = "host lint, tests, fuzz"
+
+[[component]]
+path = "kernel/crates/kernel_elfloader/fuzz/Cargo.toml"
+kind = "cargo"
+role = "ELF fuzz target"
+gate = "fuzz build"
+
+[[component]]
+path = "kernel/crates/kernel_memapi/Cargo.toml"
+kind = "cargo"
+role = "mapped-memory contract"
+gate = "host lint and tests"
+
+[[component]]
+path = "kernel/crates/kernel_pci/Cargo.toml"
+kind = "cargo"
+role = "PCI contracts"
+gate = "host lint and tests"
+
+[[component]]
+path = "kernel/crates/kernel_physical_memory/Cargo.toml"
+kind = "cargo"
+role = "physical memory"
+gate = "host lint and tests"
+
+[[component]]
+path = "kernel/crates/kernel_syscall/Cargo.toml"
+kind = "cargo"
+role = "syscall contracts"
+gate = "host lint and tests"
+
+[[component]]
+path = "kernel/crates/kernel_time/Cargo.toml"
+kind = "cargo"
+role = "time and deadline queues"
+gate = "host lint and tests"
+
+[[component]]
+path = "kernel/crates/kernel_usermem/Cargo.toml"
+kind = "cargo"
+role = "userspace memory boundary"
+gate = "host lint and tests"
+
+[[component]]
+path = "kernel/crates/kernel_vfs/Cargo.toml"
+kind = "cargo"
+role = "virtual filesystem"
+gate = "host lint and tests"
+
+[[component]]
+path = "kernel/crates/kernel_virtual_memory/Cargo.toml"
+kind = "cargo"
+role = "virtual memory"
+gate = "host lint and tests"
+
+[[component]]
+path = "kernel/crates/shrike_link/Cargo.toml"
+kind = "cargo"
+role = "control-link protocol"
+gate = "host lint and tests"
+
+[[component]]
+path = "kernel/demos/riscv/Cargo.toml"
+kind = "cargo"
+role = "experimental RISC-V demo"
+gate = "RISC-V target lint"
+
+[[component]]
+path = "firmware/shrike_rp2040/Cargo.toml"
+kind = "cargo"
+role = "RP2040 firmware"
+gate = "RP2040 target lint and build"
+
+[[component]]
+path = "userspace/benchmark/Cargo.toml"
+kind = "cargo"
+role = "benchmark image"
+gate = "target build"
+
+[[component]]
+path = "userspace/bpf_loader/Cargo.toml"
+kind = "cargo"
+role = "BPF loader image"
+gate = "target build"
+
+[[component]]
+path = "userspace/file_io_demo/Cargo.toml"
+kind = "cargo"
+role = "filesystem demo"
+gate = "target build"
+
+[[component]]
+path = "userspace/file_structure/Cargo.toml"
+kind = "cargo"
+role = "image filesystem model"
+gate = "host lint and tests"
+
+[[component]]
+path = "userspace/fork_test/Cargo.toml"
+kind = "cargo"
+role = "process lifecycle probe"
+gate = "target build and QEMU"
+
+[[component]]
+path = "userspace/gpio_demo/Cargo.toml"
+kind = "cargo"
+role = "GPIO demo"
+gate = "target build"
+
+[[component]]
+path = "userspace/iio_demo/Cargo.toml"
+kind = "cargo"
+role = "IIO demo"
+gate = "target build"
+
+[[component]]
+path = "userspace/init/Cargo.toml"
+kind = "cargo"
+role = "init and integration probes"
+gate = "target build and QEMU"
+
+[[component]]
+path = "userspace/minilib/Cargo.toml"
+kind = "cargo"
+role = "userspace runtime"
+gate = "target build"
+
+[[component]]
+path = "userspace/pwm_demo/Cargo.toml"
+kind = "cargo"
+role = "PWM demo"
+gate = "target build"
+
+[[component]]
+path = "userspace/rk_bridge/Cargo.toml"
+kind = "cargo"
+role = "host robotics bridge"
+gate = "standalone host lint and tests"
+
+[[component]]
+path = "userspace/rk_cli/Cargo.toml"
+kind = "cargo"
+role = "host signing CLI"
+gate = "standalone host lint and tests"
+
+[[component]]
+path = "userspace/rk_uart_forwarder/Cargo.toml"
+kind = "cargo"
+role = "UART forwarder image"
+gate = "target build"
+
+[[component]]
+path = "userspace/safety_demo/Cargo.toml"
+kind = "cargo"
+role = "safety-state demo"
+gate = "target build"
+
+[[component]]
+path = "userspace/sched_switch_bridge_demo/Cargo.toml"
+kind = "cargo"
+role = "scheduler bridge demo"
+gate = "target build"
+
+[[component]]
+path = "userspace/sched_switch_demo/Cargo.toml"
+kind = "cargo"
+role = "scheduler demo"
+gate = "target build"
+
+[[component]]
+path = "userspace/sched_switch_export_demo/Cargo.toml"
+kind = "cargo"
+role = "scheduler export demo"
+gate = "target build"
+
+[[component]]
+path = "userspace/signed_bpf_loader/Cargo.toml"
+kind = "cargo"
+role = "signed BPF integration image"
+gate = "target build and QEMU"
+
+[[component]]
+path = "userspace/sys_exit_demo/Cargo.toml"
+kind = "cargo"
+role = "task-exit probe"
+gate = "target build and QEMU"
+
+[[component]]
+path = "userspace/syscall_demo/Cargo.toml"
+kind = "cargo"
+role = "syscall demo"
+gate = "target build"
+
+[[component]]
+path = "userspace/timeseries_demo/Cargo.toml"
+kind = "cargo"
+role = "time-series map demo"
+gate = "target build"
+
+[[component]]
+path = "userspace/verifier_bench/Cargo.toml"
+kind = "cargo"
+role = "verifier benchmark image"
+gate = "target build"
+
+[[component]]
+path = "formal/lakefile.toml"
+kind = "lean"
+role = "verifier formal model"
+gate = "Lean build"

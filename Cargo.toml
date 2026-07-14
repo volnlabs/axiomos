@@ -109,6 +109,7 @@ exclude = [
   "firmware/shrike_rp2040",
 ]
 members = [
+  "tools/xtask",
   "kernel",
   "kernel/crates/kernel_abi",
   "kernel/crates/kernel_bpf",

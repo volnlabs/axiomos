@@ -3,6 +3,9 @@
 # https://doc.rust-lang.org/nightly/cargo/reference/unstable.html#artifact-dependencies
 bindeps = true
 
+[alias]
+xtask = "run --locked --package xtask --"
+
 [target.x86_64-unknown-none]
 rustflags = [
     # curve25519-dalek defaults to nightly SIMD on x86_64. The pinned compiler
