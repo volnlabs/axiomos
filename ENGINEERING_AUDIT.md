@@ -1,14 +1,15 @@
 # axiomos Engineering Audit
 
-## Current branch re-audit (2026-07-14)
+## Current branch re-audit (2026-07-14, refreshed post-Miri)
 
 - **Branch:** `audit/runtime-architecture-hardening`
-- **Implementation re-audited at:** `54e8b8886d1fde5ad8308e4fa1f5cefb18e21a80`
+- **Implementation re-audited at:** `7c1b02b` (Miri fix) on top of `3f94cfe` (rk_bridge fuzz)
 - **Comparison baseline:** original audited commit `661d5ede6331c5ee62d6642451ce63ce1e0d5adf`
 - **Fresh engineering score:** **7/10** (release-candidate engineering, not production assurance)
 - **Fresh production decision:** **NO-GO** for v1.0 or safety-relevant deployment
-- **Local required gate:** **62/62 passed** with production and development two-vCPU QEMU boots
-- **Hosted H-06 evidence:** externally blocked; [GitHub Actions run 29305700412](https://github.com/pro-utkarshM/axiomOS/actions/runs/29305700412) created zero-step jobs because the account spending limit/monthly usage prevented runners from starting
+- **Local required gate:** **71/71 passed** with production and development two-vCPU QEMU boots
+- **Local Miri run (out of default gate):** `cargo miri test -p kernel_bpf --no-default-features --features cloud-profile` passes 342+45+18+4 = ~409 tests with zero UB after the integer-derived-pointer fix at `execution/mod.rs:113`; the pre-fix run aborted at `execute_map_update_helper`
+- **Hosted H-06 evidence:** externally blocked; [GitHub Actions run 29305700412](https://github.com/pro-utkarshM/axiomOS/actions/runs/29305700412) created zero-step jobs because the account spending limit/monthly usage prevented runners from starting. Note: `--miri` is also not invoked by any PR workflow today; running Miri is a local-only developer step behind `scripts/verify-engineering-audit.sh --miri`
 
 This table is the authoritative status for the current branch. The detailed audit below is preserved as a historical review of `661d5ed`; its 3/10 score, finding descriptions, and recommendations describe that old snapshot and are not current-branch status.
 
@@ -26,16 +27,16 @@ This table is the authoritative status for the current branch. The detailed audi
 | H-03 | **Closed** | Fixed-fanout immutable hook/GPIO snapshots are published through an epoch grace period; dispatch avoids manager/runtime locks, allocation, refcount changes, scans, and logging. Hash buckets use flat backing storage and the interpreter clears only verifier-recorded stack use. |
 | H-04 | **Closed** | Process credentials and capabilities are inherited exactly across fork/exec; BPF operations use per-command authorization, credential-derived verifier tiers, bounded pin grants, and fail-closed production signing. |
 | H-05 | **Closed** | ELF parsing/loading is fallible, executable images are capped and fallibly allocated, malformed-input regression coverage is present, and the isolated fuzz target builds. |
-| H-06 | **Pending hosted evidence** | Workflow/toolchain/target/QEMU-gate defects are remediated and the full local gate passes 62/62. Hosted jobs cannot start until GitHub billing/quota is restored. |
+| H-06 | **Pending hosted evidence** | Workflow/toolchain/target/QEMU-gate defects are remediated and the full local gate passes 71/71 at `7c1b02b`. Hosted jobs cannot start until GitHub billing/quota is restored. |
 | Additional High: ACPI mapping | **Closed** | Mapping covers every page in an unaligned range, returns the offset virtual address, unmaps the complete reservation, and has four synthetic mapping-plan tests. |
 | Additional High: force unlock | **Closed** | H-01 teardown uses normal lock ownership and scheduler cleanup after task guards drain; no `force_unlock` call remains. |
 | Additional High: exec/spawn allocation | **Closed** | Executable files have a 16 MiB cap, buffers use fallible reservation, spawn rechecks layout, and load/allocation/protection failures terminate only the task. |
 | A-02 | **Closed** | Syscall VM traits now expose protection and commit semantics through rollback-safe mapping transactions. File/VFS traits preserve typed descriptor, path, seek, permission, unsupported-operation, broken-pipe, overflow, and I/O failures through exact errno mapping; stat carries file type; ext2/devfs user-controlled paths no longer panic. Adapter invariants are enforced by dedicated `vm-ownership-static` and `vfs-boundary-static` gate steps. |
 | A-04 | **Partial** | `kernel_abi` publishes ABI v1.0 catalogs containing exactly the 31 dispatched syscalls, 15 production BPF commands, four creatable map types, 14 interpreter-dispatched helpers, and seven accepted attach types. `ci/targets.toml` is the authoritative target/feature/evidence matrix and xtask generates both public tables; the local gate rejects dispatcher/catalog drift. Parallel RISC-V kernel entrypoints and remaining product-name drift are still open. |
-| Q-04 unsafe governance | **Partial** | The generated exact-fingerprint ledger owns all 697 first-party Rust `unsafe` sites, but independent invariant review and kernel-representative dynamic analysis remain outstanding. |
-| T-01 / T-02 / T-03 / T-04 | **Partial** | The local gate and parser/signing/QEMU coverage close the original highest-risk gaps; manifest-driven workspace discovery, physical firmware HIL, broader failure injection, coverage, and mutation budgets remain open. |
+| Q-04 unsafe governance | **Partial** | Generated exact-fingerprint ledger owns all 696 first-party Rust `unsafe` sites (one removed by the Miri fix). Cloud-profile BPF interpreter tests are now Miri-clean under sequential single-threaded execution (342+45+18+4 tests, 0 UB). Miri proves aliasing/invalid-pointer-read soundness on a representative sequential path; it does NOT prove concurrent interleavings, so it does not close T-01/T-04 or substitute for an independent unsafe-site review. Independent review and broader kernel-representative dynamic analysis (Loom, fault injection, coverage budgets) remain outstanding. |
+| T-01 / T-02 / T-03 / T-04 | **Partial** | The local gate (71/71) closes the original highest-risk gaps. New since the previous re-audit: a fourth standalone fuzz target (`userspace/rk_bridge/fuzz/event_stream`) wired into `ci/components.toml`, the regenerated component table, a weekly-CI workflow with `-max_len=65536` input cap, and audit-gate enforcement (`rk-bridge-fuzz-target-static`, `rk-bridge-fuzz-build`). `RkEvent::from_bytes` was made unaligned-safe (`core::ptr::read_unaligned`). Open: physical firmware HIL, broader failure injection, coverage, and mutation budgets. |
 
-The score rises from 3/10 to 7/10 because the original C-01 through C-07 and H-01 through H-05 implementation defects are closed and exercised by a reproducible local release gate. It does not rise further because hosted CI has not executed, real RPi5/RP2040 hardware paths are not release-gated, the unsafe/concurrency invariants lack external review or model checking, and significant Medium architecture, error-policy, workspace, test-budget, and documentation debt remains.
+The score rises from 3/10 to 7/10 because the original C-01 through C-07 and H-01 through H-05 implementation defects are closed and exercised by a reproducible local release gate. It does not rise further because hosted CI has not executed, real RPi5/RP2040 hardware paths are not release-gated, the unsafe/concurrency invariants lack external review or model checking, and significant Medium architecture, error-policy, workspace, test-budget, and documentation debt remains. The Miri-clean cloud-profile result tightens Q-04's evidence but, per the user's constraint, does not strengthen T-01/T-04 and does not substitute for an independent unsafe-site review; therefore the score stays at 7/10.
 
 Current release-gate checklist:
 
@@ -43,7 +44,9 @@ Current release-gate checklist:
 - [x] Revalidate and fix executable-size caps and fallible exec/spawn allocation.
 - [x] Confirm H-01 scheduler-owned teardown fully removes force-unlock behavior.
 - [x] Publish and gate the versioned supported ABI and target/feature matrix.
-- [x] Pass the complete local required audit gate: 62/62 at `54e8b88`.
+- [x] Pass the complete local required audit gate: 71/71 at `7c1b02b`.
+- [x] Miri-clean cloud-profile BPF interpreter tests at `7c1b02b`; not yet wired into the default gate, available via `scripts/verify-engineering-audit.sh --miri`.
+- [ ] Wire `miri-bpf-cloud` into the default required gate so the regression test runs on every local gate (decision held for next refresh).
 - [ ] Run H-06 on hosted GitHub runners after billing/monthly quota is restored.
 - [ ] Pass physical RPi5 and RP2040 HIL, including GPIO interrupt and control-link failure cases.
 - [ ] Obtain an independent safety/concurrency review of the unsafe ledger, scheduler/VM shootdown, and BPF epoch/snapshot invariants.
