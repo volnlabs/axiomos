@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicBool as Rpi5AtomicBool, Ordering as Rpi5Ordering}
 use conquer_once::spin::OnceCell;
 
 use crate::mcore::mtask::process::Process;
-use crate::mcore::mtask::scheduler::global::GlobalTaskQueue;
+use crate::mcore::mtask::scheduler::run_queue::RunQueues;
 use crate::mcore::mtask::task::{Task, TaskQueue};
 
 static CLEANUP_QUEUE: OnceCell<TaskQueue> = OnceCell::uninit();
@@ -42,7 +42,7 @@ impl TaskCleanup {
         if !CLEANUP_WORKER_SCHEDULED.swap(true, Ordering::AcqRel) {
             let task = Task::create_new(Process::root(), Self::run, ptr::null_mut())
                 .expect("should be able to create task cleanup");
-            GlobalTaskQueue::enqueue(Box::pin(task));
+            RunQueues::enqueue(Box::pin(task));
         }
     }
 

@@ -21,13 +21,14 @@ use crate::arch::traits::Architecture;
 use crate::mcore::context::ExecutionContext;
 #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
 use crate::mcore::mtask::process::Process;
-use crate::mcore::mtask::scheduler::global::GlobalTaskQueue;
+use crate::mcore::mtask::scheduler::run_queue::RunQueues;
 use crate::mcore::mtask::scheduler::sleep::TaskSleep;
 use crate::mcore::mtask::scheduler::switch::switch_impl;
 use crate::mcore::mtask::task::{State, Task};
 
 pub mod cleanup;
-pub mod global;
+pub mod run_queue;
+mod run_queue_policy;
 pub mod sleep;
 mod switch;
 
@@ -99,10 +100,10 @@ impl ContextSwitch {
 
 impl Scheduler {
     #[must_use]
-    pub fn new_cpu_local() -> Self {
+    pub fn new_cpu_local(cpu_id: usize) -> Self {
         // SAFETY: We are creating a task representing the current CPU execution state.
         // This is done once per CPU during initialization.
-        let current_task = Box::pin(unsafe { Task::create_current() });
+        let current_task = Box::pin(unsafe { Task::create_current(cpu_id) });
         Self {
             current_task,
             zombie_task: None,
@@ -135,7 +136,7 @@ impl Scheduler {
                 TaskSleep::enqueue(zombie_task);
             } else {
                 zombie_task.mark_ready();
-                GlobalTaskQueue::enqueue(zombie_task);
+                RunQueues::enqueue(zombie_task);
             }
         }
 
@@ -170,6 +171,7 @@ impl Scheduler {
             }
 
             log::trace!("reschedule: switching to task {}", next_task.id());
+            next_task.set_last_cpu(ExecutionContext::load().cpu_id());
             next_task.mark_running();
 
             next_task
@@ -270,6 +272,6 @@ impl Scheduler {
 
     #[allow(clippy::unused_self)]
     fn next_task(&self) -> Option<Pin<Box<Task>>> {
-        GlobalTaskQueue::dequeue()
+        RunQueues::dequeue()
     }
 }

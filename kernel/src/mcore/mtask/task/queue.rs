@@ -1,16 +1,13 @@
 use alloc::boxed::Box;
 use core::fmt::{Debug, Formatter};
 use core::ops::Deref;
+use core::pin::Pin;
 
 use cordyceps::MpscQueue;
 
 use crate::mcore::mtask::task::Task;
 
 pub struct TaskQueue {
-    // Although this is a Mpsc, we can use it as Mpmc, because it spins if the queue
-    // is currently being used by another thread. This is ok, because the spinning
-    // is busy, and not by halting the CPU. (if you think that this might be incorrect,
-    // double check obviously).
     inner: MpscQueue<Task>,
 }
 
@@ -26,6 +23,12 @@ impl TaskQueue {
         Self {
             inner: MpscQueue::new_with_stub(Box::pin(Task::create_stub())),
         }
+    }
+
+    /// Attempt one nonblocking dequeue. Competing consumers and in-progress
+    /// producers are treated as a miss so scheduler stealing remains bounded.
+    pub fn try_take(&self) -> Option<Pin<Box<Task>>> {
+        self.inner.try_dequeue().ok()
     }
 }
 

@@ -31,7 +31,7 @@ use crate::arch::types::{PhysAddr, PhysFrame, VirtAddr};
 #[cfg(target_arch = "x86_64")]
 use crate::limine::MP_REQUEST;
 use crate::mcore::mtask::scheduler::cleanup::TaskCleanup;
-use crate::mcore::mtask::scheduler::global::GlobalTaskQueue;
+use crate::mcore::mtask::scheduler::run_queue::RunQueues;
 use crate::mcore::mtask::scheduler::sleep::TaskSleep;
 #[cfg(target_arch = "x86_64")]
 use crate::sse;
@@ -66,7 +66,7 @@ pub fn init() {
             cpu.extra.store(extra_val, Release);
         });
 
-        GlobalTaskQueue::init();
+        RunQueues::init();
         TaskSleep::init();
 
         // then call the `cpu_init` function on each CPU (no-op on bootstrap CPU)
@@ -82,7 +82,7 @@ pub fn init() {
 
     #[cfg(target_arch = "aarch64")]
     {
-        GlobalTaskQueue::init();
+        RunQueues::init();
         TaskSleep::init();
     }
 

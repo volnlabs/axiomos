@@ -6,7 +6,7 @@ use core::ffi::c_void;
 use core::pin::Pin;
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize};
 
 use cordyceps::mpsc_queue::Links;
 use cordyceps::Linked;
@@ -48,6 +48,7 @@ pub struct Task {
     sleep_deadline_ns: AtomicU64,
     sleep_generation: AtomicU64,
     sleep_wake_reason: AtomicU8,
+    last_cpu: AtomicUsize,
     /// The kernel stack of the task. Every task starts with a stack in the higher half.
     /// Userspace tasks will then allocate a stack in the lower half, which will be stored in
     /// `ustack`.
@@ -141,6 +142,9 @@ impl Task {
             sleep_deadline_ns: AtomicU64::new(0),
             sleep_generation: AtomicU64::new(0),
             sleep_wake_reason: AtomicU8::new(SleepWakeReason::Pending as u8),
+            last_cpu: AtomicUsize::new(
+                ExecutionContext::try_load().map_or(0, ExecutionContext::cpu_id),
+            ),
             kstack: Some(stack),
             ustack: RwLock::new(None),
             tls: RwLock::new(None),
@@ -167,6 +171,7 @@ impl Task {
             sleep_deadline_ns: AtomicU64::new(0),
             sleep_generation: AtomicU64::new(0),
             sleep_wake_reason: AtomicU8::new(SleepWakeReason::Pending as u8),
+            last_cpu: AtomicUsize::new(0),
             kstack: None,
             ustack: RwLock::new(None),
             tls: RwLock::new(None),
@@ -219,7 +224,7 @@ impl Task {
     /// The caller must ensure that this is only called once per core.
     #[must_use]
     // SAFETY: Creates a fake task representing the current execution context.
-    pub unsafe fn create_current() -> Self {
+    pub unsafe fn create_current(cpu_id: usize) -> Self {
         let tid = TaskId::new();
         let name = format!("task-{tid}");
         let process = Process::root().clone();
@@ -247,6 +252,7 @@ impl Task {
             sleep_deadline_ns: AtomicU64::new(0),
             sleep_generation: AtomicU64::new(0),
             sleep_wake_reason: AtomicU8::new(SleepWakeReason::Pending as u8),
+            last_cpu: AtomicUsize::new(cpu_id),
             kstack: None,
             ustack: RwLock::new(None),
             tls: RwLock::new(None),
@@ -288,6 +294,15 @@ impl Task {
 
     pub(crate) fn mark_running(&self) {
         self.state.store(State::Running as u8, Release);
+    }
+
+    #[must_use]
+    pub(crate) fn last_cpu(&self) -> usize {
+        self.last_cpu.load(Acquire)
+    }
+
+    pub(crate) fn set_last_cpu(&self, cpu_id: usize) {
+        self.last_cpu.store(cpu_id, Release);
     }
 
     pub(crate) fn begin_sleep(&self, deadline_ns: u64) {
@@ -423,6 +438,7 @@ impl Task {
             sleep_deadline_ns: AtomicU64::new(0),
             sleep_generation: AtomicU64::new(0),
             sleep_wake_reason: AtomicU8::new(SleepWakeReason::Pending as u8),
+            last_cpu: AtomicUsize::new(parent_task.last_cpu()),
             kstack: Some(stack),
             ustack: RwLock::new(ustack),
             tls: RwLock::new(tls),

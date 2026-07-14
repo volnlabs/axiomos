@@ -185,7 +185,7 @@ impl ExecutionContext {
             sel,
             _idt: idt,
             tss: UnsafeCell::new(tss),
-            scheduler: SchedulerSlot::new(Scheduler::new_cpu_local()),
+            scheduler: SchedulerSlot::new(Scheduler::new_cpu_local(cpu.id as usize)),
             current_pid: AtomicU64::new(0),
             bpf_stack: BpfCpuStack::new(),
             bpf_execution: AtomicPtr::new(core::ptr::null_mut()),
@@ -196,7 +196,7 @@ impl ExecutionContext {
     pub fn new(cpu_id: usize) -> Self {
         ExecutionContext {
             cpu_id,
-            scheduler: SchedulerSlot::new(Scheduler::new_cpu_local()),
+            scheduler: SchedulerSlot::new(Scheduler::new_cpu_local(cpu_id)),
             current_pid: AtomicU64::new(0),
             bpf_stack: BpfCpuStack::new(),
             bpf_execution: AtomicPtr::new(core::ptr::null_mut()),

@@ -354,11 +354,11 @@ extern "C" fn poller_entry(_arg: *mut core::ffi::c_void) {
 /// Spawn the control-link poller as a kernel task. Call once at boot (rpi5).
 pub fn spawn() {
     use crate::mcore::mtask::process::Process;
-    use crate::mcore::mtask::scheduler::global::GlobalTaskQueue;
+    use crate::mcore::mtask::scheduler::run_queue::RunQueues;
     use crate::mcore::mtask::task::Task;
 
     match Task::create_new(Process::root(), poller_entry, core::ptr::null_mut()) {
-        Ok(task) => GlobalTaskQueue::enqueue(Box::pin(task)),
+        Ok(task) => RunQueues::enqueue(Box::pin(task)),
         Err(e) => log::error!("control_link: failed to spawn poller task: {:?}", e),
     }
 }

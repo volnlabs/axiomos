@@ -54,7 +54,7 @@ pub mod mem;
 pub mod telemetry;
 
 use crate::arch::UserContext;
-use crate::mcore::mtask::scheduler::global::GlobalTaskQueue;
+use crate::mcore::mtask::scheduler::run_queue::RunQueues;
 use crate::mem::virt::VirtualMemoryAllocator;
 
 pub mod tree;
@@ -316,7 +316,7 @@ impl Process {
 
         let kstack = HigherHalfStack::allocate(16, trampoline, ptr::null_mut(), Task::exit)?;
         let main_task = Task::create_with_stack(&process, kstack);
-        GlobalTaskQueue::enqueue(Box::pin(main_task));
+        RunQueues::enqueue(Box::pin(main_task));
 
         Ok(process)
     }
@@ -557,7 +557,7 @@ impl Process {
         // 6. Fork the Task
         let child_task = Task::fork(&child, current_task, ctx)
             .map_err(|_| "Failed to allocate stack for child task")?;
-        GlobalTaskQueue::enqueue(Box::pin(child_task));
+        RunQueues::enqueue(Box::pin(child_task));
 
         Ok(child)
     }

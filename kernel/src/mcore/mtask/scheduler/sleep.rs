@@ -5,7 +5,7 @@ use conquer_once::spin::OnceCell;
 use kernel_time::DeadlineQueue;
 use spin::Mutex;
 
-use crate::mcore::mtask::scheduler::global::GlobalTaskQueue;
+use crate::mcore::mtask::scheduler::run_queue::RunQueues;
 use crate::mcore::mtask::task::{SleepWakeReason, Task};
 
 const MAX_SLEEPING_TASKS: usize = 1024;
@@ -51,7 +51,7 @@ impl TaskSleep {
         });
         if let Err((task, reason)) = enqueue_result {
             task.wake_from_sleep(reason);
-            GlobalTaskQueue::enqueue(task);
+            RunQueues::enqueue(task);
         }
     }
 
@@ -75,7 +75,7 @@ impl TaskSleep {
                 break;
             };
             task.wake_from_sleep(reason);
-            GlobalTaskQueue::enqueue(task);
+            RunQueues::enqueue(task);
         }
     }
 
@@ -98,7 +98,7 @@ impl TaskSleep {
         };
         if let Some(task) = task {
             task.wake_from_sleep(SleepWakeReason::Interrupted);
-            GlobalTaskQueue::enqueue(task);
+            RunQueues::enqueue(task);
         }
         true
     }

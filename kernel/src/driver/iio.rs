@@ -32,7 +32,7 @@ use crate::mcore::mtask::process::Process;
     target_arch = "x86_64",
     all(target_arch = "aarch64", not(feature = "rpi5"))
 ))]
-use crate::mcore::mtask::scheduler::global::GlobalTaskQueue;
+use crate::mcore::mtask::scheduler::run_queue::RunQueues;
 #[cfg(any(
     target_arch = "x86_64",
     all(target_arch = "aarch64", not(feature = "rpi5"))
@@ -166,7 +166,7 @@ pub fn init_simulated_device() {
             let task =
                 Task::create_new(Process::root(), iio_simulation_task, core::ptr::null_mut())
                     .expect("failed to create IIO simulation task");
-            GlobalTaskQueue::enqueue(Box::pin(task));
+            RunQueues::enqueue(Box::pin(task));
 
             ::log::info!("Started IIO simulation background task");
         }
