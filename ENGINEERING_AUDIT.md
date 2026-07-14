@@ -2,12 +2,12 @@
 
 ## Current branch re-audit (2026-07-14)
 
-- **Branch:** `audit/h04-h02-h03-release-blockers`
-- **Implementation re-audited at:** `d52dc59aecf265fabe3667cd2e1a5172829f8fce`
+- **Branch:** `audit/runtime-architecture-hardening`
+- **Implementation re-audited at:** `aaf14d6a2d4b12d96d049018fc435596d1986a7f`
 - **Comparison baseline:** original audited commit `661d5ede6331c5ee62d6642451ce63ce1e0d5adf`
 - **Fresh engineering score:** **7/10** (release-candidate engineering, not production assurance)
 - **Fresh production decision:** **NO-GO** for v1.0 or safety-relevant deployment
-- **Local required gate:** **44/44 passed** with production and development two-vCPU QEMU boots
+- **Local required gate:** **59/59 passed** with production and development two-vCPU QEMU boots
 - **Hosted H-06 evidence:** externally blocked; [GitHub Actions run 29305700412](https://github.com/pro-utkarshM/axiomOS/actions/runs/29305700412) created zero-step jobs because the account spending limit/monthly usage prevented runners from starting
 
 This table is the authoritative status for the current branch. The detailed audit below is preserved as a historical review of `661d5ed`; its 3/10 score, finding descriptions, and recommendations describe that old snapshot and are not current-branch status.
@@ -23,10 +23,10 @@ This table is the authoritative status for the current branch. The detailed audi
 | C-07 | **Closed** | Checked allocation, global/per-owner quotas, ownership, generation-safe handles, lifecycle commands, busy checks, and scheduler-owned exit reclamation bound BPF object lifetime. |
 | H-01 | **Closed** | User exceptions terminate only the task, x86 fork/exec context handling is corrected, exec replacement is preflighted, and scheduler-owned teardown contains no force-unlock path. |
 | H-02 | **Closed** | Clock conversion is overflow-safe and sleeps use an allocation-free ordered deadline queue with timer wakeups, cancellation, task-exit cleanup, interruption, and monotonic timing probes. |
-| H-03 | **Closed** | Fixed-fanout immutable hook/GPIO snapshots are published through an epoch grace period; dispatch avoids manager/runtime locks, allocation, refcount changes, scans, and logging. |
+| H-03 | **Closed** | Fixed-fanout immutable hook/GPIO snapshots are published through an epoch grace period; dispatch avoids manager/runtime locks, allocation, refcount changes, scans, and logging. Hash buckets use flat backing storage and the interpreter clears only verifier-recorded stack use. |
 | H-04 | **Closed** | Process credentials and capabilities are inherited exactly across fork/exec; BPF operations use per-command authorization, credential-derived verifier tiers, bounded pin grants, and fail-closed production signing. |
 | H-05 | **Closed** | ELF parsing/loading is fallible, executable images are capped and fallibly allocated, malformed-input regression coverage is present, and the isolated fuzz target builds. |
-| H-06 | **Pending hosted evidence** | Workflow/toolchain/target/QEMU-gate defects are remediated and the full local gate passes 44/44. Hosted jobs cannot start until GitHub billing/quota is restored. |
+| H-06 | **Pending hosted evidence** | Workflow/toolchain/target/QEMU-gate defects are remediated and the full local gate passes 59/59. Hosted jobs cannot start until GitHub billing/quota is restored. |
 | Additional High: ACPI mapping | **Closed** | Mapping covers every page in an unaligned range, returns the offset virtual address, unmaps the complete reservation, and has four synthetic mapping-plan tests. |
 | Additional High: force unlock | **Closed** | H-01 teardown uses normal lock ownership and scheduler cleanup after task guards drain; no `force_unlock` call remains. |
 | Additional High: exec/spawn allocation | **Closed** | Executable files have a 16 MiB cap, buffers use fallible reservation, spawn rechecks layout, and load/allocation/protection failures terminate only the task. |
@@ -40,7 +40,7 @@ Current release-gate checklist:
 - [x] Revalidate and fix unaligned/cross-page ACPI mapping.
 - [x] Revalidate and fix executable-size caps and fallible exec/spawn allocation.
 - [x] Confirm H-01 scheduler-owned teardown fully removes force-unlock behavior.
-- [x] Pass the complete local required audit gate: 44/44 at `d52dc59`.
+- [x] Pass the complete local required audit gate: 59/59 at `aaf14d6`.
 - [ ] Run H-06 on hosted GitHub runners after billing/monthly quota is restored.
 - [ ] Pass physical RPi5 and RP2040 HIL, including GPIO interrupt and control-link failure cases.
 - [ ] Obtain an independent safety/concurrency review of the unsafe ledger, scheduler/VM shootdown, and BPF epoch/snapshot invariants.
