@@ -1,4 +1,4 @@
-use kernel_vfs::{ReadError, Stat, StatError, WriteError};
+use kernel_vfs::{FileType, ReadError, Stat, StatError, WriteError};
 
 use crate::DevFile;
 
@@ -16,6 +16,7 @@ impl DevFile for Null {
 
     fn stat(&mut self, stat: &mut Stat) -> Result<(), StatError> {
         stat.size = 0;
+        stat.file_type = FileType::CharacterDevice;
         Ok(())
     }
 }

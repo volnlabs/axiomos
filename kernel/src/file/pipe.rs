@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 
-use kernel_vfs::{ReadError, Stat, StatError, WriteError};
+use kernel_vfs::{FileType, ReadError, Stat, StatError, WriteError};
 use spin::Mutex;
 
 use crate::file::pipe_state::{PipeRead, PipeState, PipeWrite};
@@ -53,7 +53,7 @@ impl PipeEndpoint {
 
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, ReadError> {
         if self.direction != PipeDirection::Read {
-            return Err(ReadError::ReadFailed);
+            return Err(ReadError::NotReadable);
         }
 
         loop {
@@ -73,7 +73,7 @@ impl PipeEndpoint {
 
     pub fn write(&self, buf: &[u8]) -> Result<usize, WriteError> {
         if self.direction != PipeDirection::Write {
-            return Err(WriteError::WriteFailed);
+            return Err(WriteError::NotWritable);
         }
 
         loop {
@@ -83,7 +83,7 @@ impl PipeEndpoint {
                     self.pipe.readable.wake_all();
                     return Ok(bytes);
                 }
-                PipeWrite::Broken => return Err(WriteError::WriteFailed),
+                PipeWrite::Broken => return Err(WriteError::BrokenPipe),
                 PipeWrite::Block => {
                     TaskWait::block_current(&self.pipe.writable, move || drop(state));
                 }
@@ -93,6 +93,7 @@ impl PipeEndpoint {
 
     pub fn stat(&self, stat: &mut Stat) -> Result<(), StatError> {
         stat.size = self.pipe.state.lock().buffered_len();
+        stat.file_type = FileType::Pipe;
         Ok(())
     }
 }

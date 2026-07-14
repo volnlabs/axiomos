@@ -1,9 +1,9 @@
 //! stat/fstat syscall implementations
 
-use kernel_abi::{EBADF, Errno};
+use kernel_abi::Errno;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-use crate::access::FileAccess;
+use crate::access::{FileAccess, FileAccessError};
 
 /// Linux stat structure (simplified for now)
 #[repr(C)]
@@ -69,13 +69,11 @@ pub mod mode {
 
 /// Trait for types that can provide stat information.
 pub trait StatAccess: FileAccess {
-    type StatError;
-
     /// Get file status by file descriptor.
-    fn fstat(&self, fd: Self::Fd) -> Result<UserStat, Self::StatError>;
+    fn fstat(&self, fd: Self::Fd) -> Result<UserStat, FileAccessError>;
 }
 
 /// Get file status by file descriptor.
 pub fn sys_fstat<Cx: StatAccess>(cx: &Cx, fildes: Cx::Fd) -> Result<UserStat, Errno> {
-    cx.fstat(fildes).map_err(|_| EBADF)
+    cx.fstat(fildes).map_err(|error| error.errno())
 }

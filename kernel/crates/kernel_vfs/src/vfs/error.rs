@@ -19,6 +19,10 @@ pub enum ExistsError {}
 pub enum OpenError {
     #[error("not found")]
     NotFound,
+    #[error("path is a directory")]
+    IsDirectory,
+    #[error("file type is not supported")]
+    UnsupportedFileType,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Error)]
@@ -63,6 +67,8 @@ pub enum WriteError {
     WriteFailed,
     #[error("file is not writable")]
     NotWritable,
+    #[error("pipe has no reader")]
+    BrokenPipe,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Error)]
@@ -87,6 +93,10 @@ pub enum MkdirError {
     AlreadyExists,
     #[error("parent not found")]
     NotFound,
+    #[error("parent is not a directory")]
+    NotADirectory,
+    #[error("directory creation is not supported")]
+    Unsupported,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Error)]
@@ -103,4 +113,6 @@ pub enum RmdirError {
     NotADirectory,
     #[error("directory not empty")]
     NotEmpty,
+    #[error("directory removal is not supported")]
+    Unsupported,
 }
