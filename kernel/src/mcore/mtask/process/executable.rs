@@ -46,6 +46,64 @@ pub(crate) fn allocate_executable_buffer(size: usize) -> Result<Vec<u8>, Executa
     Ok(bytes)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExecutableReadProgress {
+    Continue(usize),
+    Complete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExecutableReadProgressError {
+    ZeroReadBeforeComplete {
+        offset: usize,
+        expected_size: usize,
+    },
+    ReadPastExpectedSize {
+        offset: usize,
+        read: usize,
+        expected_size: usize,
+    },
+}
+
+pub(crate) fn advance_executable_read_progress(
+    offset: usize,
+    read: usize,
+    expected_size: usize,
+) -> Result<ExecutableReadProgress, ExecutableReadProgressError> {
+    if offset >= expected_size {
+        return Ok(ExecutableReadProgress::Complete);
+    }
+
+    if read == 0 {
+        return Err(ExecutableReadProgressError::ZeroReadBeforeComplete {
+            offset,
+            expected_size,
+        });
+    }
+
+    let Some(next_offset) = offset.checked_add(read) else {
+        return Err(ExecutableReadProgressError::ReadPastExpectedSize {
+            offset,
+            read,
+            expected_size,
+        });
+    };
+
+    if next_offset > expected_size {
+        return Err(ExecutableReadProgressError::ReadPastExpectedSize {
+            offset,
+            read,
+            expected_size,
+        });
+    }
+
+    if next_offset == expected_size {
+        Ok(ExecutableReadProgress::Complete)
+    } else {
+        Ok(ExecutableReadProgress::Continue(next_offset))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,5 +135,40 @@ mod tests {
         let bytes = allocate_executable_buffer(8192).unwrap();
         assert_eq!(bytes.len(), 8192);
         assert!(bytes.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn executable_read_progress_advances_until_expected_size() {
+        assert_eq!(
+            advance_executable_read_progress(0, 128, 512),
+            Ok(ExecutableReadProgress::Continue(128))
+        );
+        assert_eq!(
+            advance_executable_read_progress(384, 128, 512),
+            Ok(ExecutableReadProgress::Complete)
+        );
+    }
+
+    #[test]
+    fn executable_read_progress_rejects_zero_before_expected_size() {
+        assert_eq!(
+            advance_executable_read_progress(256, 0, 512),
+            Err(ExecutableReadProgressError::ZeroReadBeforeComplete {
+                offset: 256,
+                expected_size: 512,
+            })
+        );
+    }
+
+    #[test]
+    fn executable_read_progress_rejects_read_past_expected_size() {
+        assert_eq!(
+            advance_executable_read_progress(400, 128, 512),
+            Err(ExecutableReadProgressError::ReadPastExpectedSize {
+                offset: 400,
+                read: 128,
+                expected_size: 512,
+            })
+        );
     }
 }

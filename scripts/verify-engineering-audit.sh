@@ -412,6 +412,8 @@ run_step acpi-mapping-tests "$OUTPUT_DIR/acpi-mapping-tests"
 run_step executable-limits-test-build rustc --edition 2021 -D warnings --test \
     kernel/src/mcore/mtask/process/executable.rs -o "$OUTPUT_DIR/executable-limits-tests"
 run_step executable-limits-tests "$OUTPUT_DIR/executable-limits-tests"
+run_step process-module-boundaries-static python3 -c \
+    'from pathlib import Path; root=Path("kernel/src/mcore/mtask/process"); process=(root / "mod.rs").read_text(); executable=(root / "executable.rs").read_text(); image=(root / "image.rs").read_text(); assert "mod image;" in process; assert all(token not in process for token in ("enum TrampolineLoadError", "struct ElfSegments", "fn advance_executable_read_progress", "fn read_executable_file_into")); assert all(token in executable for token in ("MAX_EXECUTABLE_FILE_SIZE", "fn allocate_executable_buffer", "fn advance_executable_read_progress", "executable_read_progress_rejects_zero_before_expected_size")); assert all(token in image for token in ("struct ElfSegments", "struct ExecImage", "fn read_executable_file_into", "fn trampoline_load_elf", "fn prepare_execve"))'
 run_cargo_step focused-host-tests test \
     -p kernel_abi -p kernel_elfloader -p kernel_physical_memory -p kernel_syscall \
     -p kernel_time -p kernel_usermem -p kernel_vfs -p kernel_virtual_memory -p shrike_link
