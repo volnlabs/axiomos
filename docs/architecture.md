@@ -402,6 +402,5 @@ impl FileSystem for VirtualExt2Fs { ... }
 
 - [benchmarks.md](benchmarks.md) — authoritative hardware benchmarks (Pi 5) and Linux comparison
 - [kernel_bpf/docs/ARCHITECTURE.md](../kernel/crates/kernel_bpf/docs/ARCHITECTURE.md) — eBPF runtime architecture
-- [kernel_bpf/docs/SCHEDULING.md](../kernel/crates/kernel_bpf/docs/SCHEDULING.md) — eBPF program scheduling
 - [kernel_bpf/docs/VERIFICATION.md](../kernel/crates/kernel_bpf/docs/VERIFICATION.md) — BPF verification algorithm
 - [kernel_bpf/docs/PROFILES.md](../kernel/crates/kernel_bpf/docs/PROFILES.md) — BPF physical reality profiles

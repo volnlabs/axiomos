@@ -43,7 +43,7 @@
 //! | Feature       | Cloud          | Embedded       |
 //! |---------------|----------------|----------------|
 //! | Max entries   | Up to 1M       | Up to 4K       |
-//! | Allocation    | Dynamic        | Static pool    |
+//! | Allocation    | Quota-bounded heap | Profile-bounded heap |
 //! | Resize        | Supported      | **Erased**     |
 
 extern crate alloc;
@@ -327,10 +327,9 @@ impl<P: PhysicalProfile> TimeSeriesMap<P> {
         // Check memory budget for embedded profile
         #[cfg(feature = "embedded-profile")]
         {
-            use crate::profile::MemoryStrategy;
             let total_size =
                 Self::allocation_size(value_size, max_entries).ok_or(MapError::OutOfMemory)?;
-            let budget = <P::MemoryStrategy as MemoryStrategy>::MEMORY_BUDGET;
+            let budget = P::MEMORY_BUDGET;
             if budget > 0 && total_size > budget {
                 return Err(MapError::OutOfMemory);
             }

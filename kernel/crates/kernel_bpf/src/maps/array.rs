@@ -4,7 +4,7 @@
 //! This implementation provides profile-aware storage:
 //!
 //! - Cloud: Uses dynamic Vec allocation, supports resize
-//! - Embedded: Uses static pool allocation, resize is erased
+//! - Embedded: Enforces the profile memory budget; resize is erased
 
 extern crate alloc;
 
@@ -137,8 +137,7 @@ impl<P: PhysicalProfile> ArrayMap<P> {
         // Check memory budget for embedded profile
         #[cfg(feature = "embedded-profile")]
         {
-            use crate::profile::MemoryStrategy;
-            let budget = <P::MemoryStrategy as MemoryStrategy>::MEMORY_BUDGET;
+            let budget = P::MEMORY_BUDGET;
             let allocation_size = Self::allocation_size(def.value_size, def.max_entries)
                 .ok_or(MapError::OutOfMemory)?;
             if budget > 0 && allocation_size > budget {

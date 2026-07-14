@@ -26,7 +26,7 @@
 //!
 //! | Feature       | Cloud          | Embedded         |
 //! |---------------|----------------|------------------|
-//! | Allocation    | Dynamic        | Static pool      |
+//! | Allocation    | Quota-bounded heap | Profile-bounded heap |
 //! | Resize        | Supported      | **Erased**       |
 //! | Max entries   | Configurable   | Fixed at init    |
 //! | Memory        | Heap           | Pre-allocated    |
@@ -343,8 +343,7 @@ impl<P: PhysicalProfile> HashMap<P> {
         // Check memory budget for embedded profile
         #[cfg(feature = "embedded-profile")]
         {
-            use crate::profile::MemoryStrategy;
-            let budget = <P::MemoryStrategy as MemoryStrategy>::MEMORY_BUDGET;
+            let budget = P::MEMORY_BUDGET;
             let allocation_size =
                 Self::allocation_size(def.key_size, def.value_size, def.max_entries)
                     .ok_or(MapError::OutOfMemory)?;

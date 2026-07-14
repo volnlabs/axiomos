@@ -13,18 +13,13 @@
 //!
 //! | Property | Cloud | Embedded |
 //! |----------|-------|----------|
-//! | Map storage | Elastic (heap) | Bounded heap [^pool] |
+//! | Map storage | Quota-bounded heap | 64 KiB profile-bounded heap |
 //! | Interpreter stack | 512 KB | 8 KB (reused static buffer [^stack]) |
 //! | Instructions | 1,000,000 max | 100,000 max |
-//! | JIT | Available | Erased |
-//! | Scheduling | Throughput | Deadline (EDF) |
+//! | JIT | Disabled | Disabled |
+//! | Execution | Synchronous hooks | Synchronous hooks + WCET admission |
 //! | Map Resize | Available | Erased |
 //!
-//! [^pool]: A 64 KB static pool (`maps::StaticPool`) is *defined* for the
-//! embedded profile but **not yet wired** — embedded map storage currently
-//! allocates from the bounded kernel heap, same as cloud. Wiring the static
-//! pool (or formally scoping the "static memory" claim) is tracked as audit
-//! item H1.
 //! [^stack]: The interpreter no longer allocates its stack per program
 //! execution; a single reused static scratch buffer is used on the hot path
 //! (#181), so the stack side of the embedded profile is genuinely static.
@@ -48,7 +43,6 @@
 //! - [`verifier`] - Static safety verification with profile constraints
 //! - [`execution`] - Program execution engines (interpreter, JIT)
 //! - [`maps`] - BPF map implementations for data storage
-//! - [`scheduler`] - Profile-aware program scheduling
 //!
 //! # Quick Start
 //!
@@ -75,8 +69,8 @@
 //!
 //! Profile-inappropriate code is physically absent from builds:
 //!
-//! - **Cloud-only**: JIT compiler, map resize, throughput scheduler
-//! - **Embedded-only**: Static pool, deadline scheduler, WCET verification
+//! - **Cloud-only**: Map resize
+//! - **Embedded-only**: WCET verification and admission limits
 //!
 //! # Documentation
 //!
@@ -88,7 +82,6 @@
 //! - `BYTECODE.md` - Instruction reference
 //! - `VERIFICATION.md` - Verifier guide
 //! - `MAPS.md` - Map types and usage
-//! - `SCHEDULING.md` - Scheduler guide
 //! - `QUICKREF.md` - Quick reference
 
 #![no_std]
@@ -118,6 +111,5 @@ pub mod execution;
 pub mod loader;
 pub mod maps;
 pub mod profile;
-pub mod scheduler;
 pub mod signing;
 pub mod verifier;

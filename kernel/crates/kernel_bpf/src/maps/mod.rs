@@ -8,10 +8,10 @@
 //!
 //! | Feature       | Cloud          | Embedded       |
 //! |---------------|----------------|----------------|
-//! | Allocation    | Dynamic        | Static pool    |
+//! | Allocation    | Quota-bounded heap | 64 KiB profile-bounded heap |
 //! | Resize        | Supported      | **Erased**     |
 //! | Max entries   | Configurable   | Fixed at init  |
-//! | Memory        | Heap           | Pre-allocated  |
+//! | Memory        | Heap           | Heap           |
 //!
 //! # Compile-Time Erasure
 //!
@@ -25,17 +25,12 @@ mod hash;
 mod ringbuf;
 mod timeseries;
 
-#[cfg(feature = "embedded-profile")]
-mod static_pool;
-
 use alloc::sync::Arc;
 
 pub use array::ArrayMap;
 pub use hash::HashMap;
 pub use ringbuf::{RingBufMap, RingBufReservation};
 use spin::RwLock;
-#[cfg(feature = "embedded-profile")]
-pub use static_pool::StaticPool;
 pub use timeseries::{TimeSeriesMap, TimeSeriesStats};
 
 use crate::profile::{ActiveProfile, PhysicalProfile};

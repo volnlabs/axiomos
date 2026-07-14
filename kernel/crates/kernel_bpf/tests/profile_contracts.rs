@@ -29,7 +29,7 @@ fn cloud_profile_has_high_limits() {
         "CloudProfile::JIT_ALLOWED must stay false until the C-06 redesign; \
          see kernel_bpf::profile::CloudProfile::JIT_ALLOWED for context"
     );
-    assert!(CloudProfile::RESTART_ACCEPTABLE);
+    assert_eq!(CloudProfile::MEMORY_BUDGET, 0);
 }
 
 #[test]
@@ -41,7 +41,7 @@ fn embedded_profile_has_conservative_limits() {
     assert!(EmbeddedProfile::MAX_STACK_SIZE <= 64 * 1024); // At most 64KB
     assert!(EmbeddedProfile::MAX_INSN_COUNT <= 200_000); // At most 200K instructions
     assert!(!EmbeddedProfile::JIT_ALLOWED);
-    assert!(!EmbeddedProfile::RESTART_ACCEPTABLE);
+    assert_eq!(EmbeddedProfile::MEMORY_BUDGET, 64 * 1024);
 }
 
 #[test]
@@ -101,33 +101,6 @@ mod jit_erasure {
     }
 }
 
-// Verify deadline types exist in embedded builds
-#[cfg(feature = "embedded-profile")]
-mod deadline_types {
-    use kernel_bpf::scheduler::{Deadline, DeadlinePolicy};
-
-    #[test]
-    fn deadline_types_available() {
-        let deadline = Deadline::new(1000, 500);
-        assert_eq!(deadline.absolute_ns, 1000);
-
-        let policy = DeadlinePolicy::new();
-        assert_eq!(policy.exec_count(), 0);
-    }
-}
-
-// Verify throughput types exist in cloud builds
-#[cfg(feature = "cloud-profile")]
-mod throughput_types {
-    use kernel_bpf::scheduler::ThroughputPolicy;
-
-    #[test]
-    fn throughput_types_available() {
-        let policy = ThroughputPolicy::new();
-        assert_eq!(policy.exec_count(), 0);
-    }
-}
-
 // Verify resize is available only in cloud builds
 #[cfg(feature = "cloud-profile")]
 mod resize_availability {
@@ -140,18 +113,5 @@ mod resize_availability {
         // This should compile and work
         map.resize(20).expect("resize");
         assert_eq!(map.def().max_entries, 20);
-    }
-}
-
-// Verify static pool exists only in embedded builds
-#[cfg(feature = "embedded-profile")]
-mod static_pool_availability {
-    use kernel_bpf::maps::StaticPool;
-
-    #[test]
-    fn static_pool_is_available() {
-        // Static pool should be accessible
-        let total = StaticPool::total_size();
-        assert!(total > 0);
     }
 }

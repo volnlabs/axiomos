@@ -46,7 +46,7 @@
 //! | Feature       | Cloud          | Embedded       |
 //! |---------------|----------------|----------------|
 //! | Buffer size   | Up to 256 MB   | Up to 64 KB    |
-//! | Allocation    | Dynamic        | Static pool    |
+//! | Allocation    | Quota-bounded heap | Profile-bounded heap |
 //! | Resize        | Supported      | **Erased**     |
 //! | Overflow      | Drop oldest    | Drop newest    |
 
@@ -212,8 +212,7 @@ impl<P: PhysicalProfile> RingBufMap<P> {
         // Check memory budget for embedded profile
         #[cfg(feature = "embedded-profile")]
         {
-            use crate::profile::MemoryStrategy;
-            let budget = <P::MemoryStrategy as MemoryStrategy>::MEMORY_BUDGET;
+            let budget = P::MEMORY_BUDGET;
             if budget > 0 && size > budget {
                 return Err(MapError::OutOfMemory);
             }
