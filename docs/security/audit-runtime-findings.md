@@ -10,8 +10,9 @@ reviewer does not have to re-derive them from the gate logs.
 
 ## Post-boot userspace page fault (--smp 1, system OVMF)
 
-**Status:** pre-existing, not gated, not caused by the audit-fault
-work. Reproducible only against a specific OVMF prebuilt.
+**Status:** historical observation, currently non-reproducing, not
+gated, and not attributed to the audit-fault work. The original cause
+and reproducing OVMF artifact remain unresolved.
 
 **Symptoms (originally reported).** After `QEMU_BOOT_OK` and
 `INIT_PROCESS_STARTED`, the init process (`/bin/init`, x86_64
@@ -26,9 +27,10 @@ accessed address: Some(VirtAddr(0x2a00000012))
 error code: PageFaultErrorCode(USER_MODE | INSTRUCTION_FETCH,)
 ```
 
-The faulting instruction pointer is `0x2a00000012`, well inside the
-init process's user-mode virtual address space. The fault is a
-`#PF` in ring 3, not a kernel bug.
+The faulting instruction pointer is `0x2a00000012` in the user half of
+the address space. The exception was delivered as a ring-3 `#PF`; that
+observation does not establish whether the originating defect was in
+userspace state construction or in the kernel's VM/context handling.
 
 **Re-investigation result (commit `423e785` on this branch).** After
 the `--capture` mode of `scripts/qemu-debug-triage.sh` was added, a
@@ -49,19 +51,17 @@ ring-3 page fault at `0x2a00000012` **does not reproduce**:
 - `RUN_AUDIT_FAULT=1 cargo run ...` for 240s: same, with all fault
   injection paths exercised.
 
-The previously-recorded symptom almost certainly reproduces on
-the specific `edk2-ovmf 202602-3` build the audit noted, but on the
-system OVMF available on this host the audit-branch's WaitChannel
-refactor, syscall-handler cleanup, exec/spawn fault injection, and
-related fixes have apparently moved or eliminated the timing-sensitive
-race that triggered the original `#PF`. The ring-3 fault is now
-**closed at this build against this system OVMF**, not unowned.
+The **historical cause is unresolved**. The recorded symptom was
+described as timing-sensitive, but no reproducible artifact containing
+the original OVMF image, faulting instruction sequence, and capture
+state exists to confirm that theory. Whether the original failure came
+from a `userspace/init` state bug or a kernel VM/context race therefore
+remains undetermined.
 
-**Classification (closed by build, not by targeted fix).**
-- Was: `@userspace/init` or `@kernel/mcore/mtask/vm`, undetermined.
-- Now: no classification step is needed because the fault is no
-  longer reachable from the symptom path. The investigation result
-  IS the closure.
+The supported conclusion is narrower: the symptom is **currently
+non-reproducing on this host with this system OVMF and kernel build**.
+That is an investigation result, not evidence of a targeted fix or a
+classification of the historical defect.
 
 **Why no regression gate is added.** A required regression step
 needs a pinned, hash-verified OVMF input — analogous to
@@ -84,9 +84,9 @@ are emitted regardless of any fault. The new `qemu-smp1-smoke` (see
 markers (`QEMU_BOOT_OK`, `INIT_PROCESS_STARTED`) and explicitly
 records (without failing) any post-boot `kernel panicked` text. The
 single-CPU boot path is now exercised end-to-end; sustained userspace
-stability is out of scope for this branch — and the empirical
-investigation now shows that on this system OVMF the ring-3 path
-closes cleanly.
+stability is out of scope for this branch. On this system OVMF the
+historical symptom is currently non-reproducing, which is recorded as
+an observation and not as a fix.
 
 ## Page-fault diagnostic instrument (not produced)
 
@@ -115,10 +115,10 @@ not live debugging); (c) a CPU debug register or hardware trace
 mechanism (depends on platform support). None of these is in scope
 for this branch.
 
-**The fix is still out of scope.** The ring-3 page fault at
-`0x2a00000012` is owned by `@userspace/init` and
-`@kernel/mcore/mtask/vm`, not the audit branch. This entry only
-records the decision not to add a partial instrument.
+**The fix is still out of scope.** The unresolved historical page fault
+at `0x2a00000012` remains jointly owned by `@userspace/init` and
+`@kernel/mcore/mtask/vm`, not the audit branch. This entry only records
+the decision not to add a partial instrument.
 
 ## OVMF prebuilt pinning history
 
