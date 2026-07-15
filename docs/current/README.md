@@ -18,6 +18,23 @@ This directory is the entry point for normative documentation.
 Generated authorities are refreshed by `cargo xtask docs` and checked by the
 local audit gate.
 
+`ci/components.toml` is the canonical workspace and shipped-artifact boundary.
+Every discovered Cargo or Lean manifest declares its workspace disposition
+(`root`, `member`, `excluded`, `standalone`, or `not-cargo`) and its artifact
+disposition. `none` and `experimental:*` are explicit non-shipped states;
+`host:*`, `boot:*`, `rootfs:*`, and `firmware:*` name delivered artifacts.
+Validate that boundary directly with:
+
+```sh
+cargo xtask boundary --check
+```
+
+The check compares workspace declarations with the root `Cargo.toml`, rejects
+duplicate artifact identities, and requires the declared `rootfs:*` artifacts
+to match the executable files in `userspace/file_structure::STRUCTURE`. The
+required local gate runs the same contract as `xtask-manifest-drift` before any
+build or QEMU step.
+
 Current generated authority:
 
 - [Component inventory](../generated/components.md)

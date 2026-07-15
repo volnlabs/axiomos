@@ -2,54 +2,54 @@
 
 # Component inventory
 
-| Manifest | Kind | Role | Required gate |
-|---|---|---|---|
-| `Cargo.toml` | cargo | runner and image assembly | build, lint, artifacts, QEMU |
-| `firmware/shrike_control/Cargo.toml` | cargo | firmware control-loop traits and run loop | host build and shrike-control-build audit step |
-| `firmware/shrike_rp2040/Cargo.toml` | cargo | RP2040 firmware | RP2040 target lint and build |
-| `firmware/shrike_rp2040_host_sim/Cargo.toml` | cargo | firmware host simulation (mocks + sampled-state tests) | explicit shrike_rp2040-host-sim-test-build and shrike_rp2040-host-sim-tests audit steps |
-| `formal/lakefile.toml` | lean | verifier formal model | Lean build |
-| `kernel/Cargo.toml` | cargo | kernel | x86/AArch64 checks and QEMU |
-| `kernel/crates/kernel_abi/Cargo.toml` | cargo | public ABI | host lint and tests |
-| `kernel/crates/kernel_bpf/Cargo.toml` | cargo | BPF runtime | cloud/embedded lint, tests, Miri |
-| `kernel/crates/kernel_bpf/fuzz/Cargo.toml` | cargo | BPF fuzz targets | fuzz build |
-| `kernel/crates/kernel_devfs/Cargo.toml` | cargo | device filesystem | host lint and tests |
-| `kernel/crates/kernel_device/Cargo.toml` | cargo | device contracts | host lint and tests |
-| `kernel/crates/kernel_elfloader/Cargo.toml` | cargo | ELF loader | host lint, tests, fuzz |
-| `kernel/crates/kernel_elfloader/fuzz/Cargo.toml` | cargo | ELF fuzz target | fuzz build |
-| `kernel/crates/kernel_map_transaction/Cargo.toml` | cargo | map_range rollback bookkeeping | host lint and tests |
-| `kernel/crates/kernel_memapi/Cargo.toml` | cargo | mapped-memory contract | host lint and tests |
-| `kernel/crates/kernel_pci/Cargo.toml` | cargo | PCI contracts | host lint and tests |
-| `kernel/crates/kernel_physical_memory/Cargo.toml` | cargo | physical memory | host lint and tests |
-| `kernel/crates/kernel_syscall/Cargo.toml` | cargo | syscall contracts | host lint and tests |
-| `kernel/crates/kernel_syscall/fuzz/Cargo.toml` | cargo | syscall argument fuzz target | fuzz build |
-| `kernel/crates/kernel_time/Cargo.toml` | cargo | time and deadline queues | host lint and tests |
-| `kernel/crates/kernel_usermem/Cargo.toml` | cargo | userspace memory boundary | host lint and tests |
-| `kernel/crates/kernel_vfs/Cargo.toml` | cargo | virtual filesystem | host lint and tests |
-| `kernel/crates/kernel_virtual_memory/Cargo.toml` | cargo | virtual memory | host lint and tests |
-| `kernel/crates/shrike_link/Cargo.toml` | cargo | control-link protocol | host lint and tests |
-| `kernel/demos/riscv/Cargo.toml` | cargo | experimental RISC-V demo | RISC-V target lint |
-| `tools/xtask/Cargo.toml` | cargo | validation authority | host lint and tests |
-| `userspace/benchmark/Cargo.toml` | cargo | benchmark image | target build |
-| `userspace/bpf_loader/Cargo.toml` | cargo | BPF loader image | target build |
-| `userspace/file_io_demo/Cargo.toml` | cargo | filesystem demo | target build |
-| `userspace/file_structure/Cargo.toml` | cargo | image filesystem model | host lint and tests |
-| `userspace/fork_test/Cargo.toml` | cargo | process lifecycle probe | target build and QEMU |
-| `userspace/gpio_demo/Cargo.toml` | cargo | GPIO demo | target build |
-| `userspace/iio_demo/Cargo.toml` | cargo | IIO demo | target build |
-| `userspace/init/Cargo.toml` | cargo | init and integration probes | target build and QEMU |
-| `userspace/minilib/Cargo.toml` | cargo | userspace runtime | target build |
-| `userspace/pwm_demo/Cargo.toml` | cargo | PWM demo | target build |
-| `userspace/rk_bridge/Cargo.toml` | cargo | host robotics bridge | standalone host lint and tests |
-| `userspace/rk_bridge/fuzz/Cargo.toml` | cargo | rk_bridge protocol fuzz target | fuzz build |
-| `userspace/rk_cli/Cargo.toml` | cargo | host signing CLI | standalone host lint and tests |
-| `userspace/rk_uart_forwarder/Cargo.toml` | cargo | UART forwarder image | target build |
-| `userspace/safety_demo/Cargo.toml` | cargo | safety-state demo | target build |
-| `userspace/sched_switch_bridge_demo/Cargo.toml` | cargo | scheduler bridge demo | target build |
-| `userspace/sched_switch_demo/Cargo.toml` | cargo | scheduler demo | target build |
-| `userspace/sched_switch_export_demo/Cargo.toml` | cargo | scheduler export demo | target build |
-| `userspace/signed_bpf_loader/Cargo.toml` | cargo | signed BPF integration image | target build and QEMU |
-| `userspace/sys_exit_demo/Cargo.toml` | cargo | task-exit probe | target build and QEMU |
-| `userspace/syscall_demo/Cargo.toml` | cargo | syscall demo | target build |
-| `userspace/timeseries_demo/Cargo.toml` | cargo | time-series map demo | target build |
-| `userspace/verifier_bench/Cargo.toml` | cargo | verifier benchmark image | target build |
+| Manifest | Kind | Workspace | Artifact disposition | Role | Required gate |
+|---|---|---|---|---|---|
+| `Cargo.toml` | cargo | root | `host:axiomos` | runner and image assembly | build, lint, artifacts, QEMU |
+| `firmware/shrike_control/Cargo.toml` | cargo | member | `none` | firmware control-loop traits and run loop | host build and shrike-control-build audit step |
+| `firmware/shrike_rp2040/Cargo.toml` | cargo | excluded | `firmware:shrike_rp2040` | RP2040 firmware | RP2040 target lint and build |
+| `firmware/shrike_rp2040_host_sim/Cargo.toml` | cargo | member | `none` | firmware host simulation (mocks + sampled-state tests) | explicit shrike_rp2040-host-sim-test-build and shrike_rp2040-host-sim-tests audit steps |
+| `formal/lakefile.toml` | lean | not-cargo | `none` | verifier formal model | Lean build |
+| `kernel/Cargo.toml` | cargo | member | `boot:kernel` | kernel | x86/AArch64 checks and QEMU |
+| `kernel/crates/kernel_abi/Cargo.toml` | cargo | member | `none` | public ABI | host lint and tests |
+| `kernel/crates/kernel_bpf/Cargo.toml` | cargo | member | `none` | BPF runtime | cloud/embedded lint, tests, Miri |
+| `kernel/crates/kernel_bpf/fuzz/Cargo.toml` | cargo | excluded | `none` | BPF fuzz targets | fuzz build |
+| `kernel/crates/kernel_devfs/Cargo.toml` | cargo | member | `none` | device filesystem | host lint and tests |
+| `kernel/crates/kernel_device/Cargo.toml` | cargo | member | `none` | device contracts | host lint and tests |
+| `kernel/crates/kernel_elfloader/Cargo.toml` | cargo | member | `none` | ELF loader | host lint, tests, fuzz |
+| `kernel/crates/kernel_elfloader/fuzz/Cargo.toml` | cargo | standalone | `none` | ELF fuzz target | fuzz build |
+| `kernel/crates/kernel_map_transaction/Cargo.toml` | cargo | member | `none` | map_range rollback bookkeeping | host lint and tests |
+| `kernel/crates/kernel_memapi/Cargo.toml` | cargo | member | `none` | mapped-memory contract | host lint and tests |
+| `kernel/crates/kernel_pci/Cargo.toml` | cargo | member | `none` | PCI contracts | host lint and tests |
+| `kernel/crates/kernel_physical_memory/Cargo.toml` | cargo | member | `none` | physical memory | host lint and tests |
+| `kernel/crates/kernel_syscall/Cargo.toml` | cargo | member | `none` | syscall contracts | host lint and tests |
+| `kernel/crates/kernel_syscall/fuzz/Cargo.toml` | cargo | standalone | `none` | syscall argument fuzz target | fuzz build |
+| `kernel/crates/kernel_time/Cargo.toml` | cargo | member | `none` | time and deadline queues | host lint and tests |
+| `kernel/crates/kernel_usermem/Cargo.toml` | cargo | member | `none` | userspace memory boundary | host lint and tests |
+| `kernel/crates/kernel_vfs/Cargo.toml` | cargo | member | `none` | virtual filesystem | host lint and tests |
+| `kernel/crates/kernel_virtual_memory/Cargo.toml` | cargo | member | `none` | virtual memory | host lint and tests |
+| `kernel/crates/shrike_link/Cargo.toml` | cargo | member | `none` | control-link protocol | host lint and tests |
+| `kernel/demos/riscv/Cargo.toml` | cargo | excluded | `experimental:riscv-kernel-demo` | experimental RISC-V demo | RISC-V target lint |
+| `tools/xtask/Cargo.toml` | cargo | member | `none` | validation authority | host lint and tests |
+| `userspace/benchmark/Cargo.toml` | cargo | member | `rootfs:benchmark` | benchmark image | target build |
+| `userspace/bpf_loader/Cargo.toml` | cargo | member | `rootfs:bpf_loader` | BPF loader image | target build |
+| `userspace/file_io_demo/Cargo.toml` | cargo | member | `rootfs:file_io_demo` | filesystem demo | target build |
+| `userspace/file_structure/Cargo.toml` | cargo | member | `none` | image filesystem model | host lint and tests |
+| `userspace/fork_test/Cargo.toml` | cargo | member | `rootfs:fork_test` | process lifecycle probe | target build and QEMU |
+| `userspace/gpio_demo/Cargo.toml` | cargo | member | `rootfs:gpio_demo` | GPIO demo | target build |
+| `userspace/iio_demo/Cargo.toml` | cargo | member | `rootfs:iio_demo` | IIO demo | target build |
+| `userspace/init/Cargo.toml` | cargo | member | `rootfs:init` | init and integration probes | target build and QEMU |
+| `userspace/minilib/Cargo.toml` | cargo | member | `none` | userspace runtime | target build |
+| `userspace/pwm_demo/Cargo.toml` | cargo | member | `rootfs:pwm_demo` | PWM demo | target build |
+| `userspace/rk_bridge/Cargo.toml` | cargo | excluded | `host:rk-to-ros` | host robotics bridge | standalone host lint and tests |
+| `userspace/rk_bridge/fuzz/Cargo.toml` | cargo | standalone | `none` | rk_bridge protocol fuzz target | fuzz build |
+| `userspace/rk_cli/Cargo.toml` | cargo | standalone | `host:rk` | host signing CLI | standalone host lint and tests |
+| `userspace/rk_uart_forwarder/Cargo.toml` | cargo | member | `rootfs:rk_uart_forwarder` | UART forwarder image | target build |
+| `userspace/safety_demo/Cargo.toml` | cargo | member | `none` | safety-state demo | target build |
+| `userspace/sched_switch_bridge_demo/Cargo.toml` | cargo | member | `rootfs:sched_switch_bridge_demo` | scheduler bridge demo | target build |
+| `userspace/sched_switch_demo/Cargo.toml` | cargo | member | `rootfs:sched_switch_demo` | scheduler demo | target build |
+| `userspace/sched_switch_export_demo/Cargo.toml` | cargo | member | `rootfs:sched_switch_export_demo` | scheduler export demo | target build |
+| `userspace/signed_bpf_loader/Cargo.toml` | cargo | member | `rootfs:signed_bpf_loader` | signed BPF integration image | target build and QEMU |
+| `userspace/sys_exit_demo/Cargo.toml` | cargo | member | `rootfs:sys_exit_demo` | task-exit probe | target build and QEMU |
+| `userspace/syscall_demo/Cargo.toml` | cargo | member | `rootfs:syscall_demo` | syscall demo | target build |
+| `userspace/timeseries_demo/Cargo.toml` | cargo | member | `rootfs:timeseries_demo` | time-series map demo | target build |
+| `userspace/verifier_bench/Cargo.toml` | cargo | member | `rootfs:verifier_bench` | verifier benchmark image | target build |

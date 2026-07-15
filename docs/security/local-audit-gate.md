@@ -7,10 +7,16 @@ the required local gate from the repository root:
 scripts/verify-engineering-audit.sh
 ```
 
-The gate runs formatting, the unsafe ledger, workflow parsing, host tests for
-both BPF profiles and the safety-boundary crates, strict per-crate Clippy,
-standalone workspace/firmware checks, both kernel target checks, the release
-build, the ELF-loader fuzz build, and the x86_64 release QEMU marker test.
+The gate runs formatting, the unsafe ledger, component inventory and
+workspace/artifact drift checks, workflow parsing, host tests for both BPF
+profiles and the safety-boundary crates, strict per-crate Clippy, standalone
+workspace/firmware checks, both kernel target checks, the release build, fuzz
+builds, and the x86_64 release QEMU marker tests.
+
+The `xtask-manifest-drift` step runs `cargo xtask boundary --check`. It rejects
+workspace membership/exclusion drift, duplicate shipped-artifact identities,
+and disagreement between declared `rootfs:*` artifacts and the production
+filesystem model before expensive build or QEMU work starts.
 
 Results are written below `target/audit-verification/`. Each run contains:
 

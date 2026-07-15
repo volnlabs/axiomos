@@ -422,6 +422,7 @@ hash_tracked_lockfiles "$LOCKFILES_BEFORE"
 run_step fmt cargo fmt --all -- --check
 run_step unsafe-ledger python3 -B scripts/unsafe-ledger.py --check
 run_step component-inventory cargo xtask inventory --check
+run_step xtask-manifest-drift cargo xtask boundary --check
 run_step generated-docs cargo xtask docs --check
 run_step abi-surface-static python3 -B scripts/check-abi-surface.py
 run_step workflow-yaml python3 -c \

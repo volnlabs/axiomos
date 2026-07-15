@@ -5,4 +5,5 @@ edition = "2021"
 publish = false
 
 [dependencies]
+file_structure = { path = "../../userspace/file_structure" }
 kernel_abi = { path = "../../kernel/crates/kernel_abi" }

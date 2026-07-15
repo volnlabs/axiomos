@@ -18,6 +18,8 @@ struct Component {
     kind: String,
     role: String,
     gate: String,
+    workspace: String,
+    artifact: String,
 }
 
 #[derive(Default)]
@@ -72,6 +74,8 @@ impl ComponentBuilder {
             kind: get("kind")?,
             role: get("role")?,
             gate: get("gate")?,
+            workspace: get("workspace")?,
+            artifact: get("artifact")?,
         })
     }
 }
@@ -125,7 +129,10 @@ fn parse_components(text: &str) -> Result<Vec<Component>, String> {
             return Err(format!("line {line_number}: expected key = value"));
         };
         let key = key.trim();
-        if !matches!(key, "path" | "kind" | "role" | "gate") {
+        if !matches!(
+            key,
+            "path" | "kind" | "role" | "gate" | "workspace" | "artifact"
+        ) {
             return Err(format!("line {line_number}: unknown component field {key}"));
         }
         let builder = current
@@ -300,19 +307,221 @@ fn validate_inventory(root: &Path, components: &[Component]) -> Result<(), Strin
     Ok(())
 }
 
+fn parse_workspace_array(text: &str, key: &str) -> Result<Vec<String>, String> {
+    let workspace = text
+        .split_once("[workspace]")
+        .map(|(_, rest)| rest)
+        .ok_or_else(|| "Cargo.toml is missing [workspace]".to_owned())?;
+    let workspace = workspace
+        .split("\n[")
+        .next()
+        .ok_or_else(|| "Cargo.toml has an empty [workspace] section".to_owned())?;
+    let assignment = format!("{key} = [");
+    let mut collecting = false;
+    let mut values = Vec::new();
+
+    for (index, raw) in workspace.lines().enumerate() {
+        let line = raw.split('#').next().unwrap_or_default().trim();
+        if !collecting {
+            if line == assignment {
+                collecting = true;
+            }
+            continue;
+        }
+        if line == "]" {
+            return Ok(values);
+        }
+        for value in line
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            values.push(parse_quoted(value, index + 1)?);
+        }
+    }
+
+    Err(format!("Cargo.toml [workspace] is missing {key}"))
+}
+
+fn workspace_manifest(path: &str) -> String {
+    if path == "." {
+        "Cargo.toml".to_owned()
+    } else {
+        format!("{}/Cargo.toml", path.trim_end_matches('/'))
+    }
+}
+
+fn load_workspace_layout(root: &Path) -> Result<(BTreeSet<String>, BTreeSet<String>), String> {
+    let manifest = root.join("Cargo.toml");
+    let text = fs::read_to_string(&manifest)
+        .map_err(|error| format!("{}: {error}", manifest.display()))?;
+    let members = parse_workspace_array(&text, "members")?
+        .into_iter()
+        .map(|path| workspace_manifest(&path))
+        .collect();
+    let excluded = parse_workspace_array(&text, "exclude")?
+        .into_iter()
+        .map(|path| workspace_manifest(&path))
+        .collect();
+    Ok((members, excluded))
+}
+
+fn collect_rootfs_executables(
+    directory: &file_structure::Dir<'_>,
+    executables: &mut BTreeSet<String>,
+) -> Result<(), String> {
+    for file in directory.files {
+        if matches!(file.kind, file_structure::Kind::Executable)
+            && !executables.insert(file.name.to_owned())
+        {
+            return Err(format!("duplicate rootfs executable: {}", file.name));
+        }
+    }
+    for child in directory.subdirs {
+        collect_rootfs_executables(child, executables)?;
+    }
+    Ok(())
+}
+
+fn expected_workspace_disposition(
+    component: &Component,
+    members: &BTreeSet<String>,
+    excluded: &BTreeSet<String>,
+) -> &'static str {
+    if component.kind != "cargo" {
+        "not-cargo"
+    } else if component.path == "Cargo.toml" {
+        "root"
+    } else if members.contains(&component.path) {
+        "member"
+    } else if excluded.contains(&component.path) {
+        "excluded"
+    } else {
+        "standalone"
+    }
+}
+
+fn validate_boundary_contract(
+    components: &[Component],
+    members: &BTreeSet<String>,
+    excluded: &BTreeSet<String>,
+    rootfs_executables: &BTreeSet<String>,
+) -> Result<(), String> {
+    let mut artifacts = BTreeMap::new();
+    let mut declared_rootfs = BTreeSet::new();
+    let mut declared_members = BTreeSet::new();
+    let mut declared_excluded = BTreeSet::new();
+
+    for component in components {
+        let expected = expected_workspace_disposition(component, members, excluded);
+        if component.workspace != expected {
+            return Err(format!(
+                "{} declares workspace={}, expected {expected}",
+                component.path, component.workspace
+            ));
+        }
+        if component.workspace == "member" {
+            declared_members.insert(component.path.clone());
+        } else if component.workspace == "excluded" {
+            declared_excluded.insert(component.path.clone());
+        }
+
+        if component.artifact == "none" {
+            continue;
+        }
+        let (kind, name) = component.artifact.split_once(':').ok_or_else(|| {
+            format!(
+                "{} has invalid artifact {}; expected KIND:NAME or none",
+                component.path, component.artifact
+            )
+        })?;
+        if !matches!(
+            kind,
+            "host" | "boot" | "rootfs" | "firmware" | "experimental"
+        ) || name.is_empty()
+        {
+            return Err(format!(
+                "{} has unsupported artifact {}",
+                component.path, component.artifact
+            ));
+        }
+        if let Some(previous) = artifacts.insert(component.artifact.clone(), &component.path) {
+            return Err(format!(
+                "duplicate artifact {}: {previous} and {}",
+                component.artifact, component.path
+            ));
+        }
+        if kind == "rootfs" {
+            declared_rootfs.insert(name.to_owned());
+        }
+    }
+
+    if &declared_members != members || &declared_excluded != excluded {
+        let mut message = String::from("workspace boundary mismatch");
+        for path in members.difference(&declared_members) {
+            message.push_str(&format!("\n  workspace member has no component: {path}"));
+        }
+        for path in declared_members.difference(members) {
+            message.push_str(&format!("\n  component is not a workspace member: {path}"));
+        }
+        for path in excluded.difference(&declared_excluded) {
+            message.push_str(&format!("\n  workspace exclude has no component: {path}"));
+        }
+        for path in declared_excluded.difference(excluded) {
+            message.push_str(&format!("\n  component is not explicitly excluded: {path}"));
+        }
+        return Err(message);
+    }
+
+    let missing = rootfs_executables
+        .difference(&declared_rootfs)
+        .cloned()
+        .collect::<Vec<_>>();
+    let stale = declared_rootfs
+        .difference(rootfs_executables)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() || !stale.is_empty() {
+        let mut message = String::from("rootfs artifact boundary mismatch");
+        for name in missing {
+            message.push_str(&format!("\n  missing component artifact: rootfs:{name}"));
+        }
+        for name in stale {
+            message.push_str(&format!(
+                "\n  artifact not shipped by file_structure: rootfs:{name}"
+            ));
+        }
+        return Err(message);
+    }
+
+    Ok(())
+}
+
+fn validate_boundary(root: &Path, components: &[Component]) -> Result<(), String> {
+    let (members, excluded) = load_workspace_layout(root)?;
+    let mut rootfs_executables = BTreeSet::new();
+    collect_rootfs_executables(&file_structure::STRUCTURE, &mut rootfs_executables)?;
+    validate_boundary_contract(components, &members, &excluded, &rootfs_executables)
+}
+
 fn render_components(components: &[Component]) -> String {
     let mut components = components.to_vec();
     components.sort_by(|a, b| a.path.cmp(&b.path));
     let mut output = String::from(
         "<!-- Generated by `cargo xtask docs`; do not edit. -->\n\n\
          # Component inventory\n\n\
-         | Manifest | Kind | Role | Required gate |\n\
-         |---|---|---|---|\n",
+         | Manifest | Kind | Workspace | Artifact disposition | Role | Required gate |\n\
+         |---|---|---|---|---|---|\n",
     );
     for component in components {
         output.push_str(&format!(
-            "| `{}` | {} | {} | {} |\n",
-            component.path, component.kind, component.role, component.gate
+            "| `{}` | {} | {} | `{}` | {} | {} |\n",
+            component.path,
+            component.kind,
+            component.workspace,
+            component.artifact,
+            component.role,
+            component.gate
         ));
     }
     output
@@ -499,7 +708,7 @@ fn run_ci(root: &Path, arguments: &[String]) -> Result<(), String> {
 
 fn usage() {
     eprintln!(
-        "Usage:\n  cargo xtask inventory --check\n  cargo xtask docs [--check]\n  cargo xtask ci [--quick|--full|--extended] [audit options]"
+        "Usage:\n  cargo xtask inventory --check\n  cargo xtask boundary --check\n  cargo xtask docs [--check]\n  cargo xtask ci [--quick|--full|--extended] [audit options]"
     );
 }
 
@@ -524,11 +733,24 @@ fn execute() -> Result<(), String> {
             );
             Ok(())
         }
+        "boundary" => {
+            if remaining.as_slice() != ["--check"] {
+                return Err("boundary requires exactly --check".to_owned());
+            }
+            validate_inventory(&root, &components)?;
+            validate_boundary(&root, &components)?;
+            println!(
+                "workspace/artifact boundary: PASS ({} components)",
+                components.len()
+            );
+            Ok(())
+        }
         "docs" => {
             if remaining.iter().any(|arg| arg != "--check") {
                 return Err("docs accepts only --check".to_owned());
             }
             validate_inventory(&root, &components)?;
+            validate_boundary(&root, &components)?;
             check_or_write_docs(
                 &root,
                 &components,
@@ -537,6 +759,7 @@ fn execute() -> Result<(), String> {
         }
         "ci" => {
             validate_inventory(&root, &components)?;
+            validate_boundary(&root, &components)?;
             check_or_write_docs(&root, &components, true)?;
             run_ci(&root, &remaining)
         }
@@ -571,6 +794,8 @@ mod tests {
         kind = "cargo"
         role = "root"
         gate = "host"
+        workspace = "root"
+        artifact = "host:axiomos"
     "#;
 
     #[test]
@@ -596,6 +821,8 @@ mod tests {
             kind: "cargo".to_owned(),
             role: "crate".to_owned(),
             gate: "host".to_owned(),
+            workspace: "member".to_owned(),
+            artifact: "none".to_owned(),
         });
         let rendered = render_components(&components);
         assert!(rendered.find("`0/Cargo.toml`").unwrap() < rendered.find("`Cargo.toml`").unwrap());
@@ -618,5 +845,68 @@ mod tests {
         .expect("valid target manifest");
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].status, "supported");
+    }
+
+    #[test]
+    fn parses_workspace_member_and_exclude_arrays() {
+        let manifest = r#"
+            [workspace]
+            exclude = [
+              "excluded",
+            ]
+            members = [
+              ".",
+              "member",
+            ]
+
+            [workspace.dependencies]
+            example = "1"
+        "#;
+        assert_eq!(
+            parse_workspace_array(manifest, "members").unwrap(),
+            [".", "member"]
+        );
+        assert_eq!(
+            parse_workspace_array(manifest, "exclude").unwrap(),
+            ["excluded"]
+        );
+    }
+
+    #[test]
+    fn boundary_rejects_rootfs_artifact_drift() {
+        let components = parse_components(VALID).expect("valid component manifest");
+        let members = BTreeSet::new();
+        let excluded = BTreeSet::new();
+        let rootfs = BTreeSet::from(["init".to_owned()]);
+        let error = validate_boundary_contract(&components, &members, &excluded, &rootfs)
+            .expect_err("missing rootfs declaration must fail");
+        assert!(error.contains("missing component artifact: rootfs:init"));
+    }
+
+    #[test]
+    fn boundary_rejects_duplicate_artifacts() {
+        let mut components = parse_components(VALID).expect("valid component manifest");
+        let mut duplicate = components[0].clone();
+        duplicate.path = "other/Cargo.toml".to_owned();
+        duplicate.workspace = "standalone".to_owned();
+        components.push(duplicate);
+        let error = validate_boundary_contract(
+            &components,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+        )
+        .expect_err("duplicate artifact must fail");
+        assert!(error.contains("duplicate artifact host:axiomos"));
+    }
+
+    #[test]
+    fn boundary_rejects_stale_workspace_member() {
+        let components = parse_components(VALID).expect("valid component manifest");
+        let members = BTreeSet::from(["missing/Cargo.toml".to_owned()]);
+        let error =
+            validate_boundary_contract(&components, &members, &BTreeSet::new(), &BTreeSet::new())
+                .expect_err("stale workspace member must fail");
+        assert!(error.contains("workspace member has no component: missing/Cargo.toml"));
     }
 }
