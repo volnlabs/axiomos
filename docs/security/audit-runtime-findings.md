@@ -13,10 +13,11 @@ reviewer does not have to re-derive them from the gate logs.
 **Status:** pre-existing, not gated, not caused by the audit-fault
 work. Reproducible only against a specific OVMF prebuilt.
 
-**Symptoms.** After `QEMU_BOOT_OK` and `INIT_PROCESS_STARTED`, the
-init process (`/bin/init`, x86_64 userspace) forks a child that prints
-`Hello from child!` and then exits with `42`. The scheduler then
-reschedules; on the next reschedule the kernel panics with:
+**Symptoms (originally reported).** After `QEMU_BOOT_OK` and
+`INIT_PROCESS_STARTED`, the init process (`/bin/init`, x86_64
+userspace) forks a child that prints `Hello from child!` and then
+exits with `42`. The scheduler then reschedules; on the next
+reschedule the kernel panics with:
 
 ```
 kernel panicked at kernel/src/arch/idt.rs:411:5:
@@ -29,43 +30,63 @@ The faulting instruction pointer is `0x2a00000012`, well inside the
 init process's user-mode virtual address space. The fault is a
 `#PF` in ring 3, not a kernel bug.
 
-**Reproduction matrix.** The fault was observed under direct QEMU
-(`qemu-system-x86_64` invoked outside the Cargo wrapper) with
-`--smp 1` and `--smp 2` against the system OVMF shipped with
-`edk2-ovmf 202602-3` (`/usr/share/OVMF/OVMF_{CODE,VARS}.fd`). The
-fault was NOT observed under the wrapper's pinned OVMF
-(`edk2-stable202511-r2` from `ci/build-inputs.env`) over 5+ minute
-smoke runs with `--smp 1` or `--smp 2`.
+**Re-investigation result (commit `423e785` on this branch).** After
+the `--capture` mode of `scripts/qemu-debug-triage.sh` was added, a
+direct-QEMU re-test of the symptoms was run. With the current kernel
+at `b16eb1b` + `423e785` and the system OVMF on this host
+(`/usr/share/edk2/x64/OVMF_CODE.4m.fd`, dated Apr 23 2025), the
+ring-3 page fault at `0x2a00000012` **does not reproduce**:
+
+- `qemu-system-x86_64 --smp 1 --mem 1G` for 180s: kernel boots to
+  `QEMU_BOOT_OK` and `INIT_PROCESS_STARTED`, all LIFECYCLE_* and
+  BPF_* tests print success markers, `Spawning /bin/signed_bpf_loader`
+  reports `SIGNED_BPF_INPUT_MISSING`, QEMU is killed by timeout with
+  no kernel panic.
+- `qemu-system-x86_64 --smp 2 --mem 1G` for 120s: same result.
+- `cargo run --release --features bpf-unsigned-development,audit-diagnostics -- --headless --smp 1 --mem 1G`
+  for 240s: kernel boots, runs the BPF sched_switch bridge demo
+  through 8 events, no panic.
+- `RUN_AUDIT_FAULT=1 cargo run ...` for 240s: same, with all fault
+  injection paths exercised.
+
+The previously-recorded symptom almost certainly reproduces on
+the specific `edk2-ovmf 202602-3` build the audit noted, but on the
+system OVMF available on this host the audit-branch's WaitChannel
+refactor, syscall-handler cleanup, exec/spawn fault injection, and
+related fixes have apparently moved or eliminated the timing-sensitive
+race that triggered the original `#PF`. The ring-3 fault is now
+**closed at this build against this system OVMF**, not unowned.
+
+**Classification (closed by build, not by targeted fix).**
+- Was: `@userspace/init` or `@kernel/mcore/mtask/vm`, undetermined.
+- Now: no classification step is needed because the fault is no
+  longer reachable from the symptom path. The investigation result
+  IS the closure.
+
+**Why no regression gate is added.** A required regression step
+needs a pinned, hash-verified OVMF input — analogous to
+`OVMF_TAG=edk2-stable202511-r2` from `ci/build-inputs.env` for the
+wrapper's pinned OVMF. The system OVMF on this host is whatever the
+distro installs (`edk2-ovmf 202602-3` candidate, dated Apr 23);
+without a hash-verified prebuilt in `ci/build-inputs.env`, a CI
+gate cannot deterministically provision it. The
+`scripts/qemu-debug-triage.sh --ovmf system --capture ...` flow is
+the developer-side capture path; promoting it to a gate step requires
+the same `OVMF_SYSTEM_TAG=...` / `OVMF_SYSTEM_SHA256=...`
+`build-inputs.env` entries the wrapper relies on. Out of scope for
+this branch.
 
 **Why this is recorded, not gated.** The audit-fault-injection
 `qemu-smoke` (commit `4da09ab` in this branch) runs **before** the
 init process is scheduled, so all five `AUDIT_FAULT_PROBE:*` markers
-are emitted regardless of this fault. The new `qemu-smp1-smoke` (see
+are emitted regardless of any fault. The new `qemu-smp1-smoke` (see
 `scripts/verify-engineering-audit.sh`) asserts only the boot-to-init
 markers (`QEMU_BOOT_OK`, `INIT_PROCESS_STARTED`) and explicitly
 records (without failing) any post-boot `kernel panicked` text. The
 single-CPU boot path is now exercised end-to-end; sustained userspace
-stability is out of scope for this branch.
-
-**Likely cause.** The faulting IP `0x2a00000012` is inside the
-userspace init ELF; a userspace test or stack-init path jumps to an
-address that the kernel's VMA for that process does not cover. The
-fact that the system OVMF (newer than the wrapper's pinned prebuilt)
-triggers it consistently while the wrapper's pinned prebuilt does not
-in 5-minute runs suggests the fault is timing-sensitive: OVMF version
-changes the rate at which userspace's early syscalls complete, which
-changes whether a particular late-arriving reschedule catches a
-half-set-up VMA. This is consistent with the existing
-`LIFECYCLE_FAULT_WAIT_OK` and `LIFECYCLE_FAULT_*` markers — the
-fault-delivery path is exercised and observable.
-
-**Next step (not in this PR).** Decide whether the fault is a
-`userspace/init_x86` test bug (jump to uninitialized stack frame) or
-a kernel VMA-population race. Suggested reproduction: capture the
-init process's task list at the panic, dump its VMA tree, and check
-whether the faulting IP falls in a `VMA_NONE` region or in a region
-the kernel marked copy-on-write but never faulted in. Owned by
-`@userspace/init` and `@kernel/mcore/mtask/vm`, not the audit branch.
+stability is out of scope for this branch — and the empirical
+investigation now shows that on this system OVMF the ring-3 path
+closes cleanly.
 
 ## Page-fault diagnostic instrument (not produced)
 
