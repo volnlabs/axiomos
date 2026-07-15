@@ -1,7 +1,7 @@
 # Scheduler run-queues design review
 
 **Status:** design review only. No implementation. Establishes current
-contracts before any per-CPU-queue or work-stealing refactor lands.
+contracts before any run-queue ownership, stealing, or wakeup refactor lands.
 
 **Scope:** `kernel/src/mcore/mtask/scheduler/{mod,run_queue,run_queue_policy,cleanup,sleep,switch,wait,wait_channel}.rs`
 and `kernel/src/mcore/mtask/task/queue.rs`.
@@ -28,13 +28,18 @@ Initialization is via `RunQueues::init()` (called from BSP bring-up).
 After init, the `Box<[TaskQueue]>` slice is fixed-size and never
 reallocated.
 
-### 1.2 Per-CPU structure
+### 1.2 Per-CPU queue topology
 
-There is NO per-CPU run-queue separation. Each `TaskQueue` is a
-shared MPSC queue (`cordyceps::MpscQueue<Task>`) indexed by `cpu_id`.
-Every CPU's enqueue path goes through `RunQueues::enqueue(task)` which
-routes to `queue(task.last_cpu())`. Dequeue is local-first
-(`queue(current_cpu)`); on miss, work-stealing probes other queues.
+`RunQueues` already provides one `TaskQueue` per CPU: the fixed
+`Box<[TaskQueue]>` is indexed by `cpu_id`. `RunQueues::enqueue(task)`
+routes to `queue(target_cpu)`, where `target_cpu = task.last_cpu()`.
+Dequeue is local-first (`queue(current_cpu).try_take()`); on miss,
+work stealing probes other queues.
+
+This is the per-CPU topology prescribed by ADR-0001. The unresolved
+ownership issue is not whether per-CPU queues exist; it is whether the
+single-consumer premise of each MPSC queue remains valid when another
+CPU attempts to steal from that queue.
 
 ### 1.3 Last-CPU sticky affinity
 
@@ -46,9 +51,13 @@ this can produce load imbalance: a CPU that just finished a task is
 likely to be put back on the runnable list and selected again, while an
 idle CPU sits empty.
 
-`last_cpu` is set whenever the task is enqueued (see
-`run_queue.rs:40`) and read on each enqueue. There's no decay, no
-rebalancing, no idle migration.
+`last_cpu` is read by `RunQueues::enqueue` at `run_queue.rs:40` to
+select the target queue. It is written by the scheduler through
+`set_last_cpu` during reschedule, immediately after `dequeue` returns
+the next task and before that task is marked running
+(`scheduler/mod.rs:213`). It therefore records the CPU that most
+recently selected the task to run, not the CPU that called `enqueue`.
+There is no decay, rebalancing, or idle migration.
 
 ### 1.4 Work stealing on miss
 
@@ -74,11 +83,13 @@ isn't probed repeatedly.
 ### 1.5 Why MPSC and not MPMC
 
 `MpscQueue` (multi-producer single-consumer) is what `cordyceps`
-provides and what each `TaskQueue` uses. In our topology the consumer
-is the local CPU; producers are everywhere (other CPUs, ISR bottom
-halves, BPF sched_switch bridge, `WaitChannel::wake_all`, etc.). MPSC
-is correct: many producers push, one consumer pops. A second consumer
-on the same queue would race.
+provides and what each `TaskQueue` uses. Producers may run on several
+CPUs, while the intended consumer is the CPU that owns the indexed
+queue. The current steal path also calls `try_take` on another CPU's
+queue, so the code does not enforce that single-consumer premise. A
+future scheduler change must either prove that the queue's `try_take`
+contract supports this use, serialize steal ownership, or use a queue
+with an explicit multi-consumer/steal API.
 
 ---
 
@@ -162,7 +173,9 @@ there, the wakee runs there next time the picked CPU reschedules.
   `dequeue()`s — which is "soon" if the CPU is currently idle or "at
   the next reschedule" if the CPU is busy.
 
-There is **no IPI** in this design. Cross-CPU wakeup is fire-and-forget.
+There is **no scheduler wakeup IPI** in this design. Cross-CPU task
+wakeup is fire-and-forget. This is distinct from the x86 TLB-shootdown
+IPI described in §5.
 
 ---
 
@@ -183,14 +196,12 @@ The "lock-ordering discipline" is really a memory-ordering discipline:
 
 The audit branch has documented a small number of locks:
 
-- `Task::kstack`, `Task::ustack`, `Task::tls`, `Task::fx_area` are
-  per-task `Option<RwLock<T>>` fields (`task/mod.rs:14, 487-499`).
-  These are held by the reschedule path via `force_write_unlock`
-  during exit cleanup (`Task::exit` calls `force_write_unlock` on
-  each). The audit doc flagged this in finding at ENGINEERING_AUDIT.md
-  as a T-row risk; the locks are not currently proven to be held by
-  the current task at the moment of unlock. This is documented but not
-  resolved.
+- `Task::kstack` is an owned optional stack allocation. `Task::ustack`,
+  `Task::tls`, and `Task::fx_area` are per-task `RwLock<Option<T>>`
+  fields. `Task::exit` releases the latter three through normal
+  `write().take()` guards (`task/mod.rs:188-198`). No
+  `force_write_unlock` call remains in the current kernel source; the
+  audit row `Additional High: force unlock` is closed.
 - `process_tree()` is a `RwLock<...>` covering the parent/child
   relations; `Task::mark_exited` acquires write.
 - `WaitChannel::waiters` (per channel) is `TaskQueue::new()` under
@@ -206,15 +217,6 @@ The lock-ordering rule is therefore:
    about memory visibility (release/acquire), not a deadlock surface.
 3. **Avoid holding any lock across `reschedule()`** — `Task::exit`
    releases all locks before calling `reschedule`.
-
-### 4.3 What could deadlock today
-
-The audit doc flagged `Task::force_write_unlock` on `ustack`, `tls`,
-and `fx_area` without proving the current task holds those locks
-(ENGINEERING_AUDIT.md finding at the systematic-unsafe-sites section).
-This is a single-task self-deadlock surface: if the task holds the
-write lock and `exit` is called from within the same task, the unlock
-panics. This is documented but not exercised by the test suite.
 
 ---
 
@@ -232,9 +234,11 @@ This has consequences:
   There is no "fast wakeup IPI" to interrupt the running task.
 - **No scheduler IPI for SMP load balancing**. A task stuck on a hot
   CPU remains there unless the hot CPU voluntarily reschedules.
-- **No TLB shootdown IPI.** TLB invalidation across CPUs is not
-  addressed here — it would require an IPI-side contract, which is
-  the next-tier concern after this design review.
+- **TLB shootdown is a separate, implemented IPI path.** On x86,
+  `arch::shootdown_tlb` publishes an epoch, sends
+  `InterruptIndex::TlbShootdown` through each target LAPIC, and waits
+  for per-CPU acknowledgements (`arch/x86_64.rs:39-88`). That path does
+  not provide scheduler wakeup or load-balancing notification.
 
 The wakeup contract is therefore "approximate, eventually consistent,
 within-CPU-bounded". For an audit-grade kernel targeting single-vCPU
@@ -249,33 +253,32 @@ first, this is acceptable. For multi-vCPU it would need follow-up work.
 `Task::exit` (called from `Task::terminate_current`, the cleanup path
 in `idt.rs`, or the syscall layer) does:
 
-1. Mark the owning `Process` as exited via
-   `process.mark_exited(status)` — publishes to `parent_exit_wait`.
-2. Force-unlock `ustack`, `tls`, `fx_area` (see §4.3 caveat).
-3. Re-enqueue the task onto `TaskCleanup::enqueue(...)` if
-   `should_terminate`, `TaskSleep::enqueue(...)` if sleeping, the
-   waiter's queue if waiting, or `RunQueues::enqueue(...)` otherwise.
+1. Acquire normal write guards for `fx_area`, `tls`, and `ustack`, take
+   their allocations, mark the current task for termination, and drop
+   those guards (`task/mod.rs:188-200`).
+2. Mark a non-root owning process exited. `Task::terminate_current`
+   publishes its supplied status before entering `Task::exit`; the
+   second `mark_exited(0)` is ignored because the exit code is already
+   present.
+3. Call `reschedule`. During the next scheduler preparation pass, the
+   outgoing task becomes `zombie_task`; on the following pass a task
+   marked for termination is transferred to `TaskCleanup::enqueue`
+   (`scheduler/mod.rs:157-171, 256-290`).
 
-The terminated task continues to *run* until the next reschedule. The
-scheduler picks it up via the path above and runs the appropriate
-destructor (cleanup.rs:70-onwards) which iterates the BPF owner ring
-and drops BPF state.
+`TaskCleanup::run` drains those task objects, drops them, and then
+retries BPF-owner reclamation until each exited owner can be reclaimed
+(`cleanup.rs:76-100`).
 
 ### 6.2 Wait-channel blocked-task semantics
 
-When a task is in a `WaitChannel` and the owning `Process` exits:
+When a process exit is published:
 
 - `process.mark_exited(status)` calls `parent_exit_wait.wake_all()`,
-  which wakes the parent.
-- The blocked child task itself is NOT directly woken by
-  `mark_exited`. It remains in the channel's wait queue.
-
-If the channel's owner process is gone, the wake-all on `wake_all` is
-a no-op for the dead process's tasks. Currently there is no
-"drain the channel when the channel's owner process exits" path.
-Tasks waiting on a dead process's channel stay parked. This is a
-known gap, not a bug; the parent process is gone, so nothing wakes
-them. They will be reaped by the per-process teardown, if any.
+  which wakes tasks waiting for that child exit.
+- `mark_exited` does not traverse the process's other tasks or their
+  wait registrations. No current production test demonstrates the
+  cancellation and reclamation behavior for a different task of the
+  exiting process that is already parked on an unrelated channel.
 
 The `wait_protocol.rs::tests` and `wait_channel.rs::tests`
 (`channel_core_*`) cover the channel core algorithm with mock sinks;
@@ -285,33 +288,35 @@ fixture item.
 
 ### 6.3 Zombie task reaping
 
-`TaskCleanup::run` (the cleanup worker task spawned by
-`cleanup.rs:62-67`) is the only task that *consumes* dead tasks. It
+`TaskCleanup::run` (the cleanup worker task scheduled by
+`cleanup.rs:53-64`) consumes dead tasks. It
 loops on `cleanup_queue().dequeue()` and:
 
-1. Reads the dead task's last BPF owner ID.
-2. Walks the BPF owner ring.
-3. Reclaims / drops BPF state.
+1. Records an exited task owner's process ID when applicable.
+2. Drops the task object.
+3. Attempts BPF-owner reclamation under the manager lock and retains
+   owners that cannot yet be reclaimed for another pass.
 
-Zombie tasks NOT consumed by `TaskCleanup::run` remain parked on
-`cleanup_queue()` indefinitely. The ring buffer has zero leak
-pressure today (`cleanup_queue` doesn't grow unboundedly because there
-is at most one consumer).
+`cleanup_queue` is another intrusive `TaskQueue`, not a bounded ring.
+The cleanup worker is therefore part of the resource-reclamation
+contract: if it does not run, queued task objects remain live. The
+current smoke tests exercise cleanup markers, but there is no separate
+host test that proves a bound on cleanup backlog under sustained exit
+load.
 
 ---
 
-## 7. Open questions for any future per-CPU refactor
+## 7. Open questions for any future ownership/stealing refactor
 
-The user's earlier task list explicitly said: *"Do not implement
-per-CPU queues or work stealing before this review establishes the
-current contracts."* That is satisfied by this review: the contracts
-above exist as-is, and the refactor is gated on the following
-pre-conditions being met first:
+The current per-CPU topology predates this review. Changes to queue
+ownership, work stealing, migration, or wakeup notification are gated
+on the following pre-conditions.
 
-### 7.1 What a per-CPU-queue refactor would change
+### 7.1 What an ownership/stealing refactor would change
 
-- Per-CPU `TaskQueue` becomes the only consumer for that CPU (no
-  cross-CPU steal-to-self).
+- Each per-CPU `TaskQueue` gains an enforceable consumer/steal contract
+  instead of relying on an MPSC queue while remote CPUs call
+  `try_take`.
 - Migration policy replaces sticky-load (e.g., idle-pull, hill
   climbing, or random kick).
 - An IPI wakeup path becomes necessary for cross-CPU latency (today's
@@ -322,35 +327,32 @@ pre-conditions being met first:
 - The waker picks the CPU. Any "CPU selection policy" must be
   documented and unit-tested with the same `loom` model we use for
   WaitChannel.
-- The `WaitChannel` core uses an opaque `W: WaiterSink`. The host
-  sink is `TaskQueue`. Migrating the host sink to per-CPU still
-  preserves the model (it becomes "TaskQueue of last_cpu's CPU"); the
-  channel algorithm itself is unchanged. The model-level guarantees
-  are preserved.
+- The `WaitChannel` core uses an opaque `W: WaiterSink`; production uses
+  `TaskQueue` and host tests use a mock sink. A scheduler queue change
+  must preserve the channel algorithm's generation/drain guarantees.
 
 ### 7.3 Pre-conditions for the refactor PR
 
-Before the per-CPU refactor lands, the following must be true:
+Before an ownership/stealing refactor lands, the following must be true:
 
 1. The SMP `--smp 4` smoke runs in CI as a regression (today: optional
-   smoke only). The per-CPU refactor would introduce cross-CPU races
+   smoke only). The refactor would change cross-CPU races
    that the existing SMP-1 audit does not exercise.
 2. A `loom`-equivalent model of the `RunQueues` MPSC + cross-CPU
    steal exists and validates at least the same set of orderings as
    the WaitChannel model.
 3. An IPI ownership contract is documented (which driver owns
    sending IPIs; what the IPIs carry; what the recipient does).
-4. A bounded-regression step for the ring-3 fault (see §6.2) — the
-   refactor must not regress "channel-drain on exit" if that gap is
-   ever closed.
+4. If the historical ring-3 fault becomes reproducible, a pinned
+   artifact and bounded regression protect its eventual fix. The
+   current non-reproducing observation is not such a guard.
 
 ---
 
 ## 8. Approved pre-conditions for the schedule
 
-This review establishes the contracts. The user-explicit reject of
-per-CPU-queue changes is honored. Any follow-on implementation work
-must produce a separate ADR recording the new contracts AND meet the
-pre-conditions in §7.3.
+This review establishes the current contracts. Any follow-on
+implementation work must update the ADR with the new contracts and
+meet the pre-conditions in §7.3.
 
 **Outcome:** review complete. No code changes land from this branch.
