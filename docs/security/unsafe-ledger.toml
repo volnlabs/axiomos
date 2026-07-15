@@ -1,6 +1,6 @@
 version = 1
-baseline_sites = 696
-baseline_fingerprint = "sha256:10518ff43157b5d42a8171f441e8cfa578a77f5a3a16f515c09af4a57d0216b5"
+baseline_sites = 698
+baseline_fingerprint = "sha256:269e756356e61e0705c61ba9b92d0f121808d39683b7db51a2e0e6644b079119"
 
 # Rules are evaluated in order. Keep narrow, high-risk obligations before broad
 # subsystem rules. The first matching rule supplies every site-level field.
@@ -51,7 +51,7 @@ reviewed = "2026-07-12"
 
 [[obligation]]
 id = "MEM-KERNEL-RAW"
-paths = ["kernel/src/mem/*", "kernel/crates/kernel_memapi/*"]
+paths = ["kernel/src/mem/*", "kernel/crates/kernel_memapi/*", "kernel/crates/kernel_map_transaction/*"]
 scope = "production"
 owner = "kernel memory maintainers"
 invariant = "Raw allocation and slice construction use live mapped allocations with exclusive access for mutable views and exact layout provenance."

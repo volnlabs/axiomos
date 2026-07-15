@@ -1,5 +1,6 @@
 use alloc::vec::Vec;
 
+use kernel_map_transaction::MapRangeTransaction;
 use kernel_physical_memory::{PhysicalFrameAllocator, PhysicalMemoryManager};
 #[cfg(target_arch = "x86_64")]
 use x86_64::registers::control::Cr3;
@@ -143,55 +144,68 @@ impl AddressSpaceMapper {
     {
         assert!(self.is_active());
 
+        // Rollback bookkeeping is owned by `MapRangeTransaction`; see
+        // `kernel/crates/kernel_map_transaction`. The helper tracks
+        // (a) the pages that have been installed in the page table
+        // and (b) the frames that were taken from the iterator but
+        // never mapped. On failure we drive its `rollback` once.
+        //
+        // The capacities are sized for the kernel's largest
+        // single-range `map_range_owned` caller: `heap::init` maps
+        // up to `RAM/1024` of heap space, clamped to 2..128 MiB.
+        // At the audit gate's `--mem 1G` (and `RAM/1024` clamped
+        // up to the 2 MiB minimum), the heap init maps 512 pages
+        // in 4 KiB units. The 512 cap covers that exactly; mmap
+        // is bounded by `MAX_USER_COPY` (16 pages) and exec
+        // allocations are small, so 512 is generous across
+        // every caller.
+        //
+        // The 8 KiB total inline storage fits in the kernel's
+        // 16-page (64 KiB) per-task kernel stack and in the BSP's
+        // 256 KiB privilege stack.
+        const MAPPED_CAP: usize = 512;
+        const PENDING_CAP: usize = 512;
+        let mut tx = MapRangeTransaction::<S, MAPPED_CAP, PENDING_CAP>::new();
         let mut pages = pages.into_iter();
         let mut frames = frames.into_iter();
-        let mut first_mapped = None;
-        let mut last_mapped = None;
 
-        while let Some(page) = pages.next() {
-            let Some(frame) = frames.next() else {
-                if let (Some(start), Some(end)) = (first_mapped, last_mapped) {
-                    for mapped_page in (PageRangeInclusive { start, end }) {
-                        if let Some(frame) = self.unmap(mapped_page) {
-                            if owns_frames {
-                                release(frame);
-                            }
+        let result: Result<(), MapToError<S>> = (|| {
+            while let Some(page) = pages.next() {
+                let Some(frame) = frames.next() else {
+                    return Err(MapToError::FrameAllocationFailed);
+                };
+
+                if let Err(error) = self.map(page, frame, flags) {
+                    if owns_frames {
+                        tx.record_pending_frame(frame);
+                        while let Some(pending) = frames.next() {
+                            tx.record_pending_frame(pending);
                         }
                     }
+                    return Err(error);
                 }
-                return Err(MapToError::FrameAllocationFailed);
-            };
-
-            if let Err(error) = self.map(page, frame, flags) {
-                if owns_frames {
-                    release(frame);
-                }
-                if let (Some(start), Some(end)) = (first_mapped, last_mapped) {
-                    for mapped_page in (PageRangeInclusive { start, end }) {
-                        if let Some(frame) = self.unmap(mapped_page) {
-                            if owns_frames {
-                                release(frame);
-                            }
-                        }
-                    }
-                }
-                // The iterator transfers one frame reference per requested page.
-                // Release references that were supplied but never mapped.
-                if owns_frames {
-                    for _ in pages {
-                        let Some(frame) = frames.next() else {
-                            break;
-                        };
-                        release(frame);
-                    }
-                }
-                return Err(error);
+                tx.record_mapping(page);
             }
-            first_mapped.get_or_insert(page);
-            last_mapped = Some(page);
+            Ok(())
+        })();
+
+        if result.is_err() {
+            if owns_frames {
+                tx.rollback(|page| self.unmap(page), |frame| release(frame));
+            } else {
+                tx.rollback(
+                    |page| {
+                        self.unmap(page);
+                        None::<PhysFrame<S>>
+                    },
+                    |_| {},
+                );
+            }
+        } else {
+            tx.commit();
         }
 
-        Ok(())
+        result
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -328,52 +342,55 @@ impl AddressSpaceMapper {
         owns_frames: bool,
         release: impl Fn(PhysFrame<S>),
     ) -> Result<(), &'static str> {
+        // See the x86_64 `map_range_transaction` for the design
+        // note on `MapRangeTransaction` ownership of rollback
+        // bookkeeping. The aarch64 and x86_64 paths share the
+        // same helper and the same release semantics; only the
+        // unmap closure differs (aarch64's `unmap` returns
+        // `Option<PhysFrame<S>>` with the same convention).
+        const MAPPED_CAP: usize = 512;
+        const PENDING_CAP: usize = 512;
+        let mut tx = MapRangeTransaction::<S, MAPPED_CAP, PENDING_CAP>::new();
         let mut pages = pages.into_iter();
         let mut frames = frames.into_iter();
-        let mut first_mapped = None;
-        let mut last_mapped = None;
 
-        while let Some(page) = pages.next() {
-            let Some(frame) = frames.next() else {
-                if let (Some(start), Some(end)) = (first_mapped, last_mapped) {
-                    for mapped_page in (PageRangeInclusive { start, end }) {
-                        if let Some(frame) = self.unmap(mapped_page) {
-                            if owns_frames {
-                                release(frame);
-                            }
+        let result: Result<(), &'static str> = (|| {
+            while let Some(page) = pages.next() {
+                let Some(frame) = frames.next() else {
+                    return Err("Not enough frames for range");
+                };
+
+                if let Err(error) = self.map(page, frame, flags) {
+                    if owns_frames {
+                        tx.record_pending_frame(frame);
+                        while let Some(pending) = frames.next() {
+                            tx.record_pending_frame(pending);
                         }
                     }
+                    return Err(error);
                 }
-                return Err("Not enough frames for range");
-            };
-
-            if let Err(error) = self.map(page, frame, flags) {
-                if owns_frames {
-                    release(frame);
-                }
-                if let (Some(start), Some(end)) = (first_mapped, last_mapped) {
-                    for mapped_page in (PageRangeInclusive { start, end }) {
-                        if let Some(frame) = self.unmap(mapped_page) {
-                            if owns_frames {
-                                release(frame);
-                            }
-                        }
-                    }
-                }
-                if owns_frames {
-                    for _ in pages {
-                        let Some(frame) = frames.next() else {
-                            break;
-                        };
-                        release(frame);
-                    }
-                }
-                return Err(error);
+                tx.record_mapping(page);
             }
-            first_mapped.get_or_insert(page);
-            last_mapped = Some(page);
+            Ok(())
+        })();
+
+        if result.is_err() {
+            if owns_frames {
+                tx.rollback(|page| self.unmap(page), release);
+            } else {
+                tx.rollback(
+                    |page| {
+                        self.unmap(page);
+                        None::<PhysFrame<S>>
+                    },
+                    |_| {},
+                );
+            }
+        } else {
+            tx.commit();
         }
-        Ok(())
+
+        result
     }
 
     #[cfg(target_arch = "aarch64")]

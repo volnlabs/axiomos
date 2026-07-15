@@ -67,6 +67,12 @@ role = "mapped-memory contract"
 gate = "host lint and tests"
 
 [[component]]
+path = "kernel/crates/kernel_map_transaction/Cargo.toml"
+kind = "cargo"
+role = "map_range rollback bookkeeping"
+gate = "host lint and tests"
+
+[[component]]
 path = "kernel/crates/kernel_pci/Cargo.toml"
 kind = "cargo"
 role = "PCI contracts"

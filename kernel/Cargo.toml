@@ -17,6 +17,7 @@ kernel_time = { path = "crates/kernel_time" }
 kernel_usermem = { path = "crates/kernel_usermem" }
 kernel_vfs = { path = "crates/kernel_vfs" }
 kernel_virtual_memory = { path = "crates/kernel_virtual_memory" }
+kernel_map_transaction = { path = "crates/kernel_map_transaction" }
 shrike_link = { path = "crates/shrike_link" }
 
 addr2line.workspace = true

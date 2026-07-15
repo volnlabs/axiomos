@@ -129,6 +129,7 @@ members = [
   "kernel/crates/kernel_syscall",
   "kernel/crates/kernel_time",
   "kernel/crates/kernel_vfs",
+  "kernel/crates/kernel_map_transaction",
   "kernel/crates/kernel_virtual_memory",
   "kernel/crates/kernel_usermem",
   "kernel/crates/shrike_link", "userspace/bpf_loader",
@@ -164,6 +165,7 @@ default-members = [
   "kernel/crates/kernel_syscall",
   "kernel/crates/kernel_time",
   "kernel/crates/kernel_vfs",
+  "kernel/crates/kernel_map_transaction",
   "kernel/crates/kernel_virtual_memory",
   "userspace/file_structure",
 ]

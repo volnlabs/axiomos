@@ -15,6 +15,7 @@
 | `kernel/crates/kernel_device/Cargo.toml` | cargo | device contracts | host lint and tests |
 | `kernel/crates/kernel_elfloader/Cargo.toml` | cargo | ELF loader | host lint, tests, fuzz |
 | `kernel/crates/kernel_elfloader/fuzz/Cargo.toml` | cargo | ELF fuzz target | fuzz build |
+| `kernel/crates/kernel_map_transaction/Cargo.toml` | cargo | map_range rollback bookkeeping | host lint and tests |
 | `kernel/crates/kernel_memapi/Cargo.toml` | cargo | mapped-memory contract | host lint and tests |
 | `kernel/crates/kernel_pci/Cargo.toml` | cargo | PCI contracts | host lint and tests |
 | `kernel/crates/kernel_physical_memory/Cargo.toml` | cargo | physical memory | host lint and tests |
