@@ -237,7 +237,12 @@ fn main() -> ! {
         pin: pins.gpio12.into_pull_up_input(),
     };
 
-    run(
+    // `run` returns `Option<RunSummary>` for the bounded form used by
+    // host tests. The production firmware passes `None` (run forever),
+    // so the return is always `None`. The `let _` discards the value
+    // and the trailing `loop {}` ensures the function diverges via
+    // the `!` return type.
+    let _ = run(
         io,
         Clock1MHz,
         ultra,
@@ -249,5 +254,12 @@ fn main() -> ! {
             ping_period_us: PING_PERIOD_US,
             peer_heartbeat_period_us: PEER_HEARTBEAT_PERIOD_US,
         },
-    )
+        None, // run forever
+    );
+    // Unreachable: the production firmware passes `None` so `run` never
+    // returns. The loop is here to satisfy the `-> !` return type and to
+    // anchor any future change that accidentally passes `Some(_)`.
+    loop {
+        cortex_m::asm::wfi();
+    }
 }

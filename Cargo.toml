@@ -134,6 +134,7 @@ members = [
   "kernel/crates/kernel_usermem",
   "kernel/crates/shrike_link",
   "firmware/shrike_control",
+  "firmware/shrike_rp2040_host_sim",
   "userspace/bpf_loader",
   "userspace/signed_bpf_loader",
   "userspace/file_structure",

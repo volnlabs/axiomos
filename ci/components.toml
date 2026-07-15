@@ -133,6 +133,12 @@ role = "firmware control-loop traits and run loop"
 gate = "host build and shrike-control-build audit step"
 
 [[component]]
+path = "firmware/shrike_rp2040_host_sim/Cargo.toml"
+kind = "cargo"
+role = "firmware host simulation (mocks + sampled-state tests)"
+gate = "explicit shrike_rp2040-host-sim-test-build and shrike_rp2040-host-sim-tests audit steps"
+
+[[component]]
 path = "kernel/demos/riscv/Cargo.toml"
 kind = "cargo"
 role = "experimental RISC-V demo"

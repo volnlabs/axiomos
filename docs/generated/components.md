@@ -7,6 +7,7 @@
 | `Cargo.toml` | cargo | runner and image assembly | build, lint, artifacts, QEMU |
 | `firmware/shrike_control/Cargo.toml` | cargo | firmware control-loop traits and run loop | host build and shrike-control-build audit step |
 | `firmware/shrike_rp2040/Cargo.toml` | cargo | RP2040 firmware | RP2040 target lint and build |
+| `firmware/shrike_rp2040_host_sim/Cargo.toml` | cargo | firmware host simulation (mocks + sampled-state tests) | explicit shrike_rp2040-host-sim-test-build and shrike_rp2040-host-sim-tests audit steps |
 | `formal/lakefile.toml` | lean | verifier formal model | Lean build |
 | `kernel/Cargo.toml` | cargo | kernel | x86/AArch64 checks and QEMU |
 | `kernel/crates/kernel_abi/Cargo.toml` | cargo | public ABI | host lint and tests |

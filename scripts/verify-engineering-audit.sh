@@ -621,6 +621,15 @@ if [[ "$MODE" != "quick" ]]; then
     # consumers. The thumbv6m target build of the firmware exercises
     # shrike_control via the shrike_rp2040 path.
     run_cargo_step shrike-control-build build -p shrike_control
+    # shrike_rp2040_host_sim is a host-only simulation crate that depends
+    # on shrike_control and exercises the production control loop under
+    # mock implementations of the local traits. Invoked explicitly via
+    # `cargo test -p shrike_rp2040_host_sim` (not workspace-wide) so the
+    # host-only crate is never pulled into a non-host build.
+    run_cargo_step shrike_rp2040-host-sim-test-build test --no-run -p shrike_rp2040_host_sim
+    run_cargo_step shrike_rp2040-host-sim-tests test -p shrike_rp2040_host_sim
+    run_step shrike_rp2040-host-sim-static python3 -c \
+        'from pathlib import Path; lib=Path("firmware/shrike_control/src/lib.rs").read_text(); run=Path("firmware/shrike_control/src/control.rs").read_text(); sim=Path("firmware/shrike_rp2040_host_sim/src/mocks.rs").read_text(); sim_tests_state=Path("firmware/shrike_rp2040_host_sim/tests/state_machine.rs").read_text(); sim_tests_sampled=Path("firmware/shrike_rp2040_host_sim/tests/sampled_state.rs").read_text(); assert "fn run" in run and "max_iterations" in run, "control::run must accept max_iterations: Option<u32>"; assert "RunSummary" in run, "control::run must return RunSummary"; assert all(name in sim for name in ("MockByteIo", "MockClock", "MockUltrasonic", "MockEstop", "MockMotor")), "all 5 mock types must be present"; assert "embedded_hal" not in sim, "mocks must implement local shrike_control traits, not embedded-hal"; assert all(trait_name in sim for trait_name in ("ByteIo", "MicrosClock", "Ultrasonic", "EstopLine", "MotorChannel")), "mocks must implement the 5 local traits"; assert "no_lost_irq_edge" not in (sim_tests_state + sim_tests_sampled) and "no lost IRQ" not in (sim_tests_state + sim_tests_sampled).lower() and "no_lost_edge" not in (sim_tests_state + sim_tests_sampled), "tests must not claim hardware-level IRQ edge-loss"'
     run_cargo_step clippy-riscv clippy --manifest-path kernel/demos/riscv/Cargo.toml \
         --target riscv64gc-unknown-none-elf -- -D clippy::all
 

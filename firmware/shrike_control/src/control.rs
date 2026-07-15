@@ -45,7 +45,35 @@ pub struct Config {
     pub peer_heartbeat_period_us: u64,
 }
 
-/// Run the control loop forever. Never returns.
+/// Counters recorded during a bounded run, returned when `run` stops after
+/// the requested number of iterations. The production firmware never
+/// inspects this struct; the host simulation crate uses it to assert
+/// that the control loop reached the expected state.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RunSummary {
+    /// Number of loop iterations actually executed.
+    pub iterations: u32,
+    /// Number of `MotorChannel::drive` calls (one per actuated side per
+    /// iteration that produced `Output::Drive`).
+    pub motor_drive_calls: u32,
+    /// Number of `MotorChannel::coast` calls (one per actuated side per
+    /// iteration that produced `Output::SafeStop`).
+    pub motor_coast_calls: u32,
+    /// Total bytes written via `ByteIo::write`.
+    pub bytes_written: u32,
+    /// Number of `EstopLine::asserted` calls that returned `true` AND
+    /// matched the previous call's value (i.e., the line was held
+    /// asserted at this sample, not a fresh edge).
+    pub estop_asserts: u32,
+}
+
+/// Run the control loop.
+///
+/// - When `max_iterations` is `None`, the loop runs forever (production
+///   behavior used by `firmware/shrike_rp2040/src/main.rs`).
+/// - When `max_iterations` is `Some(n)`, the loop returns after `n`
+///   iterations with a `RunSummary`. The host simulation crate uses this
+///   bounded form to exercise the production control loop under mocks.
 pub fn run<IO, CK, US, ES, ML, MR>(
     mut io: IO,
     clock: CK,
@@ -54,7 +82,8 @@ pub fn run<IO, CK, US, ES, ML, MR>(
     mut left: ML,
     mut right: MR,
     cfg: Config,
-) -> !
+    max_iterations: Option<u32>,
+) -> Option<RunSummary>
 where
     IO: ByteIo,
     CK: MicrosClock,
@@ -69,8 +98,11 @@ where
     let mut last_peer_heartbeat: u64 = 0;
     let mut peer_heartbeat_seq: u16 = 0;
     let mut prev_estop = false;
+    let mut summary = RunSummary::default();
 
     loop {
+        summary.iterations = summary.iterations.wrapping_add(1);
+
         let now = clock.now_us();
 
         // 1. Mirror the hardware e-stop line's EDGES into the watchdog, so a
@@ -80,6 +112,9 @@ where
         //    stale-command restart). Edge-triggered, not every loop, so a held
         //    e-stop never refreshes link liveness and mask a dead link.
         let hw_estop = estop.asserted();
+        if hw_estop {
+            summary.estop_asserts = summary.estop_asserts.wrapping_add(1);
+        }
         if hw_estop != prev_estop {
             wd.on_msg(&Msg::Estop { assert: hw_estop }, now);
             prev_estop = hw_estop;
@@ -108,10 +143,12 @@ where
             Output::Drive { left: l, right: r } => {
                 left.drive(l);
                 right.drive(r);
+                summary.motor_drive_calls = summary.motor_drive_calls.wrapping_add(2);
             }
             Output::SafeStop => {
                 left.coast();
                 right.coast();
+                summary.motor_coast_calls = summary.motor_coast_calls.wrapping_add(2);
             }
         }
 
@@ -129,6 +166,7 @@ where
             let mut buf = [0u8; MAX_FRAME];
             if let Ok(n) = encode(&msg, &mut buf) {
                 io.write(&buf[..n]);
+                summary.bytes_written = summary.bytes_written.wrapping_add(n as u32);
             }
         }
 
@@ -143,6 +181,13 @@ where
             let mut buf = [0u8; MAX_FRAME];
             if let Ok(n) = encode(&msg, &mut buf) {
                 io.write(&buf[..n]);
+                summary.bytes_written = summary.bytes_written.wrapping_add(n as u32);
+            }
+        }
+
+        if let Some(limit) = max_iterations {
+            if summary.iterations >= limit {
+                return Some(summary);
             }
         }
     }

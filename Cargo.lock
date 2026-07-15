@@ -1800,6 +1800,14 @@ name = "shrike_link"
 version = "0.1.0"
 
 [[package]]
+name = "shrike_rp2040_host_sim"
+version = "0.1.0"
+dependencies = [
+ "shrike_control",
+ "shrike_link",
+]
+
+[[package]]
 name = "signature"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
