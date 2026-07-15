@@ -1,6 +1,6 @@
 # ADR-0001: Runtime scheduling, preemption, interrupts, and lock ordering
 
-- Status: Accepted
+- Status: Accepted with implementation gap (reschedule IPI pending)
 - Date: 2026-07-14
 
 ## Context
@@ -15,8 +15,17 @@ the required design rather than incidental implementation detail.
 
 1. Each online CPU owns its current task and one runnable queue. New and woken
    tasks prefer their last CPU unless affinity or availability requires another.
-2. Remote producers may enqueue to a CPU. An idle target is notified with a
-   reschedule IPI. No runnable task may be present in more than one queue.
+2. **DRAFT — target, not yet implemented:** remote producers may enqueue to a
+   CPU. An idle target should be notified with a reschedule IPI. No runnable
+   task may be present in more than one queue.
+
+   The notification path was not wired when this ADR was accepted. Today a
+   wakeup enqueues to `last_cpu()`, and the task runs when that CPU next
+   reschedules. Implementing the IPI target requires an SMP regression, an
+   ownership contract for the sender and handler under interrupt/preemption
+   masks, and evidence that the current eventually-consistent wakeup latency
+   is insufficient. Until those conditions are met, the IPI is a design target
+   rather than an enforced runtime invariant.
 3. Work stealing is best effort and bounded by both a victim-attempt limit and a
    maximum batch. A failed `try_steal` never spins on another CPU's queue.
 4. Context-switch preparation runs with local interrupts masked and an exclusive,
