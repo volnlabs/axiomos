@@ -7,9 +7,9 @@
 - **Comparison baseline:** original audited commit `661d5ede6331c5ee62d6642451ce63ce1e0d5adf`
 - **Fresh engineering score:** **7/10** (release-candidate engineering, not production assurance)
 - **Fresh production decision:** **NO-GO** for v1.0 or safety-relevant deployment
-- **Local required gate evidence at `70406ad`:**
-  - **Default mode** (`scripts/verify-engineering-audit.sh`): **85 PASS / 1 SKIP / 0 FAIL**. The SKIP is `audit-fault-injection-qemu-smoke` (`RUN_AUDIT_FAULT not set`); every other step ran and passed.
-  - **`RUN_AUDIT_FAULT=1` mode** (`RUN_AUDIT_FAULT=1 scripts/verify-engineering-audit.sh`): **86 PASS / 0 SKIP / 0 FAIL**. The `audit-fault-injection-qemu-smoke` step runs and passes; the full fault-injection coverage of physical allocation, mapper rollback, and exec/spawn failure paths is exercised.
+- **Local required gate evidence at `d24590b`:**
+  - **Default mode** (`scripts/verify-engineering-audit.sh`): **88 PASS / 1 SKIP / 0 FAIL**. The SKIP is `audit-fault-injection-qemu-smoke` (`RUN_AUDIT_FAULT not set`); every other step ran and passed.
+  - **`RUN_AUDIT_FAULT=1` mode** (`RUN_AUDIT_FAULT=1 scripts/verify-engineering-audit.sh`): **89 PASS / 0 SKIP / 0 FAIL**. The `audit-fault-injection-qemu-smoke` step runs and passes; the full fault-injection coverage of physical allocation, mapper rollback, and exec/spawn failure paths is exercised.
 - **Fault-injection status:** **partial-but-real**. Physical allocation, mapper rollback, and exec/spawn failure paths are now exercised by deterministic-fallible-callback tests. Sustained userspace stability remains open (audit-runtime-findings.md: post-boot ring-3 page fault at 0x2a00000012 in `init_x86` is a separate runtime triage item, not gated by the fault-injection smokes).
 - **Local Miri run (out of default gate):** `cargo miri test -p kernel_bpf --no-default-features --features cloud-profile` passes 342+45+18+4 = ~409 tests with zero UB after the integer-derived-pointer fix at `execution/mod.rs:113`; the pre-fix run aborted at `execute_map_update_helper`
 - **Hosted H-06 evidence:** externally blocked; [GitHub Actions run 29305700412](https://github.com/pro-utkarshM/axiomOS/actions/runs/29305700412) created zero-step jobs because the account spending limit/monthly usage prevented runners from starting. Note: `--miri` is also not invoked by any PR workflow today; running Miri is a local-only developer step behind `scripts/verify-engineering-audit.sh --miri`
