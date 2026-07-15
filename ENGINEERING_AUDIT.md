@@ -10,7 +10,7 @@
 - **Local required gate evidence at `9c75116`:**
   - **Default mode** (`scripts/verify-engineering-audit.sh`): **88 PASS / 1 SKIP / 0 FAIL**. The SKIP is `audit-fault-injection-qemu-smoke` (`RUN_AUDIT_FAULT not set`); every other step ran and passed.
   - **`RUN_AUDIT_FAULT=1` mode** (`RUN_AUDIT_FAULT=1 scripts/verify-engineering-audit.sh`): **89 PASS / 0 SKIP / 0 FAIL**. The `audit-fault-injection-qemu-smoke` step runs and passes; the full fault-injection coverage of physical allocation, mapper rollback, and exec/spawn failure paths is exercised.
-- **Fault-injection status:** **partial-but-real**. Physical allocation, mapper rollback, and exec/spawn failure paths are now exercised by deterministic-fallible-callback tests. Sustained userspace stability was previously recorded as open against system OVMF (audit-runtime-findings.md: post-boot ring-3 page fault at 0x2a00000012); re-investigation at this build (`22323fc`) found the recorded fault no longer reproduces against the system OVMF on this host, so the ring-3 fault is closed here. A regression step needs a pinned, hash-verified `OVMF_SYSTEM_TAG` / `OVMF_SYSTEM_SHA256` in `ci/build-inputs.env`; until then the developer-side capture path `scripts/qemu-debug-triage.sh --ovmf system --capture ...` continues to be the runner.
+- **Fault-injection status:** **partial-but-real**. Physical allocation, mapper rollback, and exec/spawn failure paths are now exercised by deterministic-fallible-callback tests. A post-boot ring-3 page fault at 0x2a00000012 was previously recorded against system OVMF; re-investigation at this build (`22323fc`) found the symptom currently non-reproducing on this host. The historical cause remains unresolved and there is no reproducible regression artifact. A regression step needs a pinned, hash-verified `OVMF_SYSTEM_TAG` / `OVMF_SYSTEM_SHA256` in `ci/build-inputs.env`; until then `scripts/qemu-debug-triage.sh --ovmf system --capture ...` remains a developer-side investigation path, not evidence of a fix.
 - **Local Miri run (out of default gate):** `cargo miri test -p kernel_bpf --no-default-features --features cloud-profile` passes 342+45+18+4 = ~409 tests with zero UB after the integer-derived-pointer fix at `execution/mod.rs:113`; the pre-fix run aborted at `execute_map_update_helper`
 - **Hosted H-06 evidence:** externally blocked; [GitHub Actions run 29305700412](https://github.com/pro-utkarshM/axiomOS/actions/runs/29305700412) created zero-step jobs because the account spending limit/monthly usage prevented runners from starting. Note: `--miri` is also not invoked by any PR workflow today; running Miri is a local-only developer step behind `scripts/verify-engineering-audit.sh --miri`
 
@@ -37,7 +37,7 @@ This table is the authoritative status for the current branch. The detailed audi
 | A-02 | **Closed** | Syscall VM traits now expose protection and commit semantics through rollback-safe mapping transactions. File/VFS traits preserve typed descriptor, path, seek, permission, unsupported-operation, broken-pipe, overflow, and I/O failures through exact errno mapping; stat carries file type; ext2/devfs user-controlled paths no longer panic. Adapter invariants are enforced by dedicated `vm-ownership-static` and `vfs-boundary-static` gate steps. |
 | A-04 | **Partial** | `kernel_abi` publishes ABI v1.0 catalogs containing exactly the 31 dispatched syscalls, 15 production BPF commands, four creatable map types, 14 interpreter-dispatched helpers, and seven accepted attach types. `ci/targets.toml` is the authoritative target/feature/evidence matrix and xtask generates both public tables; the local gate rejects dispatcher/catalog drift. Parallel RISC-V kernel entrypoints and remaining product-name drift are still open. |
 | Q-04 unsafe governance | **Partial** | Generated exact-fingerprint ledger owns all 696 first-party Rust `unsafe` sites (one removed by the Miri fix). Cloud-profile BPF interpreter tests are now Miri-clean under sequential single-threaded execution (342+45+18+4 tests, 0 UB). Miri proves aliasing/invalid-pointer-read soundness on a representative sequential path; it does NOT prove concurrent interleavings, so it does not close T-01/T-04 or substitute for an independent unsafe-site review. Independent review and broader kernel-representative dynamic analysis (Loom, fault injection, coverage budgets) remain outstanding. |
-| T-01 / T-02 / T-03 / T-04 | **Partial** | The local gate (78/78) closes the original highest-risk gaps and adds fault-injection coverage. New since the previous re-audit: (1) a fourth standalone fuzz target (`userspace/rk_bridge/fuzz/event_stream`) wired into `ci/components.toml`; (2) **physical-allocation fault-injection** at `kernel_physical_memory::fault::checkpoint` in `allocate_frames_impl` with a typed `armed(budget, f)` RAII controller, an `AUDIT_FAULT_PROBE` smoke that asserts the 5 expected markers under single-vCPU `--smp 1 + KVM`, and a static-check gate step; (3) **mapper rollback** via a private `kernel_map_transaction::MapRangeTransaction<S, MAPPED_CAP, PENDING_CAP>` helper with fixed-capacity stack-allocated `MaybeUninit` buffers (no heap, works during `heap::init` before the global allocator is live), 8 unit tests including a deterministic-fallible sweep, and a refactor of `AddressSpaceMapper::map_range_transaction` (x86_64 and aarch64) to drive `rollback` once; (4) **exec/spawn rollback** via a typed `ExecveError` (`Parse(ElfParseError)` / `Load(LoadElfError)` / `Enomem { stage }`) propagated from `Process::execve` through `sys_execve` to the syscall layer (Parse/Load → `ENOEXEC`, Enomem → `ENOMEM`), and a host-side end-to-end test (`tests/exec_rollback.rs` in `kernel_elfloader`) that drives `ElfLoader::load` through a `CountingMemoryApi` and asserts zero leaked allocations on every injected failure point. **What the fault-injection smokes prove**: rollback bookkeeping correctness under physical allocation, mapper, and exec failure paths. **What they do NOT prove**: sustained userspace stability past `QEMU_BOOT_OK` (audit-runtime-findings.md: post-boot ring-3 page fault at 0x2a00000012 in `init_x86` is a separate runtime triage item, not gated). Open: physical firmware HIL, Loom model for BPF-handle generations and hook-snapshot readers/writers, wait-channel I/O fault-injection (child exit, pipes, device/I/O), coverage, and mutation budgets. |
+| T-01 / T-02 / T-03 / T-04 | **Partial** | The local gate (78/78) closes the original highest-risk gaps and adds fault-injection coverage. New since the previous re-audit: (1) a fourth standalone fuzz target (`userspace/rk_bridge/fuzz/event_stream`) wired into `ci/components.toml`; (2) **physical-allocation fault-injection** at `kernel_physical_memory::fault::checkpoint` in `allocate_frames_impl` with a typed `armed(budget, f)` RAII controller, an `AUDIT_FAULT_PROBE` smoke that asserts the 5 expected markers under single-vCPU `--smp 1 + KVM`, and a static-check gate step; (3) **mapper rollback** via a private `kernel_map_transaction::MapRangeTransaction<S, MAPPED_CAP, PENDING_CAP>` helper with fixed-capacity stack-allocated `MaybeUninit` buffers (no heap, works during `heap::init` before the global allocator is live), 8 unit tests including a deterministic-fallible sweep, and a refactor of `AddressSpaceMapper::map_range_transaction` (x86_64 and aarch64) to drive `rollback` once; (4) **exec/spawn rollback** via a typed `ExecveError` (`Parse(ElfParseError)` / `Load(LoadElfError)` / `Enomem { stage }`) propagated from `Process::execve` through `sys_execve` to the syscall layer (Parse/Load → `ENOEXEC`, Enomem → `ENOMEM`), and a host-side end-to-end test (`tests/exec_rollback.rs` in `kernel_elfloader`) that drives `ElfLoader::load` through a `CountingMemoryApi` and asserts zero leaked allocations on every injected failure point. **What the fault-injection smokes prove**: rollback bookkeeping correctness under physical allocation, mapper, and exec failure paths. **What they do NOT prove**: sustained userspace stability past `QEMU_BOOT_OK` (a post-boot ring-3 page fault at 0x2a00000012 in `init_x86` was recorded; the symptom is currently non-reproducing on this system OVMF, its historical cause is unresolved, and it is not gated). Open: physical firmware HIL, Loom model for BPF-handle generations and hook-snapshot readers/writers, wait-channel I/O fault-injection (child exit, pipes, device/I/O), coverage, and mutation budgets. |
 
 The score rises from 3/10 to 7/10 because the original C-01 through C-07 and H-01 through H-05 implementation defects are closed and exercised by a reproducible local release gate. It does not rise further because hosted CI has not executed, real RPi5/RP2040 hardware paths are not release-gated, the unsafe/concurrency invariants lack external review or model checking, and significant Medium architecture, error-policy, workspace, test-budget, and documentation debt remains. The Miri-clean cloud-profile result tightens Q-04's evidence but, per the user's constraint, does not strengthen T-01/T-04 and does not substitute for an independent unsafe-site review; therefore the score stays at 7/10.
 
@@ -53,7 +53,7 @@ Current release-gate checklist:
 - [x] Add `--no-reboot` to the host QEMU launch path (`37b8e3d`); a kernel panic now exits cleanly instead of looping Limine and clobbering the captured serial buffer.
 - [x] Add a typed `ExecveError` and end-to-end exec-rollback coverage (`e3b85d9`); the host-side `exec-rollback-tests` step asserts no leaked frames / mappings / partially installed image on every injected failure point.
 - [x] Extract `MapRangeTransaction` and refactor `AddressSpaceMapper::map_range_transaction` to use it (`56a7f2e`); the helper is fixed-capacity and stack-allocated so it works during `heap::init` before the global allocator is live.
-- [x] Document the post-boot ring-3 page fault at 0x2a00000012 in `init_x86` (a `userspace/init` test bug, not a kernel bug) as a separate runtime triage item in `docs/security/audit-runtime-findings.md`. The fault-injection smokes log a RUNTIME FINDING line when observed but do not fail on it; sustained-userspace stability remains explicitly open.
+- [x] Document the historical post-boot ring-3 page fault at 0x2a00000012 in `init_x86` as a separate runtime finding in `docs/security/audit-runtime-findings.md`. It is currently non-reproducing on this host; the historical cause remains unresolved, there is no reproducible regression artifact, and it is not gated.
 - [ ] Wire `miri-bpf-cloud` into the default required gate so the regression test runs on every local gate (decision held for next refresh).
 - [ ] Build a host-side Loom model for BPF-handle generations and hook-snapshot readers/writers, exhaustively test teardown/update/read interleavings (separate from wait-channel I/O work).
 - [ ] Extend wait-channel fault-injection coverage to child exit, pipes, and device/I/O paths.
@@ -84,14 +84,15 @@ the pre-condition for landing it.
    `ci/build-inputs.env` does not yet provision real RP2040, and there is
    no equivalent for RPi5 PL011 uart bring-up under load.
 
-3. **Per-CPU run-queue refactor** — Explicitly deferred per
-   `docs/reviews/scheduler-runqueues.md`. The current `RunQueues`
-   targets `last_cpu()` for enqueue and steals on miss; a per-CPU
-   refactor requires (a) an SMP-4 CI smoke as a regression, (b) a
-   `loom`-equivalent model of the cross-CPU queue + steal, (c) an
-   IPI ownership contract, and (d) the ring-3 regression guard.
-   Until those four pre-conditions are met the design record
-   establishes the current contracts and no implementation lands.
+3. **Run-queue ownership, stealing, and wakeup refactor** — Explicitly
+   deferred per `docs/reviews/scheduler-runqueues.md`. `RunQueues`
+   already has one queue per CPU, targets `last_cpu()` on enqueue, and
+   steals on local miss. Changing its ownership/steal contract or adding
+   a scheduler wakeup IPI requires (a) an SMP-4 CI smoke, (b) a
+   `loom`-equivalent model of the cross-CPU queue and steal, and (c) an
+   IPI ownership contract. If the historical ring-3 symptom becomes
+   reproducible, its eventual fix also needs a pinned regression artifact;
+   the current non-reproducing observation is not such a guard.
 
 4. **Pipe / child-exit / device wait-channel fixtures** — Deferred
    pending host-testable production fixtures. The current channel-
@@ -106,10 +107,12 @@ the pre-condition for landing it.
    driver actually uses `WaitChannel` for completion — currently no
    driver does, so writing a device fixture today would be a stub.
 
-5. **Ring-3 fault regression** — Closed on this system OVMF at this
-   build (`docs/security/audit-runtime-findings.md`,
-   commit `22323fc`). Re-introducing it on a future kernel branch
-   would need a pinned, hash-verified
+5. **Ring-3 fault regression** — The symptom is currently
+   non-reproducing on this system OVMF at this build
+   (`docs/security/audit-runtime-findings.md`, corrected at `b47133e`), but
+   its historical cause remains unresolved and there is no reproducible
+   regression artifact. Reopening or closing the finding on a future
+   kernel branch would need a pinned, hash-verified
    `OVMF_SYSTEM_TAG` / `OVMF_SYSTEM_SHA256` in `ci/build-inputs.env`
    analogous to `OVMF_TAG=edk2-stable202511-r2`, plus a `build.rs`
    change to consume that prebuilt and a host-OVMF gate step in
@@ -124,7 +127,7 @@ core and protocol coverage exists for pipe/child-exit paths;
 OVMF pinning work exists. They remain unchecked above until their
 missing production / HIL / release-gate portions are complete.
 
-## Remediation checklist (current branch, assessed through `9c75116`)
+## Remediation checklist (current branch, assessed through `3c9c954`)
 
 Legend: `[x]` complete for the stated scope; `[~]` meaningful work landed but
 the full stated outcome remains open; `[ ]` not started or not yet evidenced.
@@ -141,9 +144,11 @@ snapshot below.
   child-exit, and pipe waits use generation-checked channels; channel-core and
   protocol tests exist. Device/I/O completion has no production consumer or
   host-runnable integration fixture yet.
-- [x] Define preemption, interrupt, and lock-order rules in an ADR. Accepted
-  [ADR-0001](docs/adr/0001-runtime-scheduling-locking.md) covers scheduler
-  ownership, interrupts, preemption nesting, and lock ranks.
+- [x] Define preemption, interrupt, and lock-order rules in an ADR.
+  [ADR-0001](docs/adr/0001-runtime-scheduling-locking.md) is accepted with
+  an implementation gap: it covers current ownership, interrupts,
+  preemption nesting, and lock ranks, while scheduler wakeup IPI remains a
+  draft target rather than an enforced invariant.
 - [x] Remove release-path scheduler/syscall/filesystem logging or move it to
   bounded per-CPU trace rings. Release logging compiles out; diagnostic output
   is feature-gated under the accepted runtime policy.
