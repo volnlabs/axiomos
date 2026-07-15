@@ -127,6 +127,12 @@ role = "control-link protocol"
 gate = "host lint and tests"
 
 [[component]]
+path = "firmware/shrike_control/Cargo.toml"
+kind = "cargo"
+role = "firmware control-loop traits and run loop"
+gate = "host build and shrike-control-build audit step"
+
+[[component]]
 path = "kernel/demos/riscv/Cargo.toml"
 kind = "cargo"
 role = "experimental RISC-V demo"

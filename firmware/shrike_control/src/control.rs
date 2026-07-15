@@ -1,5 +1,5 @@
 //! Hardware-independent control loop. All real-time safety logic lives in
-//! [`shrike_link`] (codec + watchdog); this just wires bytes -> decode ->
+//! `shrike_link` (codec + watchdog); this just wires bytes -> decode ->
 //! watchdog -> motors and emits periodic sensor frames. Generic over a few thin
 //! traits so the RP2040 peripherals (or a host mock) plug in at the edges.
 

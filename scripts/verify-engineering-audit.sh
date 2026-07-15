@@ -615,6 +615,12 @@ if [[ "$MODE" != "quick" ]]; then
         --target thumbv6m-none-eabi -- -D clippy::all
     run_cargo_step clippy-rp2040-release clippy --manifest-path firmware/shrike_rp2040/Cargo.toml \
         --target thumbv6m-none-eabi --release -- -D clippy::all
+    # shrike_control is the firmware-domain shared crate extracted from
+    # shrike_rp2040/src/{control,motor}.rs. no_std, host-buildable; this
+    # step verifies the extraction is byte-for-byte equivalent for host
+    # consumers. The thumbv6m target build of the firmware exercises
+    # shrike_control via the shrike_rp2040 path.
+    run_cargo_step shrike-control-build build -p shrike_control
     run_cargo_step clippy-riscv clippy --manifest-path kernel/demos/riscv/Cargo.toml \
         --target riscv64gc-unknown-none-elf -- -D clippy::all
 

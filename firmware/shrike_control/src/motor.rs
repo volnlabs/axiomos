@@ -1,10 +1,10 @@
 //! Motor driver backends — the ONLY place that knows how a signed setpoint maps
 //! to physical pins. Swapping to DRV8833/TB6612 later means adding a new struct
-//! here; the protocol ([`shrike_link`]) and the watchdog never change.
+//! here; the protocol (`shrike_link`) and the watchdog never change.
 //!
 //! v0.4 backend: **L298N**. Per motor, three pins — `ENA` (PWM, speed) and
 //! `IN1`/`IN2` (direction). The duty math (sign -> direction, per-mille -> PWM
-//! magnitude) is the shared, host-tested [`shrike_link::motor::split_duty`].
+//! magnitude) is the shared, host-tested `shrike_link::motor::split_duty`.
 
 use embedded_hal::digital::OutputPin;
 use embedded_hal::pwm::SetDutyCycle;

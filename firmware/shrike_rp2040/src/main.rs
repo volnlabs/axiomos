@@ -20,11 +20,7 @@ use hal::pac;
 use panic_halt as _;
 use rp2040_hal as hal;
 
-mod control;
-mod motor;
-
-use control::{ByteIo, Config, EstopLine, MicrosClock, Ultrasonic};
-use motor::L298n;
+use shrike_control::{run, ByteIo, Config, EstopLine, MicrosClock, Ultrasonic, L298n};
 
 /// Second-stage bootloader (W25Q080 flash on most RP2040 boards).
 #[link_section = ".boot2"]
@@ -241,7 +237,7 @@ fn main() -> ! {
         pin: pins.gpio12.into_pull_up_input(),
     };
 
-    control::run(
+    run(
         io,
         Clock1MHz,
         ultra,

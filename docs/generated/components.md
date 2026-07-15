@@ -5,6 +5,7 @@
 | Manifest | Kind | Role | Required gate |
 |---|---|---|---|
 | `Cargo.toml` | cargo | runner and image assembly | build, lint, artifacts, QEMU |
+| `firmware/shrike_control/Cargo.toml` | cargo | firmware control-loop traits and run loop | host build and shrike-control-build audit step |
 | `firmware/shrike_rp2040/Cargo.toml` | cargo | RP2040 firmware | RP2040 target lint and build |
 | `formal/lakefile.toml` | lean | verifier formal model | Lean build |
 | `kernel/Cargo.toml` | cargo | kernel | x86/AArch64 checks and QEMU |

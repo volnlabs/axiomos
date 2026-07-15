@@ -1,0 +1,9 @@
+[package]
+name = "shrike_control"
+version = "0.1.0"
+edition = "2021"
+description = "Shrike-lite firmware-domain control loop traits and run loop. no_std; shared by shrike_rp2040 (target) and shrike_rp2040_host_sim (host tests)."
+
+[dependencies]
+embedded-hal = "1.0"
+shrike_link = { path = "../../kernel/crates/shrike_link" }
