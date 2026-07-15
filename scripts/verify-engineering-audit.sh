@@ -468,8 +468,21 @@ run_step vm-ownership-static python3 -c \
 run_step vfs-boundary-static python3 -c \
     'from pathlib import Path; contract=Path("kernel/crates/kernel_syscall/src/access/file.rs").read_text(); syscall=Path("kernel/crates/kernel_syscall/src/unistd.rs").read_text(); adapter=Path("kernel/src/syscall/access.rs").read_text(); ext2=Path("kernel/src/file/ext2.rs").read_text(); pipe=Path("kernel/src/file/pipe.rs").read_text(); stat=Path("kernel/crates/kernel_vfs/src/vfs/stat.rs").read_text(); assert "enum FileAccessError" in contract and "Result<Self::FileInfo, FileAccessError>" in contract and "type OpenError" not in contract; assert syscall.count("error.errno()") >= 9; assert all(token in adapter for token in ("map_open_error", "map_read_error", "map_write_error", "checked_add_signed", "ReadError::EndOfFile", "lowest_available_fd", "checked_add(1)")); assert adapter.count("lowest_available_fd(&") >= 4; assert "map_err(|_| ())" not in adapter and "saturating_sub" not in adapter and "saturating_add" not in adapter; assert all(token not in ext2 for token in ("todo" + chr(33), "unimplemented" + chr(33), "EXT2_READ_PROBE_SEQ")); assert "WriteError::BrokenPipe" in pipe; assert "enum FileType" in stat and adapter.count("kernel_vfs::FileType::") >= 5'
 run_step bpf-snapshot-test-build rustc --edition 2021 -D warnings --test \
-    kernel/src/bpf/snapshot.rs -o "$OUTPUT_DIR/bpf-snapshot-tests"
+    kernel/crates/kernel_bpf/src/concurrency/epoch_snapshot.rs -o "$OUTPUT_DIR/bpf-snapshot-tests"
 run_step bpf-snapshot-tests "$OUTPUT_DIR/bpf-snapshot-tests"
+# Loom model for EpochSnapshot reclamation. Cfg-swaps the atomic imports in
+# kernel_bpf::concurrency::epoch_snapshot to loom::sync::atomic behind the
+# `loom-model` feature, so the test exercises the same algorithm as the
+# kernel binary. Supported-lifecycle tests only (no "publish after drop"
+# — Rust ownership correctly prevents dropping a snapshot while a guard
+# exists; manufacturing that race with an `Arc` wrapper would test the
+# wrapper, not EpochSnapshot).
+run_step loom-model-static python3 -c \
+    'from pathlib import Path; cargo=Path("kernel/crates/kernel_bpf/Cargo.toml").read_text(); src=Path("kernel/crates/kernel_bpf/src/concurrency/epoch_snapshot.rs").read_text(); kernel=Path("kernel/src/bpf/snapshot.rs").read_text(); test=Path("kernel/crates/kernel_bpf/tests/concurrency_model.rs").read_text(); assert "loom = { version = \"0.7\", optional = true }" in cargo, "loom must be an optional regular dep, not a dev-dep"; assert "loom-model = [\"dep:loom\"]" in cargo, "loom-model feature must enable dep:loom"; assert "default = []" in cargo.split("[features]")[0] or "default = []" in cargo, "default features must be empty"; assert "loom-model" in src and "loom::sync::atomic" in src, "cfg-swap to loom::sync::atomic missing"; assert "core::sync::atomic" in src, "core::sync::atomic cfg branch missing"; assert "pub(crate) use kernel_bpf::concurrency::epoch_snapshot::EpochSnapshot" in kernel, "kernel/src/bpf/snapshot.rs must be a one-line re-export"; assert "owner_shutdown_races_held_reader_guard" not in test, "the invalid shutdown-race test must not be present"; assert "publish_after_drop" not in test, "the invalid publish-after-drop test must not be present"; assert all(name in test for name in ("publish_read_does_not_return_torn_value", "old_reader_delays_reclamation_until_guard_drop", "publish_after_all_readers_drop_completes_without_waiting", "saturated_reader_counter_fails_closed_without_wrapping"))'
+run_step loom-model-test-build cargo test --locked --no-run -p kernel_bpf \
+    --features loom-model,cloud-profile --test concurrency_model
+run_step loom-model-tests cargo test --locked -p kernel_bpf \
+    --features loom-model,cloud-profile --test concurrency_model
 run_step acpi-mapping-test-build rustc --edition 2021 -D warnings --test \
     kernel/src/acpi/mapping.rs -o "$OUTPUT_DIR/acpi-mapping-tests"
 run_step acpi-mapping-tests "$OUTPUT_DIR/acpi-mapping-tests"

@@ -1,6 +1,6 @@
 version = 1
 baseline_sites = 698
-baseline_fingerprint = "sha256:ce32509a6a29123a0737abd8c6c4b9b8a63c080af1944d3c53f91492055fa7df"
+baseline_fingerprint = "sha256:2e9ddab023154c8ab429d16940f69ff9ebcc0f8158605b21fab86617d4eb6920"
 
 # Rules are evaluated in order. Keep narrow, high-risk obligations before broad
 # subsystem rules. The first matching rule supplies every site-level field.
@@ -194,7 +194,7 @@ reviewed = "2026-07-12"
 
 [[obligation]]
 id = "BPF-KERNEL-INTEGRATION"
-paths = ["kernel/src/bpf/*", "kernel/crates/kernel_bpf/src/*"]
+paths = ["kernel/src/bpf/*", "kernel/crates/kernel_bpf/src/*", "kernel/crates/kernel_bpf/src/concurrency/*"]
 scope = "production"
 owner = "BPF runtime/security maintainers"
 invariant = "Verifier, profile, attach, scheduler, signing, and kernel registry boundaries preserve program, context, credential, quota, and lifetime invariants."

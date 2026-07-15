@@ -106,6 +106,7 @@ pub mod attach;
 pub mod behaviors;
 pub mod bench;
 pub mod bytecode;
+pub mod concurrency;
 pub mod cost_corpus;
 pub mod execution;
 pub mod loader;

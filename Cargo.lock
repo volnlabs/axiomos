@@ -990,6 +990,7 @@ dependencies = [
  "criterion",
  "ed25519-dalek",
  "kernel_abi",
+ "loom",
  "proptest",
  "sha2",
  "spin",
