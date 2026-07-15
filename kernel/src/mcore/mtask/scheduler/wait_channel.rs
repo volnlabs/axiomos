@@ -30,7 +30,17 @@
 //! See `docs/reviews/wait-channel-refactor.md` for the review
 //! checklist.
 
+#[cfg(test)]
+extern crate alloc;
+
+#[cfg(not(test))]
 use crate::mcore::mtask::scheduler::wait_protocol::{DrainGate, WaitEpoch};
+
+#[cfg(test)]
+#[path = "wait_protocol.rs"]
+mod wait_protocol_test_module;
+#[cfg(test)]
+use self::wait_protocol_test_module::{DrainGate, WaitEpoch};
 
 /// A sink of parked items.
 ///
@@ -135,6 +145,7 @@ impl<W: WaiterSink> WaitChannel<W> {
     /// Return the current observed generation. Production
     /// `WaitRegistration::subscribe` uses this to capture the
     /// generation before constructing the registration.
+    #[allow(dead_code)]
     pub(crate) fn subscribe_observed_generation(&self) -> u64 {
         self.generation.observe()
     }
@@ -172,5 +183,140 @@ pub struct WaitRegistration<'a, W: WaiterSink> {
 impl<'a, W: WaiterSink> WaitRegistration<'a, W> {
     pub fn park(self, item: W::Item) {
         self.channel.park(item, self.generation);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::cell::RefCell;
+    use std::collections::VecDeque;
+
+    use super::*;
+
+    /// Host-only mock sink with `RefCell` interior mutability. The
+    /// `&self` method surface of the `WaiterSink` trait is implemented
+    /// by delegating through `RefCell::borrow_mut`.
+    #[derive(Debug, Clone)]
+    struct MockSink<T> {
+        items: RefCell<VecDeque<T>>,
+        disposed: RefCell<Vec<T>>,
+    }
+
+    impl<T> MockSink<T> {
+        fn new() -> Self {
+            Self {
+                items: RefCell::new(VecDeque::new()),
+                disposed: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl<T> WaiterSink for MockSink<T>
+    where
+        T: Clone,
+    {
+        type Item = T;
+
+        fn enqueue(&self, item: T) {
+            self.items.borrow_mut().push_back(item);
+        }
+
+        fn try_take(&self) -> Option<T> {
+            self.items.borrow_mut().pop_front()
+        }
+
+        fn on_wake(&self, item: T) {
+            self.disposed.borrow_mut().push(item);
+        }
+    }
+
+    impl<T: Clone> MockSink<T> {
+        fn disposed_items(&self) -> Vec<T> {
+            self.disposed.borrow().iter().cloned().collect()
+        }
+        fn queued_items(&self) -> VecDeque<T> {
+            self.items.borrow().iter().cloned().collect()
+        }
+    }
+
+    #[test]
+    fn channel_core_subscribe_cancel_wake_does_not_enqueue() {
+        let sink = alloc::sync::Arc::new(MockSink::<u32>::new());
+        let channel = WaitChannel::with_sink(alloc::sync::Arc::clone(&sink));
+        let reg = channel.subscribe();
+        drop(reg);
+        // After dropping the registration, the channel has no
+        // waiter. A wake should drain nothing.
+        channel.wake_all();
+        assert!(sink.queued_items().is_empty());
+        assert!(sink.disposed_items().is_empty());
+    }
+
+    #[test]
+    fn channel_core_wake_after_cancel_does_not_re_enqueue() {
+        let sink = alloc::sync::Arc::new(MockSink::<u32>::new());
+        let channel = WaitChannel::with_sink(alloc::sync::Arc::clone(&sink));
+        let reg = channel.subscribe();
+        reg.park(7);
+        // The reg is consumed; no further registration exists.
+        channel.wake_all();
+        // The waiter (item 7) was enqueued by `park` and is then
+        // taken and disposed by `wake_all`.
+        assert!(sink.queued_items().is_empty());
+        assert_eq!(sink.disposed_items(), vec![7]);
+    }
+
+    #[test]
+    fn channel_core_subscribe_during_drain_observed_by_next_wake() {
+        // A wake followed by a subscribe followed by a park
+        // followed by a wake must observe both wakes.
+        let sink = alloc::sync::Arc::new(MockSink::<u32>::new());
+        let channel = WaitChannel::with_sink(alloc::sync::Arc::clone(&sink));
+        channel.wake_all();
+        let reg = channel.subscribe();
+        reg.park(11);
+        channel.wake_all();
+        assert!(sink.queued_items().is_empty());
+        assert_eq!(sink.disposed_items(), vec![11]);
+    }
+
+    #[test]
+    fn channel_core_with_sink_constructs_correctly() {
+        let sink = alloc::sync::Arc::new(MockSink::<u32>::new());
+        let channel = WaitChannel::with_sink(alloc::sync::Arc::clone(&sink));
+        // No wake, no enqueue: the sink is empty.
+        assert!(sink.queued_items().is_empty());
+        assert!(sink.disposed_items().is_empty());
+        // The channel's observed generation is 0; changed_since(0)
+        // is false (no publish has happened).
+        assert!(!channel.generation.changed_since(0));
+    }
+
+    /// Compile-time check: `MockSink<u32>` is a valid `WaiterSink`
+    /// and the channel can be constructed with it. This is a
+    /// documentation test; it does not assert runtime behavior.
+    #[test]
+    fn channel_core_mocksink_is_waitsink() {
+        fn assert_waiter_sink<T: WaiterSink>(_: &WaitChannel<T>) {}
+        let channel = WaitChannel::with_sink(MockSink::<u32>::new());
+        assert_waiter_sink(&channel);
+    }
+}
+
+/// Blanket impl: `Arc<T>` is a `WaiterSink` when `T: WaiterSink`.
+/// This lets the test clone the sink into the channel (which
+/// consumes its `W` parameter) while retaining a handle to
+/// inspect the recorded state.
+#[cfg(test)]
+impl<T: WaiterSink + ?Sized> WaiterSink for alloc::sync::Arc<T> {
+    type Item = T::Item;
+    fn enqueue(&self, item: Self::Item) {
+        (**self).enqueue(item);
+    }
+    fn try_take(&self) -> Option<Self::Item> {
+        (**self).try_take()
+    }
+    fn on_wake(&self, item: Self::Item) {
+        (**self).on_wake(item);
     }
 }
