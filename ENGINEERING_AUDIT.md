@@ -7,10 +7,10 @@
 - **Comparison baseline:** original audited commit `661d5ede6331c5ee62d6642451ce63ce1e0d5adf`
 - **Fresh engineering score:** **7/10** (release-candidate engineering, not production assurance)
 - **Fresh production decision:** **NO-GO** for v1.0 or safety-relevant deployment
-- **Local required gate evidence at `d24590b`:**
+- **Local required gate evidence at `9c75116`:**
   - **Default mode** (`scripts/verify-engineering-audit.sh`): **88 PASS / 1 SKIP / 0 FAIL**. The SKIP is `audit-fault-injection-qemu-smoke` (`RUN_AUDIT_FAULT not set`); every other step ran and passed.
   - **`RUN_AUDIT_FAULT=1` mode** (`RUN_AUDIT_FAULT=1 scripts/verify-engineering-audit.sh`): **89 PASS / 0 SKIP / 0 FAIL**. The `audit-fault-injection-qemu-smoke` step runs and passes; the full fault-injection coverage of physical allocation, mapper rollback, and exec/spawn failure paths is exercised.
-- **Fault-injection status:** **partial-but-real**. Physical allocation, mapper rollback, and exec/spawn failure paths are now exercised by deterministic-fallible-callback tests. Sustained userspace stability remains open (audit-runtime-findings.md: post-boot ring-3 page fault at 0x2a00000012 in `init_x86` is a separate runtime triage item, not gated by the fault-injection smokes).
+- **Fault-injection status:** **partial-but-real**. Physical allocation, mapper rollback, and exec/spawn failure paths are now exercised by deterministic-fallible-callback tests. Sustained userspace stability was previously recorded as open against system OVMF (audit-runtime-findings.md: post-boot ring-3 page fault at 0x2a00000012); re-investigation at this build (`22323fc`) found the recorded fault no longer reproduces against the system OVMF on this host, so the ring-3 fault is closed here. A regression step needs a pinned, hash-verified `OVMF_SYSTEM_TAG` / `OVMF_SYSTEM_SHA256` in `ci/build-inputs.env`; until then the developer-side capture path `scripts/qemu-debug-triage.sh --ovmf system --capture ...` continues to be the runner.
 - **Local Miri run (out of default gate):** `cargo miri test -p kernel_bpf --no-default-features --features cloud-profile` passes 342+45+18+4 = ~409 tests with zero UB after the integer-derived-pointer fix at `execution/mod.rs:113`; the pre-fix run aborted at `execute_map_update_helper`
 - **Hosted H-06 evidence:** externally blocked; [GitHub Actions run 29305700412](https://github.com/pro-utkarshM/axiomOS/actions/runs/29305700412) created zero-step jobs because the account spending limit/monthly usage prevented runners from starting. Note: `--miri` is also not invoked by any PR workflow today; running Miri is a local-only developer step behind `scripts/verify-engineering-audit.sh --miri`
 
@@ -60,6 +60,162 @@ Current release-gate checklist:
 - [ ] Run H-06 on hosted GitHub runners after billing/monthly quota is restored.
 - [ ] Pass physical RPi5 and RP2040 HIL, including GPIO interrupt and control-link failure cases.
 - [ ] Obtain an independent safety/concurrency review of the unsafe ledger, scheduler/VM shootdown, and BPF epoch/snapshot invariants.
+
+## Deferred items (next audit branch)
+
+This subsection records work that is **partial today** or **not started** and
+that is **explicitly deferred** to a future audit branch. Each item lists
+the current state, the missing production / HIL / release-gate piece, and
+the pre-condition for landing it.
+
+1. **Hosted H-06 evidence** — Contingent on GitHub Actions billing /
+   monthly quota. Run 29305700412 created zero-step jobs because the
+   account spending limit prevented runners from starting. When quota is
+   restored, re-run H-06 on hosted GitHub runners and update the
+   “Hosted H-06 evidence” line in this document. The local gate (88
+   PASS / 0 FAIL / 1 SKIP at `423e785`) is the closest reproducible
+   substitute today.
+
+2. **Physical RPi5 / RP2040 HIL** — Contingent on (a) RP2040 hardware
+   availability in CI, and (b) a runner contract that captures UART
+   output without the QEMU serial-port redirect. `firmware/shrike_control`
+   (commit `1d37351`) and `firmware/shrike_rp2040_host_sim`
+   (commit `70406ad`) cover the firmware-domain contract on the host;
+   `ci/build-inputs.env` does not yet provision real RP2040, and there is
+   no equivalent for RPi5 PL011 uart bring-up under load.
+
+3. **Per-CPU run-queue refactor** — Explicitly deferred per
+   `docs/reviews/scheduler-runqueues.md`. The current `RunQueues`
+   targets `last_cpu()` for enqueue and steals on miss; a per-CPU
+   refactor requires (a) an SMP-4 CI smoke as a regression, (b) a
+   `loom`-equivalent model of the cross-CPU queue + steal, (c) an
+   IPI ownership contract, and (d) the ring-3 regression guard.
+   Until those four pre-conditions are met the design record
+   establishes the current contracts and no implementation lands.
+
+4. **Pipe / child-exit / device wait-channel fixtures** — Deferred
+   pending host-testable production fixtures. The current channel-
+   core tests in `kernel/src/mcore/mtask/scheduler/wait_channel.rs::tests`
+   cover the algorithm with `MockSink<T>`; subsystem call-site tests
+   require a real task scheduler / process model that can run on the
+   host, which does not exist yet. When such a seam is available
+   (e.g., a host-runnable `RunQueues` test-double or a full host
+   kernel harness), pipe and child-exit fixtures will be added as
+   separate tests against the production types `PipeEndpoint` /
+   `Process::mark_exited`. Device fixtures will be added once a
+   driver actually uses `WaitChannel` for completion — currently no
+   driver does, so writing a device fixture today would be a stub.
+
+5. **Ring-3 fault regression** — Closed on this system OVMF at this
+   build (`docs/security/audit-runtime-findings.md`,
+   commit `22323fc`). Re-introducing it on a future kernel branch
+   would need a pinned, hash-verified
+   `OVMF_SYSTEM_TAG` / `OVMF_SYSTEM_SHA256` in `ci/build-inputs.env`
+   analogous to `OVMF_TAG=edk2-stable202511-r2`, plus a `build.rs`
+   change to consume that prebuilt and a host-OVMF gate step in
+   `scripts/verify-engineering-audit.sh`. Out of scope for this
+   branch; the developer-side capture path
+   `scripts/qemu-debug-triage.sh --ovmf system --capture ...`
+   remains in place.
+
+Some items above are already partial rather than untouched: WaitChannel
+core and protocol coverage exists for pipe/child-exit paths;
+`Loom`/`Miri` epoch work exists; RP2040 host simulation exists;
+OVMF pinning work exists. They remain unchecked above until their
+missing production / HIL / release-gate portions are complete.
+
+## Remediation checklist (current branch, assessed through `9c75116`)
+
+Legend: `[x]` complete for the stated scope; `[~]` meaningful work landed but
+the full stated outcome remains open; `[ ]` not started or not yet evidenced.
+This is the current remediation checklist, distinct from the historical audit
+snapshot below.
+
+### Runtime
+
+- [x] Replace the globally serialized task queue with per-CPU queues and
+  bounded work stealing. `RunQueues` owns one `TaskQueue` per CPU and uses a
+  bounded rotating victim scan; ADR-0001 defines the ownership and wakeup
+  contract.
+- [~] Add event-driven wait channels for child exit, pipes, and I/O. Timer,
+  child-exit, and pipe waits use generation-checked channels; channel-core and
+  protocol tests exist. Device/I/O completion has no production consumer or
+  host-runnable integration fixture yet.
+- [x] Define preemption, interrupt, and lock-order rules in an ADR. Accepted
+  [ADR-0001](docs/adr/0001-runtime-scheduling-locking.md) covers scheduler
+  ownership, interrupts, preemption nesting, and lock ranks.
+- [x] Remove release-path scheduler/syscall/filesystem logging or move it to
+  bounded per-CPU trace rings. Release logging compiles out; diagnostic output
+  is feature-gated under the accepted runtime policy.
+- [x] Gate AArch64 bring-up probes and raw markers behind
+  `bringup-diagnostics`.
+- [x] Flatten pointer-heavy map storage and zero only verifier-recorded BPF
+  stack use.
+- [x] Resolve shipped-JIT policy. Shipped profiles disable the JIT and the RWX
+  allocator was removed; a compile-on-load RW-to-RX JIT is therefore not a
+  shipped requirement. See ADR-0004.
+
+### Architecture
+
+- [x] Remove or formally integrate unused BPF scheduler, static-pool, and
+  marker-only profile strategies. The unused scheduler/static-pool path was
+  removed in `4859848`.
+- [x] Make extracted syscall/VM/VFS traits carry protection, ownership,
+  rollback, and fault semantics. This is the closed A-02 work.
+- [~] Split oversized process, BPF manager, verifier, signing, and actuation
+  modules by invariant. BPF, signing, verifier, and actuation seams were
+  extracted and gated; the process manager remains oversized.
+- [~] Define consistent kernel, syscall, VM, BPF, and boot error policies.
+  ADR-0002 and typed VM/VFS/exec errors exist, but the policy is not yet
+  uniformly enforced across all boot and kernel paths.
+- [x] Publish a versioned axiomos ABI containing only supported commands,
+  maps, helpers, and attach types. ABI v1 catalogs are generated and checked
+  against dispatch.
+- [~] Establish one supported target/feature matrix and retire or relocate
+  parallel RISC-V entrypoints. ADR-0003 and generated inventory exist; the
+  parallel RISC-V entries are still open cleanup.
+
+### Testing
+
+- [x] Add a manifest-driven `xtask` CI gate that rejects unlisted Cargo,
+  firmware, fuzz, and Lean workspaces (`d976d0`).
+- [~] Add mock-HAL RP2040 state-machine tests and real Pi/RP2040 HIL coverage.
+  Host simulation of the production control traits is complete; physical HIL
+  remains hardware- and runner-contract-dependent.
+- [x] Generate verifier/runtime helper tables from one descriptor and test
+  contract equivalence (`3039ffd`).
+- [x] Expand fuzzing to signed containers, syscall structures, ring buffers,
+  and protocol bridges.
+- [~] Add deterministic fail-after-N allocation and mapping fault injection.
+  Physical allocation, mapping rollback, and exec/spawn paths are covered;
+  the broader allocation/mapping surface is not yet exhausted.
+- [ ] Publish per-crate line/branch coverage and add parser/verifier mutation
+  testing.
+- [~] Add Loom/Miri-style epoch reclamation tests and hardware GPIO IRQ
+  dispatch stress. EpochSnapshot Loom tests and BPF Miri coverage landed;
+  hardware GPIO IRQ stress requires HIL.
+
+### Documentation
+
+- [ ] Archive obsolete pitches, plans, old audits, and superseded
+  specifications.
+- [~] Create normative current documentation and ADRs for scheduler, VM, BPF
+  trust, JIT, and platform support. `docs/current` and ADRs 0001-0004 exist;
+  archival and full VM/BPF-trust normalization remain open.
+- [~] Generate workspace, shipped-image, syscall/map/helper capability, and
+  artifact-provenance tables. Workspace, target, and capability inventories
+  exist; complete shipped-image/provenance tables remain open.
+- [~] Correct remaining Axiom/AxiomOS/axiom-ebpf naming drift. Root artifact
+  naming is standardized on `axiomos`; remaining drift is tracked under A-04.
+- [ ] Rebuild benchmark documentation with commit, toolchain, raw logs, and
+  artifact hashes.
+- [~] Pin mutable OVMF/Limine inputs and remove mtime-based artifact
+  selection. OVMF and Limine are pinned and verified; the Pi artifact
+  selection cleanup remains open.
+- [~] Enforce unsafe-ledger, documentation-link, command-smoke, and provenance
+  checks in the release gate. The unsafe ledger and broad local audit gate are
+  enforced; documentation-link and complete provenance enforcement remain
+  incomplete.
 
 ## Historical audit snapshot (2026-07-11)
 
