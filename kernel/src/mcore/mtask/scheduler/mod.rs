@@ -40,6 +40,7 @@ mod run_queue_policy;
 pub mod sleep;
 mod switch;
 pub mod wait;
+mod wait_channel;
 mod wait_protocol;
 
 #[cfg(all(

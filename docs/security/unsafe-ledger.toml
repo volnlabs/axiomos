@@ -1,6 +1,6 @@
 version = 1
 baseline_sites = 698
-baseline_fingerprint = "sha256:8fd4ea6d5b31c7a8c960e64dd35e88e247210896567cf13bfb3281074536daa6"
+baseline_fingerprint = "sha256:b6667d0a4a443a913b956852671b9034f1985437ab6f704e8575a4d018edcc52"
 
 # Rules are evaluated in order. Keep narrow, high-risk obligations before broad
 # subsystem rules. The first matching rule supplies every site-level field.
@@ -84,7 +84,7 @@ reviewed = "2026-07-12"
 
 [[obligation]]
 id = "SCHEDULER-WAIT-TRANSITION"
-paths = ["kernel/src/mcore/mtask/scheduler/wait.rs"]
+paths = ["kernel/src/mcore/mtask/scheduler/wait.rs", "kernel/src/mcore/mtask/scheduler/wait_channel.rs"]
 scope = "production"
 owner = "scheduler/SMP maintainers"
 invariant = "The current task owns a generation-stamped wait registration, the condition lock is released, and local interrupts remain masked across the exclusive scheduler transition."

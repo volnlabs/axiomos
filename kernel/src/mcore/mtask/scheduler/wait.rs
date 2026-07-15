@@ -1,77 +1,86 @@
+//! Production `WaitChannel<TaskQueue>` wrapper.
+//!
+//! The generic algorithm lives in `wait_channel.rs`. This file holds
+//! only the production specialization: a type alias
+//! `pub type WaitChannel = WaitChannel<TaskQueue>`, a `TaskQueue`
+//! adapter that implements the `WaiterSink` trait (delegating to the
+//! MPSC's interior mutability and providing the wake side effect
+//! `Task::wake_from_wait` + `RunQueues::enqueue`), a `new()`
+//! constructor on the `TaskQueue` specialization, a concrete
+//! `WaitRegistration` that owns an `Arc<WaitChannel>` (matching the
+//! pre-refactor API surface), and the `TaskWait::block_current`
+//! helper that integrates with the scheduler.
+//!
+//! Call sites are byte-identical at the source level: `WaitChannel::new()`
+//! resolves through the type alias, and the call sites in
+//! `kernel/src/file/pipe.rs` and `kernel/src/mcore/mtask/process/mod.rs`
+//! are unchanged.
+//!
+//! Drop behavior: the production specialization preserves the
+//! same fields and the same declaration order as the pre-refactor
+//! `WaitChannel`. The compiler-generated `core::ptr::drop_glue`
+//! drops each field in declaration order; the refactor does not
+//! add or alter this. No prior `Drop` impl existed; the
+//! `TaskQueue` production specialization retains the same
+//! compiler-generated field drop behavior.
+
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::pin::Pin;
 
 use crate::mcore::context::ExecutionContext;
 use crate::mcore::mtask::scheduler::run_queue::RunQueues;
-use crate::mcore::mtask::scheduler::wait_protocol::{DrainGate, WaitEpoch};
+use crate::mcore::mtask::scheduler::wait_channel::{WaitChannel as GenericWaitChannel, WaiterSink};
 use crate::mcore::mtask::task::{Task, TaskQueue};
 
-#[derive(Debug)]
-pub struct WaitChannel {
-    generation: WaitEpoch,
-    drain_gate: DrainGate,
-    waiters: TaskQueue,
+/// Production type alias. Every call site uses `WaitChannel` (no
+/// generic parameter at the use site).
+pub type WaitChannel = GenericWaitChannel<TaskQueue>;
+
+/// Production `WaiterSink` adapter for `TaskQueue`. The MPSC's
+/// interior mutability makes `enqueue` and `try_take` work through
+/// `&self`; `on_wake` performs the production wake side effect
+/// (`Task::wake_from_wait` + `RunQueues::enqueue`).
+impl WaiterSink for TaskQueue {
+    type Item = Pin<Box<Task>>;
+
+    fn enqueue(&self, item: Self::Item) {
+        // The pre-refactor code did `self.waiters.enqueue(task)`,
+        // which resolved through `Deref<Target = MpscQueue<Task>>`.
+        // The MPSC's `enqueue` is `&self` and takes
+        // `T::Handle = Pin<Box<Task>>`, matching `Self::Item`.
+        let mpsc: &cordyceps::mpsc_queue::MpscQueue<Task> = &**self;
+        mpsc.enqueue(item);
+    }
+
+    fn try_take(&self) -> Option<Self::Item> {
+        // The pre-refactor code did `self.waiters.try_take()`,
+        // which resolved to `TaskQueue::try_take` (a method on
+        // `impl TaskQueue` that delegates to the MPSC's
+        // `try_dequeue`).
+        TaskQueue::try_take(self)
+    }
+
+    fn on_wake(&self, item: Self::Item) {
+        // The pre-refactor code did `task.wake_from_wait()` and
+        // `RunQueues::enqueue(task)`. Both are preserved:
+        // `wake_from_wait` takes `&self` (interior mutability);
+        // `RunQueues::enqueue` is a static call that consumes
+        // its argument.
+        item.wake_from_wait();
+        RunQueues::enqueue(item);
+    }
 }
 
 impl WaitChannel {
+    /// Production constructor: creates a `WaitChannel<TaskQueue>` with
+    /// a fresh `TaskQueue`. The pre-refactor constructor initialized
+    /// `Self { generation, drain_gate, waiters: TaskQueue::new() }`;
+    /// the post-refactor constructor delegates to `with_sink` for
+    /// identical field initialization.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            generation: WaitEpoch::new(),
-            drain_gate: DrainGate::new(),
-            waiters: TaskQueue::new(),
-        }
-    }
-
-    #[must_use]
-    fn subscribe(self: &Arc<Self>) -> WaitRegistration {
-        WaitRegistration {
-            channel: self.clone(),
-            generation: self.generation.observe(),
-        }
-    }
-
-    /// Publish a condition change and wake every task registered before it.
-    ///
-    /// This path does not allocate or acquire a blocking lock, so it can be
-    /// called by interrupt-side event publishers.
-    pub fn wake_all(&self) {
-        self.generation.publish();
-        self.drain_waiters();
-    }
-
-    fn drain_waiters(&self) {
-        if !self.drain_gate.request() {
-            return;
-        }
-
-        loop {
-            self.drain_gate.begin_pass();
-            while let Some(task) = self.waiters.try_take() {
-                task.wake_from_wait();
-                RunQueues::enqueue(task);
-            }
-            if !self.drain_gate.finish_pass() {
-                break;
-            }
-        }
-    }
-
-    fn park(&self, task: Pin<Box<Task>>, observed_generation: u64) {
-        if self.generation.changed_since(observed_generation) {
-            task.wake_from_wait();
-            RunQueues::enqueue(task);
-            return;
-        }
-
-        self.waiters.enqueue(task);
-
-        // If a wake raced publication, either its consumer took this task or
-        // this producer observes the generation change and completes the drain.
-        if self.generation.changed_since(observed_generation) {
-            self.drain_waiters();
-        }
+        Self::with_sink(TaskQueue::new())
     }
 }
 
@@ -81,6 +90,10 @@ impl Default for WaitChannel {
     }
 }
 
+/// Production `WaitRegistration`: owns an `Arc<WaitChannel>`
+/// (matching the pre-refactor storage in `Task::wait_registration`).
+/// Drop the registration to release the Arc without parking; call
+/// `park` to actually park the task.
 #[derive(Debug)]
 pub(crate) struct WaitRegistration {
     channel: Arc<WaitChannel>,
@@ -88,7 +101,19 @@ pub(crate) struct WaitRegistration {
 }
 
 impl WaitRegistration {
+    /// Subscribe to the channel. The returned registration holds an
+    /// `Arc<WaitChannel>` clone, matching the pre-refactor API.
+    pub(crate) fn subscribe(channel: &Arc<WaitChannel>) -> Self {
+        Self {
+            channel: channel.clone(),
+            generation: channel.subscribe_observed_generation(),
+        }
+    }
+
     pub(crate) fn park(self, task: Pin<Box<Task>>) {
+        // The pre-refactor code did
+        // `self.channel.park(task, self.generation)`. The post-refactor
+        // generic `WaitChannel::park` has the same signature.
         self.channel.park(task, self.generation);
     }
 }
@@ -104,7 +129,7 @@ impl TaskWait {
     pub fn block_current(channel: &Arc<WaitChannel>, release_condition: impl FnOnce()) -> bool {
         let context = ExecutionContext::load();
         context.with_interrupts_masked(|| {
-            let registration = channel.subscribe();
+            let registration = WaitRegistration::subscribe(channel);
             context.with_current_task_mut(|task| task.begin_wait(registration));
             release_condition();
 
