@@ -482,10 +482,33 @@ run_cargo_step focused-host-tests test \
     -p kernel_abi -p kernel_elfloader -p kernel_physical_memory -p kernel_syscall \
     -p kernel_time -p kernel_usermem -p kernel_vfs -p kernel_map_transaction \
     -p kernel_virtual_memory -p shrike_link
+
+# End-to-end exec-rollback coverage. Exercises the kernel_elfloader's
+# rollback contract under deterministic allocation failures: a
+# MemoryApi that fails on the n-th `allocate` / `make_executable` /
+# `make_readonly` call, and asserts that the live-allocations
+# counter is zero after every failure point. This is the host-side
+# analogue of the kernel-side `Process::execve` rollback path: the
+# kernel's `LowerHalfMemoryApi` returns `None` (propagating to
+# `LoadElfError::AllocationFailed`) when the frame allocator is
+# exhausted, and the loader must not leak segments to the new image.
+run_step exec-rollback-static python3 -c \
+    'from pathlib import Path; t=Path("kernel/crates/kernel_elfloader/tests/exec_rollback.rs").read_text(); assert "CountingMemoryApi" in t and "live_allocations" in t; assert "LoadElfError::AllocationFailed" in t; assert "fail_allocate_at" in t and "fail_make_executable_at" in t and "fail_make_readonly_at" in t; assert "load_allocate_failure_sweep_leaves_no_leaks" in t; assert "load_releases_writable_allocation_on_make_executable_failure" in t; assert "load_releases_writable_allocation_on_make_readonly_failure" in t'
+run_cargo_step exec-rollback-tests test -p kernel_elfloader \
+    --test exec_rollback
 run_step fault-injection-static python3 -c \
     'from pathlib import Path; root=Path("kernel/crates/kernel_physical_memory"); cargo=(root/"Cargo.toml").read_text(); lib=(root/"src/lib.rs").read_text(); fault=(root/"src/fault.rs").read_text(); audit_lib=Path("kernel/src/audit_fault_probe.rs"); audit_probe=audit_lib.read_text() if audit_lib.exists() else ""; kernel_cargo=Path("kernel/Cargo.toml").read_text(); root_cargo=Path("Cargo.toml").read_text(); assert "[features]" in cargo and "fault-injection = []" in cargo; assert "spin.workspace = true" in cargo, "no_std spin mutex dependency missing"; assert "pub mod fault" in lib, "fault module must be pub (kernel test harness needs cross-crate access path)"; assert "cfg(feature = \"fault-injection\")" in lib; assert lib.count("crate::fault::checkpoint()") >= 2, "expected two checkpoints in allocate_frames_impl"; assert "pub fn armed" in fault, "only `armed` must be pub for cross-crate consumption"; assert "pub(crate) fn checkpoint" in fault and "pub(crate) fn disarm" in fault and "pub(crate) fn arm" in fault, "only `armed` must be public; arm, disarm, checkpoint, is_disarmed stay pub(crate)"; assert "pub(crate) fn is_disarmed" in fault, "is_disarmed helper must exist for the panic-restoration test"; assert "SERIAL" in fault and "spin" in fault and "Mutex" in fault, "controller must use no_std synchronization"; assert "audit-fault-injection" in kernel_cargo and "kernel_physical_memory/fault-injection" in kernel_cargo, "kernel feature must forward to kernel_physical_memory/fault-injection"; assert "audit-fault-injection = [\"kernel_x86/audit-fault-injection\"]" in root_cargo, "workspace-root forwarder feature missing"; assert "pub fn run_probe" in audit_probe, "audit_fault_probe must expose run_probe"; main_text=Path("kernel/src/main.rs").read_text(); assert "mod audit_fault_probe" in main_text, "audit_fault_probe module not wired into main.rs"; assert "audit_fault_probe::run_probe" in main_text, "run_probe call site missing from main.rs"; assert "fault::armed" in audit_probe, "probe must use armed(...) controller"'
 run_cargo_step fault-injection-tests test -p kernel_physical_memory \
     --features fault-injection
+
+# Static check: the kernel-side execve path uses the typed
+# `ExecveError` and the syscall handler maps each variant to the
+# correct errno (ENOEXEC for parse/load errors, ENOMEM for the
+# Enomem variant). Without this check, a regression that
+# collapses the typed error back to `&'static str` would silently
+# lose the ENOMEM signal that the audit-fault-injection work
+# requires.
+run_step execve-typed-error-static python3 /tmp/opencode/check_execve_typed_error.py
 
 # Audit-fault-injection QEMU smoke. Runs only when RUN_AUDIT_FAULT=1.
 # Uses --smp 1 (single vCPU) so the global fault-counter observed by the
@@ -618,6 +641,8 @@ if [[ "$MODE" == "extended" ]]; then
         -p kernel_abi -p kernel_elfloader -p kernel_physical_memory -p kernel_syscall \
         -p kernel_time -p kernel_usermem -p kernel_vfs -p kernel_map_transaction \
         -p kernel_virtual_memory -p shrike_link
+    run_cargo_step exec-rollback-tests-release test --release -p kernel_elfloader \
+        --test exec_rollback
     run_cargo_step bpf-cloud-tests-release test --release -p kernel_bpf \
         --no-default-features --features cloud-profile
     run_cargo_step bpf-embedded-tests-release test --release -p kernel_bpf \

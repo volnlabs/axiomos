@@ -54,8 +54,8 @@ use executable::executable_layout;
 mod image;
 #[cfg(target_arch = "aarch64")]
 use image::with_process_address_space_active;
-pub(crate) use image::ExecImage;
 use image::{read_executable_file_into, trampoline_load_elf, ElfSegments};
+pub(crate) use image::{ExecImage, ExecveError};
 mod id;
 pub use id::*;
 pub mod mem;
@@ -536,28 +536,47 @@ impl Process {
     /// Replaces the current process image with a preflight-validated executable.
     ///
     /// # Errors
-    /// Returns an error if the executable cannot be loaded or memory allocation fails.
+    /// Returns a typed [`ExecveError`] if the executable cannot be
+    /// loaded, a segment allocation fails, the TLS copy fails to
+    /// allocate, or the user-stack allocation fails. On any
+    /// failure, the local segment / TLS / stack allocations are
+    /// dropped, which releases the underlying physical frames via
+    /// the `LowerHalfAllocation` `Drop` impl. The process's
+    /// tracked `elf_segments` / `executable_file_data` /
+    /// `memory_regions` are only rewritten on success, so a
+    /// failed `execve` does not leave the process pointing at a
+    /// half-installed image.
     pub(crate) fn execve(
         self: &Arc<Self>,
         file_content: Vec<u8>,
         _argv: &[String],
         _envp: &[String],
-    ) -> Result<ExecImage, &'static str> {
-        // Clear process allocations
+    ) -> Result<ExecImage, ExecveError> {
+        // Stage 1: parse the ELF. No allocations are made yet, so
+        // a parse failure leaves the process untouched.
+        let elf_file = ElfFile::try_parse(&file_content).map_err(|e| {
+            log::error!("execve: ELF parse error: {e}");
+            ExecveError::Parse(e)
+        })?;
+
+        // Stage 2: clear the old process state. From this point on
+        // we MUST build the new image successfully or the process
+        // is in a "reset" state. The build itself is
+        // failure-recovering via Drop on the local segment / TLS /
+        // stack allocations.
         *self.executable_file_data.write() = None;
-
-        // Clear ELF segment allocations (unmaps from current AS before reset)
         self.elf_segments.write().clear();
-
-        // Clear memory regions (Deallocates physical frames)
         self.memory_regions.clear();
 
-        // 3. Reset Address Space and VMM
-        {
+        // Reset Address Space and VMM. The new AS is "staged" but
+        // not yet tracked in `process.elf_segments` — the loader
+        // installs segments into the new AS via `LowerHalfMemoryApi`,
+        // and on failure the local `ElfImage` is dropped, which
+        // unmaps those segments and releases the underlying frames.
+        let mut memapi = {
             let mut as_guard = self.address_space.write();
             let mut vmm_guard = self.lower_half_memory.write();
 
-            // Create fresh AddressSpace and VMM
             *as_guard = Some(AddressSpace::new());
             as_guard
                 .as_ref()
@@ -574,30 +593,23 @@ impl Process {
                 #[cfg(target_arch = "aarch64")]
                 0x0000_007F_0000_0000,
             );
-        }
 
-        // 4. Load the new executable
-        // We use the same self reference, but now it points to the new AS/VMM
-        let mut memapi = LowerHalfMemoryApi::new(self.clone());
+            LowerHalfMemoryApi::new(self.clone())
+        };
 
-        // Need to verify it's a valid ELF first. Surface the typed
-        // ElfParseError so a malformed binary (audit H-05) is
-        // diagnosable from logs instead of a generic "Invalid ELF
-        // file" line.
-        let elf_file = ElfFile::try_parse(&file_content).map_err(|e| {
-            log::error!("execve: ELF parse error: {e}");
-            "Invalid ELF file"
-        })?;
-
+        // Stage 3: load the new executable. `ElfImage` owns the
+        // segment allocations; on `?` it is dropped, which unmap +
+        // release each segment.
         let elf_image = ElfLoader::new(memapi.clone()).load(elf_file).map_err(|e| {
             log::error!("execve: ELF load error: {e}");
-            "Failed to load ELF"
+            ExecveError::Load(e)
         })?;
 
         let entry_point = elf_image.entry_point() as usize;
         let (exec_allocs, mut ro_allocs, wr_allocs, tls_master) = elf_image.into_inner();
 
-        // 5. Setup TLS if present
+        // Stage 4: TLS copy. `tls_alloc` is dropped on the
+        // `?`-branch, which releases the TLS frame.
         let tls_allocation = if let Some(ref master_tls) = tls_master {
             let mut tls_alloc = memapi
                 .allocate(
@@ -606,7 +618,7 @@ impl Process {
                     UserAccessible::Yes,
                     Guarded::No,
                 )
-                .ok_or("Failed to allocate TLS")?;
+                .ok_or(ExecveError::Enomem { stage: "tls" })?;
 
             let slice = tls_alloc.as_mut();
             slice.copy_from_slice(master_tls.as_ref());
@@ -615,7 +627,8 @@ impl Process {
             None
         };
 
-        // 6. Allocate new User Stack
+        // Stage 5: user stack. `ustack_allocation` is dropped on
+        // the `?`-branch, which releases the stack frames.
         let ustack_allocation = memapi
             .allocate(
                 Location::Anywhere,
@@ -627,11 +640,17 @@ impl Process {
                 UserAccessible::Yes,
                 Guarded::Yes,
             )
-            .ok_or("Failed to allocate user stack")?;
+            .ok_or(ExecveError::Enomem {
+                stage: "user_stack",
+            })?;
 
         let ustack_rsp = ustack_allocation.start() + ustack_allocation.len().into_u64();
 
-        // Store ELF segment allocations so they aren't dropped
+        // Stage 6: commit. Move the new segment / TLS allocations
+        // into the process's tracked state. After this point, the
+        // local `exec_allocs` / `ro_allocs` / `wr_allocs` /
+        // `tls_allocation` / `ustack_allocation` are owned by the
+        // process and live for the lifetime of the new image.
         {
             let mut segs = self.elf_segments.write();
             segs.executable = exec_allocs;

@@ -7,6 +7,7 @@ use kernel_elfloader::{ElfFile, ElfLoader, LoadElfError};
 use kernel_vfs::node::VfsNode;
 use kernel_vfs::path::AbsolutePath;
 use kernel_vfs::Stat;
+use thiserror::Error;
 
 use super::executable::{
     advance_executable_read_progress, allocate_executable_buffer, ExecutableReadProgress,
@@ -14,6 +15,49 @@ use super::executable::{
 use super::Process;
 use crate::file::vfs;
 use crate::mem::memapi::{Executable, LowerHalfAllocation, LowerHalfMemoryApi, Readonly, Writable};
+
+/// Typed error returned by `Process::execve` and friends.
+///
+/// The previous `&'static str` return type was lossy: it collapsed
+/// every allocation failure into a generic "Failed to allocate TLS" /
+/// "Failed to allocate user stack" string, and propagated the
+/// inner error from `ElfLoader::load` as a flat "Failed to load
+/// ELF". For the audit-fault-injection work and the end-to-end
+/// exec rollback coverage, the kernel needs to distinguish:
+/// - `Parse`: the input bytes are not a structurally-valid ELF.
+///   Propagated from `ElfFile::try_parse` via `ElfParseError`.
+/// - `Load`: the ELF is structurally valid but the loader cannot
+///   install its segments. Propagated from `ElfLoader::load` via
+///   `LoadElfError` (which already has `AllocationFailed` and
+///   other typed variants).
+/// - `Enomem { stage }`: a frame or virtual-memory allocation
+///   failed during the post-load stage (TLS copy, user stack,
+///   or a wrapping LowerHalf allocation that the loader
+///   delegates to the kernel's `LowerHalfMemoryApi`).
+///
+/// The `stage` field is `&'static str` rather than an enum so the
+/// caller can add new failure points without breaking downstream
+/// `match` exhaustiveness; the typed `Parse` and `Load` variants
+/// cover the loader's own error surface.
+#[derive(Debug, Error)]
+pub(crate) enum ExecveError {
+    /// The input bytes are not a structurally-valid ELF.
+    #[error("execve: ELF parse error: {0}")]
+    Parse(kernel_elfloader::ElfParseError),
+    /// The ELF is structurally valid but the loader could not
+    /// install its segments. `LoadElfError::AllocationFailed` is
+    /// the audit-fault-injection-relevant variant; the other
+    /// variants are structural (`UnsupportedFileType`,
+    /// `WritableExecutableSegment`, etc.).
+    #[error("execve: ELF load error: {0}")]
+    Load(LoadElfError),
+    /// A frame or virtual-memory allocation failed during the
+    /// post-load stage. `stage` names the failing allocation
+    /// (`"tls"`, `"user_stack"`, etc.) so an operator can
+    /// distinguish them in a log.
+    #[error("execve: out of memory during {stage}")]
+    Enomem { stage: &'static str },
+}
 
 pub(super) enum TrampolineLoadError {
     Parse(kernel_elfloader::ElfParseError),

@@ -1,8 +1,11 @@
-use kernel_abi::{Errno, ECHILD, EINVAL, ENOENT, ENOMEM, WNOHANG};
+use alloc::format;
+
+use kernel_abi::{Errno, ECHILD, EINVAL, ENOENT, ENOEXEC, ENOMEM, WNOHANG};
 use kernel_vfs::path::AbsolutePath;
 
 use crate::arch::UserContext;
 use crate::mcore::context::ExecutionContext;
+use crate::mcore::mtask::process::ExecveError;
 use crate::syscall::validation::{
     copy_to_userspace, read_userspace_string, read_userspace_string_array,
 };
@@ -136,9 +139,30 @@ pub fn sys_execve(
             apply_exec_context(ctx, entry_point, stack_pointer);
             Ok(0)
         }
-        Err(e) => {
-            log::error!("sys_execve failed: {}", e);
-            Err(ENOENT)
+        Err(error) => {
+            // Map the typed ExecveError back to the syscall layer.
+            // The audit-fault-injection work requires that ENOMEM
+            // is returned specifically for the Enomem variant so
+            // that an operator can distinguish "out of memory"
+            // (transient, retryable) from "invalid ELF" / "load
+            // error" (structural, not retryable).
+            use crate::mcore::mtask::process::ExecveError;
+            let (errno, log_line) = match &error {
+                ExecveError::Parse(_) => (
+                    ENOEXEC,
+                    format!("sys_execve failed: ELF parse error: {error}"),
+                ),
+                ExecveError::Load(load_error) => (
+                    ENOEXEC,
+                    format!("sys_execve failed: ELF load error: {load_error}"),
+                ),
+                ExecveError::Enomem { stage } => (
+                    ENOMEM,
+                    format!("sys_execve failed: out of memory during {stage}"),
+                ),
+            };
+            log::error!("{}", log_line);
+            Err(errno)
         }
     }
 }
