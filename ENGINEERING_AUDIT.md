@@ -7,7 +7,7 @@
 - **Comparison baseline:** original audited commit `661d5ede6331c5ee62d6642451ce63ce1e0d5adf`
 - **Fresh engineering score:** **7/10** (release-candidate engineering, not production assurance)
 - **Fresh production decision:** **NO-GO** for v1.0 or safety-relevant deployment
-- **Local required gate evidence at `9c75116`:**
+- **Local required gate evidence at `f6b46e1`:**
   - **Default mode** (`scripts/verify-engineering-audit.sh`): **88 PASS / 1 SKIP / 0 FAIL**. The SKIP is `audit-fault-injection-qemu-smoke` (`RUN_AUDIT_FAULT not set`); every other step ran and passed.
   - **`RUN_AUDIT_FAULT=1` mode** (`RUN_AUDIT_FAULT=1 scripts/verify-engineering-audit.sh`): **89 PASS / 0 SKIP / 0 FAIL**. The `audit-fault-injection-qemu-smoke` step runs and passes; the full fault-injection coverage of physical allocation, mapper rollback, and exec/spawn failure paths is exercised.
 - **Fault-injection status:** **partial-but-real**. Physical allocation, mapper rollback, and exec/spawn failure paths are now exercised by deterministic-fallible-callback tests. A post-boot ring-3 page fault at 0x2a00000012 was previously recorded against system OVMF; re-investigation at this build (`22323fc`) found the symptom currently non-reproducing on this host. The historical cause remains unresolved and there is no reproducible regression artifact. A regression step needs a pinned, hash-verified `OVMF_SYSTEM_TAG` / `OVMF_SYSTEM_SHA256` in `ci/build-inputs.env`; until then `scripts/qemu-debug-triage.sh --ovmf system --capture ...` remains a developer-side investigation path, not evidence of a fix.
@@ -154,7 +154,7 @@ substitutes do not close production, HIL, hosted, or independent-review work.
 | External | Independent safety/concurrency review | independent reviewer | External review | Reviewer signs off the unsafe ledger, scheduler/VM shootdown, BPF epoch/snapshot, and remediation dispositions with tracked findings | Must be independent of the implementation authors; local gate and model results are inputs, not substitutes. |
 | Conditional | Historical ring-3 page fault | `userspace/init`, kernel VM/task owners | Investigation | Only if the symptom reproduces: a pinned, hash-verified OVMF plus capture evidence identifies ownership; a targeted fix then has a failing-before/passing-after regression | Currently non-reproducing, historical cause unresolved, and no reproducible artifact exists. Do not create a pass-either-way watcher or mark it fixed. |
 
-## Remediation checklist (current branch, assessed through `3c9c954`)
+## Remediation checklist (current branch, assessed through `f6b46e1`)
 
 Legend: `[x]` complete for the stated scope; `[~]` meaningful work landed but
 the full stated outcome remains open; `[ ]` not started or not yet evidenced.
