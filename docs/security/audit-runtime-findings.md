@@ -67,6 +67,38 @@ whether the faulting IP falls in a `VMA_NONE` region or in a region
 the kernel marked copy-on-write but never faulted in. Owned by
 `@userspace/init` and `@kernel/mcore/mtask/vm`, not the audit branch.
 
+## Page-fault diagnostic instrument (not produced)
+
+**Status:** omitted by design. The three structured fields
+(fault address, instruction pointer, error code) are all safely
+readable from the exception context at `kernel/src/arch/idt.rs:367`
+(Cr2 register read, function parameter, stack frame field). However,
+the only available output mechanism — `serial_println!` — acquires a
+`spin::Mutex` on `SERIAL1` (`kernel/src/serial.rs:24-29`). That lock
+acquisition is not demonstrably safe in the panic path: if the page
+fault fires while the serial port is held by an interrupted
+`serial_print!` call, the new diagnostic would deadlock on the
+same lock the existing `panic!` at `idt.rs:400-402` already risks.
+Adding more lock acquisitions to the panic path is not "safer" — it
+is the same risk, repeated. Per the audit branch's constraint
+("If the diagnostic does not compile safely, do not commit a stub
+claiming it exists. Redesign or omit it."), the diagnostic commit
+is omitted entirely.
+
+**What would be required to produce it:** a non-locking output path.
+Options considered: (a) raw UART port writes bypassing the spin::Mutex
+(requires a new abstraction and a dedicated debug UART, or careful
+re-entrancy analysis of the existing UART); (b) a static panic buffer
+that survives the kernel reset (only useful for post-mortem analysis,
+not live debugging); (c) a CPU debug register or hardware trace
+mechanism (depends on platform support). None of these is in scope
+for this branch.
+
+**The fix is still out of scope.** The ring-3 page fault at
+`0x2a00000012` is owned by `@userspace/init` and
+`@kernel/mcore/mtask/vm`, not the audit branch. This entry only
+records the decision not to add a partial instrument.
+
 ## OVMF prebuilt pinning history
 
 The single-CPU boot path was previously held back by the OVMF
