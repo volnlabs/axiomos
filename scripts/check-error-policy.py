@@ -60,6 +60,14 @@ def main() -> None:
     for relative in ("kernel/src/file/devfs.rs", "kernel/src/file/mod.rs"):
         reject_forbidden(relative, production_text(ROOT / relative))
 
+    for relative in (
+        "kernel/crates/kernel_physical_memory/src/types.rs",
+        "kernel/crates/kernel_virtual_memory/src/addr.rs",
+    ):
+        source = production_text(ROOT / relative)
+        require("Result<Self, ()>" not in source, f"{relative}: constructor uses a unit error")
+        require("result_unit_err" not in source, f"{relative}: unit-error lint suppression remains")
+
     driver_root = ROOT / "kernel/src/driver"
     for path in sorted(driver_root.rglob("*.rs")):
         reject_forbidden(str(path.relative_to(ROOT)), production_text(path))

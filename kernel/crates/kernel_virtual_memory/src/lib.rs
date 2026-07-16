@@ -5,7 +5,7 @@ extern crate alloc;
 use alloc::collections::BTreeSet;
 
 #[cfg(not(target_arch = "x86_64"))]
-pub use addr::{Page, PageRangeInclusive, VirtAddr};
+pub use addr::{InvalidVirtAddrError, Page, PageNotAlignedError, PageRangeInclusive, VirtAddr};
 use log::debug;
 pub use segment::*;
 use thiserror::Error;
