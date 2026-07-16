@@ -42,6 +42,7 @@ Miri and QEMU and is not complete release evidence.
 Current generated authority:
 
 - [Component inventory](../generated/components.md)
+- [Shipped-image and artifact provenance](../generated/artifacts.md)
 - [Immutable build inputs](../generated/build-inputs.md)
 - [Versioned userspace ABI](../generated/abi.md)
 - [Supported target and feature matrix](../generated/targets.md)

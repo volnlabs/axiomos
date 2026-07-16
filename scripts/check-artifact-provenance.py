@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Enforce exact artifact selection and retained provenance recipes."""
+
+from pathlib import Path
+import tomllib
+
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def source(path: str) -> str:
+    return (ROOT / path).read_text(encoding="utf-8")
+
+
+def main() -> None:
+    manifest = tomllib.loads(source("ci/artifacts.toml"))
+    artifacts = manifest.get("artifact", [])
+    if not artifacts:
+        raise SystemExit("ci/artifacts.toml contains no artifact recipes")
+
+    names = [artifact["name"] for artifact in artifacts]
+    if len(names) != len(set(names)):
+        raise SystemExit("ci/artifacts.toml contains duplicate artifact names")
+    for artifact in artifacts:
+        missing = {
+            "platform",
+            "status",
+            "format",
+            "producer",
+            "output",
+            "selection",
+            "immutable_inputs",
+            "hash_evidence",
+        } - artifact.keys()
+        if missing:
+            raise SystemExit(f"{artifact['name']} is missing fields: {sorted(missing)}")
+        if "SHA-256" not in artifact["hash_evidence"]:
+            raise SystemExit(f"{artifact['name']} has no SHA-256 evidence contract")
+
+    run_virt = source("scripts/run-virt.sh")
+    for forbidden in ("%T@", "sort -n", "tail -n", "most recently modified"):
+        if forbidden in run_virt:
+            raise SystemExit(f"scripts/run-virt.sh retains time-based selection: {forbidden}")
+    for required in (
+        "AXIOM_ARTIFACT_PATHS",
+        "AXIOM_BPF_TRUSTED_KEY_PATH",
+        "s/^DISK_IMAGE=//p",
+        'file="$DISK_PATH"',
+        "sha256sum",
+    ):
+        if required not in run_virt:
+            raise SystemExit(f"scripts/run-virt.sh is missing exact selection token: {required}")
+
+    build_rpi5 = source("scripts/build-rpi5.sh")
+    for required in (
+        "AXIOM_ARTIFACT_PATHS",
+        "AXIOM_BPF_TRUSTED_KEY_PATH",
+        'ROOT_BUILD_ARGS+=(--release)',
+        "rpi5-artifacts.sha256",
+        'sha256sum "$BUILD_DIR/kernel" "$BUILD_DIR/kernel8.img" "$DISK_PATH"',
+    ):
+        if required not in build_rpi5:
+            raise SystemExit(f"scripts/build-rpi5.sh is missing provenance token: {required}")
+
+    deploy_rpi5 = source("scripts/deploy-rpi5.sh")
+    for required in (
+        "rpi5-artifacts.sha256",
+        "sha256sum -c",
+        "axiomos-rpi5-artifacts.sha256",
+    ):
+        if required not in deploy_rpi5:
+            raise SystemExit(f"scripts/deploy-rpi5.sh is missing provenance token: {required}")
+
+    generated = source("docs/generated/artifacts.md")
+    for name in names:
+        if f"| {name} |" not in generated:
+            raise SystemExit(f"generated artifact table is missing {name}")
+
+    print(f"artifact provenance clean: {len(artifacts)} image recipes")
+
+
+if __name__ == "__main__":
+    main()

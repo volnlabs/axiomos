@@ -232,6 +232,14 @@ write_manifest() {
         echo "production_artifact_hashes=$PRODUCTION_ARTIFACTS"
         echo "build_inputs=$ROOT/ci/build-inputs.env"
         echo "build_inputs_sha256=$(sha256sum ci/build-inputs.env | awk '{print $1}')"
+        echo "trusted_key=${AXIOM_BPF_TRUSTED_KEY_PATH:-not-built}"
+        if [[ -n "${AXIOM_BPF_TRUSTED_KEY_PATH:-}" && -f "$AXIOM_BPF_TRUSTED_KEY_PATH" ]]; then
+            echo "trusted_key_sha256=$(sha256sum "$AXIOM_BPF_TRUSTED_KEY_PATH" | awk '{print $1}')"
+        fi
+        echo "signed_startup=${AXIOM_SIGNED_BPF_STARTUP_PATH:-not-built}"
+        if [[ -n "${AXIOM_SIGNED_BPF_STARTUP_PATH:-}" && -f "$AXIOM_SIGNED_BPF_STARTUP_PATH" ]]; then
+            echo "signed_startup_sha256=$(sha256sum "$AXIOM_SIGNED_BPF_STARTUP_PATH" | awk '{print $1}')"
+        fi
     } >"$MANIFEST"
 }
 
@@ -426,6 +434,7 @@ run_step unsafe-ledger python3 -B scripts/unsafe-ledger.py --check
 run_step component-inventory cargo xtask inventory --check
 run_step xtask-manifest-drift cargo xtask boundary --check
 run_step generated-docs cargo xtask docs --check
+run_step artifact-provenance-static python3 scripts/check-artifact-provenance.py
 run_step target-boundary-static python3 scripts/check-target-boundary.py
 run_step ovmf-vars-isolation-static python3 -c \
     'from pathlib import Path; source=Path("src/main.rs").read_text(); qemu=source.split("// OVMF firmware", 1)[1].split("// kernel binary", 1)[0]; assert "file={OVMF_VARS},snapshot=on" in qemu, "OVMF VARS writes must use a QEMU snapshot instead of mutating the pinned source"'

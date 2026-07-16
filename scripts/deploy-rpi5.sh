@@ -1,5 +1,5 @@
 #!/bin/bash
-# Deploy axiom-ebpf to Raspberry Pi 5 SD card
+# Deploy axiomos to a Raspberry Pi 5 SD card
 #
 # Usage: ./scripts/deploy-rpi5.sh /path/to/sdcard/boot
 #
@@ -44,8 +44,17 @@ if [ ! -f "$KERNEL_IMG" ]; then
     echo "Run './scripts/build-rpi5.sh' first."
     exit 1
 fi
+PROVENANCE_MANIFEST="$BUILD_DIR/rpi5-artifacts.sha256"
+if [ ! -f "$PROVENANCE_MANIFEST" ]; then
+    echo "Error: Provenance manifest not found at $PROVENANCE_MANIFEST"
+    echo "Run './scripts/build-rpi5.sh' before deployment."
+    exit 1
+fi
 
-echo "=== Deploying axiom-ebpf to Raspberry Pi 5 ==="
+echo "Verifying retained build provenance..."
+(cd "$PROJECT_DIR" && sha256sum -c "$PROVENANCE_MANIFEST")
+
+echo "=== Deploying axiomos to Raspberry Pi 5 ==="
 echo "Mount point: $MOUNT_POINT"
 echo "Kernel: $KERNEL_IMG"
 echo ""
@@ -53,13 +62,14 @@ echo ""
 # Copy kernel
 echo "Copying kernel8.img..."
 cp "$KERNEL_IMG" "$MOUNT_POINT/kernel8.img"
+cp "$PROVENANCE_MANIFEST" "$MOUNT_POINT/axiomos-rpi5-artifacts.sha256"
 
 # Create config.txt if it doesn't exist
 CONFIG_FILE="$MOUNT_POINT/config.txt"
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "Creating config.txt..."
     cat > "$CONFIG_FILE" << 'EOF'
-# Raspberry Pi 5 configuration for axiom-ebpf
+# Raspberry Pi 5 configuration for axiomos
 
 # Use 64-bit kernel
 arm_64bit=1
@@ -102,14 +112,12 @@ echo ""
 echo "=== Deployment Complete ==="
 echo ""
 echo "Files on SD card:"
-ls -la "$MOUNT_POINT/kernel8.img" "$MOUNT_POINT/config.txt" 2>/dev/null || true
+ls -la "$MOUNT_POINT/kernel8.img" "$MOUNT_POINT/config.txt" \
+    "$MOUNT_POINT/axiomos-rpi5-artifacts.sha256" 2>/dev/null || true
 echo ""
-echo "Note: You also need the Raspberry Pi firmware files on the SD card:"
-echo "  - bootcode.bin (for Pi 4, not needed for Pi 5)"
-echo "  - start4.elf"
-echo "  - fixup4.dat"
-echo ""
-echo "Download firmware from:"
-echo "  https://github.com/raspberrypi/firmware/tree/master/boot"
+echo "Note: Raspberry Pi boot firmware must already be provisioned on the SD card."
+echo "This repository does not fetch or pin that external platform firmware."
+echo "Release/HIL evidence must record its exact revision and hashes; do not use"
+echo "a moving branch as a release input."
 echo ""
 echo "Safely eject the SD card and boot your Pi 5!"

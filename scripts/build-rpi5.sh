@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build axiom-ebpf kernel for Raspberry Pi 5
+# Build the axiomos kernel for Raspberry Pi 5
 #
 # This script builds the kernel for the aarch64-unknown-none target
 # with the rpi5 feature enabled, then creates a raw binary suitable
@@ -19,12 +19,24 @@ TARGET="aarch64-unknown-none"
 PROFILE="${1:-release}"
 FEATURES="${2:-embedded-rpi5}"
 
-echo "=== Building axiom-ebpf for Raspberry Pi 5 ==="
+echo "=== Building axiomos for Raspberry Pi 5 ==="
 echo "Profile: $PROFILE"
 echo "Kernel features: $FEATURES"
 echo ""
 
 cd "$PROJECT_DIR"
+
+if [ -z "${AXIOM_BPF_TRUSTED_KEY_PATH:-}" ] || [ ! -f "$AXIOM_BPF_TRUSTED_KEY_PATH" ]; then
+    echo "Error: AXIOM_BPF_TRUSTED_KEY_PATH must name the 32-byte production Ed25519 public key."
+    echo "The key is compiled into the kernel; this script will not generate a substitute."
+    exit 1
+fi
+if [ "$(wc -c < "$AXIOM_BPF_TRUSTED_KEY_PATH")" -ne 32 ]; then
+    echo "Error: AXIOM_BPF_TRUSTED_KEY_PATH must contain exactly 32 bytes."
+    exit 1
+fi
+AXIOM_BPF_TRUSTED_KEY_PATH=$(realpath "$AXIOM_BPF_TRUSTED_KEY_PATH")
+export AXIOM_BPF_TRUSTED_KEY_PATH
 
 # Ensure target is installed
 if ! rustup target list | grep -q "$TARGET (installed)"; then
@@ -38,10 +50,14 @@ ARTIFACT_PATHS=$(mktemp "$PROJECT_DIR/target/rpi5-artifacts.XXXXXX")
 trap 'rm -f "$ARTIFACT_PATHS"' EXIT
 export AXIOM_ARTIFACT_PATHS="$ARTIFACT_PATHS"
 
-# Run the image assembly with a unique artifact-manifest path. The environment
-# value makes build.rs emit the paths from this invocation;
-# no filesystem timestamp or stale target-directory search is involved.
-cargo build -p axiomos --target "$TARGET" --no-default-features --features aarch64_deps
+# Run image assembly at the requested profile with a unique artifact-manifest
+# path. The environment value makes build.rs emit the paths from this exact
+# invocation; no timestamp or stale target-directory search is involved.
+ROOT_BUILD_ARGS=(build -p axiomos --target "$TARGET" --no-default-features --features aarch64_deps)
+if [ "$PROFILE" = "release" ]; then
+    ROOT_BUILD_ARGS+=(--release)
+fi
+cargo "${ROOT_BUILD_ARGS[@]}"
 
 DISK_PATH=$(sed -n 's/^DISK_IMAGE=//p' "$ARTIFACT_PATHS")
 if [ -z "$DISK_PATH" ] || [ ! -f "$DISK_PATH" ]; then
@@ -76,12 +92,20 @@ fi
 echo "Creating kernel8.img..."
 $OBJCOPY -O binary "$BUILD_DIR/kernel" "$BUILD_DIR/kernel8.img"
 
+# Retain hashes for the exact ELF, raw kernel, and rootfs used by this build.
+# The artifact recipe is generated from ci/artifacts.toml.
+PROVENANCE_MANIFEST="$BUILD_DIR/rpi5-artifacts.sha256"
+sha256sum "$BUILD_DIR/kernel" "$BUILD_DIR/kernel8.img" "$DISK_PATH" \
+    "$AXIOM_BPF_TRUSTED_KEY_PATH" \
+    > "$PROVENANCE_MANIFEST"
+
 # Report results
 SIZE=$(stat -c%s "$BUILD_DIR/kernel8.img" 2>/dev/null || stat -f%z "$BUILD_DIR/kernel8.img")
 echo ""
 echo "=== Build Complete ==="
 echo "Kernel ELF: $BUILD_DIR/kernel"
 echo "Kernel Binary: $BUILD_DIR/kernel8.img"
+echo "Provenance: $PROVENANCE_MANIFEST"
 echo "Size: $SIZE bytes"
 echo ""
 echo "To deploy to SD card, run:"

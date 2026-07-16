@@ -6,6 +6,8 @@ use std::{env, fs};
 
 const COMPONENT_MANIFEST: &str = "ci/components.toml";
 const GENERATED_COMPONENTS: &str = "docs/generated/components.md";
+const ARTIFACT_MANIFEST: &str = "ci/artifacts.toml";
+const GENERATED_ARTIFACTS: &str = "docs/generated/artifacts.md";
 const BUILD_INPUTS: &str = "ci/build-inputs.env";
 const GENERATED_BUILD_INPUTS: &str = "docs/generated/build-inputs.md";
 const TARGET_MANIFEST: &str = "ci/targets.toml";
@@ -40,6 +42,46 @@ struct Target {
 #[derive(Default)]
 struct TargetBuilder {
     fields: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct Artifact {
+    name: String,
+    platform: String,
+    status: String,
+    format: String,
+    producer: String,
+    output: String,
+    selection: String,
+    immutable_inputs: String,
+    hash_evidence: String,
+}
+
+#[derive(Default)]
+struct ArtifactBuilder {
+    fields: BTreeMap<String, String>,
+}
+
+impl ArtifactBuilder {
+    fn finish(self, line: usize) -> Result<Artifact, String> {
+        let get = |name: &str| {
+            self.fields
+                .get(name)
+                .cloned()
+                .ok_or_else(|| format!("artifact ending at line {line} is missing {name}"))
+        };
+        Ok(Artifact {
+            name: get("name")?,
+            platform: get("platform")?,
+            status: get("status")?,
+            format: get("format")?,
+            producer: get("producer")?,
+            output: get("output")?,
+            selection: get("selection")?,
+            immutable_inputs: get("immutable_inputs")?,
+            hash_evidence: get("hash_evidence")?,
+        })
+    }
 }
 
 impl TargetBuilder {
@@ -159,6 +201,128 @@ fn load_targets(root: &Path) -> Result<Vec<Target>, String> {
     let path = root.join(TARGET_MANIFEST);
     let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     parse_targets(&text)
+}
+
+fn load_artifacts(root: &Path) -> Result<Vec<Artifact>, String> {
+    let path = root.join(ARTIFACT_MANIFEST);
+    let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    parse_artifacts(&text)
+}
+
+fn parse_artifacts(text: &str) -> Result<Vec<Artifact>, String> {
+    let mut artifacts = Vec::new();
+    let mut current: Option<ArtifactBuilder> = None;
+    for (index, raw) in text.lines().enumerate() {
+        let line_number = index + 1;
+        let line = raw.split('#').next().unwrap_or_default().trim();
+        if line.is_empty() || line.starts_with("format_version") {
+            continue;
+        }
+        if line == "[[artifact]]" {
+            if let Some(builder) = current.take() {
+                artifacts.push(builder.finish(line_number - 1)?);
+            }
+            current = Some(ArtifactBuilder::default());
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(format!("line {line_number}: expected key = value"));
+        };
+        let key = key.trim();
+        if !matches!(
+            key,
+            "name"
+                | "platform"
+                | "status"
+                | "format"
+                | "producer"
+                | "output"
+                | "selection"
+                | "immutable_inputs"
+                | "hash_evidence"
+        ) {
+            return Err(format!("line {line_number}: unknown artifact field {key}"));
+        }
+        let builder = current
+            .as_mut()
+            .ok_or_else(|| format!("line {line_number}: field outside [[artifact]]"))?;
+        if builder
+            .fields
+            .insert(key.to_owned(), parse_quoted(value, line_number)?)
+            .is_some()
+        {
+            return Err(format!("line {line_number}: duplicate field {key}"));
+        }
+    }
+    if let Some(builder) = current {
+        artifacts.push(builder.finish(text.lines().count())?);
+    }
+    if artifacts.is_empty() {
+        return Err("artifact manifest is empty".to_owned());
+    }
+    Ok(artifacts)
+}
+
+fn validate_artifacts(artifacts: &[Artifact], targets: &[Target]) -> Result<(), String> {
+    let target_names = targets
+        .iter()
+        .map(|target| target.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut names = BTreeSet::new();
+    let mut outputs = BTreeSet::new();
+    for artifact in artifacts {
+        if !names.insert(&artifact.name) {
+            return Err(format!("duplicate artifact name: {}", artifact.name));
+        }
+        if !outputs.insert(&artifact.output) {
+            return Err(format!("duplicate artifact output: {}", artifact.output));
+        }
+        if !target_names.contains(artifact.platform.as_str()) {
+            return Err(format!(
+                "artifact {} references unknown platform {}",
+                artifact.name, artifact.platform
+            ));
+        }
+        if !matches!(
+            artifact.status.as_str(),
+            "shipped" | "supported after HIL" | "experimental"
+        ) {
+            return Err(format!(
+                "artifact {} has unsupported status {}",
+                artifact.name, artifact.status
+            ));
+        }
+        let selection = artifact.selection.to_ascii_lowercase();
+        if [
+            "mtime",
+            "newest",
+            "most recent",
+            "find |",
+            "sort -n",
+            "tail -n",
+        ]
+        .iter()
+        .any(|forbidden| selection.contains(forbidden))
+        {
+            return Err(format!(
+                "artifact {} uses a mutable or time-based selection rule",
+                artifact.name
+            ));
+        }
+        if !artifact.hash_evidence.contains("SHA-256") {
+            return Err(format!(
+                "artifact {} does not declare SHA-256 evidence",
+                artifact.name
+            ));
+        }
+        if !artifact.immutable_inputs.contains("rust-toolchain.toml") {
+            return Err(format!(
+                "artifact {} does not name the pinned Rust toolchain",
+                artifact.name
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_targets(text: &str) -> Result<Vec<Target>, String> {
@@ -603,6 +767,33 @@ fn render_targets(targets: &[Target]) -> String {
     output
 }
 
+fn render_artifacts(artifacts: &[Artifact]) -> String {
+    let mut artifacts = artifacts.to_vec();
+    artifacts.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut output = String::from(
+        "<!-- Generated by `cargo xtask docs`; do not edit. -->\n\n\
+         # Shipped-image and artifact provenance\n\n\
+         This table defines build recipes and selection rules. Per-build SHA-256 values are retained in the evidence location named by each row; generated outputs are not assigned static hashes. Raspberry Pi boot firmware is an external platform/HIL prerequisite rather than a repository-produced image, so its exact revision and hashes belong in retained HIL evidence.\n\n\
+         | Artifact | Platform | Status | Format | Producer | Output / identity | Selection rule | Immutable inputs | Hash evidence |\n\
+         |---|---|---|---|---|---|---|---|---|\n",
+    );
+    for artifact in artifacts {
+        output.push_str(&format!(
+            "| {} | {} | {} | {} | `{}` | `{}` | {} | {} | {} |\n",
+            artifact.name,
+            artifact.platform,
+            artifact.status,
+            artifact.format,
+            artifact.producer,
+            artifact.output,
+            artifact.selection,
+            artifact.immutable_inputs,
+            artifact.hash_evidence
+        ));
+    }
+    output
+}
+
 fn render_abi_entries(output: &mut String, title: &str, entries: &[kernel_abi::AbiEntry]) {
     output.push_str(&format!(
         "## {title}\n\n| ID | Name | Availability |\n|---:|---|---|\n"
@@ -667,6 +858,9 @@ fn check_or_write(path: &Path, expected: &str, check: bool) -> Result<(), String
 }
 
 fn check_or_write_docs(root: &Path, components: &[Component], check: bool) -> Result<(), String> {
+    let targets = load_targets(root)?;
+    let artifacts = load_artifacts(root)?;
+    validate_artifacts(&artifacts, &targets)?;
     check_or_write(
         &root.join(GENERATED_COMPONENTS),
         &render_components(components),
@@ -679,7 +873,12 @@ fn check_or_write_docs(root: &Path, components: &[Component], check: bool) -> Re
     )?;
     check_or_write(
         &root.join(GENERATED_TARGETS),
-        &render_targets(&load_targets(root)?),
+        &render_targets(&targets),
+        check,
+    )?;
+    check_or_write(
+        &root.join(GENERATED_ARTIFACTS),
+        &render_artifacts(&artifacts),
         check,
     )?;
     check_or_write(&root.join(GENERATED_ABI), &render_abi(), check)?;
@@ -845,6 +1044,32 @@ mod tests {
         .expect("valid target manifest");
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].status, "supported");
+    }
+
+    #[test]
+    fn artifact_manifest_rejects_time_based_selection() {
+        let artifact = Artifact {
+            name: "image".to_owned(),
+            platform: "host".to_owned(),
+            status: "shipped".to_owned(),
+            format: "raw".to_owned(),
+            producer: "build".to_owned(),
+            output: "image.bin".to_owned(),
+            selection: "pick newest output by mtime".to_owned(),
+            immutable_inputs: "rust-toolchain.toml".to_owned(),
+            hash_evidence: "SHA-256 manifest".to_owned(),
+        };
+        let target = Target {
+            name: "host".to_owned(),
+            triple: "host".to_owned(),
+            status: "supported".to_owned(),
+            features: "default".to_owned(),
+            artifact: "binary".to_owned(),
+            evidence: "tests".to_owned(),
+        };
+        let error = validate_artifacts(&[artifact], &[target])
+            .expect_err("mtime selection must be rejected");
+        assert!(error.contains("time-based selection"));
     }
 
     #[test]
