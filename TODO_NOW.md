@@ -223,14 +223,13 @@ not C1's lock. Verify interrupt state, don't infer it from lock-call sites.
 
 # Architecture cleanup
 
-### A1 — kill dead RISC-V surface or commit to it
-- `main_riscv.rs` + `main_riscv_minimal.rs` are unreferenced dead files;
-  `riscv64_arch` feature is declared but used 0× in code; non-x86/aarch64 falls
-  back to a null `DummyAllocator`. Either delete the dead entry points and mark
-  riscv explicitly experimental (the `kernel/demos/riscv` excluded member is the
-  honest home), or invest. Right now it's half-ported ambiguity.
-- **Files:** `kernel/src/main_riscv*.rs`, `kernel/Cargo.toml:63`, `lib.rs:41`.
-- **Complexity:** S (delete) / L (finish). **Blocks release:** NO.
+### A1 — completed: isolate the RISC-V experiment
+- The dead main-kernel entries, alternate manifest/linker, unused feature and
+  dependency, null allocator fallback, and dormant architecture module are
+  removed. `kernel/demos/riscv` is the sole experimental RISC-V artifact and
+  remains outside the axiomos release workspace.
+- **Enforcement:** `scripts/check-target-boundary.py` and the required
+  `target-boundary-static` gate step.
 
 ### A2 — `PhysicalProfile` generics are threaded everywhere but only ever `ActiveProfile`
 - The `P: PhysicalProfile` type param flows through `BpfProgram<P>`,

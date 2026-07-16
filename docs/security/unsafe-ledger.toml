@@ -1,6 +1,6 @@
 version = 1
-baseline_sites = 699
-baseline_fingerprint = "sha256:cd91cbe1aae9976c83c1ff05e6b0b84be6a42be8aa99b2ce9273c21626004f74"
+baseline_sites = 656
+baseline_fingerprint = "sha256:2f61e3b47e347ac3de6469f0df0451fe1ca4a42d7d2626a58bdc47af908f9e1e"
 
 # Rules are evaluated in order. Keep narrow, high-risk obligations before broad
 # subsystem rules. The first matching rule supplies every site-level field.
@@ -150,8 +150,8 @@ reviewed = "2026-07-12"
 
 [[obligation]]
 id = "RISCV-ARCH"
-paths = ["kernel/src/arch/riscv64/*", "kernel/src/main_riscv.rs", "kernel/src/main_riscv_minimal.rs", "kernel/demos/riscv/*"]
-scope = "production/demo"
+paths = ["kernel/demos/riscv/*"]
+scope = "experimental demo"
 owner = "RISC-V architecture maintainers"
 invariant = "Trap/context assembly matches Rust layouts, CSR and SBI operations execute at the expected privilege level, and boot pointers are valid for the machine profile."
 callers = "RISC-V boot, trap entry, shutdown and demo runtime"

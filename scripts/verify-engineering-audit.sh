@@ -426,6 +426,7 @@ run_step unsafe-ledger python3 -B scripts/unsafe-ledger.py --check
 run_step component-inventory cargo xtask inventory --check
 run_step xtask-manifest-drift cargo xtask boundary --check
 run_step generated-docs cargo xtask docs --check
+run_step target-boundary-static python3 scripts/check-target-boundary.py
 run_step ovmf-vars-isolation-static python3 -c \
     'from pathlib import Path; source=Path("src/main.rs").read_text(); qemu=source.split("// OVMF firmware", 1)[1].split("// kernel binary", 1)[0]; assert "file={OVMF_VARS},snapshot=on" in qemu, "OVMF VARS writes must use a QEMU snapshot instead of mutating the pinned source"'
 run_step abi-surface-static python3 -B scripts/check-abi-surface.py

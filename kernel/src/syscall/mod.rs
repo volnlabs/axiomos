@@ -35,16 +35,8 @@ use crate::mcore::mtask::process::Process;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::mcore::mtask::task::Task;
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(target_arch = "aarch64")]
 fn hlt() {
-    #[cfg(target_arch = "riscv64")]
-    // SAFETY: wfi (wait for interrupt) is a privileged instruction that halts the CPU
-    // until an interrupt occurs. We are in kernel context with interrupts properly
-    // configured, so this is safe to execute.
-    unsafe {
-        riscv::asm::wfi();
-    }
-    #[cfg(all(target_arch = "aarch64", feature = "aarch64_arch"))]
     // SAFETY: wfi (wait for interrupt) is a privileged instruction that halts the CPU
     // until an interrupt occurs. We are in kernel context with interrupts properly
     // configured, so this is safe to execute.

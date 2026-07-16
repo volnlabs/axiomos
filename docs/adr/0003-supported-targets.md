@@ -17,6 +17,9 @@ Only `cloud-profile` and `embedded-profile` are shipped BPF limit sets. Producti
 images are signed-only. Unsigned BPF is an explicit development-image feature
 and must never appear in production provenance.
 
-Parallel RISC-V kernel entrypoints and unused architecture features will be
-removed or relocated under an `experiments/` boundary. Generated target tables
-and CI inventory are derived from the component manifest rather than prose.
+The main kernel supports only x86_64 and AArch64. The alternate RISC-V
+manifest, entrypoints, linker, dependency/feature, null allocator, and dormant
+architecture module are retired; `kernel/demos/riscv` is the sole isolated
+experimental RISC-V artifact. Generated target tables and CI inventory are
+derived from the component manifest rather than prose, and the required
+`target-boundary-static` check rejects drift back into the main kernel.

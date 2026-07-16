@@ -4,6 +4,9 @@
 #![feature(negative_impls)]
 extern crate alloc;
 
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+compile_error!("the axiomos kernel supports only x86_64 and AArch64; use kernel/demos/riscv for the experimental RISC-V artifact");
+
 use ::log::info;
 use conquer_once::spin::OnceCell;
 use spin::Mutex;
@@ -36,22 +39,6 @@ mod log;
 pub mod mcore;
 pub mod mem;
 pub mod serial;
-
-// Provide a dummy allocator for non-x86_64 and non-aarch64 targets
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-#[global_allocator]
-static ALLOCATOR: DummyAllocator = DummyAllocator;
-
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-struct DummyAllocator;
-
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-unsafe impl core::alloc::GlobalAlloc for DummyAllocator {
-    unsafe fn alloc(&self, _layout: core::alloc::Layout) -> *mut u8 {
-        core::ptr::null_mut()
-    }
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
-}
 
 #[cfg(target_arch = "x86_64")]
 pub mod sse;

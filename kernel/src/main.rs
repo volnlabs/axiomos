@@ -86,14 +86,8 @@ fn boot_fatal(error: BootError) -> ! {
     }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(target_arch = "aarch64")]
 fn hlt() {
-    #[cfg(target_arch = "riscv64")]
-    // SAFETY: Executing wfi (wait for interrupt) is safe in kernel mode.
-    unsafe {
-        riscv::asm::wfi();
-    }
-    #[cfg(target_arch = "aarch64")]
     // SAFETY: Executing wfi instruction is safe in kernel mode.
     unsafe {
         core::arch::asm!("wfi");
@@ -285,23 +279,6 @@ unsafe extern "C" fn main() -> ! {
 
     dbg_mark(0x46); // 'F'
     mcore::turn_idle()
-}
-
-#[cfg(target_arch = "riscv64")]
-// SAFETY: Export "kernel_main" for the bootloader.
-#[unsafe(export_name = "kernel_main")]
-// SAFETY: Kernel entry point.
-unsafe extern "C" fn main() -> ! {
-    if let Err(error) = kernel::init() {
-        boot_fatal(BootError::from_kernel_init(error));
-    }
-
-    info!("RISC-V kernel started");
-    info!("Kernel initialization complete");
-
-    loop {
-        hlt();
-    }
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]

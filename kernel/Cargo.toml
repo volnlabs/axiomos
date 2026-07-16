@@ -46,9 +46,6 @@ zerocopy.workspace = true
 aarch64-cpu.workspace = true
 fdt.workspace = true
 
-[target.'cfg(target_arch = "riscv64")'.dependencies]
-riscv.workspace = true
-
 [build-dependencies]
 cc = "1.0"
 
@@ -63,7 +60,6 @@ limine.workspace = true
 default = []
 backtrace = []
 x86_64_arch = []
-riscv64_arch = []
 aarch64_arch = []
 rpi5 = ["aarch64_arch"]
 virt = ["aarch64_arch"]
