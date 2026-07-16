@@ -75,6 +75,17 @@ impl MapGrants {
     }
 
     pub(super) fn grant(&mut self, owner: u64, access: MapAccess) -> Result<(), BpfError> {
+        self.grant_with_reservation(owner, access, |entries| {
+            entries.try_reserve(1).map_err(|_| BpfError::OutOfMemory)
+        })
+    }
+
+    fn grant_with_reservation(
+        &mut self,
+        owner: u64,
+        access: MapAccess,
+        mut reserve: impl FnMut(&mut Vec<MapGrant>) -> Result<(), BpfError>,
+    ) -> Result<(), BpfError> {
         if let Some(grant) = self.entries.iter_mut().find(|grant| grant.owner == owner) {
             grant.access = grant.access.union(access);
             return Ok(());
@@ -82,9 +93,7 @@ impl MapGrants {
         if self.entries.len() >= MAX_MAP_GRANTS {
             return Err(BpfError::ResourceLimit);
         }
-        self.entries
-            .try_reserve(1)
-            .map_err(|_| BpfError::OutOfMemory)?;
+        reserve(&mut self.entries)?;
         self.entries.push(MapGrant { owner, access });
         Ok(())
     }
@@ -99,6 +108,22 @@ pub(super) struct PinnedMap {
     pub(super) map_id: u32,
     pub(super) owner: u64,
     pub(super) offered: MapAccess,
+}
+
+pub(super) fn append_pinned_map(pins: &mut Vec<PinnedMap>, pin: PinnedMap) -> Result<(), BpfError> {
+    append_pinned_map_with_reservation(pins, pin, |pins| {
+        pins.try_reserve(1).map_err(|_| BpfError::OutOfMemory)
+    })
+}
+
+fn append_pinned_map_with_reservation(
+    pins: &mut Vec<PinnedMap>,
+    pin: PinnedMap,
+    mut reserve: impl FnMut(&mut Vec<PinnedMap>) -> Result<(), BpfError>,
+) -> Result<(), BpfError> {
+    reserve(pins)?;
+    pins.push(pin);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -137,5 +162,64 @@ mod tests {
             grants.grant(MAX_MAP_GRANTS as u64, MapAccess::READ),
             Err(BpfError::ResourceLimit)
         );
+    }
+
+    #[test]
+    fn new_grant_reservation_failure_does_not_publish_authority() {
+        let mut grants = MapGrants::new();
+        grants.grant(7, MapAccess::READ).unwrap();
+
+        let result =
+            grants.grant_with_reservation(8, MapAccess::WRITE, |_| Err(BpfError::OutOfMemory));
+
+        assert_eq!(result, Err(BpfError::OutOfMemory));
+        assert_eq!(grants.access_for(7), Some(MapAccess::READ));
+        assert_eq!(grants.access_for(8), None);
+        grants.grant(8, MapAccess::WRITE).unwrap();
+        assert_eq!(grants.access_for(8), Some(MapAccess::WRITE));
+    }
+
+    #[test]
+    fn existing_grant_update_does_not_reserve() {
+        let mut grants = MapGrants::new();
+        grants.grant(7, MapAccess::READ).unwrap();
+
+        grants
+            .grant_with_reservation(7, MapAccess::WRITE, |_| {
+                panic!("existing grant update must not allocate")
+            })
+            .unwrap();
+
+        assert_eq!(grants.access_for(7), Some(MapAccess::READ_WRITE));
+    }
+
+    #[test]
+    fn pinned_map_reservation_failure_does_not_publish_path() {
+        let mut pins = Vec::new();
+        let result = append_pinned_map_with_reservation(
+            &mut pins,
+            PinnedMap {
+                path: "/maps/control".into(),
+                map_id: 3,
+                owner: 7,
+                offered: MapAccess::READ,
+            },
+            |_| Err(BpfError::OutOfMemory),
+        );
+
+        assert_eq!(result, Err(BpfError::OutOfMemory));
+        assert!(pins.is_empty());
+        append_pinned_map(
+            &mut pins,
+            PinnedMap {
+                path: "/maps/control".into(),
+                map_id: 3,
+                owner: 7,
+                offered: MapAccess::READ,
+            },
+        )
+        .unwrap();
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].path, "/maps/control");
     }
 }

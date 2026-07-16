@@ -11,5 +11,15 @@ pub mod execution {
     }
 }
 
+pub mod verifier {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum LoadCaller {
+        Trusted,
+    }
+}
+
 #[path = "../src/bpf/handles.rs"]
 mod handles;
+
+#[path = "../src/bpf/authorization.rs"]
+mod authorization;

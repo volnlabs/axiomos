@@ -14,8 +14,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(test)]
 use authorization::MAX_MAP_GRANTS;
+use authorization::{append_pinned_map, MapGrants, PinnedMap};
 pub use authorization::{BpfLoadAuthorization, MapAccess};
-use authorization::{MapGrants, PinnedMap};
 use kernel_abi::{
     BpfObjectInfo, BPF_MAP_TYPE_ARRAY, BPF_MAP_TYPE_HASH, BPF_MAP_TYPE_RINGBUF,
     BPF_MAP_TYPE_TIMESERIES, BPF_OBJECT_KIND_MAP,
@@ -1831,16 +1831,15 @@ impl BpfManager {
         if self.pinned_maps.len() >= self.limits.max_pinned_maps {
             return Err(BpfError::ResourceLimit);
         }
-        self.pinned_maps
-            .try_reserve(1)
-            .map_err(|_| BpfError::OutOfMemory)?;
-        self.pinned_maps.push(PinnedMap {
-            path,
-            map_id,
-            owner,
-            offered,
-        });
-        Ok(())
+        append_pinned_map(
+            &mut self.pinned_maps,
+            PinnedMap {
+                path,
+                map_id,
+                owner,
+                offered,
+            },
+        )
     }
 
     pub fn get_pinned_map(&self, path: &str) -> Option<u32> {
