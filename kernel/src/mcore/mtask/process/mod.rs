@@ -14,7 +14,6 @@ use core::ptr;
     feature = "bringup-diagnostics"
 ))]
 use core::sync::atomic::AtomicBool;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 use conquer_once::spin::OnceCell;
 use kernel_elfloader::{ElfFile, ElfLoader};
@@ -58,7 +57,10 @@ use image::{read_executable_file_into, trampoline_load_elf, ElfSegments};
 pub(crate) use image::{ExecImage, ExecveError};
 mod id;
 pub use id::*;
+mod lifecycle;
 pub mod mem;
+mod sleep_state;
+use sleep_state::InterruptibleSleepState;
 pub mod telemetry;
 
 use crate::arch::UserContext;
@@ -118,7 +120,7 @@ pub struct Process {
     exit_code: RwLock<Option<i32>>,
     child_exit_wait: OnceCell<Arc<WaitChannel>>,
     parent_exit_wait: Option<Arc<WaitChannel>>,
-    interruptible_sleep_state: AtomicU64,
+    interruptible_sleep_state: InterruptibleSleepState,
 
     executable_path: Option<AbsoluteOwnedPath>,
     executable_file_data: RwLock<Option<LowerHalfAllocation<Executable>>>,
@@ -148,7 +150,7 @@ impl Process {
                 exit_code: RwLock::new(None),
                 child_exit_wait: OnceCell::uninit(),
                 parent_exit_wait: None,
-                interruptible_sleep_state: AtomicU64::new(0),
+                interruptible_sleep_state: InterruptibleSleepState::new(),
                 executable_path: None,
                 executable_file_data: RwLock::new(None),
                 current_working_directory: RwLock::new(ROOT.to_owned()),
@@ -190,7 +192,7 @@ impl Process {
             exit_code: RwLock::new(None),
             child_exit_wait: OnceCell::uninit(),
             parent_exit_wait: Some(parent.child_exit_wait().clone()),
-            interruptible_sleep_state: AtomicU64::new(0),
+            interruptible_sleep_state: InterruptibleSleepState::new(),
             executable_path: executable_path.map(|x| x.as_ref().to_owned()),
             executable_file_data: RwLock::new(None),
             current_working_directory: RwLock::new(parent.current_working_directory.read().clone()),
@@ -271,101 +273,6 @@ impl Process {
         RunQueues::enqueue(Box::pin(main_task));
 
         Ok(process)
-    }
-
-    pub fn exit_code(&self) -> &RwLock<Option<i32>> {
-        &self.exit_code
-    }
-
-    pub(crate) fn child_exit_wait(&self) -> &Arc<WaitChannel> {
-        self.child_exit_wait
-            .get_or_init(|| Arc::new(WaitChannel::new()))
-    }
-
-    /// Publish process exit while holding the same tree lock used by waiters.
-    pub(crate) fn mark_exited(&self, status: i32) {
-        let _tree = process_tree().write();
-        let mut exit_code = self.exit_code.write();
-        if exit_code.is_some() {
-            return;
-        }
-        *exit_code = Some(status);
-        if let Some(parent_exit_wait) = self.parent_exit_wait.as_ref() {
-            parent_exit_wait.wake_all();
-        }
-    }
-
-    pub(crate) fn begin_interruptible_sleep(&self) -> u64 {
-        const INACTIVE: u64 = 0;
-        const ACTIVE: u64 = 1;
-        loop {
-            let current = self.interruptible_sleep_state.load(Ordering::Acquire);
-            assert_eq!(
-                current & 3,
-                INACTIVE,
-                "process already has an interruptible sleeper"
-            );
-            let generation = (current >> 2).wrapping_add(1);
-            let next = (generation << 2) | ACTIVE;
-            if self
-                .interruptible_sleep_state
-                .compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                return generation;
-            }
-        }
-    }
-
-    #[must_use]
-    pub(crate) fn request_sleep_interrupt(&self) -> bool {
-        const ACTIVE: u64 = 1;
-        const INTERRUPT_REQUESTED: u64 = 2;
-        let current = self.interruptible_sleep_state.load(Ordering::Acquire);
-        current & 3 == ACTIVE
-            && self
-                .interruptible_sleep_state
-                .compare_exchange(
-                    current,
-                    (current & !3) | INTERRUPT_REQUESTED,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-    }
-
-    #[must_use]
-    pub(crate) fn sleep_interrupt_requested(&self, generation: u64) -> bool {
-        const INTERRUPT_REQUESTED: u64 = 2;
-        self.interruptible_sleep_state.load(Ordering::Acquire)
-            == (generation << 2) | INTERRUPT_REQUESTED
-    }
-
-    /// Complete one exact sleep generation and report whether interruption won.
-    pub(crate) fn finish_interruptible_sleep(&self, generation: u64) -> bool {
-        const INACTIVE: u64 = 0;
-        const ACTIVE: u64 = 1;
-        const INTERRUPT_REQUESTED: u64 = 2;
-        loop {
-            let current = self.interruptible_sleep_state.load(Ordering::Acquire);
-            assert_eq!(current >> 2, generation, "sleep generation changed");
-            assert!(
-                matches!(current & 3, ACTIVE | INTERRUPT_REQUESTED),
-                "sleep generation completed twice"
-            );
-            if self
-                .interruptible_sleep_state
-                .compare_exchange(
-                    current,
-                    (generation << 2) | INACTIVE,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                return current & 3 == INTERRUPT_REQUESTED;
-            }
-        }
     }
 
     pub fn pid(&self) -> ProcessId {
