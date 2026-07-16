@@ -38,6 +38,28 @@ pub(super) fn insert<T>(
     max_slots: usize,
     value: T,
 ) -> Result<u32, BpfError> {
+    insert_with_reservations(
+        slots,
+        generations,
+        max_slots,
+        value,
+        |slots| slots.try_reserve(1).map_err(|_| BpfError::OutOfMemory),
+        |generations| {
+            generations
+                .try_reserve(1)
+                .map_err(|_| BpfError::OutOfMemory)
+        },
+    )
+}
+
+fn insert_with_reservations<T>(
+    slots: &mut Vec<Option<T>>,
+    generations: &mut Vec<u32>,
+    max_slots: usize,
+    value: T,
+    mut reserve_slot: impl FnMut(&mut Vec<Option<T>>) -> Result<(), BpfError>,
+    mut reserve_generation: impl FnMut(&mut Vec<u32>) -> Result<(), BpfError>,
+) -> Result<u32, BpfError> {
     if let Some(slot) = slots
         .iter()
         .enumerate()
@@ -52,10 +74,11 @@ pub(super) fn insert<T>(
     if slots.len() >= max_slots || slots.len() > SLOT_MASK as usize {
         return Err(BpfError::ResourceLimit);
     }
-    slots.try_reserve(1).map_err(|_| BpfError::OutOfMemory)?;
-    generations
-        .try_reserve(1)
-        .map_err(|_| BpfError::OutOfMemory)?;
+    // Reserve both backing vectors before publishing either half of the
+    // handle-table record. A failure may grow capacity, but it cannot expose a
+    // slot without a matching generation or consume `value` into the table.
+    reserve_slot(slots)?;
+    reserve_generation(generations)?;
     let slot = slots.len();
     slots.push(Some(value));
     generations.push(0);
@@ -64,7 +87,19 @@ pub(super) fn insert<T>(
 
 #[cfg(test)]
 mod tests {
+    use core::cell::Cell;
+
     use super::*;
+
+    struct DropTracked<'a> {
+        drops: &'a Cell<usize>,
+    }
+
+    impl Drop for DropTracked<'_> {
+        fn drop(&mut self) {
+            self.drops.set(self.drops.get() + 1);
+        }
+    }
 
     #[test]
     fn stale_generation_does_not_decode_after_slot_reuse() {
@@ -91,5 +126,52 @@ mod tests {
         );
         assert_eq!(slots, [Some(10)]);
         assert_eq!(generations, [0]);
+    }
+
+    #[test]
+    fn append_reservation_failure_sweep_preserves_state_and_value_ownership() {
+        for fail_at in 1..=2 {
+            let drops = Cell::new(0usize);
+            let calls = Cell::new(0usize);
+            let mut slots = Vec::new();
+            let mut generations = Vec::new();
+
+            let result = insert_with_reservations(
+                &mut slots,
+                &mut generations,
+                4,
+                DropTracked { drops: &drops },
+                |_| {
+                    let call = calls.get() + 1;
+                    calls.set(call);
+                    (call != fail_at).then_some(()).ok_or(BpfError::OutOfMemory)
+                },
+                |_| {
+                    let call = calls.get() + 1;
+                    calls.set(call);
+                    (call != fail_at).then_some(()).ok_or(BpfError::OutOfMemory)
+                },
+            );
+
+            assert_eq!(result, Err(BpfError::OutOfMemory));
+            assert!(slots.is_empty(), "failure {fail_at} published a slot");
+            assert!(
+                generations.is_empty(),
+                "failure {fail_at} published a generation"
+            );
+            assert_eq!(calls.get(), fail_at);
+            assert_eq!(drops.get(), 1);
+
+            let handle = insert(
+                &mut slots,
+                &mut generations,
+                4,
+                DropTracked { drops: &drops },
+            )
+            .unwrap();
+            assert_eq!(decode(&generations, handle), Some(0));
+            drop(slots);
+            assert_eq!(drops.get(), 2);
+        }
     }
 }
