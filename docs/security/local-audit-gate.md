@@ -19,6 +19,11 @@ workspace membership/exclusion drift, duplicate shipped-artifact identities,
 and disagreement between declared `rootfs:*` artifacts and the production
 filesystem model before expensive build or QEMU work starts.
 
+The host runner treats the pinned OVMF VARS file as an immutable template. Its
+QEMU pflash drive uses `snapshot=on`, so NVRAM writes go to an ephemeral overlay
+instead of the source template; `ovmf-vars-isolation-static` enforces that
+launch contract.
+
 Results are written below `target/audit-verification/`. Each run contains:
 
 - `manifest.txt`: commit, branch, dirty state, toolchain, host, selected mode,

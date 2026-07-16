@@ -103,7 +103,9 @@ continue"
         "if=pflash,unit=0,format=raw,file={OVMF_CODE},readonly=on"
     ));
     cmd.arg("-drive");
-    cmd.arg(format!("if=pflash,unit=1,format=raw,file={OVMF_VARS}"));
+    cmd.arg(format!(
+        "if=pflash,unit=1,format=raw,file={OVMF_VARS},snapshot=on"
+    ));
 
     // kernel binary
     cmd.arg("-cdrom");
