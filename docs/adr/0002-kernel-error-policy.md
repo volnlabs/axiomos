@@ -31,5 +31,9 @@ and defer recovery to task context.
 
 - Clippy plus a repository check rejects unit/string errors at designated public
   kernel boundaries.
+- `scripts/check-error-policy.py` rejects panic/unwrap/todo and unit-error
+  regressions in supported boot, filesystem-initialization, and driver paths;
+  it also enforces the bounded release fatal path and transactional block-device
+  publication order.
 - Failure-injection tests cover every transactional allocation/mapping API.
 - Syscall adapters contain the only subsystem-error-to-`Errno` mapping tables.

@@ -7,7 +7,10 @@ use core::fmt::{Debug, Formatter};
 use kernel_device::block::{BlockBuf, BlockDevice};
 use kernel_device::Device;
 use spin::Mutex;
+use thiserror::Error;
 
+#[cfg(feature = "rpi5")]
+use crate::driver::block::RegisterBlockDeviceError;
 use crate::driver::KernelDeviceId;
 
 #[cfg(feature = "rpi5")]
@@ -16,6 +19,12 @@ static EMBEDDED_DISK: &[u8] = include_bytes!(env!("EMBEDDED_DISK_PATH"));
 pub struct RamBlockDevice {
     id: KernelDeviceId,
     data: Arc<Mutex<Vec<u8>>>,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Error)]
+pub enum RamBlockDeviceError {
+    #[error("block access is outside the ramdisk")]
+    OutOfBounds,
 }
 
 impl RamBlockDevice {
@@ -53,15 +62,31 @@ impl BlockDevice<KernelDeviceId, 512> for RamBlockDevice {
         buf: &mut BlockBuf<512>,
     ) -> Result<(), Box<dyn Error>> {
         let data = self.data.lock();
-        let offset = block_num * 512;
-        buf[..].copy_from_slice(&data[offset..offset + 512]);
+        let offset = block_num
+            .checked_mul(512)
+            .ok_or(RamBlockDeviceError::OutOfBounds)?;
+        let end = offset
+            .checked_add(512)
+            .ok_or(RamBlockDeviceError::OutOfBounds)?;
+        let source = data
+            .get(offset..end)
+            .ok_or(RamBlockDeviceError::OutOfBounds)?;
+        buf[..].copy_from_slice(source);
         Ok(())
     }
 
     fn write_block(&mut self, block_num: usize, buf: &BlockBuf<512>) -> Result<(), Box<dyn Error>> {
         let mut data = self.data.lock();
-        let offset = block_num * 512;
-        data[offset..offset + 512].copy_from_slice(&buf[..]);
+        let offset = block_num
+            .checked_mul(512)
+            .ok_or(RamBlockDeviceError::OutOfBounds)?;
+        let end = offset
+            .checked_add(512)
+            .ok_or(RamBlockDeviceError::OutOfBounds)?;
+        let destination = data
+            .get_mut(offset..end)
+            .ok_or(RamBlockDeviceError::OutOfBounds)?;
+        destination.copy_from_slice(&buf[..]);
         Ok(())
     }
 
@@ -71,7 +96,7 @@ impl BlockDevice<KernelDeviceId, 512> for RamBlockDevice {
 }
 
 impl filesystem::BlockDevice for RamBlockDevice {
-    type Error = ();
+    type Error = RamBlockDeviceError;
 
     fn sector_size(&self) -> usize {
         512
@@ -83,23 +108,39 @@ impl filesystem::BlockDevice for RamBlockDevice {
 
     fn read_sector(&self, sector_index: usize, buf: &mut [u8]) -> Result<usize, Self::Error> {
         let data = self.data.lock();
-        let offset = sector_index * 512;
+        let offset = sector_index
+            .checked_mul(512)
+            .ok_or(RamBlockDeviceError::OutOfBounds)?;
         let len = buf.len().min(512);
-        buf[..len].copy_from_slice(&data[offset..offset + len]);
+        let end = offset
+            .checked_add(len)
+            .ok_or(RamBlockDeviceError::OutOfBounds)?;
+        let source = data
+            .get(offset..end)
+            .ok_or(RamBlockDeviceError::OutOfBounds)?;
+        buf[..len].copy_from_slice(source);
         Ok(len)
     }
 
     fn write_sector(&mut self, sector_index: usize, buf: &[u8]) -> Result<usize, Self::Error> {
         let mut data = self.data.lock();
-        let offset = sector_index * 512;
+        let offset = sector_index
+            .checked_mul(512)
+            .ok_or(RamBlockDeviceError::OutOfBounds)?;
         let len = buf.len().min(512);
-        data[offset..offset + len].copy_from_slice(&buf[..len]);
+        let end = offset
+            .checked_add(len)
+            .ok_or(RamBlockDeviceError::OutOfBounds)?;
+        let destination = data
+            .get_mut(offset..end)
+            .ok_or(RamBlockDeviceError::OutOfBounds)?;
+        destination.copy_from_slice(&buf[..len]);
         Ok(len)
     }
 }
 
 #[cfg(feature = "rpi5")]
-pub fn init_embedded() {
+pub fn init_embedded() -> Result<(), RegisterBlockDeviceError> {
     use log::info;
     use spin::RwLock;
 
@@ -113,6 +154,7 @@ pub fn init_embedded() {
     info!("RamBlockDevice created: {:?}", device);
 
     let device = Arc::new(RwLock::new(device));
-    BlockDevices::register_block_device(device).expect("should be able to register ramdisk");
+    BlockDevices::register_block_device(device)?;
     info!("Embedded ramdisk registered as block device");
+    Ok(())
 }

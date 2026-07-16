@@ -2,43 +2,48 @@ use core::fmt::Write;
 
 use conquer_once::spin::OnceCell;
 use kernel_devfs::{ArcLockedDevFs, Null, Serial};
-use kernel_vfs::path::AbsolutePath;
+use kernel_vfs::path::{AbsolutePath, PathNotAbsoluteError};
+use thiserror::Error;
 
 use crate::serial_print;
 
 static DEVFS: OnceCell<ArcLockedDevFs> = OnceCell::uninit();
 
-#[must_use]
-pub fn devfs() -> &'static ArcLockedDevFs {
-    DEVFS.get().expect("devfs should be initialized")
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Error)]
+pub enum DevFsInitError {
+    #[error("default devfs path is invalid: {0}")]
+    InvalidPath(#[from] PathNotAbsoluteError),
+    #[error("default devfs node registration failed: {0}")]
+    Registration(#[from] kernel_devfs::RegisterError),
 }
 
-pub fn init() {
+#[must_use]
+pub fn devfs() -> &'static ArcLockedDevFs {
+    match DEVFS.get() {
+        Some(devfs) => devfs,
+        None => crate::fatal::halt("devfs-uninitialized"),
+    }
+}
+
+pub fn init() -> Result<(), DevFsInitError> {
     let devfs = ArcLockedDevFs::new();
     {
         let mut guard = devfs.write();
-        guard
-            .register_file(AbsolutePath::try_new("/serial").unwrap(), || {
-                Ok(Serial::<SerialWrite>::default())
-            })
-            .expect("should be able to register serial file");
+        guard.register_file(AbsolutePath::try_new("/serial")?, || {
+            Ok(Serial::<SerialWrite>::default())
+        })?;
 
         // TODO: implement proper STDIO
-        guard
-            .register_file(AbsolutePath::try_new("/stdin").unwrap(), || Ok(Null))
-            .expect("should be able to register stdin");
-        guard
-            .register_file(AbsolutePath::try_new("/stdout").unwrap(), || {
-                Ok(Serial::<SerialWrite>::default())
-            })
-            .expect("should be able to register stdout");
-        guard
-            .register_file(AbsolutePath::try_new("/stderr").unwrap(), || {
-                Ok(Serial::<SerialWrite>::default())
-            })
-            .expect("should be able to register stderr");
+        guard.register_file(AbsolutePath::try_new("/stdin")?, || Ok(Null))?;
+        guard.register_file(AbsolutePath::try_new("/stdout")?, || {
+            Ok(Serial::<SerialWrite>::default())
+        })?;
+        guard.register_file(AbsolutePath::try_new("/stderr")?, || {
+            Ok(Serial::<SerialWrite>::default())
+        })?;
     }
     DEVFS.init_once(|| devfs);
+    Ok(())
 }
 
 #[derive(Default)]

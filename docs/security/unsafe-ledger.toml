@@ -1,6 +1,6 @@
 version = 1
-baseline_sites = 698
-baseline_fingerprint = "sha256:0e056cf65e744e14b6c05edac5fdb34832516a3a9ddf86526e0b6e030ea93bbb"
+baseline_sites = 699
+baseline_fingerprint = "sha256:67c6bf122cbd8be60c1687dcdc9461a77cb5e0e4ec2085f81e1d8bccc271546d"
 
 # Rules are evaluated in order. Keep narrow, high-risk obligations before broad
 # subsystem rules. The first matching rule supplies every site-level field.
@@ -227,7 +227,7 @@ reviewed = "2026-07-12"
 
 [[obligation]]
 id = "KERNEL-BOOT-RUNTIME"
-paths = ["kernel/src/main*.rs", "kernel/src/lib.rs", "kernel/src/limine.rs", "kernel/src/log.rs", "kernel/src/serial.rs", "kernel/src/backtrace.rs", "kernel/src/time.rs", "kernel/src/bench.rs", "kernel/build.rs"]
+paths = ["kernel/src/main*.rs", "kernel/src/lib.rs", "kernel/src/fatal.rs", "kernel/src/limine.rs", "kernel/src/log.rs", "kernel/src/serial.rs", "kernel/src/backtrace.rs", "kernel/src/time.rs", "kernel/src/bench.rs", "kernel/build.rs"]
 scope = "production"
 owner = "kernel platform maintainers"
 invariant = "Bootloader/firmware pointers, linker symbols, allocator setup, assembly reads, and ABI attributes satisfy their documented platform lifetime and layout contracts."

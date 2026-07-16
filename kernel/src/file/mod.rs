@@ -4,6 +4,7 @@ use kernel_vfs::node::VfsNode;
 use kernel_vfs::path::AbsolutePath;
 use kernel_vfs::Vfs;
 use spin::RwLock;
+use thiserror::Error;
 
 use crate::file::devfs::devfs;
 
@@ -16,17 +17,27 @@ use pipe::PipeEndpoint;
 
 static VFS: RwLock<Vfs> = RwLock::new(Vfs::new());
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Error)]
+pub enum FileInitError {
+    #[error("devfs initialization failed: {0}")]
+    DevFs(#[from] devfs::DevFsInitError),
+    #[error("devfs mount path is invalid: {0}")]
+    InvalidMountPath(#[from] kernel_vfs::path::PathNotAbsoluteError),
+    #[error("devfs mount failed: {0}")]
+    Mount(#[from] kernel_vfs::MountError),
+}
+
 #[must_use]
 pub fn vfs() -> &'static RwLock<Vfs> {
     &VFS
 }
 
-pub fn init() {
-    devfs::init();
+pub fn init() -> Result<(), FileInitError> {
+    devfs::init()?;
 
     VFS.write()
-        .mount(AbsolutePath::try_new("/dev").unwrap(), devfs().clone())
-        .expect("should be able to mount devfs");
+        .mount(AbsolutePath::try_new("/dev")?, devfs().clone())?;
+    Ok(())
 }
 
 #[derive(Debug)]

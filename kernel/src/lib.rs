@@ -7,6 +7,7 @@ extern crate alloc;
 use ::log::info;
 use conquer_once::spin::OnceCell;
 use spin::Mutex;
+use thiserror::Error;
 
 #[cfg(target_arch = "x86_64")]
 use crate::driver::pci;
@@ -24,6 +25,7 @@ pub mod backtrace;
 pub mod bench;
 pub mod bpf;
 pub mod driver;
+mod fatal;
 pub mod file;
 #[cfg(target_arch = "x86_64")]
 pub mod hpet;
@@ -70,6 +72,20 @@ pub struct KernelBootMetrics {
 pub static BOOT_METRICS: OnceCell<KernelBootMetrics> = OnceCell::uninit();
 pub static BPF_MANAGER: OnceCell<Mutex<bpf::BpfManager>> = OnceCell::uninit();
 
+#[derive(Debug, Error)]
+pub enum KernelInitError {
+    #[cfg(target_arch = "x86_64")]
+    #[error("boot time was not provided by the bootloader")]
+    BootTimeUnavailable,
+    #[error("filesystem initialization failed: {0}")]
+    FileSystem(#[from] file::FileInitError),
+    #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+    #[error("embedded ramdisk registration failed: {0}")]
+    EmbeddedRamdisk(#[from] driver::block::RegisterBlockDeviceError),
+    #[error("IIO simulation task creation failed: {0}")]
+    IioSimulationTask(#[from] driver::iio::IioInitError),
+}
+
 #[inline(always)]
 pub(crate) fn dbg_mark(_ch: u32) {
     #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
@@ -79,19 +95,30 @@ pub(crate) fn dbg_mark(_ch: u32) {
     }
 }
 
-fn init_boot_time() {
+fn init_boot_time() -> Result<(), KernelInitError> {
     #[cfg(target_arch = "x86_64")]
-    BOOT_TIME_SECONDS.init_once(|| BOOT_TIME.get_response().unwrap().timestamp().as_secs());
+    {
+        let response = BOOT_TIME
+            .get_response()
+            .ok_or(KernelInitError::BootTimeUnavailable)?;
+        BOOT_TIME_SECONDS.init_once(|| response.timestamp().as_secs());
+    }
     #[cfg(not(target_arch = "x86_64"))]
     {
         // AArch64/RISC-V currently run without a platform RTC source here.
         // Keep boot time at epoch 0 and avoid early OnceCell initialization.
     }
+    Ok(())
 }
 
-pub fn init() {
+/// Initializes kernel subsystems in dependency order.
+///
+/// # Errors
+/// Returns a typed boot-boundary error when a fallible device or task setup
+/// step cannot be completed.
+pub fn init() -> Result<(), KernelInitError> {
     dbg_mark(0x61); // 'a'
-    init_boot_time();
+    init_boot_time()?;
     dbg_mark(0x62); // 'b'
     log::init();
     dbg_mark(0x63); // 'c'
@@ -139,7 +166,7 @@ pub fn init() {
     info!("Backtrace initialized");
 
     info!("Initializing VFS...");
-    file::init();
+    file::init()?;
     dbg_mark(0x6a); // 'j'
     info!("VFS initialized");
 
@@ -171,13 +198,13 @@ pub fn init() {
     #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
     {
         info!("Initializing embedded ramdisk...");
-        driver::ram::init_embedded();
+        driver::ram::init_embedded()?;
         dbg_mark(0x52); // 'R'
         info!("Embedded ramdisk initialized");
     }
 
     info!("Initializing simulated devices...");
-    driver::iio::init_simulated_device();
+    driver::iio::init_simulated_device()?;
     dbg_mark(0x6d); // 'm'
     info!("Simulated devices initialized");
 
@@ -185,6 +212,7 @@ pub fn init() {
 
     // Print benchmark metrics
     print_benchmark_metrics();
+    Ok(())
 }
 
 fn print_benchmark_metrics() {

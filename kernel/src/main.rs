@@ -35,6 +35,57 @@ use spin::RwLock;
 #[cfg(target_arch = "x86_64")]
 use x86_64::instructions::hlt;
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum BootError {
+    BootloaderRevisionUnsupported,
+    BootTimeUnavailable,
+    FileSystemInitialization,
+    EmbeddedRamdiskInitialization,
+    IioSimulationInitialization,
+    RootBlockDeviceMissing,
+    RootFilesystemInvalid,
+    RootMountFailed,
+    InitPathInvalid,
+    InitExecutableMissing,
+    InitProcessCreationFailed,
+}
+
+impl BootError {
+    const fn code(self) -> &'static str {
+        match self {
+            Self::BootloaderRevisionUnsupported => "bootloader-revision-unsupported",
+            Self::BootTimeUnavailable => "boot-time-unavailable",
+            Self::FileSystemInitialization => "filesystem-initialization",
+            Self::EmbeddedRamdiskInitialization => "embedded-ramdisk-initialization",
+            Self::IioSimulationInitialization => "iio-simulation-initialization",
+            Self::RootBlockDeviceMissing => "root-block-device-missing",
+            Self::RootFilesystemInvalid => "root-filesystem-invalid",
+            Self::RootMountFailed => "root-mount-failed",
+            Self::InitPathInvalid => "init-path-invalid",
+            Self::InitExecutableMissing => "init-executable-missing",
+            Self::InitProcessCreationFailed => "init-process-creation-failed",
+        }
+    }
+
+    fn from_kernel_init(error: kernel::KernelInitError) -> Self {
+        match error {
+            #[cfg(target_arch = "x86_64")]
+            kernel::KernelInitError::BootTimeUnavailable => Self::BootTimeUnavailable,
+            kernel::KernelInitError::FileSystem(_) => Self::FileSystemInitialization,
+            #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+            kernel::KernelInitError::EmbeddedRamdisk(_) => Self::EmbeddedRamdiskInitialization,
+            kernel::KernelInitError::IioSimulationTask(_) => Self::IioSimulationInitialization,
+        }
+    }
+}
+
+fn boot_fatal(error: BootError) -> ! {
+    kernel::serial_println!("BOOT_FATAL code={}", error.code());
+    loop {
+        hlt();
+    }
+}
+
 #[cfg(not(target_arch = "x86_64"))]
 fn hlt() {
     #[cfg(target_arch = "riscv64")]
@@ -59,31 +110,47 @@ mod audit_fault_probe;
 // SAFETY: This is the kernel entry point. It initializes the system and manages resources
 // which inherently involves unsafe operations. The bootloader guarantees the initial state.
 unsafe extern "C" fn main() -> ! {
-    assert!(BASE_REVISION.is_supported());
+    if !BASE_REVISION.is_supported() {
+        boot_fatal(BootError::BootloaderRevisionUnsupported);
+    }
 
-    kernel::init();
+    if let Err(error) = kernel::init() {
+        boot_fatal(BootError::from_kernel_init(error));
+    }
 
     {
         info!("mounting root filesystem");
-        let root_block_device = BlockDevices::by_id(0).expect("should have block device with id 0");
+        let Some(root_block_device) = BlockDevices::by_id(0) else {
+            boot_fatal(BootError::RootBlockDeviceMissing);
+        };
         let root_block_device = ArcLockedBlockDevice(root_block_device);
-        vfs()
+        let root_fs = match Ext2Fs::try_new(root_block_device) {
+            Ok(root_fs) => root_fs,
+            Err(_) => boot_fatal(BootError::RootFilesystemInvalid),
+        };
+        if vfs()
             .write()
-            .mount(
-                ROOT,
-                VirtualExt2Fs::from(
-                    Ext2Fs::try_new(root_block_device).expect("should be able to create ext2fs"),
-                ),
-            )
-            .expect("should be able to mount ext2fs at /");
+            .mount(ROOT, VirtualExt2Fs::from(root_fs))
+            .is_err()
+        {
+            boot_fatal(BootError::RootMountFailed);
+        }
     }
 
     {
         info!("starting init process...");
 
-        let init_path = AbsolutePath::try_new("/bin/init").unwrap();
-        let _ = vfs().read().open(init_path).expect("should have /bin/init");
-        let proc = Process::create_userspace_init(Process::root(), init_path).unwrap();
+        let init_path = match AbsolutePath::try_new("/bin/init") {
+            Ok(path) => path,
+            Err(_) => boot_fatal(BootError::InitPathInvalid),
+        };
+        if vfs().read().open(init_path).is_err() {
+            boot_fatal(BootError::InitExecutableMissing);
+        }
+        let proc = match Process::create_userspace_init(Process::root(), init_path) {
+            Ok(process) => process,
+            Err(_) => boot_fatal(BootError::InitProcessCreationFailed),
+        };
         info!("started process pid={}", proc.pid());
         #[cfg(feature = "audit-diagnostics")]
         serial_println!("INIT_PROCESS_STARTED pid={}", proc.pid());
@@ -128,7 +195,9 @@ unsafe extern "C" fn main() -> ! {
     }
 
     // SAFETY: We are initializing the kernel subsystems in the correct order.
-    kernel::init();
+    if let Err(error) = kernel::init() {
+        boot_fatal(BootError::from_kernel_init(error));
+    }
 
     #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     // SAFETY: Early debug marker write to Pi 5 debug UART10 data register.
@@ -162,14 +231,14 @@ unsafe extern "C" fn main() -> ! {
                     Ok(fs) => fs,
                     Err(_) => {
                         dbg_mark(0x65); // 'e'
-                        mcore::turn_idle();
+                        boot_fatal(BootError::RootFilesystemInvalid);
                     }
                 }),
             )
             .is_err()
         {
             dbg_mark(0x66); // 'f'
-            mcore::turn_idle();
+            boot_fatal(BootError::RootMountFailed);
         }
         dbg_mark(0x44); // 'D'
 
@@ -178,16 +247,16 @@ unsafe extern "C" fn main() -> ! {
             Ok(p) => p,
             Err(_) => {
                 dbg_mark(0x67); // 'g'
-                mcore::turn_idle();
+                boot_fatal(BootError::InitPathInvalid);
             }
         };
         if vfs().read().open(init_path).is_err() {
             dbg_mark(0x68); // 'h'
-            mcore::turn_idle();
+            boot_fatal(BootError::InitExecutableMissing);
         }
         if Process::create_userspace_init(Process::root(), init_path).is_err() {
             dbg_mark(0x69); // 'i'
-            mcore::turn_idle();
+            boot_fatal(BootError::InitProcessCreationFailed);
         }
         dbg_mark(0x45); // 'E'
     } else {
@@ -223,7 +292,9 @@ unsafe extern "C" fn main() -> ! {
 #[unsafe(export_name = "kernel_main")]
 // SAFETY: Kernel entry point.
 unsafe extern "C" fn main() -> ! {
-    kernel::init();
+    if let Err(error) = kernel::init() {
+        boot_fatal(BootError::from_kernel_init(error));
+    }
 
     info!("RISC-V kernel started");
     info!("Kernel initialization complete");
@@ -288,13 +359,16 @@ fn handle_panic(info: &PanicInfo) {
         (0xFFFF_8010_7D00_1000 as *mut u32).write_volatile(0x21); // '!'
     }
 
-    let location = info.location().unwrap();
-    kernel::serial_println!(
-        "kernel panicked at {}:{}:{}:",
-        location.file(),
-        location.line(),
-        location.column(),
-    );
+    if let Some(location) = info.location() {
+        kernel::serial_println!(
+            "kernel panicked at {}:{}:{}:",
+            location.file(),
+            location.line(),
+            location.column(),
+        );
+    } else {
+        kernel::serial_println!("kernel panicked at <unknown>:");
+    }
     kernel::serial_println!("{}", info.message());
 
     #[cfg(feature = "backtrace")]
