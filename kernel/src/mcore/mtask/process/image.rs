@@ -10,7 +10,8 @@ use kernel_vfs::Stat;
 use thiserror::Error;
 
 use super::executable::{
-    advance_executable_read_progress, allocate_executable_buffer, ExecutableReadProgress,
+    advance_executable_read_progress, allocate_executable_buffer, ExecutableFileError,
+    ExecutableReadProgress, ExecutableReadProgressError,
 };
 use super::Process;
 use crate::file::vfs;
@@ -57,6 +58,30 @@ pub(crate) enum ExecveError {
     /// distinguish them in a log.
     #[error("execve: out of memory during {stage}")]
     Enomem { stage: &'static str },
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum ExecutableReadError {
+    #[error("executable buffer is shorter than its stat size")]
+    BufferTooShort,
+    #[error("failed to read executable: {0}")]
+    Read(#[from] kernel_vfs::ReadError),
+    #[error("invalid executable read progress: {0}")]
+    Progress(#[from] ExecutableReadProgressError),
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum ExecPreflightError {
+    #[error("failed to open executable: {0}")]
+    Open(#[from] kernel_vfs::OpenError),
+    #[error("failed to stat executable: {0}")]
+    Stat(#[from] kernel_vfs::StatError),
+    #[error("invalid executable buffer: {0}")]
+    File(#[from] ExecutableFileError),
+    #[error("failed to read executable: {0}")]
+    Read(#[from] ExecutableReadError),
+    #[error("invalid ELF file: {0}")]
+    Parse(#[from] kernel_elfloader::ElfParseError),
 }
 
 pub(super) enum TrampolineLoadError {
@@ -150,9 +175,9 @@ pub(super) fn read_executable_file_into(
     buf: &mut [u8],
     expected_size: usize,
     log_label: &str,
-) -> Result<(), &'static str> {
+) -> Result<(), ExecutableReadError> {
     if buf.len() < expected_size {
-        return Err("Executable buffer shorter than stat size");
+        return Err(ExecutableReadError::BufferTooShort);
     }
 
     let mut offset = 0;
@@ -163,9 +188,7 @@ pub(super) fn read_executable_file_into(
             offset,
             expected_size - offset
         );
-        let read = node
-            .read(&mut buf[offset..expected_size], offset)
-            .map_err(|_| "Failed to read executable")?;
+        let read = node.read(&mut buf[offset..expected_size], offset)?;
         log::info!(
             "{}: executable read returned offset={} read={}",
             log_label,
@@ -173,9 +196,7 @@ pub(super) fn read_executable_file_into(
             read
         );
 
-        match advance_executable_read_progress(offset, read, expected_size)
-            .map_err(|_| "Executable read made no progress or exceeded stat size")?
-        {
+        match advance_executable_read_progress(offset, read, expected_size)? {
             ExecutableReadProgress::Continue(next_offset) => offset = next_offset,
             ExecutableReadProgress::Complete => break,
         }
@@ -197,21 +218,19 @@ pub(super) fn trampoline_load_elf<'a>(
 }
 
 impl Process {
-    pub(crate) fn prepare_execve(&self, path: &AbsolutePath) -> Result<Vec<u8>, &'static str> {
-        let node = vfs()
-            .write()
-            .open(path)
-            .map_err(|_| "Failed to open executable")?;
+    pub(crate) fn prepare_execve(
+        &self,
+        path: &AbsolutePath,
+    ) -> Result<Vec<u8>, ExecPreflightError> {
+        let node = vfs().write().open(path)?;
         let mut stat = Stat::default();
-        node.stat(&mut stat)
-            .map_err(|_| "Failed to stat executable")?;
+        node.stat(&mut stat)?;
 
-        let mut file_content =
-            allocate_executable_buffer(stat.size).map_err(|error| error.message())?;
+        let mut file_content = allocate_executable_buffer(stat.size)?;
         read_executable_file_into(&node, &mut file_content, stat.size, "execve")?;
         ElfFile::try_parse(&file_content).map_err(|e| {
             log::error!("execve preflight: ELF parse error: {e}");
-            "Invalid ELF file"
+            e
         })?;
         Ok(file_content)
     }

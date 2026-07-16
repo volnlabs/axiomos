@@ -5,6 +5,7 @@ use core::slice;
 use kernel_abi::ProtFlags;
 use kernel_vfs::node::VfsNode;
 use spin::mutex::Mutex;
+use thiserror::Error;
 
 use crate::arch::{PhysFrame, VirtAddr};
 use crate::mem::address_space::AddressSpace;
@@ -14,6 +15,24 @@ use crate::UsizeExt;
 
 pub struct MemoryRegions {
     regions: Mutex<Vec<MemoryRegion>>,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Error)]
+pub enum MemoryCloneError {
+    #[error("failed to reserve the region in the child process")]
+    ReserveChildRegion,
+    #[error("the source mapping owner no longer exists")]
+    SourceOwnerGone,
+    #[error("the source region contains an unmapped page")]
+    SourcePageUnmapped,
+    #[error("failed to map the region in the child process")]
+    MapChildRegion,
+    #[error("failed to remap the parent region as copy-on-write")]
+    RemapParentCopyOnWrite,
+    #[error("forking a lazy memory region is not supported")]
+    LazyRegionUnsupported,
+    #[error("forking a file-backed memory region is not supported")]
+    FileBackedRegionUnsupported,
 }
 
 impl Default for MemoryRegions {
@@ -44,7 +63,7 @@ impl MemoryRegions {
         }
     }
 
-    pub fn clone_to_process(&self, new_process: &Arc<Process>) -> Result<Self, &'static str> {
+    pub fn clone_to_process(&self, new_process: &Arc<Process>) -> Result<Self, MemoryCloneError> {
         let mut new_regions = Vec::new();
         let guard = self.regions.lock();
 
@@ -147,7 +166,7 @@ impl MemoryRegion {
         }
     }
 
-    pub fn clone_to_process(&self, new_process: &Arc<Process>) -> Result<Self, &'static str> {
+    pub fn clone_to_process(&self, new_process: &Arc<Process>) -> Result<Self, MemoryCloneError> {
         match self {
             MemoryRegion::Mapped(r) => Ok(MemoryRegion::Mapped(r.clone_to_process(new_process)?)),
             MemoryRegion::Lazy(r) => Ok(MemoryRegion::Lazy(r.clone_to_process(new_process)?)),
@@ -197,19 +216,19 @@ impl MemoryRegion {
 }
 
 impl MappedMemoryRegion {
-    pub fn clone_to_process(&self, new_process: &Arc<Process>) -> Result<Self, &'static str> {
+    pub fn clone_to_process(&self, new_process: &Arc<Process>) -> Result<Self, MemoryCloneError> {
         let new_segment_inner =
             kernel_virtual_memory::Segment::new(self.segment.start, self.segment.len);
 
         let new_segment = new_process
             .vmm()
             .mark_as_reserved(new_segment_inner)
-            .map_err(|_| "Failed to reserve segment in new process")?;
+            .map_err(|_| MemoryCloneError::ReserveChildRegion)?;
 
         let owner = self
             .owner
             .upgrade()
-            .ok_or("mapping owner no longer exists")?;
+            .ok_or(MemoryCloneError::SourceOwnerGone)?;
         let page_count = self.segment.len / Size4KiB::SIZE;
         let frames = owner.with_address_space(|address_space| {
             (0..page_count)
@@ -217,10 +236,10 @@ impl MappedMemoryRegion {
                     let virtual_address = self.segment.start + page_index * Size4KiB::SIZE;
                     let (physical_address, _) = address_space
                         .translate_page_flags(virtual_address)
-                        .ok_or("mapped region contains an unmapped page")?;
+                        .ok_or(MemoryCloneError::SourcePageUnmapped)?;
                     Ok(PhysFrame::<Size4KiB>::containing_address(physical_address))
                 })
-                .collect::<Result<Vec<_>, &'static str>>()
+                .collect::<Result<Vec<_>, MemoryCloneError>>()
         })?;
         for frame in frames.iter().copied() {
             PhysicalMemory::retain_frame(frame);
@@ -241,7 +260,7 @@ impl MappedMemoryRegion {
             .with_address_space(|as_| {
                 as_.map_range_owned(*new_segment, frames.iter().copied(), flags)
             })
-            .map_err(|_| "Failed to map memory in new process")?;
+            .map_err(|_| MemoryCloneError::MapChildRegion)?;
 
         #[cfg(target_arch = "aarch64")]
         if self.protection.contains(ProtFlags::WRITE) {
@@ -254,7 +273,7 @@ impl MappedMemoryRegion {
                 new_process.with_address_space(|as_| {
                     as_.unmap_range::<Size4KiB>(&*new_segment, PhysicalMemory::deallocate_frame);
                 });
-                return Err("Failed to remap parent memory as copy-on-write");
+                return Err(MemoryCloneError::RemapParentCopyOnWrite);
             }
         }
 
@@ -269,18 +288,18 @@ impl MappedMemoryRegion {
 }
 
 impl LazyMemoryRegion {
-    pub fn clone_to_process(&self, _new_process: &Arc<Process>) -> Result<Self, &'static str> {
+    pub fn clone_to_process(&self, _new_process: &Arc<Process>) -> Result<Self, MemoryCloneError> {
         // TODO: Implement proper deep copy for Lazy regions.
         // For now, since we only use Eager allocation (Mapped), this is less critical.
         // But if we encounter one, we shouldn't fail silently or panic?
         // Let's return error for now as it's not supported.
-        Err("Forking LazyMemoryRegion not implemented")
+        Err(MemoryCloneError::LazyRegionUnsupported)
     }
 }
 
 impl FileBackedMemoryRegion {
-    pub fn clone_to_process(&self, _new_process: &Arc<Process>) -> Result<Self, &'static str> {
-        Err("Forking FileBackedMemoryRegion not implemented")
+    pub fn clone_to_process(&self, _new_process: &Arc<Process>) -> Result<Self, MemoryCloneError> {
+        Err(MemoryCloneError::FileBackedRegionUnsupported)
     }
 }
 

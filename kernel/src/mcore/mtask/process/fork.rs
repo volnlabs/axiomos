@@ -1,10 +1,29 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 
+use thiserror::Error;
+
+use super::mem::MemoryCloneError;
 use super::Process;
 use crate::arch::UserContext;
 use crate::mcore::mtask::scheduler::run_queue::RunQueues;
-use crate::mcore::mtask::task::Task;
+use crate::mcore::mtask::task::{StackAllocationError, Task};
+
+#[derive(Debug, Error)]
+pub enum ProcessForkError {
+    #[error("failed to clone process memory: {0}")]
+    Memory(#[from] MemoryCloneError),
+    #[error("failed to clone executable data")]
+    CloneExecutableData,
+    #[error("failed to clone executable ELF segment")]
+    CloneExecutableSegment,
+    #[error("failed to clone read-only ELF segment")]
+    CloneReadonlySegment,
+    #[error("failed to clone writable ELF segment")]
+    CloneWritableSegment,
+    #[error("failed to allocate the child task: {0}")]
+    ChildTask(#[from] StackAllocationError),
+}
 
 impl Process {
     /// Forks the process, creating a exact copy of memory and file descriptors.
@@ -15,7 +34,7 @@ impl Process {
         self: &Arc<Self>,
         current_task: &Task,
         ctx: &UserContext,
-    ) -> Result<Arc<Self>, &'static str> {
+    ) -> Result<Arc<Self>, ProcessForkError> {
         let name = self.name.clone();
         let executable_path = self.executable_path.clone();
 
@@ -47,7 +66,7 @@ impl Process {
             if let Some(alloc) = parent_exec.as_ref() {
                 let cloned = alloc
                     .clone_to_process(child.clone())
-                    .ok_or("Failed to clone executable data")?;
+                    .ok_or(ProcessForkError::CloneExecutableData)?;
                 *child.executable_file_data.write() = Some(cloned);
             }
         }
@@ -60,29 +79,28 @@ impl Process {
                 child_segs.executable.push(
                     alloc
                         .clone_to_process(child.clone())
-                        .ok_or("Failed to clone executable ELF segment")?,
+                        .ok_or(ProcessForkError::CloneExecutableSegment)?,
                 );
             }
             for alloc in &parent_segs.readonly {
                 child_segs.readonly.push(
                     alloc
                         .clone_to_process(child.clone())
-                        .ok_or("Failed to clone readonly ELF segment")?,
+                        .ok_or(ProcessForkError::CloneReadonlySegment)?,
                 );
             }
             for alloc in &parent_segs.writable {
                 child_segs.writable.push(
                     alloc
                         .clone_to_process(child.clone())
-                        .ok_or("Failed to clone writable ELF segment")?,
+                        .ok_or(ProcessForkError::CloneWritableSegment)?,
                 );
             }
         }
 
         // 5. Build the task before publishing the child. Any earlier failure
         // drops the unpublished process and rolls back all cloned allocations.
-        let child_task = Task::fork(&child, current_task, ctx)
-            .map_err(|_| "Failed to allocate stack for child task")?;
+        let child_task = Task::fork(&child, current_task, ctx)?;
 
         // 6. Atomically publish the fully constructed child, then make it runnable.
         self.publish_child(child.clone());

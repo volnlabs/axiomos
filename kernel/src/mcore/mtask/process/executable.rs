@@ -2,6 +2,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use core::alloc::Layout;
+use core::fmt::{Display, Formatter};
 
 pub(crate) const MAX_EXECUTABLE_FILE_SIZE: usize = 16 * 1024 * 1024;
 const EXECUTABLE_ALIGNMENT: usize = 4096;
@@ -24,6 +25,14 @@ impl ExecutableFileError {
         }
     }
 }
+
+impl Display for ExecutableFileError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+impl core::error::Error for ExecutableFileError {}
 
 pub(crate) fn executable_layout(size: usize) -> Result<Layout, ExecutableFileError> {
     if size == 0 {
@@ -64,6 +73,30 @@ pub(crate) enum ExecutableReadProgressError {
         expected_size: usize,
     },
 }
+
+impl Display for ExecutableReadProgressError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::ZeroReadBeforeComplete {
+                offset,
+                expected_size,
+            } => write!(
+                f,
+                "read returned zero at offset {offset} before expected size {expected_size}"
+            ),
+            Self::ReadPastExpectedSize {
+                offset,
+                read,
+                expected_size,
+            } => write!(
+                f,
+                "read of {read} bytes at offset {offset} exceeds expected size {expected_size}"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for ExecutableReadProgressError {}
 
 pub(crate) fn advance_executable_read_progress(
     offset: usize,

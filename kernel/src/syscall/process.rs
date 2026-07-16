@@ -1,11 +1,11 @@
 use alloc::format;
 
-use kernel_abi::{Errno, ECHILD, EINVAL, ENOENT, ENOEXEC, ENOMEM, WNOHANG};
+use kernel_abi::{Errno, ECHILD, EINVAL, EIO, ENOENT, ENOEXEC, ENOMEM, WNOHANG};
 use kernel_vfs::path::AbsolutePath;
 
 use crate::arch::UserContext;
 use crate::mcore::context::ExecutionContext;
-use crate::mcore::mtask::process::ExecveError;
+use crate::mcore::mtask::process::{ExecPreflightError, ExecutableFileError};
 use crate::syscall::validation::{
     copy_to_userspace, read_userspace_string, read_userspace_string_array,
 };
@@ -90,7 +90,12 @@ pub fn sys_execve(
     let process = execution_context.current_process();
     let file_content = process.prepare_execve(path).map_err(|e| {
         log::error!("sys_execve preflight failed: {e}");
-        ENOENT
+        match e {
+            ExecPreflightError::Open(_) => ENOENT,
+            ExecPreflightError::File(ExecutableFileError::OutOfMemory) => ENOMEM,
+            ExecPreflightError::File(_) | ExecPreflightError::Parse(_) => ENOEXEC,
+            ExecPreflightError::Stat(_) | ExecPreflightError::Read(_) => EIO,
+        }
     })?;
 
     let (old_ustack, old_tls, old_fx_area) = execution_context.with_current_task(|current_task| {

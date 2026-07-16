@@ -68,6 +68,25 @@ def main() -> None:
         require("Result<Self, ()>" not in source, f"{relative}: constructor uses a unit error")
         require("result_unit_err" not in source, f"{relative}: unit-error lint suppression remains")
 
+    for relative in (
+        "kernel/src/mcore/mtask/process/executable.rs",
+        "kernel/src/mcore/mtask/process/fork.rs",
+        "kernel/src/mcore/mtask/process/image.rs",
+        "kernel/src/mcore/mtask/process/mem.rs",
+    ):
+        source = production_text(ROOT / relative)
+        require(
+            not re.search(r"Result\s*<[^\n]+,\s*&'static str\s*>", source),
+            f"{relative}: process boundary collapses errors to &'static str",
+        )
+
+    address_space = production_text(ROOT / "kernel/src/mem/address_space/mod.rs")
+    fork = address_space.split("pub fn fork", 1)[1]
+    require(
+        "Result<Self, AddressSpaceForkError>" in fork,
+        "address-space fork must expose a typed error",
+    )
+
     driver_root = ROOT / "kernel/src/driver"
     for path in sorted(driver_root.rglob("*.rs")):
         reject_forbidden(str(path.relative_to(ROOT)), production_text(path))
@@ -92,7 +111,7 @@ def main() -> None:
         "block registry publication must follow all fallible devfs preparation",
     )
 
-    print("ADR-0002 boot/driver boundary conformance: PASS")
+    print("ADR-0002 designated-boundary conformance: PASS")
 
 
 if __name__ == "__main__":

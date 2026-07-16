@@ -8,6 +8,7 @@ use kernel_usermem::{UserMemError, UserMemPerm, UserMemResult, MAX_USER_COPY};
 use log::info;
 use mapper::AddressSpaceMapper;
 use spin::RwLock;
+use thiserror::Error;
 #[cfg(target_arch = "x86_64")]
 use x86_64::instructions::interrupts;
 #[cfg(target_arch = "x86_64")]
@@ -54,6 +55,16 @@ mod mapper;
 static KERNEL_ADDRESS_SPACE: OnceCell<AddressSpace> = OnceCell::uninit();
 #[cfg(target_arch = "x86_64")]
 pub static RECURSIVE_INDEX: OnceCell<usize> = OnceCell::uninit();
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Error)]
+pub enum AddressSpaceForkError {
+    #[error("cannot fork an inactive address space")]
+    Inactive,
+    #[error("out of physical memory while copying the address space")]
+    OutOfPhysicalMemory,
+    #[error("failed to map a copied page into the child address space")]
+    MapPage,
+}
 
 pub fn init() {
     #[cfg(target_arch = "x86_64")]
@@ -830,7 +841,7 @@ impl AddressSpace {
     ///
     /// # Errors
     /// Returns an error if memory allocation fails.
-    pub fn fork(&self) -> Result<Self, &'static str> {
+    pub fn fork(&self) -> Result<Self, AddressSpaceForkError> {
         // 1. Create a new empty address space (this sets up kernel mappings)
         let new_as = Self::new();
 
@@ -844,7 +855,7 @@ impl AddressSpace {
         // Ensure we are active so we can read the user pages
         // (On x86_64, visit_user_pages relies on recursive mapping which requires activation)
         if !self.is_active() {
-            return Err("Cannot fork inactive address space");
+            return Err(AddressSpaceForkError::Inactive);
         }
 
         self.inner.read().visit_user_pages(|page, frame, flags| {
@@ -856,7 +867,7 @@ impl AddressSpace {
             let new_frame = match PhysicalMemory::allocate_frame() {
                 Some(f) => f,
                 None => {
-                    error = Some("Out of physical memory");
+                    error = Some(AddressSpaceForkError::OutOfPhysicalMemory);
                     return;
                 }
             };
@@ -889,12 +900,12 @@ impl AddressSpace {
                 // On x86_64, `map` returns Result<(), MapToError>. On AArch64, Result<(), &str>
                 #[cfg(target_arch = "x86_64")]
                 if active_as.map(page, frame, flags).is_err() {
-                    return Err("Failed to map page");
+                    return Err(AddressSpaceForkError::MapPage);
                 }
 
                 #[cfg(target_arch = "aarch64")]
                 if active_as.map(page, frame, flags).is_err() {
-                    return Err("Failed to map page");
+                    return Err(AddressSpaceForkError::MapPage);
                 }
             }
             Ok(())
