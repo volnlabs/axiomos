@@ -2,17 +2,17 @@
 
 ## Current branch re-audit (2026-07-15, fault-injection phase)
 
-- **Branch:** `audit/xtask-manifest-boundary`
+- **Branch:** `audit/runtime-architecture-hardening`
 - **Implementation re-audited at:** `e3b85d9` (exec/spawn rollback + typed `ExecveError`) on top of `56a7f2e` (map_range transaction helper), `9c78d05` (single-CPU boot smoke), `d76a657` (OVMF bump), `37b8e3d` (QEMU `--no-reboot`)
 - **Comparison baseline:** original audited commit `661d5ede6331c5ee62d6642451ce63ce1e0d5adf`
 - **Fresh engineering score:** **7/10** (release-candidate engineering, not production assurance)
 - **Fresh production decision:** **NO-GO** for v1.0 or safety-relevant deployment
-- **Local required gate evidence at `916efae`:**
-  - **Default mode** (`cargo xtask ci --full`): **89 PASS / 1 SKIP / 0 FAIL**. The SKIP is `audit-fault-injection-qemu-smoke` (`RUN_AUDIT_FAULT not set`); every other step, including the required `xtask-manifest-drift` boundary check, ran and passed.
-  - **`RUN_AUDIT_FAULT=1` mode** (`RUN_AUDIT_FAULT=1 cargo xtask ci --full`): **90 PASS / 0 SKIP / 0 FAIL**. The `audit-fault-injection-qemu-smoke` and `xtask-manifest-drift` steps run and pass; the full fault-injection coverage of physical allocation, mapper rollback, and exec/spawn failure paths is exercised.
+- **Local required gate evidence at `abf717e`:**
+  - **Default mode** (`cargo xtask ci --full`): **92 PASS / 1 SKIP / 0 FAIL**. The SKIP is `audit-fault-injection-qemu-smoke` (`RUN_AUDIT_FAULT not set`); every other step, including the required `xtask-manifest-drift`, `ovmf-vars-isolation-static`, `miri-setup`, and `miri-bpf-cloud` checks, ran and passed.
+  - **`RUN_AUDIT_FAULT=1` mode** (`RUN_AUDIT_FAULT=1 cargo xtask ci --full`): **93 PASS / 0 SKIP / 0 FAIL**. The fault-injection smoke and all required boundary, OVMF-isolation, and Miri checks run and pass; the full fault-injection coverage of physical allocation, mapper rollback, and exec/spawn failure paths is exercised.
 - **Fault-injection status:** **partial-but-real**. Physical allocation, mapper rollback, and exec/spawn failure paths are now exercised by deterministic-fallible-callback tests. A post-boot ring-3 page fault at 0x2a00000012 was previously recorded against system OVMF; re-investigation at this build (`22323fc`) found the symptom currently non-reproducing on this host. The historical cause remains unresolved and there is no reproducible regression artifact. A regression step needs a pinned, hash-verified `OVMF_SYSTEM_TAG` / `OVMF_SYSTEM_SHA256` in `ci/build-inputs.env`; until then `scripts/qemu-debug-triage.sh --ovmf system --capture ...` remains a developer-side investigation path, not evidence of a fix.
-- **Local Miri run (out of default gate):** `cargo miri test -p kernel_bpf --no-default-features --features cloud-profile` passes 342+45+18+4 = ~409 tests with zero UB after the integer-derived-pointer fix at `execution/mod.rs:113`; the pre-fix run aborted at `execute_map_update_helper`
-- **Hosted H-06 evidence:** externally blocked; [GitHub Actions run 29305700412](https://github.com/pro-utkarshM/axiomOS/actions/runs/29305700412) created zero-step jobs because the account spending limit/monthly usage prevented runners from starting. Note: `--miri` is also not invoked by any PR workflow today; running Miri is a local-only developer step behind `scripts/verify-engineering-audit.sh --miri`
+- **Required local Miri evidence:** `miri-bpf-cloud` runs by default in the normal/full and extended local gates (`f5338dc`). At `abf717e`, `cargo miri test --locked -p kernel_bpf --no-default-features --features cloud-profile` passes **427 tests** (43 ignored) with zero UB; the gate-recorded duration is **1122 seconds**. `--quick` is the documented iteration mode that omits Miri.
+- **Hosted H-06 evidence:** externally blocked; [GitHub Actions run 29305700412](https://github.com/pro-utkarshM/axiomOS/actions/runs/29305700412) created zero-step jobs because the account spending limit/monthly usage prevented runners from starting. The required local gate now includes Miri, but no hosted workflow execution is available until billing/quota is restored.
 
 This table is the authoritative status for the current branch. The detailed audit below is preserved as a historical review of `661d5ed`; its 3/10 score, finding descriptions, and recommendations describe that old snapshot and are not current-branch status.
 
@@ -30,14 +30,14 @@ This table is the authoritative status for the current branch. The detailed audi
 | H-03 | **Closed** | Fixed-fanout immutable hook/GPIO snapshots are published through an epoch grace period; dispatch avoids manager/runtime locks, allocation, refcount changes, scans, and logging. Hash buckets use flat backing storage and the interpreter clears only verifier-recorded stack use. |
 | H-04 | **Closed** | Process credentials and capabilities are inherited exactly across fork/exec; BPF operations use per-command authorization, credential-derived verifier tiers, bounded pin grants, and fail-closed production signing. |
 | H-05 | **Closed** | ELF parsing/loading is fallible, executable images are capped and fallibly allocated, malformed-input regression coverage is present, and the isolated fuzz target builds. |
-| H-06 | **Pending hosted evidence** | Workflow/toolchain/target/QEMU-gate defects are remediated. At `916efae`, the default local gate passes 89 required steps with one conditional skip and fault mode passes 90/90. Hosted jobs cannot start until GitHub billing/quota is restored. |
+| H-06 | **Pending hosted evidence** | Workflow/toolchain/target/QEMU-gate defects are remediated. At `abf717e`, the default local gate passes 92 required steps with one conditional skip and fault mode passes 93/93, including required Miri. Hosted jobs cannot start until GitHub billing/quota is restored. |
 | Additional High: ACPI mapping | **Closed** | Mapping covers every page in an unaligned range, returns the offset virtual address, unmaps the complete reservation, and has four synthetic mapping-plan tests. |
 | Additional High: force unlock | **Closed** | H-01 teardown uses normal lock ownership and scheduler cleanup after task guards drain; no `force_unlock` call remains. |
 | Additional High: exec/spawn allocation | **Closed** | Executable files have a 16 MiB cap, buffers use fallible reservation, spawn rechecks layout, and load/allocation/protection failures terminate only the task. |
 | A-02 | **Closed** | Syscall VM traits now expose protection and commit semantics through rollback-safe mapping transactions. File/VFS traits preserve typed descriptor, path, seek, permission, unsupported-operation, broken-pipe, overflow, and I/O failures through exact errno mapping; stat carries file type; ext2/devfs user-controlled paths no longer panic. Adapter invariants are enforced by dedicated `vm-ownership-static` and `vfs-boundary-static` gate steps. |
 | A-04 | **Partial** | `kernel_abi` publishes ABI v1.0 catalogs containing exactly the 31 dispatched syscalls, 15 production BPF commands, four creatable map types, 14 interpreter-dispatched helpers, and seven accepted attach types. `ci/targets.toml` is the authoritative target/feature/evidence matrix and xtask generates both public tables; the local gate rejects dispatcher/catalog drift. Parallel RISC-V kernel entrypoints and remaining product-name drift are still open. |
-| Q-04 unsafe governance | **Partial** | Generated exact-fingerprint ledger owns all 696 first-party Rust `unsafe` sites (one removed by the Miri fix). Cloud-profile BPF interpreter tests are now Miri-clean under sequential single-threaded execution (342+45+18+4 tests, 0 UB). Miri proves aliasing/invalid-pointer-read soundness on a representative sequential path; it does NOT prove concurrent interleavings, so it does not close T-01/T-04 or substitute for an independent unsafe-site review. Independent review and broader kernel-representative dynamic analysis (Loom, fault injection, coverage budgets) remain outstanding. |
-| T-01 / T-02 / T-03 / T-04 | **Partial** | At `916efae`, the default local gate passes 89 required steps with one conditional skip and fault mode passes 90/90; these close the original highest-risk gaps and add fault-injection coverage. New since the previous re-audit: (1) a fourth standalone fuzz target (`userspace/rk_bridge/fuzz/event_stream`) wired into `ci/components.toml`; (2) **physical-allocation fault-injection** at `kernel_physical_memory::fault::checkpoint` in `allocate_frames_impl` with a typed `armed(budget, f)` RAII controller, an `AUDIT_FAULT_PROBE` smoke that asserts the 5 expected markers under single-vCPU `--smp 1 + KVM`, and a static-check gate step; (3) **mapper rollback** via a private `kernel_map_transaction::MapRangeTransaction<S, MAPPED_CAP, PENDING_CAP>` helper with fixed-capacity stack-allocated `MaybeUninit` buffers (no heap, works during `heap::init` before the global allocator is live), 8 unit tests including a deterministic-fallible sweep, and a refactor of `AddressSpaceMapper::map_range_transaction` (x86_64 and aarch64) to drive `rollback` once; (4) **exec/spawn rollback** via a typed `ExecveError` (`Parse(ElfParseError)` / `Load(LoadElfError)` / `Enomem { stage }`) propagated from `Process::execve` through `sys_execve` to the syscall layer (Parse/Load → `ENOEXEC`, Enomem → `ENOMEM`), and a host-side end-to-end test (`tests/exec_rollback.rs` in `kernel_elfloader`) that drives `ElfLoader::load` through a `CountingMemoryApi` and asserts zero leaked allocations on every injected failure point. **What the fault-injection smokes prove**: rollback bookkeeping correctness under physical allocation, mapper, and exec failure paths. **What they do NOT prove**: sustained userspace stability past `QEMU_BOOT_OK` (a post-boot ring-3 page fault at 0x2a00000012 in `init_x86` was recorded; the symptom is currently non-reproducing on this system OVMF, its historical cause is unresolved, and it is not gated). Open: physical firmware HIL, Loom model for BPF-handle generations and hook-snapshot readers/writers, wait-channel I/O fault-injection (child exit, pipes, device/I/O), coverage, and mutation budgets. |
+| Q-04 unsafe governance | **Partial** | Generated exact-fingerprint ledger owns all 696 first-party Rust `unsafe` sites (one removed by the Miri fix). The required local gate now runs 427 passing cloud-profile BPF Miri tests (43 ignored, 0 UB) under sequential single-threaded execution. Miri proves aliasing/invalid-pointer-read soundness on a representative sequential path; it does NOT prove concurrent interleavings, so it does not close T-01/T-04 or substitute for an independent unsafe-site review. Independent review and broader kernel-representative dynamic analysis (Loom, fault injection, coverage budgets) remain outstanding. |
+| T-01 / T-02 / T-03 / T-04 | **Partial** | At `abf717e`, the default local gate passes 92 required steps with one conditional skip and fault mode passes 93/93; these close the original highest-risk gaps and add fault-injection coverage. New since the previous re-audit: (1) a fourth standalone fuzz target (`userspace/rk_bridge/fuzz/event_stream`) wired into `ci/components.toml`; (2) **physical-allocation fault-injection** at `kernel_physical_memory::fault::checkpoint` in `allocate_frames_impl` with a typed `armed(budget, f)` RAII controller, an `AUDIT_FAULT_PROBE` smoke that asserts the 5 expected markers under single-vCPU `--smp 1 + KVM`, and a static-check gate step; (3) **mapper rollback** via a private `kernel_map_transaction::MapRangeTransaction<S, MAPPED_CAP, PENDING_CAP>` helper with fixed-capacity stack-allocated `MaybeUninit` buffers (no heap, works during `heap::init` before the global allocator is live), 8 unit tests including a deterministic-fallible sweep, and a refactor of `AddressSpaceMapper::map_range_transaction` (x86_64 and aarch64) to drive `rollback` once; (4) **exec/spawn rollback** via a typed `ExecveError` (`Parse(ElfParseError)` / `Load(LoadElfError)` / `Enomem { stage }`) propagated from `Process::execve` through `sys_execve` to the syscall layer (Parse/Load → `ENOEXEC`, Enomem → `ENOMEM`), and a host-side end-to-end test (`tests/exec_rollback.rs` in `kernel_elfloader`) that drives `ElfLoader::load` through a `CountingMemoryApi` and asserts zero leaked allocations on every injected failure point. **What the fault-injection smokes prove**: rollback bookkeeping correctness under physical allocation, mapper, and exec failure paths. **What they do NOT prove**: sustained userspace stability past `QEMU_BOOT_OK` (a post-boot ring-3 page fault at 0x2a00000012 in `init_x86` was recorded; the symptom is currently non-reproducing on this system OVMF, its historical cause is unresolved, and it is not gated). Open: physical firmware HIL, remaining genuinely concurrent BPF models, wait-channel I/O fault-injection (child exit, pipes, device/I/O), coverage, and mutation budgets. |
 
 The score rises from 3/10 to 7/10 because the original C-01 through C-07 and H-01 through H-05 implementation defects are closed and exercised by a reproducible local release gate. It does not rise further because hosted CI has not executed, real RPi5/RP2040 hardware paths are not release-gated, the unsafe/concurrency invariants lack external review or model checking, and significant Medium architecture, error-policy, test-budget, and documentation debt remains. The Miri-clean cloud-profile result tightens Q-04's evidence but, per the user's constraint, does not strengthen T-01/T-04 and does not substitute for an independent unsafe-site review; therefore the score stays at 7/10.
 
@@ -47,14 +47,14 @@ Current release-gate checklist:
 - [x] Revalidate and fix executable-size caps and fallible exec/spawn allocation.
 - [x] Confirm H-01 scheduler-owned teardown fully removes force-unlock behavior.
 - [x] Publish and gate the versioned supported ABI and target/feature matrix.
-- [x] Pass the complete local required audit gate at `916efae`: default mode is 89 PASS / 1 conditional SKIP / 0 FAIL; `RUN_AUDIT_FAULT=1` is 90 PASS / 0 SKIP / 0 FAIL. Both run through `cargo xtask ci --full`, and the required `xtask-manifest-drift` boundary check passes.
-- [x] Miri-clean cloud-profile BPF interpreter tests at `7c1b02b`; not yet wired into the default gate, available via `scripts/verify-engineering-audit.sh --miri`.
-- [x] Bump the OVMF prebuilt to `edk2-stable202511-r2` (`d76a657`); pinned OVMF in `ci/build-inputs.env` now boots the kernel under `--smp 1 + KVM`, which unblocks single-vCPU deterministic fault-injection smokes.
+- [x] Pass the complete local required audit gate at `abf717e`: default mode is 92 PASS / 1 conditional SKIP / 0 FAIL; `RUN_AUDIT_FAULT=1` is 93 PASS / 0 SKIP / 0 FAIL. Both run through `cargo xtask ci --full`, including the required manifest-boundary, OVMF-VARS-isolation, and Miri checks.
+- [x] Require the Miri-clean cloud-profile BPF interpreter suite in the normal/full and extended local gates (`f5338dc`). At `abf717e`, all 427 selected tests pass with zero UB in a gate-recorded 1122 seconds; `--quick` remains the explicit iteration-only omission.
+- [x] Bump the OVMF prebuilt to `edk2-stable202511-r2` (`d76a657`) and isolate its writable VARS template with QEMU `snapshot=on` (`abf717e`). The pinned input now remains immutable across repeated SMP smoke runs, enforced by `ovmf-vars-isolation-static`.
 - [x] Add `--no-reboot` to the host QEMU launch path (`37b8e3d`); a kernel panic now exits cleanly instead of looping Limine and clobbering the captured serial buffer.
 - [x] Add a typed `ExecveError` and end-to-end exec-rollback coverage (`e3b85d9`); the host-side `exec-rollback-tests` step asserts no leaked frames / mappings / partially installed image on every injected failure point.
 - [x] Extract `MapRangeTransaction` and refactor `AddressSpaceMapper::map_range_transaction` to use it (`56a7f2e`); the helper is fixed-capacity and stack-allocated so it works during `heap::init` before the global allocator is live.
 - [x] Document the historical post-boot ring-3 page fault at 0x2a00000012 in `init_x86` as a separate runtime finding in `docs/security/audit-runtime-findings.md`. It is currently non-reproducing on this host; the historical cause remains unresolved, there is no reproducible regression artifact, and it is not gated.
-- [ ] Wire `miri-bpf-cloud` into the default required gate so the regression test runs on every local gate (decision held for next refresh).
+- [x] Wire `miri-bpf-cloud` into the default required gate so the regression test runs on every normal/full local gate (`f5338dc`).
 - [ ] Build a host-side Loom model for BPF-handle generations and hook-snapshot readers/writers, exhaustively test teardown/update/read interleavings (separate from wait-channel I/O work).
 - [ ] Extend wait-channel fault-injection coverage to child exit, pipes, and device/I/O paths.
 - [ ] Run H-06 on hosted GitHub runners after billing/monthly quota is restored.
@@ -72,8 +72,8 @@ the pre-condition for landing it.
    monthly quota. Run 29305700412 created zero-step jobs because the
    account spending limit prevented runners from starting. When quota is
    restored, re-run H-06 on hosted GitHub runners and update the
-   “Hosted H-06 evidence” line in this document. At `916efae`, the local
-   default gate (89 PASS / 0 FAIL / 1 SKIP) and fault-mode gate (90 PASS /
+   “Hosted H-06 evidence” line in this document. At `abf717e`, the local
+   default gate (92 PASS / 0 FAIL / 1 SKIP) and fault-mode gate (93 PASS /
    0 FAIL / 0 SKIP) are the closest reproducible substitutes today.
 
 2. **Physical RPi5 / RP2040 HIL** — Contingent on (a) RP2040 hardware
@@ -138,7 +138,7 @@ production, HIL, hosted, or independent-review work.
 | Order | Workstream | Owner | Type | Smallest verifiable closing artifact | Preconditions / boundary |
 |---:|---|---|---|---|---|
 | Done | Canonical workspace and artifact boundary | `tools/xtask`, root workspace, `ci/components.toml` | Systemic build/CI | Landed at `916efae`: all 49 components declare exact workspace and artifact dispositions; root workspace membership/exclusion and production rootfs entries must match the manifest; the required `xtask-manifest-drift` step passes in both full gate modes | This completed prerequisite is retained for provenance. Governed operations use `cargo xtask`; direct low-level commands remain available for focused developer diagnosis. |
-| 2 | Default-gate BPF Miri | `kernel/crates/kernel_bpf`, audit gate | Test/CI | A required `miri-bpf-cloud` step runs the existing cloud-profile suite and fails the default gate on UB | Depends on the canonical boundary so Miri is invoked through the supported test entry point; runtime cost must be recorded. |
+| Done | Default-gate BPF Miri | `kernel/crates/kernel_bpf`, audit gate | Test/CI | Landed at `f5338dc` and verified at `abf717e`: the required `miri-setup` and `miri-bpf-cloud` steps run the existing cloud-profile suite and fail the normal/full gate on UB; 427 tests pass (43 ignored) | Gate-recorded warm-host runtime was 1122 seconds. `--quick` deliberately omits Miri for iteration; it is not release evidence. |
 | 3 | Remaining BPF concurrency models | `kernel/src/bpf`, `kernel_bpf` | Test/model | A model exercises only genuinely concurrent handle-generation or manager/snapshot state and is required by the gate; non-concurrent interrupt-masked handle code is explicitly excluded | `EpochSnapshot` Loom coverage already exists. Do not manufacture concurrency by wrapping a single-threaded algorithm in `Arc`/`Mutex`. |
 | 4 | Run-queue ownership, stealing, and wakeup | `kernel/src/mcore/mtask/scheduler`, x86/APIC and AArch64 interrupt owners | Kernel + ADR + test | Updated ADR plus an SMP-4 regression and a model proving the chosen local-consumer/remote-steal contract; scheduler wakeup IPI is implemented only if its measured latency case and ownership contract justify it | Current per-CPU topology remains. Requires the three predicates in `docs/reviews/scheduler-runqueues.md`; no `CpuContext` seam or queue replacement before them. |
 | 5 | Pipe and child-exit wait-channel integration | scheduler, `kernel/src/file`, process/syscall owners | Test + production seam | Host-runnable tests drive the production pipe and child-exit types without recreating kernel globals; device coverage is added only when a production driver uses `WaitChannel` for completion | Requires a real host scheduler/process seam or full host-kernel harness. Current channel-core/model tests remain valid but do not close subsystem integration. |
@@ -155,7 +155,7 @@ production, HIL, hosted, or independent-review work.
 | External | Independent safety/concurrency review | independent reviewer | External review | Reviewer signs off the unsafe ledger, scheduler/VM shootdown, BPF epoch/snapshot, and remediation dispositions with tracked findings | Must be independent of the implementation authors; local gate and model results are inputs, not substitutes. |
 | Conditional | Historical ring-3 page fault | `userspace/init`, kernel VM/task owners | Investigation | Only if the symptom reproduces: a pinned, hash-verified OVMF plus capture evidence identifies ownership; a targeted fix then has a failing-before/passing-after regression | Currently non-reproducing, historical cause unresolved, and no reproducible artifact exists. Do not create a pass-either-way watcher or mark it fixed. |
 
-## Remediation checklist (current branch, assessed through `916efae`)
+## Remediation checklist (current branch, assessed through `abf717e`)
 
 Legend: `[x]` complete for the stated scope; `[~]` meaningful work landed but
 the full stated outcome remains open; `[ ]` not started or not yet evidenced.
@@ -227,8 +227,8 @@ snapshot below.
 - [ ] Publish per-crate line/branch coverage and add parser/verifier mutation
   testing.
 - [~] Add Loom/Miri-style epoch reclamation tests and hardware GPIO IRQ
-  dispatch stress. EpochSnapshot Loom tests and BPF Miri coverage landed;
-  hardware GPIO IRQ stress requires HIL.
+  dispatch stress. EpochSnapshot Loom tests landed and BPF Miri is required
+  by the normal/full gate; hardware GPIO IRQ stress still requires HIL.
 
 ### Documentation
 
@@ -245,12 +245,13 @@ snapshot below.
 - [ ] Rebuild benchmark documentation with commit, toolchain, raw logs, and
   artifact hashes.
 - [~] Pin mutable OVMF/Limine inputs and remove mtime-based artifact
-  selection. OVMF and Limine are pinned and verified; the Pi artifact
-  selection cleanup remains open.
+  selection. OVMF and Limine are pinned and verified, and QEMU now treats the
+  pinned OVMF VARS file as an immutable template via `snapshot=on`; the Pi
+  artifact selection cleanup remains open.
 - [~] Enforce unsafe-ledger, documentation-link, command-smoke, and provenance
-  checks in the release gate. The unsafe ledger and broad local audit gate are
-  enforced; documentation-link and complete provenance enforcement remain
-  incomplete.
+  checks in the release gate. The unsafe ledger, required BPF Miri suite,
+  OVMF-VARS isolation check, and broad local audit gate are enforced;
+  documentation-link and complete provenance enforcement remain incomplete.
 
 ## Historical audit snapshot (2026-07-11)
 
