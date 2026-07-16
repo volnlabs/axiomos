@@ -6,7 +6,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODE="required"
 RUN_QEMU=1
-RUN_MIRI=0
+RUN_MIRI=1
 OUTPUT_DIR=""
 QEMU_TIMEOUT="${AUDIT_QEMU_TIMEOUT:-90}"
 
@@ -15,16 +15,17 @@ usage() {
 Usage: scripts/verify-engineering-audit.sh [options]
 
 Options:
-  --quick          Run formatting, ledger, focused tests, and kernel checks.
+  --quick          Run formatting, ledger, focused tests, and kernel checks; skip Miri.
   --extended       Add release-profile tests, Lean (when installed), and Miri.
-  --miri           Add the kernel_bpf cloud-profile Miri run.
+  --miri           Explicitly enable Miri (already required outside quick mode).
   --no-qemu        Skip the release QEMU smoke test.
   --output DIR     Store logs and manifest in DIR.
   -h, --help       Show this help.
 
-The default required gate mirrors the locally reproducible CI matrix without
-Miri. Every command writes a log and a TSV result row. The script runs all
-selected steps and exits non-zero if any required step fails.
+The default required gate mirrors the locally reproducible CI matrix and runs
+the kernel_bpf cloud-profile Miri suite. Quick mode omits Miri for iteration.
+Every command writes a log and a TSV result row. The script runs all selected
+steps and exits non-zero if any required step fails.
 EOF
 }
 
@@ -33,6 +34,7 @@ while (($#)); do
         --quick)
             MODE="quick"
             RUN_QEMU=0
+            RUN_MIRI=0
             ;;
         --extended)
             MODE="extended"

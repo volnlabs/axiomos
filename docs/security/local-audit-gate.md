@@ -11,7 +11,8 @@ The gate runs formatting, the unsafe ledger, component inventory and
 workspace/artifact drift checks, workflow parsing, host tests for both BPF
 profiles and the safety-boundary crates, strict per-crate Clippy, standalone
 workspace/firmware checks, both kernel target checks, the release build, fuzz
-builds, and the x86_64 release QEMU marker tests.
+builds, the cloud-profile BPF Miri suite, and the x86_64 release QEMU marker
+tests.
 
 The `xtask-manifest-drift` step runs `cargo xtask boundary --check`. It rejects
 workspace membership/exclusion drift, duplicate shipped-artifact identities,
@@ -35,10 +36,11 @@ Use the short gate while iterating:
 scripts/verify-engineering-audit.sh --quick
 ```
 
-Use `--extended` before a release candidate to add release-profile host tests,
-Lean when installed, and the cloud-profile Miri run. `--miri` adds Miri to the
-normal required gate. `--no-qemu` is intended only for environments without
-QEMU access; the manifest records the skipped boot gate.
+Use `--extended` before a release candidate to add release-profile host tests
+and Lean when installed. The normal required and extended gates run the
+cloud-profile Miri suite; `--quick` omits it for iteration. `--miri` is retained
+as an explicit compatibility flag. `--no-qemu` is intended only for
+environments without QEMU access; the manifest records the skipped boot gate.
 
 The required gate fails if any selected command fails or if QEMU misses
 `QEMU_BOOT_OK`, `USERCOPY_EFAULT_OK`, `UNKNOWN_SYSCALL_ENOSYS_OK`,

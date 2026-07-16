@@ -35,6 +35,10 @@ to match the executable files in `userspace/file_structure::STRUCTURE`. The
 required local gate runs the same contract as `xtask-manifest-drift` before any
 build or QEMU step.
 
+The normal required gate also runs the cloud-profile `kernel_bpf` suite under
+Miri. Use `cargo xtask ci --quick` only for iteration; it deliberately omits
+Miri and QEMU and is not complete release evidence.
+
 Current generated authority:
 
 - [Component inventory](../generated/components.md)
