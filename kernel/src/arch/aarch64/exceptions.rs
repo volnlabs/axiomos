@@ -2,6 +2,10 @@ use core::arch::asm;
 #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use thiserror::Error;
+
+use super::paging::PageTableError;
+
 #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 static PREEMPT_MARKER_SENT: AtomicBool = AtomicBool::new(false);
 #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
@@ -384,7 +388,19 @@ impl DataFaultCode {
     }
 }
 
-fn try_handle_copy_on_write_fault(far: u64, is_write: bool) -> Result<bool, &'static str> {
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Error)]
+enum CopyOnWriteFaultError {
+    #[error("fault page is not mapped")]
+    FaultPageNotMapped,
+    #[error("out of physical memory during copy-on-write fault")]
+    OutOfMemory,
+    #[error("page-table operation failed during copy-on-write fault: {0}")]
+    PageTable(#[from] PageTableError),
+    #[error("copy-on-write rollback failed: {0}")]
+    Rollback(PageTableError),
+}
+
+fn try_handle_copy_on_write_fault(far: u64, is_write: bool) -> Result<bool, CopyOnWriteFaultError> {
     if !is_write {
         return Ok(false);
     }
@@ -396,7 +412,7 @@ fn try_handle_copy_on_write_fault(far: u64, is_write: bool) -> Result<bool, &'st
 
     let (phys, flags) = current_process
         .with_address_space(|as_| as_.translate_page_flags(page_vaddr))
-        .ok_or("fault page not mapped")?;
+        .ok_or(CopyOnWriteFaultError::FaultPageNotMapped)?;
 
     if !flags.contains(crate::arch::types::PageTableFlags::COPY_ON_WRITE) {
         return Ok(false);
@@ -412,13 +428,13 @@ fn try_handle_copy_on_write_fault(far: u64, is_write: bool) -> Result<bool, &'st
     if crate::mem::phys::PhysicalMemory::frame_ref_count(old_frame) == Some(1) {
         current_process
             .with_address_space(|as_| as_.remap(page, |_| writable_flags))
-            .map_err(|_| "failed to upgrade COW page in place")?;
+            .map_err(CopyOnWriteFaultError::PageTable)?;
         return Ok(true);
     }
 
     let new_frame =
         crate::mem::phys::PhysicalMemory::allocate_frame::<crate::arch::types::Size4KiB>()
-            .ok_or("out of physical memory during COW fault")?;
+            .ok_or(CopyOnWriteFaultError::OutOfMemory)?;
 
     unsafe {
         let src =
@@ -427,12 +443,20 @@ fn try_handle_copy_on_write_fault(far: u64, is_write: bool) -> Result<bool, &'st
         core::ptr::copy_nonoverlapping(src, dst, 4096);
     }
 
-    current_process
-        .with_address_space(|as_| {
-            as_.unmap(page).ok_or("failed to unmap old COW page")?;
-            as_.map(page, new_frame, writable_flags)
-        })
-        .map_err(|_| "failed to remap private writable page after COW fault")?;
+    let map_result = current_process.with_address_space(|as_| {
+        as_.unmap(page).ok_or(PageTableError::PageNotMapped)?;
+        if let Err(error) = as_.map(page, new_frame, writable_flags) {
+            if let Err(rollback_error) = as_.map(page, old_frame, flags) {
+                return Err(CopyOnWriteFaultError::Rollback(rollback_error));
+            }
+            return Err(CopyOnWriteFaultError::PageTable(error));
+        }
+        Ok(())
+    });
+    if let Err(error) = map_result {
+        crate::mem::phys::PhysicalMemory::deallocate_frame(new_frame);
+        return Err(error);
+    }
 
     crate::mem::phys::PhysicalMemory::deallocate_frame(old_frame);
 

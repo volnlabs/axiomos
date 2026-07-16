@@ -10,7 +10,7 @@ use x86_64::structures::paging::mapper::{FlagUpdateError, MapToError, TranslateR
 use x86_64::structures::paging::{Mapper, PageTable, RecursivePageTable, Translate};
 
 #[cfg(target_arch = "aarch64")]
-use crate::arch::aarch64::paging::PageTableWalker;
+use crate::arch::aarch64::paging::{PageTableError, PageTableWalker};
 use crate::arch::types::{
     Page, PageRangeInclusive, PageSize, PageTableFlags, PhysAddr, PhysFrame, VirtAddr,
 };
@@ -301,7 +301,7 @@ impl AddressSpaceMapper {
         page: Page<S>,
         frame: PhysFrame<S>,
         flags: PageTableFlags,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PageTableError> {
         let mut walker = unsafe { PageTableWalker::new(self.level0_vaddr.as_mut_ptr()) };
         walker.map_page(
             page.start_address().as_usize(),
@@ -316,7 +316,7 @@ impl AddressSpaceMapper {
         pages: PageRangeInclusive<S>,
         frames: impl Iterator<Item = PhysFrame<S>>,
         flags: PageTableFlags,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PageTableError> {
         self.map_range_transaction(pages, frames, flags, false, |_| {})
     }
 
@@ -326,7 +326,7 @@ impl AddressSpaceMapper {
         pages: PageRangeInclusive<S>,
         frames: impl Iterator<Item = PhysFrame<S>>,
         flags: PageTableFlags,
-    ) -> Result<(), &'static str>
+    ) -> Result<(), PageTableError>
     where
         PhysicalMemoryManager: PhysicalFrameAllocator<S>,
     {
@@ -341,7 +341,7 @@ impl AddressSpaceMapper {
         flags: PageTableFlags,
         owns_frames: bool,
         release: impl Fn(PhysFrame<S>),
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PageTableError> {
         // See the x86_64 `map_range_transaction` for the design
         // note on `MapRangeTransaction` ownership of rollback
         // bookkeeping. The aarch64 and x86_64 paths share the
@@ -354,10 +354,10 @@ impl AddressSpaceMapper {
         let mut pages = pages.into_iter();
         let mut frames = frames.into_iter();
 
-        let result: Result<(), &'static str> = (|| {
+        let result: Result<(), PageTableError> = (|| {
             while let Some(page) = pages.next() {
                 let Some(frame) = frames.next() else {
-                    return Err("Not enough frames for range");
+                    return Err(PageTableError::InsufficientFrames);
                 };
 
                 if let Err(error) = self.map(page, frame, flags) {
@@ -420,10 +420,12 @@ impl AddressSpaceMapper {
         &mut self,
         page: Page<S>,
         f: &F,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PageTableError> {
         let mut walker = unsafe { PageTableWalker::new(self.level0_vaddr.as_mut_ptr()) };
         let vaddr = page.start_address().as_usize();
-        let (_phys, raw_flags) = walker.translate_full(vaddr).ok_or("Page not mapped")?;
+        let (_phys, raw_flags) = walker
+            .translate_full(vaddr)
+            .ok_or(PageTableError::PageNotMapped)?;
 
         let old_flags = PageTableFlags::from_pte_bits(raw_flags);
         let new_flags = f(old_flags);
@@ -436,11 +438,11 @@ impl AddressSpaceMapper {
         &mut self,
         pages: PageRangeInclusive<S>,
         f: &F,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PageTableError> {
         let mut originals = Vec::new();
         for page in pages {
             let Some((_frame, flags)) = self.translate_page_flags(page.start_address()) else {
-                return Err("Page not mapped");
+                return Err(PageTableError::PageNotMapped);
             };
             originals.push((page, flags));
         }

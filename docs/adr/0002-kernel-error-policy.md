@@ -33,7 +33,8 @@ and defer recovery to task context.
   kernel boundaries.
 - `scripts/check-error-policy.py` rejects panic/unwrap/todo and unit-error
   regressions in supported boot, filesystem-initialization, and driver paths;
-  it also enforces the bounded release fatal path and transactional block-device
-  publication order.
+  rejects unit/string errors at low-level address, process fork/exec, and
+  AArch64 paging/DTB boundaries; and enforces the bounded release fatal path
+  and transactional block-device publication order.
 - Failure-injection tests cover every transactional allocation/mapping API.
 - Syscall adapters contain the only subsystem-error-to-`Errno` mapping tables.

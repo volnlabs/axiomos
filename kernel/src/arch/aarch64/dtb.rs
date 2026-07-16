@@ -4,6 +4,17 @@
 //! particularly memory regions.
 
 use fdt::Fdt;
+use thiserror::Error;
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Error)]
+pub enum DtbParseError {
+    #[error("DTB address is null")]
+    NullAddress,
+    #[error("invalid DTB magic number")]
+    InvalidMagic,
+    #[error("failed to parse DTB")]
+    InvalidBlob,
+}
 
 /// Memory region extracted from DTB
 #[derive(Debug, Clone, Copy)]
@@ -47,7 +58,7 @@ static mut DTB_INFO: DeviceTreeInfo = DeviceTreeInfo::empty();
 ///
 /// # Safety
 /// The dtb_addr must point to a valid device tree blob in memory
-pub unsafe fn parse(dtb_addr: usize) -> Result<(), &'static str> {
+pub unsafe fn parse(dtb_addr: usize) -> Result<(), DtbParseError> {
     let res = unsafe { parse_internal(dtb_addr) };
     if res.is_err() {
         log::warn!(
@@ -68,13 +79,13 @@ pub unsafe fn parse(dtb_addr: usize) -> Result<(), &'static str> {
     res
 }
 
-unsafe fn parse_internal(dtb_addr: usize) -> Result<(), &'static str> {
+unsafe fn parse_internal(dtb_addr: usize) -> Result<(), DtbParseError> {
     // SAFETY: We are accessing raw memory at dtb_addr. The caller guarantees this is valid.
     // We also modify the static DTB_INFO, which is safe because we are single-threaded
     // during early boot.
     unsafe {
         if dtb_addr == 0 {
-            return Err("DTB address is null");
+            return Err(DtbParseError::NullAddress);
         }
 
         // Create a slice from the DTB address - we don't know the size yet,
@@ -84,7 +95,7 @@ unsafe fn parse_internal(dtb_addr: usize) -> Result<(), &'static str> {
         // Read the magic number first to validate
         let magic = core::ptr::read_volatile(dtb_ptr as *const u32);
         if magic.to_be() != 0xd00dfeed {
-            return Err("Invalid DTB magic number");
+            return Err(DtbParseError::InvalidMagic);
         }
 
         // Read the total size from the header
@@ -94,7 +105,7 @@ unsafe fn parse_internal(dtb_addr: usize) -> Result<(), &'static str> {
         let dtb_slice = core::slice::from_raw_parts(dtb_ptr, total_size);
 
         // Parse the FDT
-        let fdt = Fdt::new(dtb_slice).map_err(|_| "Failed to parse DTB")?;
+        let fdt = Fdt::new(dtb_slice).map_err(|_| DtbParseError::InvalidBlob)?;
 
         // Extract memory regions
         let mut region_count = 0;

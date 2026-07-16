@@ -18,6 +18,8 @@ use x86_64::structures::paging::mapper::{FlagUpdateError, MapToError};
 #[cfg(target_arch = "x86_64")]
 use x86_64::structures::paging::{Mapper, PageTable, RecursivePageTable};
 
+#[cfg(target_arch = "aarch64")]
+use crate::arch::aarch64::paging::PageTableError;
 #[cfg(target_arch = "x86_64")]
 use crate::arch::types::Size4KiB;
 #[cfg(target_arch = "aarch64")]
@@ -762,7 +764,7 @@ impl AddressSpace {
         page: Page<S>,
         frame: PhysFrame<S>,
         flags: PageTableFlags,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PageTableError> {
         let result = self.inner.write().map(page, frame, flags);
         if result.is_ok() {
             self.shootdown();
@@ -776,7 +778,7 @@ impl AddressSpace {
         pages: impl Into<PageRangeInclusive<S>>,
         frames: impl Iterator<Item = PhysFrame<S>>,
         flags: PageTableFlags,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PageTableError> {
         let result = self.inner.write().map_range(pages.into(), frames, flags);
         self.shootdown();
         result
@@ -790,7 +792,7 @@ impl AddressSpace {
         pages: impl Into<PageRangeInclusive<S>>,
         frames: impl Iterator<Item = PhysFrame<S>>,
         flags: PageTableFlags,
-    ) -> Result<(), &'static str>
+    ) -> Result<(), PageTableError>
     where
         PhysicalMemoryManager: PhysicalFrameAllocator<S>,
     {
@@ -821,7 +823,7 @@ impl AddressSpace {
         &self,
         page: Page<S>,
         f: F,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PageTableError> {
         self.inner.write().remap(page, &f)
     }
 
@@ -830,7 +832,7 @@ impl AddressSpace {
         &self,
         pages: impl Into<PageRangeInclusive<S>>,
         f: F,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PageTableError> {
         self.inner.write().remap_range(pages.into(), &f)
     }
 

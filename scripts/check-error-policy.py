@@ -87,6 +87,18 @@ def main() -> None:
         "address-space fork must expose a typed error",
     )
 
+    for relative in (
+        "kernel/src/arch/aarch64/dtb.rs",
+        "kernel/src/arch/aarch64/exceptions.rs",
+        "kernel/src/arch/aarch64/paging.rs",
+        "kernel/src/mem/address_space/mapper.rs",
+    ):
+        source = production_text(ROOT / relative)
+        require(
+            not re.search(r"Result\s*<[^\n]+,\s*&'static str\s*>", source),
+            f"{relative}: AArch64 memory boundary collapses errors to &'static str",
+        )
+
     driver_root = ROOT / "kernel/src/driver"
     for path in sorted(driver_root.rglob("*.rs")):
         reject_forbidden(str(path.relative_to(ROOT)), production_text(path))
