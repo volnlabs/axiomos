@@ -24,6 +24,14 @@ QEMU pflash drive uses `snapshot=on`, so NVRAM writes go to an ephemeral overlay
 instead of the source template; `ovmf-vars-isolation-static` enforces that
 launch contract.
 
+The BPF concurrency checks model only shared lock-free state. The
+`EpochSnapshot` implementation is cfg-swapped to Loom atomics and exercised
+through its publish/read/reclamation lifecycle tests. Handle slots and
+generations are private `BpfManager` vectors mutated through exclusive Rust
+borrows while the production manager remains behind a `Mutex`;
+`bpf-concurrency-boundary-static` enforces that distinction rather than
+manufacturing a second concurrency model around a serialized algorithm.
+
 Results are written below `target/audit-verification/`. Each run contains:
 
 - `manifest.txt`: commit, branch, dirty state, toolchain, host, selected mode,
