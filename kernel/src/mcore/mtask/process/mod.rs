@@ -1,13 +1,10 @@
-use alloc::borrow::ToOwned;
-use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::ffi::c_void;
 use core::fmt::{Debug, Formatter};
-use core::ptr;
 #[cfg(all(
     target_arch = "aarch64",
     feature = "rpi5",
@@ -18,7 +15,7 @@ use core::sync::atomic::AtomicBool;
 use conquer_once::spin::OnceCell;
 use kernel_elfloader::{ElfFile, ElfLoader};
 use kernel_memapi::{Allocation, Guarded, Location, MemoryApi, UserAccessible};
-use kernel_vfs::path::{AbsoluteOwnedPath, AbsolutePath, ROOT};
+use kernel_vfs::path::{AbsoluteOwnedPath, AbsolutePath};
 use kernel_vfs::Stat;
 use kernel_virtual_memory::VirtualMemoryManager;
 use log::debug;
@@ -40,7 +37,7 @@ use crate::mcore::mtask::process::fd::{FdNum, FileDescriptor, FileDescriptorFlag
 use crate::mcore::mtask::process::mem::MemoryRegions;
 use crate::mcore::mtask::process::telemetry::Telemetry;
 use crate::mcore::mtask::process::tree::process_tree;
-use crate::mcore::mtask::task::{HigherHalfStack, StackAllocationError, Task};
+use crate::mcore::mtask::task::{StackAllocationError, Task};
 use crate::mem::address_space::AddressSpace;
 use crate::mem::memapi::{Executable, LowerHalfAllocation, LowerHalfMemoryApi};
 use crate::{U64Ext, UsizeExt};
@@ -48,6 +45,7 @@ use crate::{U64Ext, UsizeExt};
 mod credentials;
 pub mod fd;
 pub use credentials::{BpfCapabilities, Credentials};
+mod construction;
 mod executable;
 use executable::executable_layout;
 mod image;
@@ -57,20 +55,17 @@ use image::{read_executable_file_into, trampoline_load_elf, ElfSegments};
 pub(crate) use image::{ExecImage, ExecveError};
 mod id;
 pub use id::*;
+mod fork;
 mod lifecycle;
 pub mod mem;
 mod sleep_state;
 use sleep_state::InterruptibleSleepState;
 pub mod telemetry;
 
-use crate::arch::UserContext;
-use crate::mcore::mtask::scheduler::run_queue::RunQueues;
 use crate::mcore::mtask::scheduler::wait::WaitChannel;
 use crate::mem::virt::VirtualMemoryAllocator;
 
 pub mod tree;
-
-static ROOT_PROCESS: OnceCell<Arc<Process>> = OnceCell::uninit();
 
 #[cfg(all(
     target_arch = "aarch64",
@@ -139,142 +134,6 @@ pub struct Process {
 }
 
 impl Process {
-    pub fn root() -> &'static Arc<Process> {
-        ROOT_PROCESS.get_or_init(|| {
-            let pid = ProcessId::new();
-            let root = Arc::new(Self {
-                pid,
-                name: "root".to_string(),
-                ppid: RwLock::new(pid),
-                credentials: RwLock::new(Credentials::kernel()),
-                exit_code: RwLock::new(None),
-                child_exit_wait: OnceCell::uninit(),
-                parent_exit_wait: None,
-                interruptible_sleep_state: InterruptibleSleepState::new(),
-                executable_path: None,
-                executable_file_data: RwLock::new(None),
-                current_working_directory: RwLock::new(ROOT.to_owned()),
-                address_space: RwLock::new(None),
-                lower_half_memory: Arc::new(RwLock::new(VirtualMemoryManager::new(
-                    VirtAddr::new(0x00),
-                    #[cfg(target_arch = "x86_64")]
-                    0x0000_7FFF_FFFF_FFFF,
-                    #[cfg(target_arch = "aarch64")]
-                    0x0000_FFFF_FFFF_FFFF, // 48-bit user space
-                ))),
-                telemetry: Telemetry::default(),
-                memory_regions: MemoryRegions::new(),
-                file_descriptors: RwLock::new(BTreeMap::new()),
-                elf_segments: RwLock::new(ElfSegments::new()),
-            });
-            process_tree().write().processes.insert(pid, root.clone());
-            root
-        })
-    }
-
-    fn create_new(
-        parent: &Arc<Process>,
-        name: String,
-        executable_path: Option<impl AsRef<AbsolutePath>>,
-        allowed_bpf_capabilities: BpfCapabilities,
-    ) -> Arc<Self> {
-        let pid = ProcessId::new();
-        let parent_pid = parent.pid;
-        let mut credentials = Credentials::inherit(parent.credentials());
-        credentials.restrict_bpf_capabilities(allowed_bpf_capabilities);
-        let address_space = AddressSpace::new();
-
-        let process = Self {
-            pid,
-            name,
-            ppid: RwLock::new(parent_pid),
-            credentials: RwLock::new(credentials),
-            exit_code: RwLock::new(None),
-            child_exit_wait: OnceCell::uninit(),
-            parent_exit_wait: Some(parent.child_exit_wait().clone()),
-            interruptible_sleep_state: InterruptibleSleepState::new(),
-            executable_path: executable_path.map(|x| x.as_ref().to_owned()),
-            executable_file_data: RwLock::new(None),
-            current_working_directory: RwLock::new(parent.current_working_directory.read().clone()),
-            address_space: RwLock::new(Some(address_space)),
-            lower_half_memory: Arc::new(RwLock::new(VirtualMemoryManager::new(
-                #[cfg(target_arch = "x86_64")]
-                VirtAddr::new(0xF000),
-                #[cfg(target_arch = "aarch64")]
-                VirtAddr::new(0x2_0000_0000), // Start Location::Anywhere allocations at 8GB to leave 4GB (0x1_0000_0000) for Fixed ELF load segments
-                #[cfg(target_arch = "x86_64")]
-                0x0000_7FFF_FFFF_0FFF,
-                #[cfg(target_arch = "aarch64")]
-                0x0000_007E_0000_0000, // Size adjusted
-            ))),
-            telemetry: Telemetry::default(),
-            memory_regions: MemoryRegions::new(),
-            file_descriptors: RwLock::new(BTreeMap::new()),
-            elf_segments: RwLock::new(ElfSegments::new()),
-        };
-
-        Arc::new(process)
-    }
-
-    // TODO: add documentation
-    #[allow(clippy::missing_errors_doc)]
-    pub fn create_from_executable(
-        parent: &Arc<Process>,
-        path: impl AsRef<AbsolutePath>,
-    ) -> Result<Arc<Self>, CreateProcessError> {
-        Self::create_from_executable_with_bpf_capabilities(parent, path, BpfCapabilities::NONE)
-    }
-
-    /// Create the first userspace process with the fixed, non-actuating init policy.
-    pub fn create_userspace_init(
-        parent: &Arc<Process>,
-        path: impl AsRef<AbsolutePath>,
-    ) -> Result<Arc<Self>, CreateProcessError> {
-        Self::create_from_executable_with_bpf_capabilities(
-            parent,
-            path,
-            BpfCapabilities::USERSPACE_INIT,
-        )
-    }
-
-    /// Create a child whose BPF authority is restricted before it becomes runnable.
-    pub(crate) fn create_from_executable_with_bpf_capabilities(
-        parent: &Arc<Process>,
-        path: impl AsRef<AbsolutePath>,
-        allowed: BpfCapabilities,
-    ) -> Result<Arc<Self>, CreateProcessError> {
-        // TODO: validate that the executable exists and is a valid executable file
-
-        let path = path.as_ref();
-        let process = Self::create_new(parent, path.to_string(), Some(path), allowed);
-        {
-            // register STDIN, STDOUT and STDERR
-            let mut fds = process.file_descriptors().write();
-
-            for (i, path) in ["/dev/stdin", "/dev/stdout", "/dev/stderr"]
-                .iter()
-                .map(|v| AbsolutePath::try_new(v).unwrap())
-                .enumerate()
-            {
-                let node = vfs()
-                    .write()
-                    .open(path)
-                    .expect("should be able to open stdin");
-                let ofd = OpenFileDescription::from(node);
-                let fd_num = FdNum::from(i as i32);
-                let fd = FileDescriptor::new(fd_num, FileDescriptorFlags::empty(), ofd.into());
-                fds.insert(fd_num, fd);
-            }
-        }
-
-        let kstack = HigherHalfStack::allocate(16, trampoline, ptr::null_mut(), Task::exit)?;
-        let main_task = Task::create_with_stack(&process, kstack);
-        parent.publish_child(process.clone());
-        RunQueues::enqueue(Box::pin(main_task));
-
-        Ok(process)
-    }
-
     pub fn pid(&self) -> ProcessId {
         self.pid
     }
@@ -354,90 +213,6 @@ impl Process {
 
     pub fn telemetry(&self) -> &Telemetry {
         &self.telemetry
-    }
-
-    /// Forks the process, creating a exact copy of memory and file descriptors.
-    ///
-    /// # Errors
-    /// Returns an error if memory allocation fails.
-    pub fn fork(
-        self: &Arc<Self>,
-        current_task: &Task,
-        ctx: &UserContext,
-    ) -> Result<Arc<Self>, &'static str> {
-        let name = self.name.clone();
-        let executable_path = self.executable_path.clone();
-
-        // 1. Create basics (this creates new AS, VMM, PID)
-        let child = Self::create_new(
-            self, // Parent is self. (Self is the parent of the child)
-            name,
-            executable_path.as_ref(),
-            self.bpf_capabilities(),
-        );
-
-        // 2. Clone File Descriptors
-        {
-            let parent_fds = self.file_descriptors.read();
-            let mut child_fds = child.file_descriptors.write();
-            *child_fds = parent_fds.clone();
-        }
-
-        // 3. Clone Memory Regions (Heap, mmap)
-        {
-            let cloned_regions = self.memory_regions.clone_to_process(&child)?;
-            // We need to replace the child's empty regions with the cloned ones.
-            child.memory_regions.replace_from(cloned_regions);
-        }
-
-        // 4. Clone Executable Data
-        {
-            let parent_exec = self.executable_file_data.read();
-            if let Some(alloc) = parent_exec.as_ref() {
-                let cloned = alloc
-                    .clone_to_process(child.clone())
-                    .ok_or("Failed to clone executable data")?;
-                *child.executable_file_data.write() = Some(cloned);
-            }
-        }
-
-        // 4b. Clone ELF Segment Allocations (code, rodata, data loaded by ELF loader)
-        {
-            let parent_segs = self.elf_segments.read();
-            let mut child_segs = child.elf_segments.write();
-            for alloc in &parent_segs.executable {
-                child_segs.executable.push(
-                    alloc
-                        .clone_to_process(child.clone())
-                        .ok_or("Failed to clone executable ELF segment")?,
-                );
-            }
-            for alloc in &parent_segs.readonly {
-                child_segs.readonly.push(
-                    alloc
-                        .clone_to_process(child.clone())
-                        .ok_or("Failed to clone readonly ELF segment")?,
-                );
-            }
-            for alloc in &parent_segs.writable {
-                child_segs.writable.push(
-                    alloc
-                        .clone_to_process(child.clone())
-                        .ok_or("Failed to clone writable ELF segment")?,
-                );
-            }
-        }
-
-        // 5. Build the task before publishing the child. Any earlier failure
-        // drops the unpublished process and rolls back all cloned allocations.
-        let child_task = Task::fork(&child, current_task, ctx)
-            .map_err(|_| "Failed to allocate stack for child task")?;
-
-        // 6. Atomically publish the fully constructed child, then make it runnable.
-        self.publish_child(child.clone());
-        RunQueues::enqueue(Box::pin(child_task));
-
-        Ok(child)
     }
 
     /// Replaces the current process image with a preflight-validated executable.
