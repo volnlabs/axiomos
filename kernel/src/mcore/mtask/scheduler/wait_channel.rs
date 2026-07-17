@@ -27,7 +27,7 @@
 //! compiler-generated drop is byte-identical before and after the
 //! refactor. No custom `Drop` is added.
 //!
-//! See `docs/reviews/wait-channel-refactor.md` for the review
+//! See `docs/reviews/implementation/wait-channel-refactor.md` for the review
 //! checklist.
 
 #[cfg(test)]

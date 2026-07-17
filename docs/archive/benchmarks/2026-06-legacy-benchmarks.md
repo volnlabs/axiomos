@@ -5,7 +5,7 @@
 > more required provenance fields (tracked raw log, exact toolchain, or
 > benchmark-artifact hash), and the QEMU timing claims include the H-02 clock
 > conversion defect. Current attributable results live in
-> [`docs/benchmarks.md`](../../benchmarks.md).
+> [`docs/performance/current-results.md`](../../performance/current-results.md).
 
 # axiomos Kernel Benchmarks
 
@@ -26,7 +26,7 @@
 > and HPET-derived number in this document as suspect.** A future
 > commit will replace §1 with numbers measured against a monotonic
 > tick→ns conversion that uses `Hpet::period_femtoseconds()`. The
-> raw captures remain in git history (`git log -- docs/benchmarks.md`)
+> raw captures remain in git history (`git log -- docs/performance/current-results.md`)
 > for archaeology only.
 >
 > The non-time metrics (memory footprint, kernel image size) are
@@ -482,7 +482,7 @@ Userspace Benchmark Tool
 
 Measures the verifier's **own** execution cost as a function of program size, on
 real A76 hardware — the basis for the claim that verification is bounded and
-schedulable on-device alongside a control loop (see `docs/verifier-fragment.md`).
+schedulable on-device alongside a control loop (see `docs/security/verifier-assurance.md`).
 Distinct from §3's "BPF load time": this isolates `verify_with_stats` and reports
 both `states_explored` and a `CNTVCT_EL0` cycle delta.
 

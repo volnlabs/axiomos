@@ -2,7 +2,7 @@
 
 axiomos is a research kernel for robotics workloads. It is pre-1.0: the safety
 architecture is real and load-bearing, but it has not had an external audit
-and makes no formal assurance claims. See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)
+and makes no formal assurance claims. See [docs/security/threat-model.md](docs/security/threat-model.md)
 for what is and is not defended.
 
 ## Reporting a vulnerability
@@ -16,7 +16,7 @@ Please include:
 - A reproducer where possible. For verifier soundness bugs, the ideal report
   is a BPF program (bytes or assembly) that **passes verification but
   performs an unsafe action** — see the target list in
-  [docs/security/verifier-review-call.md](docs/security/verifier-review-call.md).
+  [docs/reviews/implementation/verifier-review-call.md](docs/reviews/implementation/verifier-review-call.md).
 - The commit hash you tested against.
 
 ## What counts as a security bug

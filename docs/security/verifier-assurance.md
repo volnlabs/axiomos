@@ -72,7 +72,7 @@ excluded — WCET ≠ the naive instruction-cost total. The result is returned a
 Costs are **calibrated cycle units**: the Pi 5 (Cortex-A76) calibration run
 measured per-class execution cost (ALU, memory, div, helper classes including
 copy and ringbuf) and fixed `PhysicalProfile::CYCLE_UNIT_NS = 6` (≈5.74 ns/unit
-measured, rounded up — `docs/benchmarks.md` §12). Two enforcement points
+measured, rounded up — `docs/performance/current-results.md` §12). Two enforcement points
 consume the bound today:
 
 - **Per-program budget (verifier):** the embedded profile rejects a program
@@ -91,7 +91,7 @@ consume the bound today:
   An attach that would cross the budget is refused (safe but not schedulable);
   detach returns the budget. Validated on Pi 5 silicon: the admission
   self-test shows the 15th attach of a dense program refused exactly where
-  the arithmetic predicts (`docs/benchmarks.md` §12).
+  the arithmetic predicts (`docs/performance/current-results.md` §12).
 
 The remaining approximation is the fire frequency: every hook is assumed to
 run at the nominal 1 kHz control-loop rate. Per-hook-type and caller-declared
@@ -140,4 +140,4 @@ and thus the size of programs verifiable in bounded cost — rise substantially.
   in `kernel_bpf::cost_corpus`, whose `cost_corpus` unit tests pin the
   `states_explored ≤ n` bound at the exact measurement sizes. This is the
   authoritative (real A76, in-kernel) measurement; the host criterion curve is a
-  proxy. See `docs/benchmarks.md` §12.
+  proxy. See `docs/performance/current-results.md` §12.

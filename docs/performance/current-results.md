@@ -4,7 +4,7 @@ This page is the current benchmark authority. A number is publishable here only
 when its campaign records the exact source commit, toolchain, command, host or
 hardware boundary, tracked raw output, and SHA-256 hashes for both the raw log
 and the Cargo-reported benchmark executable. Methodology and unsupported legacy
-claims are retained in the [historical benchmark record](archive/benchmarks/2026-06-legacy-benchmarks.md),
+claims are retained in the [historical benchmark record](../archive/benchmarks/2026-06-legacy-benchmarks.md),
 not silently presented as current results.
 
 ## Current attributable campaign
@@ -18,8 +18,8 @@ not silently presented as current results.
 | Toolchain | `nightly-2026-07-02`; `rustc 1.98.0-nightly (4c9d2bfe4 2026-07-01)` |
 | Host | Linux 7.0.9 x86_64; AMD Ryzen 7 7735HS; 16 logical CPUs |
 | Command | `CARGO_TERM_COLOR=never cargo bench --locked -p kernel_bpf --bench verifier --features embedded-profile` |
-| Raw output | [`benchmark-evidence/2ef74f0/verifier-host.log`](benchmark-evidence/2ef74f0/verifier-host.log) |
-| Evidence manifest | [`benchmark-evidence/2ef74f0/manifest.toml`](benchmark-evidence/2ef74f0/manifest.toml) |
+| Raw output | [`evidence/2ef74f0/verifier-host.log`](evidence/2ef74f0/verifier-host.log) |
+| Evidence manifest | [`evidence/2ef74f0/manifest.toml`](evidence/2ef74f0/manifest.toml) |
 
 Criterion collected 100 samples per group after its normal warm-up. Values are
 the reported 95% confidence intervals from the tracked raw output.
@@ -78,7 +78,7 @@ artifact that produced this specific campaign.
 
 1. Start from a clean, committed tree and use the pinned repository toolchain.
 2. Store raw output and `manifest.toml` under
-   `docs/benchmark-evidence/<commit>/`.
+   `docs/performance/evidence/<commit>/`.
 3. Record the Cargo-reported executable, its SHA-256, host/hardware controls,
    exact command, and hashes of benchmark source, `Cargo.lock`, and
    `rust-toolchain.toml` at that commit.

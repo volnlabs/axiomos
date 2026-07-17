@@ -265,7 +265,7 @@ pub enum VerifyError {
     /// A helper banned on the bounded RT fragment was called (embedded only).
     /// `bpf_trace_printk` writes to the UART — serial-I/O-bound (~ms/line) and
     /// unbounded in message length — so it cannot appear in a deadline-scheduled
-    /// hook (`docs/benchmarks.md §12`).
+    /// hook (`docs/performance/current-results.md §12`).
     #[cfg(feature = "embedded-profile")]
     HelperForbiddenOnRtFragment {
         /// Instruction index of the offending call.

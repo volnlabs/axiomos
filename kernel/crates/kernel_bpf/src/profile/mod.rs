@@ -94,7 +94,7 @@ pub trait PhysicalProfile: sealed::Sealed + 'static {
     const WCET_CYCLE_BUDGET: u64;
 
     /// Calibrated cost of one WCET cycle unit, in nanoseconds, on this profile's
-    /// target. The Pi5 A76 JIT measured ~5.74 ns/unit (`docs/benchmarks.md §12`,
+    /// target. The Pi5 A76 JIT measured ~5.74 ns/unit (`docs/performance/current-results.md §12`,
     /// straight-line baseline); rounded up to 6 for a conservative bound. Used
     /// to convert a program's `wcet_cycles` into wall-clock time for the
     /// utilization admission test.
@@ -247,7 +247,7 @@ impl PhysicalProfile for EmbeddedProfile {
     /// invocation that cannot fit one period is unschedulable at any frequency.
     const WCET_CYCLE_BUDGET: u64 = Self::RT_PERIOD_NS / Self::CYCLE_UNIT_NS;
 
-    /// Pi5 A76 JIT: ~5.74 ns/unit measured, rounded up to 6 (docs/benchmarks.md §12).
+    /// Pi5 A76 JIT: ~5.74 ns/unit measured, rounded up to 6 (docs/performance/current-results.md §12).
     const CYCLE_UNIT_NS: u64 = 6;
 
     /// 1 kHz control loop.

@@ -115,9 +115,9 @@ host-side reproducer is enough for any soundness report.
 
 ## Context documents
 
-- [Threat model & assurance positioning vs seL4](../THREAT_MODEL.md)
-- [Verifier fragment & WCET bound](../verifier-fragment.md)
-- [Security policy / how to report](../../SECURITY.md)
+- [Threat model & assurance positioning vs seL4](../../security/threat-model.md)
+- [Verifier fragment & WCET bound](../../security/verifier-assurance.md)
+- [Security policy / how to report](../../../SECURITY.md)
 
 ## Bounty
 

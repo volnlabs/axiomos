@@ -78,5 +78,5 @@ material per stage 2–4) and consequential. The abstract domain is small,
 pure, and already transcribes cleanly (this directory took an afternoon).
 If stages 2–4 interest you: co-authorship is on the table, the maintainer
 is responsive, and the contact is in [SECURITY.md](../SECURITY.md).
-Context documents: [threat model](../docs/THREAT_MODEL.md),
-[verifier review call](../docs/security/verifier-review-call.md).
+Context documents: [threat model](../docs/security/threat-model.md),
+[verifier review call](../docs/reviews/implementation/verifier-review-call.md).

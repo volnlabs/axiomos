@@ -42,11 +42,12 @@ def markdown_files() -> list[Path]:
         check=True,
         stdout=subprocess.PIPE,
     )
-    return sorted(
+    candidates = (
         ROOT / entry.decode("utf-8", errors="surrogateescape")
         for entry in result.stdout.split(b"\0")
         if entry
     )
+    return sorted(path for path in candidates if path.is_file())
 
 
 def destination(raw: str) -> str:

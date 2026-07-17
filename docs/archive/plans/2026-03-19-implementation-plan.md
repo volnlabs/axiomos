@@ -14,9 +14,9 @@
 > interpreter, and loader relocation (#121); verifier cost is measured on
 > Pi 5 (Track B) and a Pi5-calibrated WCET cost model with utilization-form
 > EDF admission gates loads and attaches (Track C, #43) — see
-> `docs/benchmarks.md` §12. The Phase 4 host transport shipped as the
+> `docs/performance/current-results.md` §12. The Phase 4 host transport shipped as the
 > UART-JSON protocol (`rk_uart_forwarder` + `rk-to-ros --input stdin`,
-> #125, `docs/rk_bridge_protocol.md`). Sections below describe the state
+> #125, `docs/architecture/protocols/rk-bridge.md`). Sections below describe the state
 > as of March and are kept for the plan's rationale and remaining phases.
 
 ---

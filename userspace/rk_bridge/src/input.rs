@@ -7,7 +7,7 @@
 //! tolerate `meta` and `ready` records (and any unknown record types) without
 //! treating them as events.
 //!
-//! See `docs/rk_bridge_protocol.md` for the full spec.
+//! See `docs/architecture/protocols/rk-bridge.md` for the full spec.
 
 use std::io::{self, BufRead, BufReader, Read};
 

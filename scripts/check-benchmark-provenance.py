@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EVIDENCE_ROOT = ROOT / "docs/benchmark-evidence"
+EVIDENCE_ROOT = ROOT / "docs/performance/evidence"
 HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 HEX_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
@@ -94,17 +94,17 @@ def validate_manifest(path: Path, current_doc: str) -> None:
             f"{path}: {relative} does not match recorded commit hash",
         )
 
-    manifest_relative = str(path.relative_to(ROOT).relative_to("docs"))
-    raw_doc_relative = str(raw_relative.relative_to("docs"))
-    require(manifest_relative in current_doc, f"docs/benchmarks.md does not link {manifest_relative}")
-    require(raw_doc_relative in current_doc, f"docs/benchmarks.md does not link {raw_doc_relative}")
+    manifest_relative = str(path.relative_to(EVIDENCE_ROOT.parent))
+    raw_doc_relative = str((ROOT / raw_relative).relative_to(EVIDENCE_ROOT.parent))
+    require(manifest_relative in current_doc, f"docs/performance/current-results.md does not link {manifest_relative}")
+    require(raw_doc_relative in current_doc, f"docs/performance/current-results.md does not link {raw_doc_relative}")
 
 
 def main() -> int:
     try:
         manifests = sorted(EVIDENCE_ROOT.glob("*/manifest.toml"))
         require(manifests, "no benchmark evidence manifests found")
-        current_doc = (ROOT / "docs/benchmarks.md").read_text(encoding="utf-8")
+        current_doc = (ROOT / "docs/performance/current-results.md").read_text(encoding="utf-8")
         require(
             "historical benchmark record" in current_doc,
             "current benchmark authority must link the legacy record",

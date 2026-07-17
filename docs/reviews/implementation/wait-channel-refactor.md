@@ -157,7 +157,7 @@ The refactor commit's body references this document:
 
 ```
 Reviewed-by: <reviewer>
-Refs: docs/reviews/wait-channel-refactor.md
+Refs: docs/reviews/implementation/wait-channel-refactor.md
 ```
 
 The commit does not land without this checklist approved.

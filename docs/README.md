@@ -3,9 +3,14 @@
 ## Start Here
 
 - [`architecture/`](architecture/system-overview.md) for implemented architecture and supported behavior.
+- [`reference/`](reference/) for exact contracts and generated inventories.
 - [`decisions/`](decisions/) for architectural decisions and implementation gaps.
+- [`design/`](design/) for proposed and accepted design reasoning.
+- [`plans/`](plans/) for active and completed execution plans.
 - [`security/`](security/) for threat, unsafe-code, audit, and gate evidence.
 - [`reviews/`](reviews/) for point-in-time engineering findings.
+- [`operations/`](operations/) for build, boot, test, debug, and release procedures.
+- [`performance/`](performance/) for benchmark methodology, results, and evidence.
 - [`archive/`](archive/) for superseded or historical material.
 - [`../plan_refactor.md`](../plan_refactor.md) for the repository migration plan.
 
@@ -17,10 +22,7 @@
 | Why was a decision made? | `docs/decisions/` |
 | What problems were found? | `docs/reviews/` and `docs/security/` |
 | Which files are generated? | `docs/reference/generated/` and checked-in manifests |
-| How do I build, test, run, or debug it? | root docs, `scripts/`, and `docs/operations/` |
-
-During migration, existing paths remain authoritative where this table points
-to them. A document move must not silently change authority.
+| How do I build, test, run, or debug it? | `docs/operations/` |
 
 ## Documentation Lifecycle
 
@@ -35,8 +37,10 @@ Generated documents identify their generator and are not edited by hand.
 
 axiomos documentation is divided by authority:
 
-- [`architecture/`](architecture/system-overview.md) is normative for the implementation and
-  supported release surface.
+- [`architecture/`](architecture/) is normative for implemented behavior and
+  subsystem boundaries.
+- [`reference/`](reference/) defines exact supported interfaces and generated
+  inventories.
 - [`decisions/`](decisions/) records accepted architecture decisions. Later ADRs supersede
   earlier ones; accepted ADRs are not edited to hide historical decisions.
 - [`reference/generated/`](reference/generated/README.md) is produced from checked-in manifests and
@@ -44,10 +48,9 @@ axiomos documentation is divided by authority:
 - [`archive/`](archive/README.md) contains historical proposals, plans, audits,
   and specifications that are retained for traceability but are not current
   implementation contracts.
-- [`security/`](security/) contains the generated unsafe ledger and release-gate
-  evidence.
+- [`security/`](security/) contains threat, assurance, unsafe-code, and gate
+  authorities.
 
 The original proposal, execution plans, branch-specific engineering review, and
-superseded design specifications are indexed under `archive/`. Files still
-located directly under `docs/` are legacy material awaiting normalization;
-their claims are not normative unless linked from `current/README.md`.
+superseded design specifications are indexed under `archive/`. No generic
+`current/` namespace exists: document type and lifecycle encode authority.

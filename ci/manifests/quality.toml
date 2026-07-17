@@ -386,7 +386,7 @@ baseline_missed = 10
 baseline_timeout = 2
 baseline_unviable = 8
 baseline_commit = "2cd870d"
-evidence = "docs/quality-evidence/2cd870d/shrike-link-protocol.json"
+evidence = "docs/reviews/releases/2026-07-engineering-audit/evidence/shrike-link-protocol.json"
 evidence_sha256 = "265b085181741ad7fe8cb06331706f5efc4f62d8b00a5388c3a73b039602d9dc"
 
 [[mutation]]
@@ -401,5 +401,5 @@ baseline_missed = 2
 baseline_timeout = 0
 baseline_unviable = 3
 baseline_commit = "a5316b4"
-evidence = "docs/quality-evidence/a5316b4/physical-memory-region.json"
+evidence = "docs/reviews/releases/2026-07-engineering-audit/evidence/physical-memory-region.json"
 evidence_sha256 = "ca44b1555e8d235b59057037f78b06c64cd7a185eadf38f14961e84bce5e35bd"

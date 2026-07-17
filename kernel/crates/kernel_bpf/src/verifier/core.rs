@@ -106,7 +106,7 @@ pub struct VerifyConfig<'a> {
 /// both verification time (work per state is bounded) and memory (one recorded
 /// state each). For the loop-free embedded fragment this is bounded by the
 /// program size; this is the figure the bounded-verification / verifier-WCET
-/// work measures. See `docs/verifier-fragment.md`.
+/// work measures. See `docs/security/verifier-assurance.md`.
 #[derive(Debug, Clone, Default)]
 pub struct VerifyStats {
     /// Distinct verifier states explored during verification.
@@ -208,7 +208,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
     /// [`VerifyStats`] describing the verification *cost* — chiefly the number
     /// of distinct states explored. This is the metric the bounded-verification
     /// work measures: for the loop-free embedded fragment it is bounded by the
-    /// program size (see `docs/verifier-fragment.md`).
+    /// program size (see `docs/security/verifier-assurance.md`).
     pub fn verify_with_stats(
         prog_type: BpfProgType,
         insns: &[BpfInsn],
@@ -1201,7 +1201,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
 
                 // Helpers banned on the bounded RT fragment. `bpf_trace_printk`
                 // is serial-I/O-bound and unbounded in message length, so it has
-                // no place in a deadline-scheduled hook (docs/benchmarks.md §12).
+                // no place in a deadline-scheduled hook (docs/performance/current-results.md §12).
                 const FORBIDDEN_RT_HELPERS: &[i32] = &[super::HelperId::TracePrintk as i32];
 
                 if FORBIDDEN_RT_HELPERS.contains(&insn.imm) {
@@ -2609,7 +2609,7 @@ mod tests {
     /// A straight-line program of `n` instructions has a single path, so the
     /// verifier explores exactly one state per reachable instruction — cost is
     /// linear in program size. This is the empirical form of the bound in
-    /// `docs/verifier-fragment.md`; it guards against a regression that would
+    /// `docs/security/verifier-assurance.md`; it guards against a regression that would
     /// make verification cost super-linear on loop-free programs.
     #[test]
     #[cfg_attr(miri, ignore)]

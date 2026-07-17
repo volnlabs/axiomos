@@ -15,7 +15,7 @@ exact static WCET) and for keeping the verifier mathematically simple.
 
 axiomOS' pitch is on-device, hot-reloadable kernel extensions for real-time
 systems, where **verification cost is bounded and pre-declarable as a function
-of program size** (`docs/verifier-fragment.md`). The verifier proves safety over
+of program size** (`docs/security/verifier-assurance.md`). The verifier proves safety over
 a *bounded fragment* `F`: loop-free CFG, bounded helper set, no dynamic
 allocation, `states_explored ≤ (h+1)·n`. A separate static WCET model bounds
 *execution* cost via the longest path through the loop-free CFG DAG.

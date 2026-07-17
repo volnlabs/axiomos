@@ -91,7 +91,7 @@ criteria for any future RW-to-RX implementation are in
 [ADR-0004](../decisions/0004-bpf-jit-policy.md).
 
 The required local evidence command is documented in the
-[local audit gate](../security/local-audit-gate.md). `--quick` is an iteration
+[local audit gate](../security/gates/local-audit-gate.md). `--quick` is an iteration
 mode and is not full release evidence.
 
 ## Known assurance limits

@@ -17,10 +17,10 @@ This directory is the entry point for normative documentation.
 
 ## Normative security and validation documents
 
-- [Local audit gate](../../security/local-audit-gate.md)
-- [Unsafe ledger](../../security/unsafe-ledger.md)
-- [Threat model](../../THREAT_MODEL.md)
-- [Benchmark evidence authority](../../benchmarks.md)
+- [Local audit gate](../../security/gates/local-audit-gate.md)
+- [Unsafe ledger](../../security/unsafe-code/ledger.md)
+- [Threat model](../../security/threat-model.md)
+- [Benchmark evidence authority](../../performance/current-results.md)
 
 Generated authorities are refreshed by `cargo xtask docs` and checked by the
 local audit gate.

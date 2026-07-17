@@ -4,8 +4,8 @@
 //! measure how verification cost scales with program size. The same shapes are
 //! loaded on hardware by the `verifier_bench` userspace driver, so the host
 //! cost curve (`states_explored`) and the on-device curve (cycles) describe the
-//! same programs. See `docs/verifier-fragment.md` ("How to measure") and
-//! `docs/benchmarks.md`.
+//! same programs. See `docs/security/verifier-assurance.md` ("How to measure") and
+//! `docs/performance/current-results.md`.
 //!
 //! The cost metric the corpus exercises is `VerifyStats::states_explored`,
 //! which for the loop-free fragment is bounded by program size (the declared

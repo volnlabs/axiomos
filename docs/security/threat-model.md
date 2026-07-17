@@ -258,7 +258,7 @@ the roadmap borrows seL4's discipline where it fits.
 
 ## 9. Related documents
 
-- [SECURITY.md](../SECURITY.md) — reporting and disclosure policy
-- [docs/security/verifier-review-call.md](security/verifier-review-call.md) — external review challenge (#77)
-- [docs/verifier-fragment.md](verifier-fragment.md) — verified fragment + WCET bound
-- [formal/README.md](../formal/README.md) — formalization PoC + roadmap (#91)
+- [SECURITY.md](../../SECURITY.md) — reporting and disclosure policy
+- [verifier review call](../reviews/implementation/verifier-review-call.md) — external review challenge (#77)
+- [verifier assurance](verifier-assurance.md) — verified fragment + WCET bound
+- [formalization overview](../../formal/README.md) — formalization PoC + roadmap (#91)

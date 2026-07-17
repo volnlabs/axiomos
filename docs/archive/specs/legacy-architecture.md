@@ -246,7 +246,7 @@ program whose WCET cannot fit one control-loop period (~166k cycle units at
 utilization ledger capped at U = 0.5 — the EDF utilization test, validated on
 silicon. `trace_printk` is banned on RT hooks. Verification cost itself is
 measured and near-linear (~80–94 cycles/insn on A76). See
-[benchmarks.md §12](../../benchmarks.md).
+[historical benchmark record](../../performance/current-results.md).
 
 ### Signing
 
@@ -403,7 +403,7 @@ impl FileSystem for VirtualExt2Fs { ... }
 
 ## Further Reading
 
-- [benchmarks.md](../../benchmarks.md) — authoritative hardware benchmarks (Pi 5) and Linux comparison
+- [current performance results](../../performance/current-results.md) — current benchmark authority
 - [kernel_bpf/docs/ARCHITECTURE.md](../../../kernel/crates/kernel_bpf/docs/ARCHITECTURE.md) — eBPF runtime architecture
 - [kernel_bpf/docs/VERIFICATION.md](../../../kernel/crates/kernel_bpf/docs/VERIFICATION.md) — BPF verification algorithm
 - [kernel_bpf/docs/PROFILES.md](../../../kernel/crates/kernel_bpf/docs/PROFILES.md) — BPF physical reality profiles

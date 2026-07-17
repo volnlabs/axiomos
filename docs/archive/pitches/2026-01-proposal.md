@@ -15,7 +15,7 @@
 > **Note (2026-06):** this is the original pitch document, kept for the vision
 > and rationale. For the current, honest implementation state see the
 > [README](../../../README.md) (Limitations section),
-> [benchmarks.md](../../benchmarks.md) for measured numbers, and the
+> [current performance results](../../performance/current-results.md) for measured numbers, and the
 > [archived implementation plan](../plans/2026-03-19-implementation-plan.md)
 > for the historical execution plan.
 
@@ -303,7 +303,7 @@ The heart of Axiom's programmability:
 A single path-sensitive verifier gates every program load. On the embedded
 real-time fragment — loop-free by profile constraint — verification cost is
 bounded by program size: Track B measured `states_explored == n` on hardware
-(see `docs/benchmarks.md` §12). The verifier also carries a static WCET cycle
+(see `docs/performance/current-results.md` §12). The verifier also carries a static WCET cycle
 bound per program and admits loads against a schedulability budget (#143/#144):
 
 ```

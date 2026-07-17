@@ -4,7 +4,7 @@ A bare-metal Rust kernel with runtime-programmable behavior through verified eBP
 
 axiomos targets robotics and embedded systems where kernel logic should evolve without reflashing firmware. Instead of recompiling to change kernel behavior, verified programs are loaded and attached to kernel hooks at runtime.
 
-> **Status: research kernel under active hardware bring-up on Raspberry Pi 5.** Not production-ready. See [Limitations](#limitations) for the current honest list of what works and what doesn't. The current [benchmark authority](docs/benchmarks.md) contains one attributable host-verifier campaign; legacy Pi/QEMU/Linux numbers are archived until rerun with retained raw logs and artifact hashes.
+> **Status: research kernel under active hardware bring-up on Raspberry Pi 5.** Not production-ready. See [Limitations](#limitations) for the current honest list of what works and what doesn't. The current [benchmark authority](docs/performance/current-results.md) contains one attributable host-verifier campaign; legacy Pi/QEMU/Linux numbers are archived until rerun with retained raw logs and artifact hashes.
 
 **Repository structure:**
 - `kernel/src` — core kernel implementation
@@ -27,7 +27,7 @@ This is proven in Linux, but Linux is unsuitable for hard real-time robotics due
 | RTOS + custom | <10,000ns | ~1MB | Partial | Medium |
 | **axiomos (Pi5)** | **Not currently attributable** | **Not currently attributable** | **Total** | **Unmeasured under the current evidence contract** |
 
-Historical latency methodology covered hardware vector entry → BPF dispatch on one core without contention, but its raw capture and artifact hash were not retained. Tail latency under load is also unmeasured ([#74](https://github.com/pro-utkarshM/axiomOS/issues/74)); see the [benchmark evidence policy](docs/benchmarks.md).
+Historical latency methodology covered hardware vector entry → BPF dispatch on one core without contention, but its raw capture and artifact hash were not retained. Tail latency under load is also unmeasured ([#74](https://github.com/pro-utkarshM/axiomOS/issues/74)); see the [benchmark evidence policy](docs/performance/current-results.md).
 
 ---
 
@@ -164,5 +164,5 @@ Email: utkarsh@kernex.sbs
 
 **Further reading:**
 - [docs/architecture/system-overview.md](docs/architecture/system-overview.md) — normative system layers and links to VM, BPF trust, scheduler, target, and JIT contracts
-- [docs/benchmarks.md](docs/benchmarks.md) — attributable benchmark campaigns and historical-claim disposition
+- [docs/performance/current-results.md](docs/performance/current-results.md) — attributable benchmark campaigns and historical-claim disposition
 - [kernel_bpf docs](kernel/crates/kernel_bpf/docs/) — eBPF runtime architecture, scheduling, verification, profiles

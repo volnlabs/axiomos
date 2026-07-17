@@ -3,7 +3,7 @@
 // init on Pi5). Host-side `rk_bridge --input` consumes the same stream and
 // publishes to ROS2.
 //
-// Wire format: see docs/rk_bridge_protocol.md.
+// Wire format: see docs/architecture/protocols/rk-bridge.md.
 
 #![no_std]
 #![no_main]

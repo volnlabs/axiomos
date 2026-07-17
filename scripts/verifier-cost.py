@@ -8,7 +8,7 @@ The kernel, built with `--features verifier-cost`, emits one line per BPF load:
 
 This script extracts those lines, writes a CSV, prints a summary table, and —
 if matplotlib is available — saves a cost-vs-size plot overlaying the declared
-budget T(n) = (h+1)*n from docs/verifier-fragment.md.
+budget T(n) = (h+1)*n from docs/security/verifier-assurance.md.
 
 Usage:
     scripts/verifier-cost.py uart.clean.log [-o cost.csv] [--plot cost.png]

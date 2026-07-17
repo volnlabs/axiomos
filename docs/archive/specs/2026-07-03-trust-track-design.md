@@ -31,9 +31,9 @@ changes.
   `tnum.c`, which Agni (CAV'23) already SMT-verified — the Lean PoC leans on
   that prior art for operator definitions.
 
-## Deliverable 1 — #39: `docs/THREAT_MODEL.md` + `SECURITY.md`
+## Deliverable 1 — #39: `docs/security/threat-model.md` + `SECURITY.md`
 
-`docs/THREAT_MODEL.md` sections:
+`docs/security/threat-model.md` sections:
 
 1. **Asset inventory** — kernel image, BPF runtime (verifier + interpreter;
    no JIT exists), attach points (GPIO, PWM, IIO, timer, syscall), signing
@@ -63,7 +63,7 @@ changes.
 (what counts as a security bug — verifier soundness first), response
 expectations, no-legal-threats safe-harbor sentence. Short.
 
-## Deliverable 2 — #77: `docs/security/verifier-review-call.md`
+## Deliverable 2 — #77: `docs/reviews/implementation/verifier-review-call.md`
 
 The call-for-review post, drafted for community posting (posting itself is
 the maintainer's manual step, out of scope):
@@ -83,7 +83,7 @@ the maintainer's manual step, out of scope):
 - Known open gaps disclosed up front: #89 (Spectre), #90 (BTF).
 - Bounty: placeholder section marked "TBD by maintainer before posting"
   (decision deferred by design).
-- Links: THREAT_MODEL.md, `docs/verifier-fragment.md`, source paths.
+- Links: THREAT_MODEL.md, `docs/security/verifier-assurance.md`, source paths.
 
 ## Deliverable 3 — #91: `formal/` Lean 4 PoC
 
