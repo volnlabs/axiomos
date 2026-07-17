@@ -22,7 +22,8 @@ this refactor; it does not replace architecture, reference, or ADR documents.
 - [x] Inventory authoritative, generated, operational, proposed, and historical
       files; see `docs/plans/active/repository-inventory.md`.
 - [x] Add `docs/README.md` and `scripts/README.md` authority guidance.
-- [ ] Add metadata to substantial active docs and ADRs.
+- [~] Add metadata to substantial active docs and ADRs. Authority guidance is
+      documented, but metadata has not yet been applied repository-wide.
 - [x] Move generated documentation under `docs/reference/generated/` and update
       xtask paths.
 - [x] Group scripts by responsibility with compatibility wrappers.
@@ -30,11 +31,12 @@ this refactor; it does not replace architecture, reference, or ADR documents.
       process modules without changing behavior. Typed error categories are
       landed; parser and command-module extraction remain.
 - [ ] Replace handwritten TOML parsing with `serde` and `toml`.
-- [ ] Add typed xtask exit categories and structured command output.
+- [~] Add typed xtask exit categories and structured command output. Typed exit
+      categories and tests are complete; human/JSON structured reporting is not.
 - [x] Add declarative quick/full/extended CI profiles while retaining `xtask ci`.
 - [ ] Add shared repository-model loading for manifests and workspace data.
 - [ ] Decompose the audit shell script only after equivalent xtask checks pass.
-- [ ] Add kernel crate-boundary and component-naming documentation.
+- [x] Add kernel crate-boundary and component-naming documentation.
 - [ ] Relocate generated root artifacts and consolidate TODO tracking.
 - [ ] Reassess root `src/main.rs` and `build.rs` ownership before creating an
       image-builder crate.
