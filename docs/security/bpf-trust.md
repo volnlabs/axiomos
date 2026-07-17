@@ -117,7 +117,7 @@ failure, `EpochSnapshot` Loom models, and the cloud-profile Miri suite. The
 [quality boundary](../reference/generated/quality.md) publishes the current BPF coverage
 and verifier mutation floor.
 
-Remaining assurance limits are recorded in `ENGINEERING_AUDIT.md`: physical
+Remaining assurance limits are recorded in the [engineering audit](../reviews/releases/2026-07-engineering-audit/README.md): physical
 GPIO/control-link HIL, an independent unsafe/concurrency review, and measured
 coverage for deferred host-capable components are not replaced by these local
 tests.

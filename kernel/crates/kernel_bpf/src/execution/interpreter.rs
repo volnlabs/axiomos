@@ -880,7 +880,7 @@ mod tests {
     /// Miri proves the read is aliasing-clean under sequential single-
     /// threaded execution. It does NOT prove concurrent safety; that
     /// requires Loom or true kernel concurrency, tracked under
-    /// "Loom/Miri epoch reclamation tests" in `ENGINEERING_AUDIT.md`.
+    /// "Loom/Miri epoch reclamation tests" in the engineering audit package.
     #[test]
     fn execute_map_update_helper() {
         // Test that calling bpf_map_update_elem helper works

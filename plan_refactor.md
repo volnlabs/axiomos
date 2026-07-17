@@ -60,8 +60,8 @@ this refactor; it does not replace architecture, reference, or ADR documents.
 - Optional TUI; it follows a stable CLI and must display the equivalent command.
 - Broad userspace and firmware directory moves until workspace and component
   manifests can validate them automatically.
-- Moving `ENGINEERING_AUDIT.md` until all links, generated references, and
-  release evidence paths are migrated.
+- Splitting the relocated engineering-audit package into topical files; the
+  canonical package now lives under `docs/reviews/releases/`.
 - Deleting old paths; compatibility wrappers remain until one full gate confirms
   all callers have migrated.
 

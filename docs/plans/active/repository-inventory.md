@@ -27,7 +27,7 @@ current paths before physical moves and the required compatibility rules.
 | Generated docs | `docs/reference/generated/` | `docs/reference/generated/` | Generator and checks now use the reference namespace |
 | Historical material | `docs/archive/` | `docs/archive/` | Never delete; preserve provenance |
 | Run/build outputs | `target/`, root logs/images | ignored artifacts | Do not commit transient outputs |
-| Engineering audit | `ENGINEERING_AUDIT.md` | release review package | Move only after links/evidence migrate |
+| Engineering audit | `docs/reviews/releases/2026-07-engineering-audit/` | release review package | current status and historical evidence |
 
 ## Script Map
 

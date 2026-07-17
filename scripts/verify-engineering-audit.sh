@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Canonical local gate for ENGINEERING_AUDIT.md remediation work.
+# Canonical local gate for the engineering-audit remediation package.
 
 set -uo pipefail
 

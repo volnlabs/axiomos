@@ -6,7 +6,7 @@ trust the named function over the line number.
 
 **Resolves:** #39 (RFC: Threat Model & Formal Assurance Gap vs seL4).
 
-> **⚠ Audit-time erratum (2026-07-11, ENGINEERING_AUDIT.md):** This
+> **⚠ Audit-time erratum (2026-07-11, engineering audit):** This
 > document claims certain controls are operative that the audit shows
 > are not. Concretely:
 >

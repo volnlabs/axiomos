@@ -40,7 +40,7 @@ def governed_files() -> list[Path]:
 def historical(path: Path) -> bool:
     relative = path.relative_to(ROOT)
     return (
-        relative == Path("ENGINEERING_AUDIT.md")
+        relative.parts[:3] == ("docs", "reviews", "releases")
         or relative.parts[:1] == ("artifacts",)
         or relative.parts[:2] == ("docs", "archive")
         or relative.parts[:2] == (".superpowers", "sdd")
