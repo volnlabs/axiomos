@@ -23,14 +23,15 @@ this refactor; it does not replace architecture, reference, or ADR documents.
       files; see `docs/plans/active/repository-inventory.md`.
 - [x] Add `docs/README.md` and `scripts/README.md` authority guidance.
 - [ ] Add metadata to substantial active docs and ADRs.
-- [ ] Move generated documentation under `docs/reference/generated/` and update
+- [x] Move generated documentation under `docs/reference/generated/` and update
       xtask paths.
-- [ ] Group scripts by responsibility with compatibility wrappers.
-- [ ] Split xtask into CLI, command, manifest, validation, documentation, and
-      process modules without changing behavior.
+- [x] Group scripts by responsibility with compatibility wrappers.
+- [~] Split xtask into CLI, command, manifest, validation, documentation, and
+      process modules without changing behavior. Typed error categories are
+      landed; parser and command-module extraction remain.
 - [ ] Replace handwritten TOML parsing with `serde` and `toml`.
 - [ ] Add typed xtask exit categories and structured command output.
-- [ ] Add declarative quick/full/extended CI profiles while retaining `xtask ci`.
+- [x] Add declarative quick/full/extended CI profiles while retaining `xtask ci`.
 - [ ] Add shared repository-model loading for manifests and workspace data.
 - [ ] Decompose the audit shell script only after equivalent xtask checks pass.
 - [ ] Add kernel crate-boundary and component-naming documentation.
