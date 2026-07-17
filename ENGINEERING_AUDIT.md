@@ -45,7 +45,7 @@ Current release-gate checklist:
 - [x] Revalidate and fix executable-size caps and fallible exec/spawn allocation.
 - [x] Confirm H-01 scheduler-owned teardown fully removes force-unlock behavior.
 - [x] Publish and gate the versioned supported ABI and target/feature matrix.
-- [x] Pass the complete local required audit gate at `8b406a6`: default mode is 102 PASS / 1 conditional SKIP / 0 FAIL; `RUN_AUDIT_FAULT=1` is 103 PASS / 0 SKIP / 0 FAIL. Both run through `scripts/verify-engineering-audit.sh`, including the required BPF control-plane fault-injection, quality-boundary, artifact-provenance, target-boundary, manifest-boundary, OVMF-VARS-isolation, BPF-concurrency-boundary, process-module-boundary, Loom, and Miri checks.
+- [x] Pass the locally reproducible audit gate: the quick profile is 74 PASS / 1 SKIP / 0 FAIL, and the full non-QEMU profile passes its static, model, build, clippy, and Miri checks. QEMU-dependent and hosted evidence remain separately tracked.
 - [x] Require the Miri-clean cloud-profile BPF interpreter suite in the normal/full and extended local gates (`f5338dc`). At `a409522`, all 427 selected tests pass with zero UB in a default-gate-recorded 1236 seconds; `--quick` remains the explicit iteration-only omission.
 - [x] Bump the OVMF prebuilt to `edk2-stable202511-r2` (`d76a657`) and isolate its writable VARS template with QEMU `snapshot=on` (`abf717e`). The pinned input now remains immutable across repeated SMP smoke runs, enforced by `ovmf-vars-isolation-static`.
 - [x] Add `--no-reboot` to the host QEMU launch path (`37b8e3d`); a kernel panic now exits cleanly instead of looping Limine and clobbering the captured serial buffer.
@@ -164,10 +164,10 @@ snapshot below.
 
 ### Runtime
 
-- [x] Replace the globally serialized task queue with per-CPU queues and
+- [~] Replace the globally serialized task queue with per-CPU queues and
   bounded work stealing. `RunQueues` owns one `TaskQueue` per CPU and uses a
-  bounded rotating victim scan; ADR-0001 defines the ownership and wakeup
-  contract.
+  bounded rotating victim scan; unit and Loom models pass. Execution
+  exclusivity and a cross-CPU wakeup/IPI contract remain unimplemented.
 - [~] Add event-driven wait channels for child exit, pipes, and I/O. Timer,
   child-exit, and pipe waits use generation-checked channels. Commit `b597e2b`
   exercises the production pipe and waitpid paths in QEMU; audit-only counters
@@ -242,10 +242,10 @@ snapshot below.
   Physical allocation, mapping rollback, exec/spawn, both BPF handle-table
   append reservations, authorization-grant reservation, pinned-map path
   reservation, and cloud array, time-series, and ring-buffer resize
-  reservations are covered; the broader allocation/mapping surface is not yet
-  exhausted.
+  reservations, hash resize, and heap/map-range policy transactions are
+  covered; the broader allocation/mapping surface is not yet exhausted.
 - [~] Publish per-crate line/branch coverage and add parser/verifier mutation
-  testing. `ci/quality.toml` enumerates the exact 49-component denominator;
+  testing. `ci/quality.toml` enumerates the exact 50-component denominator;
   required line/branch baselines cover 20 host-testable components, including
   `xtask`, `kernel_abi`, strengthened devfs/syscall/virtual-memory suites,
   `kernel_device`, `kernel_pci`, `kernel_vfs`, `shrike_link`, `shrike_control`,
