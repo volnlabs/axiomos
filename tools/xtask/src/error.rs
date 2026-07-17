@@ -8,6 +8,28 @@ pub enum XtaskError {
     Infrastructure(String),
 }
 
+#[cfg(test)]
+mod tests {
+    use super::XtaskError;
+
+    #[test]
+    fn exit_categories_are_stable() {
+        assert_eq!(
+            XtaskError::Verification(String::new()).exit_code(),
+            1.into()
+        );
+        assert_eq!(XtaskError::Usage(String::new()).exit_code(), 2.into());
+        assert_eq!(
+            XtaskError::MissingDependency(String::new()).exit_code(),
+            3.into()
+        );
+        assert_eq!(
+            XtaskError::Infrastructure(String::new()).exit_code(),
+            4.into()
+        );
+    }
+}
+
 impl XtaskError {
     pub fn render(&self) {
         let message = match self {
