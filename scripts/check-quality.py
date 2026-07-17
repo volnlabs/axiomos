@@ -94,7 +94,7 @@ def validate_mutation_evidence(row: dict, quality: dict) -> None:
         "Timeout": int(row.get("baseline_timeout", 0)),
         "Unviable": int(row["baseline_unviable"]),
     }
-    if counts != expected_counts or report.get("total_mutants") != len(outcomes):
+    if counts != Counter(expected_counts) or report.get("total_mutants") != len(outcomes):
         raise ValueError(f"{row['name']}: mutation evidence outcome totals mismatch")
     report_counts = report.get("counts", {})
     if report_counts != {

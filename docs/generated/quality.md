@@ -24,7 +24,7 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 | `kernel/crates/kernel_map_transaction/Cargo.toml` | map_range rollback bookkeeping | measured |
 | `kernel/crates/kernel_memapi/Cargo.toml` | mapped-memory contract | deferred-host |
 | `kernel/crates/kernel_pci/Cargo.toml` | PCI contracts | deferred-host |
-| `kernel/crates/kernel_physical_memory/Cargo.toml` | physical memory | deferred-host |
+| `kernel/crates/kernel_physical_memory/Cargo.toml` | physical memory | measured |
 | `kernel/crates/kernel_syscall/Cargo.toml` | syscall contracts | deferred-host |
 | `kernel/crates/kernel_syscall/fuzz/Cargo.toml` | syscall argument fuzz target | fuzz-harness |
 | `kernel/crates/kernel_time/Cargo.toml` | time and deadline queues | measured |
@@ -65,6 +65,7 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 | kernel-bpf-cloud | `kernel/crates/kernel_bpf/Cargo.toml` | 77.71% | 63.43% | 77.00% | 63.00% | `2c3bd2c` |
 | kernel-elfloader | `kernel/crates/kernel_elfloader/Cargo.toml` | 83.29% | 66.67% | 83.00% | 66.00% | `2c3bd2c` |
 | kernel-map-transaction | `kernel/crates/kernel_map_transaction/Cargo.toml` | 94.35% | 100.00% | 94.00% | 99.00% | `97f514c` |
+| kernel-physical-memory | `kernel/crates/kernel_physical_memory/Cargo.toml` | 94.71% | 77.08% | 94.00% | 77.00% | `a5316b4` |
 | kernel-time | `kernel/crates/kernel_time/Cargo.toml` | 96.76% | 88.24% | 96.00% | 88.00% | `fbaed42` |
 | kernel-usermem | `kernel/crates/kernel_usermem/Cargo.toml` | 98.40% | 86.67% | 98.00% | 86.00% | `946c2d2` |
 
@@ -75,3 +76,4 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 | elf-parser-loader | 67 | 15 | 0 | 36 | 81.71% | 80.00% | `2c3bd2c` | - |
 | bpf-verifier-policy | 72 | 21 | 0 | 8 | 77.42% | 75.00% | `2c3bd2c` | - |
 | shrike-link-protocol | 143 | 10 | 2 | 8 | 92.26% | 90.00% | `2cd870d` | [`report`](../quality-evidence/2cd870d/shrike-link-protocol.json) |
+| physical-memory-region | 29 | 2 | 0 | 3 | 93.55% | 90.00% | `a5316b4` | [`report`](../quality-evidence/a5316b4/physical-memory-region.json) |
