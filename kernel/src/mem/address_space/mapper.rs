@@ -16,6 +16,21 @@ use crate::arch::types::{
 };
 use crate::mem::phys::PhysicalMemory;
 
+#[path = "map_range_policy.rs"]
+mod policy;
+
+/// Maximum number of pages recorded by one stack-backed map transaction.
+pub(crate) const MAP_RANGE_TRANSACTION_CAPACITY: usize = policy::TRANSACTION_CAPACITY;
+
+fn page_range_len<S: PageSize>(pages: &PageRangeInclusive<S>) -> usize {
+    let start = pages.start.start_address().as_u64();
+    let end = pages.end.start_address().as_u64();
+    if end < start {
+        return 0;
+    }
+    usize::try_from((end - start) / S::SIZE + 1).expect("page range length must fit in usize")
+}
+
 #[derive(Debug)]
 pub struct AddressSpaceMapper {
     #[cfg(target_arch = "x86_64")]
@@ -144,27 +159,24 @@ impl AddressSpaceMapper {
     {
         assert!(self.is_active());
 
+        let page_count = page_range_len(&pages);
+        let plan = policy::MapRangePlan::new(page_count);
+
         // Rollback bookkeeping is owned by `MapRangeTransaction`; see
         // `kernel/crates/kernel_map_transaction`. The helper tracks
         // (a) the pages that have been installed in the page table
         // and (b) the frames that were taken from the iterator but
         // never mapped. On failure we drive its `rollback` once.
         //
-        // The capacities are sized for the kernel's largest
-        // single-range `map_range_owned` caller: `heap::init` maps
-        // up to `RAM/1024` of heap space, clamped to 2..128 MiB.
-        // At the audit gate's `--mem 1G` (and `RAM/1024` clamped
-        // up to the 2 MiB minimum), the heap init maps 512 pages
-        // in 4 KiB units. The 512 cap covers that exactly; mmap
-        // is bounded by `MAX_USER_COPY` (16 pages) and exec
-        // allocations are small, so 512 is generous across
-        // every caller.
+        // The bootstrap heap may exceed this cap as RAM grows, so
+        // `heap::init` explicitly partitions it into bounded ranges.
+        // Other callers (mmap and exec) are substantially smaller.
         //
         // The 8 KiB total inline storage fits in the kernel's
         // 16-page (64 KiB) per-task kernel stack and in the BSP's
         // 256 KiB privilege stack.
-        const MAPPED_CAP: usize = 512;
-        const PENDING_CAP: usize = 512;
+        const MAPPED_CAP: usize = MAP_RANGE_TRANSACTION_CAPACITY;
+        const PENDING_CAP: usize = MAP_RANGE_TRANSACTION_CAPACITY;
         let mut tx = MapRangeTransaction::<S, MAPPED_CAP, PENDING_CAP>::new();
         let mut pages = pages.into_iter();
         let mut frames = frames.into_iter();
@@ -178,7 +190,9 @@ impl AddressSpaceMapper {
                 if let Err(error) = self.map(page, frame, flags) {
                     if owns_frames {
                         tx.record_pending_frame(frame);
-                        while let Some(pending) = frames.next() {
+                        let remaining_page_count =
+                            plan.frames_after_failed_mapping(tx.mapped_len());
+                        for pending in frames.by_ref().take(remaining_page_count) {
                             tx.record_pending_frame(pending);
                         }
                     }
@@ -302,6 +316,11 @@ impl AddressSpaceMapper {
         frame: PhysFrame<S>,
         flags: PageTableFlags,
     ) -> Result<(), PageTableError> {
+        assert_eq!(
+            S::SIZE,
+            crate::arch::types::Size4KiB::SIZE,
+            "AArch64 mapper supports only 4 KiB pages until block mappings are implemented",
+        );
         let mut walker = unsafe { PageTableWalker::new(self.level0_vaddr.as_mut_ptr()) };
         walker.map_page(
             page.start_address().as_usize(),
@@ -342,14 +361,22 @@ impl AddressSpaceMapper {
         owns_frames: bool,
         release: impl Fn(PhysFrame<S>),
     ) -> Result<(), PageTableError> {
+        assert_eq!(
+            S::SIZE,
+            crate::arch::types::Size4KiB::SIZE,
+            "AArch64 mapper supports only 4 KiB pages until block mappings are implemented",
+        );
+        let page_count = page_range_len(&pages);
+        let plan = policy::MapRangePlan::new(page_count);
+
         // See the x86_64 `map_range_transaction` for the design
         // note on `MapRangeTransaction` ownership of rollback
         // bookkeeping. The aarch64 and x86_64 paths share the
         // same helper and the same release semantics; only the
         // unmap closure differs (aarch64's `unmap` returns
         // `Option<PhysFrame<S>>` with the same convention).
-        const MAPPED_CAP: usize = 512;
-        const PENDING_CAP: usize = 512;
+        const MAPPED_CAP: usize = MAP_RANGE_TRANSACTION_CAPACITY;
+        const PENDING_CAP: usize = MAP_RANGE_TRANSACTION_CAPACITY;
         let mut tx = MapRangeTransaction::<S, MAPPED_CAP, PENDING_CAP>::new();
         let mut pages = pages.into_iter();
         let mut frames = frames.into_iter();
@@ -363,7 +390,9 @@ impl AddressSpaceMapper {
                 if let Err(error) = self.map(page, frame, flags) {
                     if owns_frames {
                         tx.record_pending_frame(frame);
-                        while let Some(pending) = frames.next() {
+                        let remaining_page_count =
+                            plan.frames_after_failed_mapping(tx.mapped_len());
+                        for pending in frames.by_ref().take(remaining_page_count) {
                             tx.record_pending_frame(pending);
                         }
                     }

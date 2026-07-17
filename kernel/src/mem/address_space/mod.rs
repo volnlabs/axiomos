@@ -53,6 +53,7 @@ use crate::mem::virt::{VirtualMemoryAllocator, VirtualMemoryHigherHalf};
 use crate::U64Ext;
 
 mod mapper;
+pub(crate) use mapper::MAP_RANGE_TRANSACTION_CAPACITY;
 
 static KERNEL_ADDRESS_SPACE: OnceCell<AddressSpace> = OnceCell::uninit();
 #[cfg(target_arch = "x86_64")]
@@ -635,6 +636,11 @@ impl AddressSpace {
 
     /// # Errors
     /// Returns an error if the pages are already mapped or flags are invalid.
+    ///
+    /// # Panics
+    /// Panics before changing page tables when the range exceeds
+    /// [`MAP_RANGE_TRANSACTION_CAPACITY`]. Large callers must split their
+    /// ranges into bounded transactions.
     #[cfg(target_arch = "x86_64")]
     pub fn map_range<S: PageSize>(
         &self,
@@ -652,6 +658,11 @@ impl AddressSpace {
 
     /// Map a range while transferring ownership of one frame reference per page.
     /// All transferred references are released if any page fails to map.
+    ///
+    /// # Panics
+    /// Panics before changing page tables when the range exceeds
+    /// [`MAP_RANGE_TRANSACTION_CAPACITY`]. Large callers must split their
+    /// ranges into bounded transactions.
     #[cfg(target_arch = "x86_64")]
     pub fn map_range_owned<S: PageSize>(
         &self,
@@ -759,6 +770,10 @@ impl AddressSpace {
     }
 
     #[cfg(target_arch = "aarch64")]
+    /// Map one 4 KiB page.
+    ///
+    /// # Panics
+    /// Panics before changing the page table when `S` is not `Size4KiB`.
     pub fn map<S: PageSize>(
         &self,
         page: Page<S>,
@@ -773,6 +788,11 @@ impl AddressSpace {
     }
 
     #[cfg(target_arch = "aarch64")]
+    /// Map a range of 4 KiB pages.
+    ///
+    /// # Panics
+    /// Panics before changing page tables when the range exceeds
+    /// [`MAP_RANGE_TRANSACTION_CAPACITY`] or when `S` is not `Size4KiB`.
     pub fn map_range<S: PageSize>(
         &self,
         pages: impl Into<PageRangeInclusive<S>>,
@@ -786,6 +806,10 @@ impl AddressSpace {
 
     /// Map a range while transferring ownership of one frame reference per page.
     /// All transferred references are released if any page fails to map.
+    ///
+    /// # Panics
+    /// Panics before changing page tables when the range exceeds
+    /// [`MAP_RANGE_TRANSACTION_CAPACITY`] or when `S` is not `Size4KiB`.
     #[cfg(target_arch = "aarch64")]
     pub fn map_range_owned<S: PageSize>(
         &self,

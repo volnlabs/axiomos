@@ -21,6 +21,7 @@
 | `kernel/crates/kernel_memapi/Cargo.toml` | cargo | member | `none` | mapped-memory contract | host lint and tests |
 | `kernel/crates/kernel_pci/Cargo.toml` | cargo | member | `none` | PCI contracts | host lint and tests |
 | `kernel/crates/kernel_physical_memory/Cargo.toml` | cargo | member | `none` | physical memory | host lint and tests |
+| `kernel/crates/kernel_run_queue/Cargo.toml` | cargo | member | `none` | per-CPU runnable queue core | host lint, tests, and Loom model |
 | `kernel/crates/kernel_syscall/Cargo.toml` | cargo | member | `none` | syscall contracts | host lint and tests |
 | `kernel/crates/kernel_syscall/fuzz/Cargo.toml` | cargo | standalone | `none` | syscall argument fuzz target | fuzz build |
 | `kernel/crates/kernel_time/Cargo.toml` | cargo | member | `none` | time and deadline queues | host lint and tests |

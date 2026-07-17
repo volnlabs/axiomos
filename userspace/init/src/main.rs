@@ -161,6 +161,11 @@ pub extern "C" fn _start() -> ! {
     }
 
     #[cfg(feature = "bpf-unsigned-development")]
+    if bpf_smp4_scheduler_probe() {
+        write(1, b"SMP4_SCHEDULER_OK\n");
+    }
+
+    #[cfg(feature = "bpf-unsigned-development")]
     if bpf_owner_exit_probe() {
         write(1, b"BPF_HANDLE_REUSE_OK\n");
         write(1, b"BPF_OWNER_EXIT_OK\n");
@@ -669,6 +674,292 @@ fn bpf_hook_snapshot_smp_probe() -> bool {
     ) == 0;
 
     probe_ok && execution_seen && cleanup_ok
+}
+
+#[cfg(feature = "bpf-unsigned-development")]
+fn bpf_smp4_scheduler_probe() -> bool {
+    const CPU_COUNT: u32 = 4;
+    const WORKER_COUNT: usize = 4;
+    const MAX_TRACKED_PID: i32 = 255;
+    const MAP_ENTRIES: u64 = (MAX_TRACKED_PID as u64 + 1) * CPU_COUNT as u64;
+
+    let attr_size = core::mem::size_of::<kernel_abi::BpfAttr>() as i32;
+    let map_attr = kernel_abi::BpfAttr {
+        prog_type: kernel_abi::BPF_MAP_TYPE_ARRAY,
+        insn_cnt: 4,
+        insns: 8 | (MAP_ENTRIES << 32),
+        ..kernel_abi::BpfAttr::default()
+    };
+    let map = minilib::bpf(
+        kernel_abi::BPF_MAP_CREATE as i32,
+        (&raw const map_attr).cast(),
+        attr_size,
+    );
+    if map < 0 {
+        emit_smp4_scheduler_diagnostics(0, 0, 0);
+        return false;
+    }
+    let mut stage = 1u64;
+
+    const fn regs(dst: u8, src: u8) -> u8 {
+        (src << 4) | (dst & 0x0f)
+    }
+
+    // R1 is `&BpfContext`; its first field is the verifier-tracked pointer to
+    // SchedSwitchContext. Each CPU writes a distinct (next_pid, cpu_id) array
+    // cell, so the hot path has no shared read-modify-write race.
+    let instructions = [
+        BpfInsn {
+            code: 0x79,
+            dst_src: regs(6, 1),
+            off: 0,
+            imm: 0,
+        },
+        BpfInsn {
+            code: 0x79,
+            dst_src: regs(7, 6),
+            off: 0,
+            imm: 0,
+        },
+        BpfInsn {
+            code: 0x25,
+            dst_src: regs(7, 0),
+            off: 10,
+            imm: (CPU_COUNT - 1) as i32,
+        },
+        BpfInsn {
+            code: 0x79,
+            dst_src: regs(8, 6),
+            off: 24,
+            imm: 0,
+        },
+        BpfInsn {
+            code: 0x67,
+            dst_src: regs(8, 0),
+            off: 0,
+            imm: 2,
+        },
+        BpfInsn {
+            code: 0x0f,
+            dst_src: regs(8, 7),
+            off: 0,
+            imm: 0,
+        },
+        BpfInsn {
+            code: 0x63,
+            dst_src: regs(10, 8),
+            off: -4,
+            imm: 0,
+        },
+        BpfInsn {
+            code: 0xb7,
+            dst_src: regs(1, 0),
+            off: 0,
+            imm: map,
+        },
+        BpfInsn {
+            code: 0xbf,
+            dst_src: regs(2, 10),
+            off: 0,
+            imm: 0,
+        },
+        BpfInsn {
+            code: 0x07,
+            dst_src: regs(2, 0),
+            off: 0,
+            imm: -4,
+        },
+        BpfInsn {
+            code: 0x85,
+            dst_src: 0,
+            off: 0,
+            imm: kernel_abi::BPF_HELPER_MAP_LOOKUP_ELEM,
+        },
+        BpfInsn {
+            code: 0x15,
+            dst_src: regs(0, 0),
+            off: 1,
+            imm: 0,
+        },
+        BpfInsn {
+            code: 0x7a,
+            dst_src: regs(0, 0),
+            off: 0,
+            imm: 1,
+        },
+        BpfInsn {
+            code: 0xb7,
+            dst_src: regs(0, 0),
+            off: 0,
+            imm: 0,
+        },
+        BpfInsn {
+            code: 0x95,
+            dst_src: 0,
+            off: 0,
+            imm: 0,
+        },
+    ];
+    let load = kernel_abi::BpfAttr {
+        insn_cnt: instructions.len() as u32,
+        insns: instructions.as_ptr() as u64,
+        ..kernel_abi::BpfAttr::default()
+    };
+    let program = minilib::bpf(
+        kernel_abi::BPF_PROG_LOAD as i32,
+        (&raw const load).cast(),
+        attr_size,
+    );
+    if program >= 0 {
+        stage = 2;
+    }
+
+    let attachment = kernel_abi::BpfAttr {
+        attach_btf_id: kernel_abi::BPF_ATTACH_TYPE_SCHED_SWITCH,
+        attach_prog_fd: program.max(0) as u32,
+        ..kernel_abi::BpfAttr::default()
+    };
+    let mut attached = program >= 0
+        && minilib::bpf(
+            kernel_abi::BPF_PROG_ATTACH as i32,
+            (&raw const attachment).cast(),
+            attr_size,
+        ) == 0;
+    if attached {
+        stage = 3;
+    }
+    let mut probe_ok = attached;
+    let mut workers = [0i32; WORKER_COUNT];
+    let mut worker_count = 0;
+
+    if attached {
+        for worker in &mut workers {
+            let child = minilib::fork();
+            if child < 0 {
+                probe_ok = false;
+                break;
+            }
+            if child == 0 {
+                for _ in 0..512 {
+                    minilib::msleep(1);
+                }
+                minilib::exit(0);
+            }
+            *worker = child;
+            worker_count += 1;
+            if child > MAX_TRACKED_PID {
+                probe_ok = false;
+            }
+        }
+    }
+    probe_ok &= worker_count == WORKER_COUNT;
+    if probe_ok {
+        stage = 4;
+    }
+
+    let mut workers_ok = true;
+    for &child in &workers[..worker_count] {
+        let mut status = 0;
+        workers_ok &= minilib::waitpid(child, &raw mut status, 0) == child && status == 0;
+    }
+    probe_ok &= workers_ok;
+    if stage == 4 && workers_ok {
+        stage = 5;
+    }
+
+    if attached {
+        let detached = minilib::bpf(
+            kernel_abi::BPF_PROG_DETACH as i32,
+            (&raw const attachment).cast(),
+            attr_size,
+        ) == 0;
+        probe_ok &= detached;
+        attached = !detached;
+        if stage == 5 && detached {
+            stage = 6;
+        }
+    }
+
+    let mut aggregate_mask = 0u8;
+    for &child in &workers[..worker_count] {
+        let mut worker_mask = 0u8;
+        if child <= 0 || child > MAX_TRACKED_PID {
+            probe_ok = false;
+            continue;
+        }
+        for cpu in 0..CPU_COUNT {
+            let key = child as u32 * CPU_COUNT + cpu;
+            let mut observed = 0u64;
+            let lookup = kernel_abi::BpfAttr {
+                map_fd: map as u32,
+                key: (&raw const key) as u64,
+                value: (&raw mut observed) as u64,
+                ..kernel_abi::BpfAttr::default()
+            };
+            if minilib::bpf(
+                kernel_abi::BPF_MAP_LOOKUP_ELEM as i32,
+                (&raw const lookup).cast(),
+                attr_size,
+            ) == 0
+                && observed != 0
+            {
+                worker_mask |= 1 << cpu;
+            }
+        }
+        probe_ok &= worker_mask != 0;
+        aggregate_mask |= worker_mask;
+    }
+    probe_ok &= aggregate_mask == 0x0f;
+    if stage == 6 && probe_ok {
+        stage = 7;
+    }
+
+    let mut cleanup_ok = true;
+    if attached {
+        cleanup_ok &= minilib::bpf(
+            kernel_abi::BPF_PROG_DETACH as i32,
+            (&raw const attachment).cast(),
+            attr_size,
+        ) == 0;
+    }
+    if program >= 0 {
+        let unload = kernel_abi::BpfAttr {
+            attach_prog_fd: program as u32,
+            ..kernel_abi::BpfAttr::default()
+        };
+        cleanup_ok &= minilib::bpf(
+            kernel_abi::BPF_PROG_UNLOAD as i32,
+            (&raw const unload).cast(),
+            attr_size,
+        ) == 0;
+    }
+    let destroy = kernel_abi::BpfAttr {
+        map_fd: map as u32,
+        ..kernel_abi::BpfAttr::default()
+    };
+    cleanup_ok &= minilib::bpf(
+        kernel_abi::BPF_MAP_DESTROY as i32,
+        (&raw const destroy).cast(),
+        attr_size,
+    ) == 0;
+    if stage == 7 && cleanup_ok {
+        stage = 8;
+    }
+
+    emit_smp4_scheduler_diagnostics(stage, worker_count, aggregate_mask);
+
+    probe_ok && cleanup_ok
+}
+
+#[cfg(feature = "bpf-unsigned-development")]
+fn emit_smp4_scheduler_diagnostics(stage: u64, workers: usize, cpu_mask: u8) {
+    write(1, b"SMP4_SCHEDULER_STAGE=");
+    print_num(stage);
+    write(1, b"\nSMP4_SCHEDULER_WORKERS=");
+    print_num(workers as u64);
+    write(1, b"\nSMP4_SCHEDULER_CPU_MASK=");
+    print_num(cpu_mask as u64);
+    write(1, b"\n");
 }
 
 fn read_audit_counter(op: usize) -> Option<usize> {

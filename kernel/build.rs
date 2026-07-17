@@ -1,6 +1,14 @@
 fn main() {
     let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
     let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+
+    // Host unit tests link through the platform test harness. Applying the
+    // bare-metal linker script there suppresses its TLS segment and makes the
+    // kernel's otherwise host-runnable unit tests fail at link time.
+    if target_os != "none" {
+        return;
+    }
 
     // Handle embedded disk image for rpi5
     if std::env::var("CARGO_FEATURE_RPI5").is_ok() {

@@ -1,6 +1,6 @@
 version = 1
-baseline_sites = 656
-baseline_fingerprint = "sha256:c9048762e517b41c4197c861d38471cd61168a86021ef8df6e74ac78d472cf97"
+baseline_sites = 676
+baseline_fingerprint = "sha256:962df3d2e602dec3878c2cc79afd4bcbb4a54541abf7a1732facfd7389d52533"
 
 # Rules are evaluated in order. Keep narrow, high-risk obligations before broad
 # subsystem rules. The first matching rule supplies every site-level field.
@@ -279,3 +279,14 @@ callers = "ElfFile section/program/symbol parsing and exec"
 tests = "kernel_elfloader malformed-input suite and parse/load fuzz target; cross-endian ELF input is unsupported by contract."
 priority = "P1"
 reviewed = "2026-07-12"
+
+[[obligation]]
+id = "SCHEDULER-RUN-QUEUE"
+paths = ["kernel/crates/kernel_run_queue/*"]
+scope = "production"
+owner = "kernel scheduler maintainers"
+invariant = "Intrusive run-queue links, per-CPU queue ownership, and bounded stealing preserve task uniqueness and valid queue lifetimes across scheduler operations."
+callers = "scheduler enqueue/dequeue and modeled queue consumers"
+tests = "kernel_run_queue unit tests and Loom concurrency model; SMP-4 wakeup/IPI integration remains pending."
+priority = "P1"
+reviewed = "2026-07-17"

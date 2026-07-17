@@ -188,8 +188,10 @@ impl<'a, W: WaiterSink> WaitRegistration<'a, W> {
 
 #[cfg(test)]
 mod tests {
+    use alloc::collections::VecDeque;
+    use alloc::vec;
+    use alloc::vec::Vec;
     use core::cell::RefCell;
-    use std::collections::VecDeque;
 
     use super::*;
 

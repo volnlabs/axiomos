@@ -1,10 +1,12 @@
 # Scheduler run-queues design review
 
-**Status:** design review only. No implementation. Establishes current
-contracts before any run-queue ownership, stealing, or wakeup refactor lands.
+**Status:** design review and target-contract update. The current kernel has no
+reschedule-IPI implementation; the future ownership contract is documented
+separately from implemented behavior.
 
-**Scope:** `kernel/src/mcore/mtask/scheduler/{mod,run_queue,run_queue_policy,cleanup,sleep,switch,wait,wait_channel}.rs`
-and `kernel/src/mcore/mtask/task/queue.rs`.
+**Scope:** `kernel/src/mcore/mtask/scheduler/{mod,run_queue,cleanup,sleep,switch,wait,wait_channel}.rs`,
+`kernel/src/mcore/mtask/task/queue.rs`, and
+`kernel/crates/kernel_run_queue/src/{queue,per_cpu,policy}.rs`.
 
 **Out of scope:** BPF sched_switch bridge demo, BPF-related task state,
 scheduler.test fixtures. BPF is observed by the scheduler but does not
@@ -16,25 +18,29 @@ own it.
 
 ### 1.1 Global state
 
-`RunQueues` is a unit struct with static methods. There is no struct
-instance; everything is a private `static` inside `run_queue.rs`:
+`RunQueues` is a unit struct with static methods. Its kernel integration
+owns one private static in `run_queue.rs`:
 
 ```
-static RUN_QUEUES:        OnceCell<Box<[TaskQueue]>>         # MAX_SCHEDULER_CPUS = 64 entries
-static STEAL_CURSORS:     [AtomicUsize; MAX_SCHEDULER_CPUS]   # one steal cursor per CPU
+static RUN_QUEUES: OnceCell<kernel_run_queue::RunQueueSet<Task>>
 ```
 
-Initialization is via `RunQueues::init()` (called from BSP bring-up).
-After init, the `Box<[TaskQueue]>` slice is fixed-size and never
-reallocated.
+`RunQueueSet<Task>` owns fixed boxed slices containing one
+`RunQueue<Task>` and one rotating `AtomicUsize` steal cursor per CPU.
+Initialization is via `RunQueues::init()` (called from BSP bring-up) and
+creates `MAX_SCHEDULER_CPUS = 64` queues. The kernel supplies the task
+stubs, CPU identity, affinity, and online mask; the extracted crate owns
+the queue and steal-policy algorithms used by both production and model
+tests.
 
 ### 1.2 Per-CPU queue topology
 
-`RunQueues` already provides one `TaskQueue` per CPU: the fixed
-`Box<[TaskQueue]>` is indexed by `cpu_id`. `RunQueues::enqueue(task)`
-routes to `queue(target_cpu)`, where `target_cpu = task.last_cpu()`.
-Dequeue is local-first (`queue(current_cpu).try_take()`); on miss,
-work stealing probes other queues.
+`RunQueues` already provides one `RunQueue<Task>` per CPU through the
+fixed storage inside `RunQueueSet`. `RunQueues::enqueue(task)` delegates
+to `enqueue_on(target_cpu, task)`, where `target_cpu = task.last_cpu()`.
+Dequeue delegates to `try_take_from(current_cpu, online_cpu_mask)`, which
+tries the local queue before it even loads the online mask; on miss, work
+stealing probes other queues.
 
 This is the per-CPU topology prescribed by ADR-0001. The unresolved
 ownership issue is not whether per-CPU queues exist; it is whether the
@@ -51,45 +57,49 @@ this can produce load imbalance: a CPU that just finished a task is
 likely to be put back on the runnable list and selected again, while an
 idle CPU sits empty.
 
-`last_cpu` is read by `RunQueues::enqueue` at `run_queue.rs:40` to
-select the target queue. It is written by the scheduler through
-`set_last_cpu` during reschedule, immediately after `dequeue` returns
-the next task and before that task is marked running
-(`scheduler/mod.rs:213`). It therefore records the CPU that most
-recently selected the task to run, not the CPU that called `enqueue`.
-There is no decay, rebalancing, or idle migration.
+`last_cpu` is read by `RunQueues::enqueue` to select the target queue.
+It is written by the scheduler through `set_last_cpu` during
+reschedule, immediately after `dequeue` returns the next task and
+before that task is marked running. It therefore records the CPU that
+most recently selected the task to run, not the CPU that called
+`enqueue`. There is no decay, rebalancing, or idle migration.
 
 ### 1.4 Work stealing on miss
 
-`dequeue()` first tries the local CPU's queue. On miss:
+`dequeue()` first tries the local CPU's queue. On miss it delegates to
+the extracted production policy, whose effective flow is:
 
 ```
-let cursor = STEAL_CURSORS[current_cpu].fetch_add(1, Ordering::Relaxed);
-let online = online_cpu_mask();
+let cursor = steal_cursors[current_cpu].fetch_add(1, Ordering::Relaxed);
+let online = online_mask();
 let local_bit = 1u64 << current_cpu;
 let victim_count = (online & !local_bit).count_ones() as usize;
 for ordinal in 0..MAX_STEAL_ATTEMPTS.min(victim_count) {
     let Some(victim) = victim_at(online, current_cpu, cursor + ordinal) else { break; };
-    if let Some(task) = queue(victim).try_take() { return Some(task); }
+    if let Some(task) = queues[victim].try_take() { return Some(task); }
 }
 None
 ```
 
-`MAX_STEAL_ATTEMPTS = 4` (configured in `run_queue_policy.rs`). The
-steal attempts are bounded; the next dequeue iterates from the rotated
-cursor. `victim_at` wraps modulo `victim_count` so the same victim
-isn't probed repeatedly.
+`MAX_STEAL_ATTEMPTS = 4` is defined in
+`kernel_run_queue::policy`. The steal attempts are bounded; the next
+dequeue iterates from the rotated cursor. `victim_at` wraps modulo
+`victim_count` so the same victim is not probed repeatedly.
 
 ### 1.5 Why MPSC and not MPMC
 
 `MpscQueue` (multi-producer single-consumer) is what `cordyceps`
-provides and what each `TaskQueue` uses. Producers may run on several
-CPUs, while the intended consumer is the CPU that owns the indexed
-queue. The current steal path also calls `try_take` on another CPU's
-queue, so the code does not enforce that single-consumer premise. A
-future scheduler change must either prove that the queue's `try_take`
-contract supports this use, serialize steal ownership, or use a queue
-with an explicit multi-consumer/steal API.
+provides and what each `RunQueue` uses. Producers may run on several
+CPUs, while the home CPU is the intended consumer of its indexed queue.
+The steal path may concurrently call `try_take` from one remote CPU.
+
+The extracted crate now runs the actual Cordyceps implementation under
+`cfg(loom)`. Its pairwise models cover a local consumer racing a remote
+stealer (no duplicate or lost task) and publication racing a remote
+steal (a miss remains retryable and the task is observed after
+quiescence). This is evidence for the current pairwise use of
+`try_dequeue`, not a proof of arbitrary-N liveness, hotplug behavior, or
+wakeup latency. Those remain separate SMP and policy obligations.
 
 ---
 
@@ -188,7 +198,7 @@ lock-free (cordyceps MPSC) and the steal-cursor is an `AtomicUsize`.
 The "lock-ordering discipline" is really a memory-ordering discipline:
 
 - `enqueue` ends with a release-store equivalent (cordyceps publish).
-- `dequeue` begins with an acquire-load (cordycepts consume).
+- `dequeue` begins with an acquire-load (Cordyceps consume).
 - `try_take` returns `Option<Pin<Box<Task>>>` so a successful steal
   hands ownership atomically.
 
@@ -222,6 +232,8 @@ The lock-ordering rule is therefore:
 
 ## 5. Cross-CPU wakeup / IPI ownership
 
+### 5.1 Current implemented behavior
+
 There is **no inter-processor interrupt (IPI) path** in this kernel
 for wakeup. The `RunQueues::enqueue(task)` call always targets
 `task.last_cpu()`, and the wakee sits on that CPU's queue until the
@@ -243,6 +255,58 @@ This has consequences:
 The wakeup contract is therefore "approximate, eventually consistent,
 within-CPU-bounded". For an audit-grade kernel targeting single-vCPU
 first, this is acceptable. For multi-vCPU it would need follow-up work.
+
+### 5.2 Future ownership split (target, not implemented)
+
+ADR-0001 defines the following target contract. None of these bullets
+claims that the notification path exists today:
+
+- **Scheduler policy chooses the target and the need to notify.** It
+  owns affinity, availability, migration, and notification suppression.
+  Architecture interrupt code must not choose a run queue or inspect
+  scheduler policy.
+- **The architecture APIC/GIC layer transports the request.** It owns
+  vector allocation, delivery, acknowledgement, and architecture
+  barriers behind a bounded `request_reschedule(cpu)`-equivalent API.
+  The IPI carries no task pointer or queue payload.
+- **A scheduler-owned per-target pending bit coalesces requests.** The
+  producer first release-publishes the task to the selected queue, then
+  sets the bit. Only a clear-to-set transition sends an IPI.
+  Notification therefore cannot race ahead of runnable-task publication.
+- **The IPI handler only acknowledges and requests rescheduling.** It
+  does not allocate, mutate or drain queues, block, acquire subsystem
+  locks, or log synchronously. The scheduler acts at a normal safe
+  interrupt-return or reschedule boundary.
+
+### 5.3 Lost-wakeup and masking rule (target, not implemented)
+
+The target CPU may clear its pending bit only at a scheduler boundary
+while it is inspecting the local queue. It must perform an acquire
+observation and recheck that queue after clearing. Work published before
+the clear is found by the recheck; work published after the clear sees
+the clear bit and sends a new notification. The queue, not the pending
+bit, remains the source of truth.
+
+Interrupt masking may delay delivery but must not undo the producer's
+queue publication or pending state. Preemption-disabled code with IRQs
+enabled may latch the request through the handler, but no context switch
+is forced until interrupt-return and the preemption counter permit it.
+This keeps the future path within the interrupt rules in ADR-0001 and
+prevents a reschedule in the middle of a protected kernel region.
+
+### 5.4 Acceptance boundary
+
+The notification path remains out of scope until both conditions hold:
+
+1. A required SMP-4 regression identifies only its own workers,
+   confirms that all workers exit successfully, and observes their
+   execution across all four CPUs. Exact-once queue ownership remains a
+   model-test obligation. The planned `qemu-smp4-scheduler-smoke` is
+   **pending**; no implementation or passing gate result is claimed by
+   this review.
+2. A repeatable measurement demonstrates that no-IPI wakeup latency
+   violates an accepted objective. Distribution across four CPUs is
+   necessary scheduler evidence, but is not by itself a latency need.
 
 ---
 
@@ -319,8 +383,8 @@ on the following pre-conditions.
   `try_take`.
 - Migration policy replaces sticky-load (e.g., idle-pull, hill
   climbing, or random kick).
-- An IPI wakeup path becomes necessary for cross-CPU latency (today's
-  "eventually consistent" is acceptable on SMP-1 but not on SMP-N).
+- An IPI wakeup path may be added only if measured cross-CPU latency
+  requires it. SMP-N support alone does not establish that need.
 
 ### 7.2 What it must NOT change without evidence
 
@@ -333,16 +397,22 @@ on the following pre-conditions.
 
 ### 7.3 Pre-conditions for the refactor PR
 
-Before an ownership/stealing refactor lands, the following must be true:
+Before an ownership/stealing or wakeup-notification refactor lands, the
+following must be true:
 
-1. The SMP `--smp 4` smoke runs in CI as a regression (today: optional
-   smoke only). The refactor would change cross-CPU races
-   that the existing SMP-1 audit does not exercise.
+1. The planned `qemu-smp4-scheduler-smoke` runs as a required
+   regression. It must track its own worker identities and prove those
+   workers execute across CPU mask `0x0f`, with every worker exiting
+   successfully. **Status: pending** until the implementation and gate
+   step land and pass; this document is not that evidence.
 2. A `loom`-equivalent model of the `RunQueues` MPSC + cross-CPU
    steal exists and validates at least the same set of orderings as
-   the WaitChannel model.
-3. An IPI ownership contract is documented (which driver owns
-   sending IPIs; what the IPIs carry; what the recipient does).
+   the WaitChannel model. A model must be wired into the required gate,
+   not merely present as an optional local test.
+3. The IPI ownership contract in ADR-0001 and §5 is preserved: the
+   scheduler owns policy, the APIC/GIC layer owns transport, and the
+   handler is bounded. Implementing it additionally requires the
+   measured latency need from §5.4.
 4. If the historical ring-3 fault becomes reproducible, a pinned
    artifact and bounded regression protect its eventual fix. The
    current non-reproducing observation is not such a guard.
@@ -355,4 +425,8 @@ This review establishes the current contracts. Any follow-on
 implementation work must update the ADR with the new contracts and
 meet the pre-conditions in §7.3.
 
-**Outcome:** review complete. No code changes land from this branch.
+**Outcome:** the contract review is complete. It distinguishes the
+implemented per-CPU queue/no-reschedule-IPI behavior from the future
+notification target. The executable SMP-4 proof and required run-queue
+model gate remain pending, and no latency evidence currently justifies
+an IPI implementation. No IPI code lands with this documentation update.

@@ -15,19 +15,22 @@
 //! (a `MaybeUninit<[T; N]>` with a length counter, parameterised by
 //! the const generic `MAPPED_CAP` / `PENDING_CAP`). It does **not**
 //! use `alloc::vec::Vec` for the records, by design. The kernel's
-//! very first `map_range_owned` call is `heap::init` setting up the
-//! kernel heap, and the helper must work before the global
+//! very first `map_range` call is `heap::init` setting up the kernel
+//! heap, and the helper must work before the global
 //! allocator is live. A `Vec`-backed helper would deadlock or
 //! panic on `Vec::push` (which calls `alloc`).
 //!
 //! Callers pick a capacity that fits their use case:
 //!
-//! - The kernel heap init maps 2 MiB of 4 KiB pages (512 entries) and
-//!   uses `MapRangeTransaction<Size4KiB, 512, 512>`.
+//! - The kernel heap init partitions its RAM-scaled range into at most
+//!   512 4 KiB pages per transaction and uses
+//!   `MapRangeTransaction<Size4KiB, 512, 512>` for each chunk.
 //! - `mmap` / `exec` mappings are smaller and use a smaller
 //!   capacity.
 //!
-//! If the buffer overflows (`record_mapping` is called more than
+//! The kernel mapper rejects a range larger than its selected capacity
+//! before changing any PTE. If a direct user of this helper overflows
+//! the buffer (`record_mapping` is called more than
 //! `MAPPED_CAP` times, or `record_pending_frame` more than
 //! `PENDING_CAP` times), the helper panics. The original
 //! `map_range_transaction` had no such bound, so this is a
@@ -487,7 +490,7 @@ mod tests {
     /// Stack-only allocation: the helper's `new()` does not touch
     /// the global allocator. This is enforced by the const-fn
     /// signature and exercised by the fact that the kernel's
-    /// `heap::init` (which is the very first `map_range_owned`
+    /// `heap::init` (which is the very first `map_range`
     /// call, before the global allocator is live) is able to use
     /// this helper.
     #[test]

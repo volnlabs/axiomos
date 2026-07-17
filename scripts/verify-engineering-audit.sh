@@ -381,6 +381,54 @@ qemu_smoke_smp1() {
     return 0
 }
 
+# SMP-4 scheduler regression. The init probe attaches a sched_switch BPF
+# program before forking its workers and records only cells keyed by the exact
+# returned child PIDs and CPU IDs. Requiring the aggregate 0x0f mask therefore
+# rejects incidental-task activity and proves runnable worker work reached all
+# four configured CPUs. Four workers keep the regression inside the supported
+# 1G smoke envelope; repeated sleeps provide 2,048 migration opportunities.
+qemu_smp4_scheduler_smoke() {
+    local log="$OUTPUT_DIR/qemu-smp4-scheduler-serial.log"
+    local command="timeout ${QEMU_TIMEOUT}s cargo run --locked --release --features bpf-unsigned-development,audit-diagnostics -- --headless --smp 4 --mem 1G"
+    local start end rc=0
+    start="$(date +%s)"
+    printf '[audit] %-34s' "qemu-smp4-scheduler-smoke"
+    timeout "${QEMU_TIMEOUT}s" cargo run --locked --release \
+        --features bpf-unsigned-development,audit-diagnostics \
+        -- --headless --smp 4 --mem 1G >"$log" 2>&1 || rc=$?
+
+    if [[ "$rc" -ne 0 && "$rc" -ne 124 ]]; then
+        echo "QEMU command failed with status $rc" >>"$log"
+    fi
+
+    local failed=0 marker
+    for marker in QEMU_BOOT_OK INIT_PROCESS_STARTED SMP4_SCHEDULER_OK; do
+        if ! grep -qF "$marker" "$log"; then
+            echo "missing required SMP-4 marker: $marker" >>"$log"
+            failed=1
+        fi
+    done
+    if grep -qiE 'kernel panicked|panicked at kernel/src/arch/idt|KERNEL_MODE.*PAGE FAULT' "$log"; then
+        echo "forbidden SMP-4 panic/page-fault marker found" >>"$log"
+        failed=1
+    fi
+
+    if [[ "$failed" -eq 0 && ("$rc" -eq 0 || "$rc" -eq 124) ]]; then
+        passes=$((passes + 1))
+        printf ' PASS\n'
+        rc=0
+    else
+        failures=$((failures + 1))
+        printf ' FAIL\n'
+        tail -n 120 "$log" >&2 || true
+        rc=1
+    fi
+    end="$(date +%s)"
+    record "qemu-smp4-scheduler-smoke" "$([[ "$rc" -eq 0 ]] && echo PASS || echo FAIL)" \
+        "$((end - start))" "$log" "$command"
+    return 0
+}
+
 qemu_production_smoke() {
     local log="$OUTPUT_DIR/qemu-production-serial.log"
     local command="timeout ${QEMU_TIMEOUT}s cargo run --locked --release -- --headless --smp 2 --mem 1G"
@@ -449,17 +497,22 @@ run_step quality-boundary-static python3 -B scripts/check-quality.py --check
 run_step artifact-provenance-static python3 scripts/check-artifact-provenance.py
 run_step target-boundary-static python3 scripts/check-target-boundary.py
 run_step ovmf-vars-isolation-static python3 -c \
-    'from pathlib import Path; source=Path("src/main.rs").read_text(); qemu=source.split("// OVMF firmware", 1)[1].split("// kernel binary", 1)[0]; assert "file={OVMF_VARS},snapshot=on" in qemu, "OVMF VARS writes must use a QEMU snapshot instead of mutating the pinned source"'
+    'from pathlib import Path; source=Path("src/main.rs").read_text(); qemu=source.split("fn qemu_command", 1)[1].split("\n#[cfg(not(target_os = \"none\"))]\nfn main", 1)[0]; assert "file={OVMF_VARS},snapshot=on" in qemu, "OVMF VARS writes must use a QEMU snapshot instead of mutating the pinned source"'
 run_step abi-surface-static python3 -B scripts/check-abi-surface.py
 run_step workflow-yaml python3 -c \
     'import yaml; [yaml.safe_load(open(p, encoding="utf-8")) for p in (".github/workflows/build.yml", ".github/workflows/fuzz.yml", ".github/workflows/bpf-profiles.yml")]'
 run_step nanosleep-waitq-static python3 -c \
     'from pathlib import Path; source=Path("kernel/src/syscall/mod.rs").read_text(); body=source.split("fn dispatch_sys_nanosleep", 1)[1].split("\nfn ", 1)[0]; assert "abort_sleep_before_switch" in body and body.count("ExecutionContext::load()") >= 2; assert all(token not in body for token in ("enable_and_hlt", "spin_loop", "Busy wait loop"))'
 run_step run-queue-static python3 -c \
-    'from pathlib import Path; scheduler=Path("kernel/src/mcore/mtask/scheduler"); source=(scheduler / "run_queue.rs").read_text(); task=Path("kernel/src/mcore/mtask/task/mod.rs").read_text(); assert not (scheduler / "global.rs").exists(); assert "Box<[TaskQueue]>" in source and "MAX_STEAL_ATTEMPTS.min(victim_count)" in source and ".try_take()" in source; assert "last_cpu: AtomicUsize" in task'
-run_step run-queue-policy-test-build rustc --edition 2021 -D warnings --test \
-    kernel/src/mcore/mtask/scheduler/run_queue_policy.rs -o "$OUTPUT_DIR/run-queue-policy-tests"
-run_step run-queue-policy-tests "$OUTPUT_DIR/run-queue-policy-tests"
+    'from pathlib import Path; scheduler=Path("kernel/src/mcore/mtask/scheduler"); source=(scheduler / "run_queue.rs").read_text(); core=Path("kernel/crates/kernel_run_queue/src/per_cpu.rs").read_text(); task=Path("kernel/src/mcore/mtask/task/mod.rs").read_text(); assert not (scheduler / "global.rs").exists(); assert "RunQueueSet" in source and "try_take_from" in source and "enqueue_on" in source; assert "Box<[RunQueue<T>]>" in core and "MAX_STEAL_ATTEMPTS.min(victim_count)" in core and ".try_take()" in core; assert "last_cpu: AtomicUsize" in task'
+run_cargo_step run-queue-tests test -p kernel_run_queue
+run_step run-queue-loom env RUSTFLAGS=--cfg=loom cargo test --locked -p kernel_run_queue --test concurrency_model
+run_step heap-policy-test-build rustc --edition 2021 -D warnings --test \
+    kernel/src/mem/heap_policy.rs -o "$OUTPUT_DIR/heap-policy-tests"
+run_step heap-policy-tests "$OUTPUT_DIR/heap-policy-tests"
+run_step map-range-policy-test-build rustc --edition 2021 -D warnings --test \
+    kernel/src/mem/address_space/map_range_policy.rs -o "$OUTPUT_DIR/map-range-policy-tests"
+run_step map-range-policy-tests "$OUTPUT_DIR/map-range-policy-tests"
 run_step wait-protocol-test-build rustc --edition 2021 -D warnings --test \
     kernel/src/mcore/mtask/scheduler/wait_protocol.rs -o "$OUTPUT_DIR/wait-protocol-tests"
 run_step wait-protocol-tests "$OUTPUT_DIR/wait-protocol-tests"
@@ -494,7 +547,7 @@ run_step bpf-control-plane-fault-test-build rustc --edition 2021 -D warnings --t
     kernel/tests/bpf_handles_fault.rs -o "$OUTPUT_DIR/bpf-control-plane-fault-tests"
 run_step bpf-control-plane-fault-tests "$OUTPUT_DIR/bpf-control-plane-fault-tests"
 run_step bpf-map-resize-fault-static python3 -c \
-    'from pathlib import Path; array=Path("kernel/crates/kernel_bpf/src/maps/array.rs").read_text(); timeseries=Path("kernel/crates/kernel_bpf/src/maps/timeseries.rs").read_text(); ringbuf=Path("kernel/crates/kernel_bpf/src/maps/ringbuf.rs").read_text(); assert "fn resize_with_reservation" in array; assert "array_map_resize_fail_after_n_preserves_live_storage" in array; array_test=array.split("fn array_map_resize_fail_after_n_preserves_live_storage", 1)[1]; assert all(token in array_test for token in ("before_buffer", "before_max_entries", "before_def_max_entries", "MapError::OutOfMemory", "map.lookup")); assert "fn resize_with_reservation" in timeseries; assert "timeseries_resize_fail_after_n_preserves_storage" in timeseries; assert "for fail_at in 1..=1" in timeseries; timeseries_test=timeseries.split("fn timeseries_resize_fail_after_n_preserves_storage", 1)[1]; assert all(token in timeseries_test for token in ("before_buffer", "before_entries", "MapError::OutOfMemory", "storage.head_idx")); assert "fn resize_with_reservation" in ringbuf; assert "ringbuf_resize_fail_after_n_preserves_live_ring" in ringbuf; ringbuf_test=ringbuf.split("fn ringbuf_resize_fail_after_n_preserves_live_ring", 1)[1]; assert all(token in ringbuf_test for token in ("before_buffer", "before_buffer_len", "before_control", "before_max_entries", "MapError::OutOfMemory", "ringbuf.poll()"))'
+    'from pathlib import Path; array=Path("kernel/crates/kernel_bpf/src/maps/array.rs").read_text(); timeseries=Path("kernel/crates/kernel_bpf/src/maps/timeseries.rs").read_text(); ringbuf=Path("kernel/crates/kernel_bpf/src/maps/ringbuf.rs").read_text(); hash_map=Path("kernel/crates/kernel_bpf/src/maps/hash.rs").read_text(); assert "fn resize_with_reservation" in array; assert "array_map_resize_fail_after_n_preserves_live_storage" in array; array_test=array.split("fn array_map_resize_fail_after_n_preserves_live_storage", 1)[1]; assert all(token in array_test for token in ("before_buffer", "before_max_entries", "before_def_max_entries", "MapError::OutOfMemory", "map.lookup")); assert "fn resize_with_reservation" in timeseries; assert "timeseries_resize_fail_after_n_preserves_storage" in timeseries; assert "for fail_at in 1..=1" in timeseries; timeseries_test=timeseries.split("fn timeseries_resize_fail_after_n_preserves_storage", 1)[1]; assert all(token in timeseries_test for token in ("before_buffer", "before_entries", "MapError::OutOfMemory", "storage.head_idx")); assert "fn resize_with_reservation" in ringbuf; assert "ringbuf_resize_fail_after_n_preserves_live_ring" in ringbuf; ringbuf_test=ringbuf.split("fn ringbuf_resize_fail_after_n_preserves_live_ring", 1)[1]; assert all(token in ringbuf_test for token in ("before_buffer", "before_buffer_len", "before_control", "before_max_entries", "MapError::OutOfMemory", "ringbuf.poll()")); assert "fn resize_with_reservation" in hash_map; assert "hash_map_resize_fail_after_n_preserves_live_storage" in hash_map; hash_test=hash_map.split("fn hash_map_resize_fail_after_n_preserves_live_storage", 1)[1]; assert all(token in hash_test for token in ("before_storage", "before_def_max_entries", "before_metadata", "MapError::OutOfMemory", "map.lookup"))'
 run_step bpf-storage-stack-static python3 -c \
     'from pathlib import Path; root=Path("kernel/crates/kernel_bpf/src"); hash_map=(root / "maps/hash.rs").read_text(); interpreter=(root / "execution/interpreter.rs").read_text(); verifier=(root / "verifier/core.rs").read_text(); state=(root / "verifier/state.rs").read_text(); assert "storage: Vec<u8>" in hash_map and "Vec<Bucket>" not in hash_map and "[state | key | value]" in hash_map; assert "stack[used_stack_start..].fill(0)" in interpreter and "stack.fill(0)" not in interpreter; assert "offset.checked_add(size)" in state and "offset + i as i64" in verifier and "offset - i as i64" not in verifier'
 run_step bpf-helper-descriptor-static python3 -c \
@@ -709,9 +762,11 @@ if [[ "$MODE" != "quick" ]]; then
     if [[ "$RUN_QEMU" -eq 1 ]]; then
         qemu_smoke
         qemu_smoke_smp1
+        skip_step qemu-smp4-scheduler-smoke "deferred: cross-CPU wakeup/IPI ownership is not implemented; SMP-4 remains a future regression predicate"
     else
         skip_step qemu-release-smoke "disabled by option"
         skip_step qemu-smp1-smoke "disabled by option"
+        skip_step qemu-smp4-scheduler-smoke "disabled by option"
     fi
 fi
 
