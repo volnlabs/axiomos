@@ -64,3 +64,173 @@ git diff --check
 The full gate is required before merging the completed refactor. Any failed
 step, stale generated file, broken compatibility path, or workspace drift
 stops the migration until resolved or explicitly recorded above.
+
+## Target-state guidance
+
+The repository must make five things obvious: what the system is, what is
+proposed, why decisions were made, how to build/test/run/debug/verify it, and
+which files are generated, historical, or non-authoritative.
+
+### Ownership model
+
+```text
+kernel/       privileged runtime
+userspace/    shipped programs, tools, demos, benchmarks
+firmware/     external controller firmware
+formal/       machine-checked models
+tools/        repository-native orchestration and build tooling
+scripts/      focused process adapters
+ci/           declarative validation and build policy
+docs/         system knowledge and decision history
+artifacts/    ignored generated outputs
+```
+
+The intended top-level areas are `kernel`, `userspace`, `firmware`, `formal`,
+`examples`, `tools/{xtask,image-builder}`, responsibility-grouped `scripts`,
+`ci/{manifests,profiles}`, typed `docs` categories, and ignored
+`artifacts/`. Root files remain limited to workspace metadata, contribution
+and security policy, licenses, and entry-point documentation.
+
+### Documentation authority
+
+Every document belongs to exactly one category:
+
+- `architecture/`: implemented runtime behavior, boundaries, invariants, and
+  trust relationships.
+- `reference/`: exact ABI, target, error, configuration, protocol, syscall,
+  and naming contracts, including generated tables.
+- `decisions/`: ADRs containing status, context, decision, alternatives,
+  consequences, and supersession links.
+- `design/active|accepted|rejected/`: proposed-system reasoning and lifecycle.
+- `plans/active|completed/`: execution sequencing, dependencies, owners, and
+  validation gates.
+- `reviews/`: point-in-time evidence with status, reviewed commit, date,
+  scope, and follow-up issues.
+- `security/`: threat model, security architecture, verifier assurance,
+  unsafe ledger, audits, and security gates.
+- `operations/`: build, boot, test, deploy, debug, and release instructions.
+- `performance/`: methodology, current accepted results, raw captures, and
+  historical results.
+- `archive/`: superseded or obsolete material.
+
+Avoid generic `docs/current/`. Remove workflow-specific permanent names such
+as `docs/superpowers/`; classify those documents as designs or plans instead.
+Substantial documents should carry YAML metadata with title, status, owner,
+review date, applicability, source-of-truth flag, and related documents.
+
+`docs/README.md` must define the authority table and lifecycle:
+
+```text
+proposed design -> accepted design -> implementation
+-> architecture/reference update -> completed plan -> historical evidence
+```
+
+### Scripts and orchestration
+
+Group scripts by responsibility: `build`, `run`, `deploy`, `test`, `verify`,
+`benchmark`, and `debug`. Preserve old paths through wrappers until all
+callers migrate. Shell remains for process wiring and QEMU; Python remains for
+structured analysis and reports; Rust owns stable orchestration, typed models,
+and generated documentation.
+
+`cargo xtask` is the only canonical command. Do not create a second master
+shell implementation. The public grammar is:
+
+```text
+cargo xtask build <target>
+cargo xtask run <target>
+cargo xtask deploy <target>
+cargo xtask check <scope>
+cargo xtask docs [--check]
+cargo xtask bench <name>
+cargo xtask debug <name>
+```
+
+Substantial commands support `--help`, `--dry-run`, `--format human|json`,
+`--verbose`, `--quiet`, `--no-color`, and `--keep-artifacts`. `xtask ci`
+remains a compatibility alias during migration.
+
+### Xtask architecture
+
+Split xtask into small modules for `cli`, `context`, `error`, `commands`,
+`manifests`, `validation`, `docs`, `process`, and optional `ui`. Replace
+handwritten TOML parsing with `serde`/`toml`, parse the root Cargo workspace
+structurally, and use one shared `RepositoryModel` for components, targets,
+build inputs, workspace layout, and rootfs artifacts.
+
+Preserve existing inventory, boundary, generated-doc, and test behavior.
+Use typed exit classes: `0` success, `1` verification failure, `2` invalid
+invocation, `3` missing dependency, and `4` infrastructure failure.
+
+### CI, reports, and artifacts
+
+Add declarative `ci/profiles/{quick,full,extended}.toml`. Checks should be
+invokable individually and through `cargo xtask check all --profile ...`.
+Support structured JSON summaries containing status, profile, duration, check
+status, duration, and diagnostic message.
+
+Substantial runs should retain an ignored artifact directory containing the
+exact command, environment, commit, target, profile, timestamps, summary,
+logs, check results, and produced artifacts. A TUI is optional and must always
+show the equivalent command; CI must never depend on it.
+
+### Generated output and root hygiene
+
+Generated reference files belong under `docs/reference/generated/` and must
+state that they are generated, identify the generator command, and name their
+source manifests. Create parent directories before generation and enforce
+`docs --check` in CI.
+
+Transient images, logs, debug output, and run artifacts belong under ignored
+`artifacts/`; root-level generated files should be removed from version
+control. Consolidate root TODO files under `docs/plans/active/`.
+
+Move the large engineering audit into release-review documentation only after
+all links, generated references, and release evidence paths are migrated. Do
+not delete historical snapshots.
+
+### Component boundaries and naming
+
+Document whether each `kernel/crates/*` package is reusable policy-free code or
+the canonical implementation, and whether `kernel/src/*` is integration or a
+temporary compatibility layer. Never let both layers independently own the
+same behavior. Record this in
+`docs/architecture/kernel-crate-boundaries.md`.
+
+Define and enforce naming prefixes: `kernel_*`, `axiom_*`, `rk_*`, `shrike_*`,
+and explicit demo/benchmark suffixes. Group userspace by core runtime, tools,
+demos, and benchmarks only after manifests can validate the move. Group
+firmware by product boundary only when versioning and workspace ownership are
+clear.
+
+### Build ownership and testing
+
+Review root `src/main.rs` and `build.rs` before creating an image-builder
+crate. Build scripts should perform small compile-time generation tasks, not
+quietly own image assembly, Limine management, deployment, and all target
+workflows. Move that responsibility to xtask or a clearly named builder only
+when the ownership boundary is demonstrated.
+
+Add tooling tests for unknown commands, invalid arguments, missing
+dependencies, exit propagation, dry-run output, JSON schema, signal cleanup,
+repository-root discovery, paths with spaces, stale generated docs, malformed
+manifests, cancellation, and subprocess cleanup. Use shell tests only for
+shell-specific behavior; Python integration tests are acceptable for
+end-to-end orchestration.
+
+### Migration order
+
+1. Repository hygiene and artifact ignores.
+2. Documentation authority, metadata, and lifecycle.
+3. Generated-doc relocation.
+4. Script grouping with compatibility wrappers.
+5. Mechanical xtask module split.
+6. Typed TOML parsing and CLI/error model.
+7. Canonical xtask commands and CI profiles.
+8. Audit decomposition and structured reporting.
+9. Userspace grouping and manifest regeneration.
+10. Root build ownership and image-builder decision.
+11. Optional TUI after CLI stabilization.
+
+Each stage is independently reviewable and must satisfy the per-commit
+verification checklist above before the next stage begins.
