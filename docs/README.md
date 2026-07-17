@@ -1,4 +1,37 @@
-# Documentation authority
+# AxiomOS Documentation
+
+## Start Here
+
+- [`current/`](current/README.md) for implemented architecture and supported behavior.
+- [`adr/`](adr/) for architectural decisions and implementation gaps.
+- [`security/`](security/) for threat, unsafe-code, audit, and gate evidence.
+- [`reviews/`](reviews/) for point-in-time engineering findings.
+- [`archive/`](archive/) for superseded or historical material.
+- [`../plan_refactor.md`](../plan_refactor.md) for the repository migration plan.
+
+## Sources of Truth
+
+| Question | Authority |
+|---|---|
+| How does AxiomOS currently work? | `docs/current/` |
+| Why was a decision made? | `docs/adr/` |
+| What problems were found? | `docs/reviews/` and `docs/security/` |
+| Which files are generated? | `docs/generated/` and checked-in manifests |
+| How do I build, test, run, or debug it? | root docs, scripts, and `docs/current/` |
+
+During migration, existing paths remain authoritative where this table points
+to them. A document move must not silently change authority.
+
+## Documentation Lifecycle
+
+```text
+proposed design -> accepted decision -> implementation
+-> current architecture/reference -> completed plan -> historical review
+```
+
+Substantial documents should identify status, owner, review date, applicability,
+and related sources. Reviews identify the reviewed commit and follow-up issues.
+Generated documents identify their generator and are not edited by hand.
 
 axiomos documentation is divided by authority:
 
