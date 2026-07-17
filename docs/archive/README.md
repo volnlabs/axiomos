@@ -23,6 +23,7 @@ behavior and accepted decisions.
 
 ## Superseded specifications
 
+- [Legacy architecture overview](specs/legacy-architecture.md)
 - [v0.3 real-I/O and ARM-A design](specs/2026-06-14-v0.3-real-io-arm-a-design.md)
 - [Shrike-link UART protocol proposal](specs/2026-06-23-shrike-link-uart-protocol.md)
 - [Pi5 PL011 control-transport plan](specs/2026-06-24-pi5-pl011-control-transport.md)

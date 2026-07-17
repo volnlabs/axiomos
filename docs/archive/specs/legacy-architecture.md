@@ -1,5 +1,8 @@
 # Axiom Architecture
 
+> **Archived historical record.** This overview contains superseded runtime
+> and security claims. Use the [current architecture](../../current/architecture.md).
+
 Deep-dive companion to the [README](../README.md). The README states what Axiom
 is and what works; this document explains how it is built.
 
@@ -223,15 +226,15 @@ fn verify_program(bytecode: &[u8]) -> Result<(), VerifyError> {
 The full verifier goes well beyond this sketch: tnum bit-tracking, state
 pruning, range refinement, and per-instruction liveness are wired into
 `verify_alu`, `verify_jump`, and `verify_safety`
-([state.rs](../kernel/crates/kernel_bpf/src/verifier/state.rs),
-[pruner.rs](../kernel/crates/kernel_bpf/src/verifier/pruner.rs),
-[refine.rs](../kernel/crates/kernel_bpf/src/verifier/refine.rs),
-[liveness.rs](../kernel/crates/kernel_bpf/src/verifier/liveness.rs)), with
+([state.rs](../../../kernel/crates/kernel_bpf/src/verifier/state.rs),
+[pruner.rs](../../../kernel/crates/kernel_bpf/src/verifier/pruner.rs),
+[refine.rs](../../../kernel/crates/kernel_bpf/src/verifier/refine.rs),
+[liveness.rs](../../../kernel/crates/kernel_bpf/src/verifier/liveness.rs)), with
 width-correct 32-bit ALU semantics, typed maybe-null map/ctx pointer bounds, a
 bounded state budget, an explicit worklist, and sparse stack state. Helper IDs
 are unified across verifier, interpreter, and loader relocation; load-time ctx
 size is bound to `BpfContext`; map value sizing is per-map precise. See
-[kernel_bpf/docs/VERIFICATION.md](../kernel/crates/kernel_bpf/docs/VERIFICATION.md)
+[kernel_bpf/docs/VERIFICATION.md](../../../kernel/crates/kernel_bpf/docs/VERIFICATION.md)
 for the algorithm in detail.
 
 ### WCET Admission
@@ -243,7 +246,7 @@ program whose WCET cannot fit one control-loop period (~166k cycle units at
 utilization ledger capped at U = 0.5 — the EDF utilization test, validated on
 silicon. `trace_printk` is banned on RT hooks. Verification cost itself is
 measured and near-linear (~80–94 cycles/insn on A76). See
-[benchmarks.md §12](benchmarks.md).
+[benchmarks.md §12](../../benchmarks.md).
 
 ### Signing
 
@@ -400,7 +403,7 @@ impl FileSystem for VirtualExt2Fs { ... }
 
 ## Further Reading
 
-- [benchmarks.md](benchmarks.md) — authoritative hardware benchmarks (Pi 5) and Linux comparison
-- [kernel_bpf/docs/ARCHITECTURE.md](../kernel/crates/kernel_bpf/docs/ARCHITECTURE.md) — eBPF runtime architecture
-- [kernel_bpf/docs/VERIFICATION.md](../kernel/crates/kernel_bpf/docs/VERIFICATION.md) — BPF verification algorithm
-- [kernel_bpf/docs/PROFILES.md](../kernel/crates/kernel_bpf/docs/PROFILES.md) — BPF physical reality profiles
+- [benchmarks.md](../../benchmarks.md) — authoritative hardware benchmarks (Pi 5) and Linux comparison
+- [kernel_bpf/docs/ARCHITECTURE.md](../../../kernel/crates/kernel_bpf/docs/ARCHITECTURE.md) — eBPF runtime architecture
+- [kernel_bpf/docs/VERIFICATION.md](../../../kernel/crates/kernel_bpf/docs/VERIFICATION.md) — BPF verification algorithm
+- [kernel_bpf/docs/PROFILES.md](../../../kernel/crates/kernel_bpf/docs/PROFILES.md) — BPF physical reality profiles

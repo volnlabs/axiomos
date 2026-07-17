@@ -2,6 +2,12 @@
 
 This directory is the entry point for normative documentation.
 
+## Current system contracts
+
+- [Architecture overview](architecture.md)
+- [Virtual-memory ownership and fault semantics](vm.md)
+- [BPF trust, authorization, and lifecycle](bpf-trust.md)
+
 ## Accepted architecture decisions
 
 - [Runtime scheduling, preemption, interrupts, and lock ordering](../adr/0001-runtime-scheduling-locking.md)

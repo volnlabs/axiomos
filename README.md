@@ -33,7 +33,8 @@ The latency figure is honest about its boundary: hardware vector entry → BPF d
 
 ## Design
 
-Three decisions define the kernel — detail and rationale in [docs/architecture.md](docs/architecture.md):
+Three decisions define the kernel — detail and rationale in the
+[current architecture](docs/current/architecture.md):
 
 1. **Bare metal, monolithic.** No host OS, no RTOS. Limine bootloader (x86_64) or device tree (AArch64). Microkernel IPC overhead is unacceptable for control loops; Rust trait boundaries provide the modularity instead.
 2. **Rust core, `no_std`, `panic=abort`.** ~95% Rust; assembly limited to boot stubs and exception vectors. Memory-safety bug classes (use-after-free, double-free, data races) are eliminated at compile time; `unsafe` blocks are explicit and audited.
@@ -163,6 +164,6 @@ Email: utkarsh@kernex.sbs
 ---
 
 **Further reading:**
-- [docs/architecture.md](docs/architecture.md) — system layers, execution model, syscall flow, eBPF deep dive, memory management, HAL
+- [docs/current/architecture.md](docs/current/architecture.md) — normative system layers and links to VM, BPF trust, scheduler, target, and JIT contracts
 - [docs/benchmarks.md](docs/benchmarks.md) — authoritative hardware benchmarks (Pi5) and Linux comparison
 - [kernel_bpf docs](kernel/crates/kernel_bpf/docs/) — eBPF runtime architecture, scheduling, verification, profiles
