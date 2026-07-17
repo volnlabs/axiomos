@@ -5,14 +5,14 @@ use std::process::{Command, ExitCode};
 use std::{env, fs};
 
 const COMPONENT_MANIFEST: &str = "ci/components.toml";
-const GENERATED_COMPONENTS: &str = "docs/generated/components.md";
+const GENERATED_COMPONENTS: &str = "docs/reference/generated/components.md";
 const ARTIFACT_MANIFEST: &str = "ci/artifacts.toml";
-const GENERATED_ARTIFACTS: &str = "docs/generated/artifacts.md";
+const GENERATED_ARTIFACTS: &str = "docs/reference/generated/artifacts.md";
 const BUILD_INPUTS: &str = "ci/build-inputs.env";
-const GENERATED_BUILD_INPUTS: &str = "docs/generated/build-inputs.md";
+const GENERATED_BUILD_INPUTS: &str = "docs/reference/generated/build-inputs.md";
 const TARGET_MANIFEST: &str = "ci/targets.toml";
-const GENERATED_TARGETS: &str = "docs/generated/targets.md";
-const GENERATED_ABI: &str = "docs/generated/abi.md";
+const GENERATED_TARGETS: &str = "docs/reference/generated/targets.md";
+const GENERATED_ABI: &str = "docs/reference/generated/abi.md";
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct Component {

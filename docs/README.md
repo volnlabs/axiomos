@@ -16,7 +16,7 @@
 | How does AxiomOS currently work? | `docs/current/` |
 | Why was a decision made? | `docs/adr/` |
 | What problems were found? | `docs/reviews/` and `docs/security/` |
-| Which files are generated? | `docs/generated/` and checked-in manifests |
+| Which files are generated? | `docs/reference/generated/` and checked-in manifests |
 | How do I build, test, run, or debug it? | root docs, scripts, and `docs/current/` |
 
 During migration, existing paths remain authoritative where this table points

@@ -10,7 +10,7 @@ accepted ADRs define policy where this overview only links the components.
 
 When two documents disagree, use this order:
 
-1. Generated authorities under [`docs/generated`](../generated/README.md).
+1. Generated authorities under [`docs/reference/generated`](../reference/generated/README.md).
 2. Accepted decisions under [`docs/adr`](../adr/).
 3. Current documents in this directory.
 4. Source code and its required gate evidence.

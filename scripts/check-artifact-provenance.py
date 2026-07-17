@@ -71,7 +71,7 @@ def main() -> None:
         if required not in deploy_rpi5:
             raise SystemExit(f"scripts/deploy-rpi5.sh is missing provenance token: {required}")
 
-    generated = source("docs/generated/artifacts.md")
+    generated = source("docs/reference/generated/artifacts.md")
     for name in names:
         if f"| {name} |" not in generated:
             raise SystemExit(f"generated artifact table is missing {name}")

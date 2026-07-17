@@ -16,7 +16,7 @@ import tomllib
 ROOT = Path(__file__).resolve().parent.parent
 COMPONENTS = ROOT / "ci/components.toml"
 QUALITY = ROOT / "ci/quality.toml"
-GENERATED = ROOT / "docs/generated/quality.md"
+GENERATED = ROOT / "docs/reference/generated/quality.md"
 ALLOWED_DISPOSITIONS = {
     "measured",
     "interface-only",
@@ -367,7 +367,7 @@ def main() -> int:
         actual = GENERATED.read_text(encoding="utf-8")
         if actual != expected:
             raise RuntimeError(
-                "docs/generated/quality.md is stale; run scripts/check-quality.py --write-docs"
+                "docs/reference/generated/quality.md is stale; run scripts/check-quality.py --write-docs"
             )
     if args.write_docs:
         GENERATED.write_text(expected, encoding="utf-8")

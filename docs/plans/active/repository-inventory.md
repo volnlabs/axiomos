@@ -17,7 +17,7 @@ current paths before physical moves and the required compatibility rules.
 | Reviews | `docs/reviews/` | categorized reviews | Add metadata before relocation |
 | Security | `docs/security/` | categorized security docs | Preserve generated ledger paths initially |
 | Proposals/plans | `docs/superpowers/`, `plan_refactor.md` | design/plans | Move after authority links exist |
-| Generated docs | `docs/generated/` | `docs/reference/generated/` | Update generator and checks atomically |
+| Generated docs | `docs/reference/generated/` | `docs/reference/generated/` | Generator and checks now use the reference namespace |
 | Historical material | `docs/archive/` | `docs/archive/` | Never delete; preserve provenance |
 | Run/build outputs | `target/`, root logs/images | ignored artifacts | Do not commit transient outputs |
 | Engineering audit | `ENGINEERING_AUDIT.md` | release review package | Move only after links/evidence migrate |
@@ -36,7 +36,7 @@ current paths before physical moves and the required compatibility rules.
 
 ## Generated Outputs
 
-Current outputs are `docs/generated/components.md`, `build-inputs.md`,
+Current outputs are `docs/reference/generated/components.md`, `build-inputs.md`,
 `targets.md`, `artifacts.md`, and `abi.md`. The generator is `cargo xtask docs`;
 `cargo xtask docs --check` is mandatory after every generated-doc change.
 
