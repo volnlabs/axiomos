@@ -1,15 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
+use std::fs;
 use std::path::Path;
-use std::process::{Command as ProcessCommand, ExitCode};
-use std::{env, fs};
+use std::process::ExitCode;
 
 use serde::Deserialize;
 
 mod cli;
+mod commands;
 mod context;
 mod error;
-use cli::Command;
 use context::*;
 use error::XtaskError;
 
@@ -918,73 +918,8 @@ fn check_or_write_docs(root: &Path, components: &[Component], check: bool) -> Re
     Ok(())
 }
 
-fn run_ci(root: &Path, arguments: &[String]) -> Result<(), String> {
-    let mut script_arguments = Vec::new();
-    for argument in arguments {
-        if argument == "--full" {
-            continue;
-        }
-        script_arguments.push(argument.clone());
-    }
-    let status = ProcessCommand::new(root.join("scripts/verify-engineering-audit.sh"))
-        .args(&script_arguments)
-        .current_dir(root)
-        .status()
-        .map_err(|e| format!("failed to run audit gate: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("audit gate exited with {status}"))
-    }
-}
-
-fn usage() {
-    eprintln!(
-        "Usage:\n  cargo xtask inventory --check\n  cargo xtask boundary --check\n  cargo xtask docs [--check]\n  cargo xtask ci [--quick|--full|--extended] [audit options]"
-    );
-}
-
-fn execute() -> Result<(), String> {
-    let root = repo_root();
-    let components = load_components(&root)?;
-    match cli::parse(env::args().skip(1))? {
-        Command::Inventory { .. } => {
-            validate_inventory(&root, &components)?;
-            println!(
-                "component inventory: PASS ({} components)",
-                components.len()
-            );
-            Ok(())
-        }
-        Command::Boundary { .. } => {
-            validate_inventory(&root, &components)?;
-            validate_boundary(&root, &components)?;
-            println!(
-                "workspace/artifact boundary: PASS ({} components)",
-                components.len()
-            );
-            Ok(())
-        }
-        Command::Docs { check } => {
-            validate_inventory(&root, &components)?;
-            validate_boundary(&root, &components)?;
-            check_or_write_docs(&root, &components, check)
-        }
-        Command::Ci { arguments } => {
-            validate_inventory(&root, &components)?;
-            validate_boundary(&root, &components)?;
-            check_or_write_docs(&root, &components, true)?;
-            run_ci(&root, &arguments)
-        }
-        Command::Help => {
-            usage();
-            Ok(())
-        }
-    }
-}
-
 fn main() -> ExitCode {
-    match execute() {
+    match commands::execute() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             let error = if error.starts_with("unknown xtask command")
@@ -1001,7 +936,7 @@ fn main() -> ExitCode {
                 XtaskError::Verification(error)
             };
             error.render();
-            usage();
+            commands::usage();
             error.exit_code()
         }
     }
