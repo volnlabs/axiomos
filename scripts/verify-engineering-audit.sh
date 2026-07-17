@@ -437,6 +437,7 @@ run_step generated-docs cargo xtask docs --check
 run_step documentation-links python3 -B scripts/check-doc-links.py
 run_step product-naming-static python3 -B scripts/check-product-naming.py
 run_step benchmark-provenance-static python3 -B scripts/check-benchmark-provenance.py
+run_step command-smoke python3 -B scripts/check-command-smoke.py
 run_step quality-boundary-static python3 -B scripts/check-quality.py --check
 run_step artifact-provenance-static python3 scripts/check-artifact-provenance.py
 run_step target-boundary-static python3 scripts/check-target-boundary.py

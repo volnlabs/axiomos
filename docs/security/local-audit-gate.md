@@ -35,6 +35,25 @@ campaign's exact commit, raw-log hash, Cargo-reported executable identity and
 hash, required result markers, and immutable source-input hashes. Historical
 numbers without this evidence remain archived rather than release claims.
 
+The `command-smoke` step executes the safe documented entrypoints declared in
+`ci/commands.toml`. The boundary is intentionally small and shell-free:
+
+```sh
+cargo xtask --help
+cargo xtask inventory --check
+cargo xtask boundary --check
+cargo xtask docs --check
+scripts/verify-engineering-audit.sh --help
+scripts/qemu-debug-triage.sh --help
+scripts/analyze-v03-bench.py --self-test
+scripts/verifier-cost.py --help
+```
+
+Each command has a 30-second timeout and an expected success/output contract.
+Builds, QEMU execution, network access, block-device writes, and physical HIL
+are not command-smoke operations; they retain their dedicated gate or external
+evidence paths.
+
 The host runner treats the pinned OVMF VARS file as an immutable template. Its
 QEMU pflash drive uses `snapshot=on`, so NVRAM writes go to an ephemeral overlay
 instead of the source template; `ovmf-vars-isolation-static` enforces that

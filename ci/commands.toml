@@ -1,0 +1,56 @@
+schema_version = 1
+
+[[command]]
+name = "xtask-help"
+display = "cargo xtask --help"
+argv = ["cargo", "xtask", "--help"]
+docs = ["docs/security/local-audit-gate.md"]
+expect = "Usage:"
+
+[[command]]
+name = "xtask-inventory"
+display = "cargo xtask inventory --check"
+argv = ["cargo", "xtask", "inventory", "--check"]
+docs = ["docs/security/local-audit-gate.md"]
+expect = "component inventory: PASS"
+
+[[command]]
+name = "xtask-boundary"
+display = "cargo xtask boundary --check"
+argv = ["cargo", "xtask", "boundary", "--check"]
+docs = ["docs/security/local-audit-gate.md"]
+expect = "workspace/artifact boundary: PASS"
+
+[[command]]
+name = "xtask-docs"
+display = "cargo xtask docs --check"
+argv = ["cargo", "xtask", "docs", "--check"]
+docs = ["docs/security/local-audit-gate.md"]
+
+[[command]]
+name = "audit-help"
+display = "scripts/verify-engineering-audit.sh --help"
+argv = ["scripts/verify-engineering-audit.sh", "--help"]
+docs = ["docs/security/local-audit-gate.md"]
+expect = "Usage:"
+
+[[command]]
+name = "triage-help"
+display = "scripts/qemu-debug-triage.sh --help"
+argv = ["scripts/qemu-debug-triage.sh", "--help"]
+docs = ["docs/security/local-audit-gate.md"]
+expect = "Ring-3 page-fault triage helper"
+
+[[command]]
+name = "benchmark-analyzer-self-test"
+display = "scripts/analyze-v03-bench.py --self-test"
+argv = ["scripts/analyze-v03-bench.py", "--self-test"]
+docs = ["docs/security/local-audit-gate.md"]
+expect = "Ran 2 tests"
+
+[[command]]
+name = "verifier-cost-help"
+display = "scripts/verifier-cost.py --help"
+argv = ["scripts/verifier-cost.py", "--help"]
+docs = ["docs/security/local-audit-gate.md"]
+expect = "usage: verifier-cost.py"
