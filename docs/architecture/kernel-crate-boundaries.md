@@ -1,3 +1,10 @@
+---
+title: kernel crate boundaries
+status: accepted
+owners: [kernel-runtime]
+source-of-truth: true
+---
+
 # Kernel Crate Boundaries
 
 Kernel crates and `kernel/src` have different ownership roles. A pair must not

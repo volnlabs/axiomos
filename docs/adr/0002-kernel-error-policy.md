@@ -1,3 +1,9 @@
+---
+title: kernel error policy
+status: accepted
+source-of-truth: true
+---
+
 # ADR-0002: Kernel error policy
 
 - Status: Accepted

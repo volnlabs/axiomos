@@ -1,3 +1,10 @@
+---
+title: repository structure inventory
+status: active
+owners: [repository-tooling]
+source-of-truth: true
+---
+
 # Repository Structure Inventory
 
 Migration baseline for `refactor/repository-structure-tooling`. This records

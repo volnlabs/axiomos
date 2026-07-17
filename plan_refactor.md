@@ -22,8 +22,9 @@ this refactor; it does not replace architecture, reference, or ADR documents.
 - [x] Inventory authoritative, generated, operational, proposed, and historical
       files; see `docs/plans/active/repository-inventory.md`.
 - [x] Add `docs/README.md` and `scripts/README.md` authority guidance.
-- [~] Add metadata to substantial active docs and ADRs. Authority guidance is
-      documented, but metadata has not yet been applied repository-wide.
+- [x] Add metadata to substantial active docs and ADRs. Active repository,
+      architecture, and ADR documents now carry lifecycle/status headers;
+      historical and generated documents intentionally remain metadata-free.
 - [x] Move generated documentation under `docs/reference/generated/` and update
       xtask paths.
 - [x] Group scripts by responsibility with compatibility wrappers.

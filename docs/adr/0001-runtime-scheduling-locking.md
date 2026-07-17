@@ -1,3 +1,9 @@
+---
+title: runtime scheduling and locking
+status: accepted-with-implementation-gap
+source-of-truth: true
+---
+
 # ADR-0001: Runtime scheduling, preemption, interrupts, and lock ordering
 
 - Status: Accepted with implementation gap (reschedule IPI pending)

@@ -1,3 +1,9 @@
+---
+title: supported targets and feature matrix
+status: accepted
+source-of-truth: true
+---
+
 # ADR-0003: Supported target and feature matrix
 
 - Status: Accepted

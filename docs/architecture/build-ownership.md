@@ -1,3 +1,10 @@
+---
+title: build ownership
+status: accepted
+owners: [repository-tooling]
+source-of-truth: true
+---
+
 # Build ownership
 
 The root `axiomos` package is the host-side image and QEMU runner. Its Cargo

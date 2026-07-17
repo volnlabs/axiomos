@@ -1,3 +1,9 @@
+---
+title: BPF JIT policy
+status: accepted
+source-of-truth: true
+---
+
 # ADR-0004: BPF JIT policy
 
 - Status: Accepted
