@@ -81,6 +81,19 @@ struct HashStorage {
 
 impl HashStorage {
     fn new(key_size: usize, value_size: usize, capacity: usize) -> MapResult<Self> {
+        Self::new_with_reservation(key_size, value_size, capacity, |storage, len| {
+            storage
+                .try_reserve_exact(len)
+                .map_err(|_| MapError::OutOfMemory)
+        })
+    }
+
+    fn new_with_reservation(
+        key_size: usize,
+        value_size: usize,
+        capacity: usize,
+        reserve: impl FnOnce(&mut Vec<u8>, usize) -> MapResult<()>,
+    ) -> MapResult<Self> {
         let entry_size = 1usize
             .checked_add(key_size)
             .and_then(|size| size.checked_add(value_size))
@@ -89,9 +102,7 @@ impl HashStorage {
             .checked_mul(capacity)
             .ok_or(MapError::OutOfMemory)?;
         let mut storage = Vec::new();
-        storage
-            .try_reserve_exact(storage_size)
-            .map_err(|_| MapError::OutOfMemory)?;
+        reserve(&mut storage, storage_size)?;
         storage.resize(storage_size, BucketState::Empty as u8);
 
         Ok(Self {
@@ -243,13 +254,19 @@ impl HashStorage {
         Ok(())
     }
 
-    /// Resize the hash map (cloud profile only).
+    /// Build and populate a replacement table after a caller-provided
+    /// reservation succeeds. The live table is published only at the end.
     #[cfg(feature = "cloud-profile")]
-    fn resize(&mut self, new_capacity: usize) -> MapResult<()> {
+    fn resize_with_reservation(
+        &mut self,
+        new_capacity: usize,
+        reserve: impl FnOnce(&mut Vec<u8>, usize) -> MapResult<()>,
+    ) -> MapResult<()> {
         if new_capacity == 0 {
             return Err(MapError::InvalidValue);
         }
-        let mut replacement = Self::new(self.key_size, self.value_size, new_capacity)?;
+        let mut replacement =
+            Self::new_with_reservation(self.key_size, self.value_size, new_capacity, reserve)?;
 
         // Populate the replacement fully before publishing it. Any allocation
         // or rehash failure leaves the live table unchanged.
@@ -365,6 +382,28 @@ impl<P: PhysicalProfile> HashMap<P> {
     pub fn capacity(&self) -> usize {
         self.storage.read().capacity
     }
+
+    /// Resize after reserving the unpublished replacement table.
+    ///
+    /// The map definition is updated only after the replacement has been fully
+    /// allocated and rehashed, so every failure leaves both data and metadata
+    /// unchanged.
+    #[cfg(feature = "cloud-profile")]
+    fn resize_with_reservation(
+        &mut self,
+        new_max_entries: u32,
+        reserve: impl FnOnce(&mut Vec<u8>, usize) -> MapResult<()>,
+    ) -> MapResult<()> {
+        let storage = self.storage.get_mut();
+
+        if (new_max_entries as usize) < storage.count {
+            return Err(MapError::InvalidValue);
+        }
+
+        storage.resize_with_reservation(new_max_entries as usize, reserve)?;
+        self.def.max_entries = new_max_entries;
+        Ok(())
+    }
 }
 
 impl<P: PhysicalProfile> BpfMap<P> for HashMap<P> {
@@ -400,17 +439,11 @@ impl<P: PhysicalProfile> BpfMap<P> for HashMap<P> {
 
     #[cfg(feature = "cloud-profile")]
     fn resize(&mut self, new_max_entries: u32) -> MapResult<()> {
-        let mut guard = self.storage.write();
-
-        // Check that new size can hold existing entries
-        if (new_max_entries as usize) < guard.count {
-            return Err(MapError::InvalidValue);
-        }
-
-        guard.resize(new_max_entries as usize)?;
-        self.def.max_entries = new_max_entries;
-
-        Ok(())
+        self.resize_with_reservation(new_max_entries, |storage, len| {
+            storage
+                .try_reserve_exact(len)
+                .map_err(|_| MapError::OutOfMemory)
+        })
     }
 }
 
@@ -657,5 +690,101 @@ mod tests {
             let value = i.to_ne_bytes();
             map.update(&key, &value, 0).expect("insert after resize");
         }
+    }
+
+    #[cfg(feature = "cloud-profile")]
+    #[test]
+    fn hash_map_resize_fail_after_n_preserves_live_storage() {
+        let mut map = HashMap::<ActiveProfile>::with_sizes(4, 4, 8).expect("create map");
+        let live = [
+            (1u32.to_ne_bytes(), 10u32.to_ne_bytes()),
+            (2u32.to_ne_bytes(), 20u32.to_ne_bytes()),
+            (3u32.to_ne_bytes(), 30u32.to_ne_bytes()),
+        ];
+        for (key, value) in &live {
+            map.update(key, value, 0).expect("seed live entry");
+        }
+        map.delete(&live[1].0).expect("create tombstone");
+
+        let before_def_max_entries = map.def.max_entries;
+        let storage = map.storage.get_mut();
+        let before_storage = storage.storage.clone();
+        let before_metadata = (
+            storage.key_size,
+            storage.value_size,
+            storage.entry_size,
+            storage.count,
+            storage.capacity,
+        );
+
+        for fail_at in 1..=1 {
+            let mut checkpoint = 0;
+            let error = map
+                .resize_with_reservation(16, |_replacement, len| {
+                    checkpoint += 1;
+                    assert_eq!(len, 9 * 16);
+                    if checkpoint == fail_at {
+                        Err(MapError::OutOfMemory)
+                    } else {
+                        Ok(())
+                    }
+                })
+                .expect_err("injected replacement reservation must fail");
+
+            assert_eq!(error, MapError::OutOfMemory);
+            assert_eq!(checkpoint, fail_at);
+            let storage = map.storage.get_mut();
+            assert_eq!(storage.storage, before_storage);
+            assert_eq!(
+                (
+                    storage.key_size,
+                    storage.value_size,
+                    storage.entry_size,
+                    storage.count,
+                    storage.capacity,
+                ),
+                before_metadata
+            );
+            assert_eq!(map.def.max_entries, before_def_max_entries);
+            assert_eq!(
+                map.lookup(&live[0].0).as_deref(),
+                Some(live[0].1.as_slice())
+            );
+            assert!(map.lookup(&live[1].0).is_none());
+            assert_eq!(
+                map.lookup(&live[2].0).as_deref(),
+                Some(live[2].1.as_slice())
+            );
+        }
+
+        let replacement_value = 200u32.to_ne_bytes();
+        map.update(&live[1].0, &replacement_value, 0)
+            .expect("reuse live table after failed resize");
+        assert_eq!(map.len(), 3);
+        assert_eq!(
+            map.lookup(&live[1].0).as_deref(),
+            Some(replacement_value.as_slice())
+        );
+
+        map.resize(16).expect("later production resize succeeds");
+        assert_eq!(map.capacity(), 16);
+        assert_eq!(map.def.max_entries, 16);
+        for key in 4u32..=10 {
+            map.update(&key.to_ne_bytes(), &(key * 10).to_ne_bytes(), 0)
+                .expect("insert beyond original live count");
+        }
+        assert_eq!(map.len(), 10);
+        assert_eq!(
+            map.lookup(&live[0].0).as_deref(),
+            Some(live[0].1.as_slice())
+        );
+        assert_eq!(
+            map.lookup(&live[1].0).as_deref(),
+            Some(replacement_value.as_slice())
+        );
+        assert_eq!(
+            map.lookup(&live[2].0).as_deref(),
+            Some(live[2].1.as_slice())
+        );
     }
 }
