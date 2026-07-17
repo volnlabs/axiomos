@@ -19,7 +19,7 @@ format = "ext2 disk image"
 producer = "cargo build --locked --release -p axiomos"
 output = "DISK_IMAGE reported by target/release/axiomos --no-run"
 selection = "build.rs output path reported through AXIOM_ARTIFACT_PATHS"
-immutable_inputs = "Cargo.lock; rust-toolchain.toml; userspace/file_structure; ci/manifests/components.toml; AXIOM_SIGNED_BPF_STARTUP_PATH payload"
+immutable_inputs = "Cargo.lock; rust-toolchain.toml; userspace/core/file_structure; ci/manifests/components.toml; AXIOM_SIGNED_BPF_STARTUP_PATH payload"
 hash_evidence = "SHA-256 in the required gate production_artifact_hashes file"
 
 [[artifact]]
@@ -63,7 +63,7 @@ format = "ext2 disk image embedded in kernel8.img"
 producer = "scripts/build-rpi5.sh release embedded-rpi5"
 output = "DISK_IMAGE reported to scripts/build-rpi5.sh by its aarch64 image-assembly invocation"
 selection = "build.rs output path reported through a unique AXIOM_ARTIFACT_PATHS file"
-immutable_inputs = "Cargo.lock; rust-toolchain.toml; userspace/file_structure; ci/manifests/components.toml; AXIOM_BPF_TRUSTED_KEY_PATH trust root"
+immutable_inputs = "Cargo.lock; rust-toolchain.toml; userspace/core/file_structure; ci/manifests/components.toml; AXIOM_BPF_TRUSTED_KEY_PATH trust root"
 hash_evidence = "SHA-256 in target/aarch64-unknown-none/release/rpi5-artifacts.sha256"
 
 [[artifact]]
@@ -74,7 +74,7 @@ format = "ext2 disk image"
 producer = "scripts/run-virt.sh"
 output = "DISK_IMAGE reported to scripts/run-virt.sh by its aarch64 image-assembly invocation"
 selection = "build.rs output path reported through a unique AXIOM_ARTIFACT_PATHS file"
-immutable_inputs = "Cargo.lock; rust-toolchain.toml; userspace/file_structure; ci/manifests/components.toml; AXIOM_BPF_TRUSTED_KEY_PATH trust root"
+immutable_inputs = "Cargo.lock; rust-toolchain.toml; userspace/core/file_structure; ci/manifests/components.toml; AXIOM_BPF_TRUSTED_KEY_PATH trust root"
 hash_evidence = "SHA-256 printed by scripts/run-virt.sh before QEMU launch"
 
 [[artifact]]

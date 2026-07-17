@@ -55,7 +55,7 @@ The **historical cause is unresolved**. The recorded symptom was
 described as timing-sensitive, but no reproducible artifact containing
 the original OVMF image, faulting instruction sequence, and capture
 state exists to confirm that theory. Whether the original failure came
-from a `userspace/init` state bug or a kernel VM/context race therefore
+from a `userspace/core/init` state bug or a kernel VM/context race therefore
 remains undetermined.
 
 The supported conclusion is narrower: the symptom is **currently
@@ -116,7 +116,7 @@ mechanism (depends on platform support). None of these is in scope
 for this branch.
 
 **The fix is still out of scope.** The unresolved historical page fault
-at `0x2a00000012` remains jointly owned by `@userspace/init` and
+at `0x2a00000012` remains jointly owned by `@userspace/core/init` and
 `@kernel/mcore/mtask/vm`, not the audit branch. This entry only records
 the decision not to add a partial instrument.
 

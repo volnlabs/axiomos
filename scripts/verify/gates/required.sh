@@ -13,11 +13,11 @@ if [[ "$MODE" != "quick" ]]; then
     run_cargo_step clippy-bpf-embedded clippy -p kernel_bpf --no-default-features \
         --features embedded-profile --lib -- -D clippy::all
 
-    run_cargo_step clippy-rk-bridge clippy --manifest-path userspace/rk_bridge/Cargo.toml \
+    run_cargo_step clippy-rk-bridge clippy --manifest-path userspace/tools/rk_bridge/Cargo.toml \
         --lib -- -D clippy::all
-    run_cargo_step clippy-rk-cli clippy --manifest-path userspace/rk_cli/Cargo.toml -- -D clippy::all
-    run_cargo_step test-rk-bridge test --manifest-path userspace/rk_bridge/Cargo.toml
-    run_cargo_step test-rk-cli test --manifest-path userspace/rk_cli/Cargo.toml
+    run_cargo_step clippy-rk-cli clippy --manifest-path userspace/tools/rk_cli/Cargo.toml -- -D clippy::all
+    run_cargo_step test-rk-bridge test --manifest-path userspace/tools/rk_bridge/Cargo.toml
+    run_cargo_step test-rk-cli test --manifest-path userspace/tools/rk_cli/Cargo.toml
     run_cargo_step clippy-rp2040-debug clippy --manifest-path firmware/shrike_rp2040/Cargo.toml \
         --target thumbv6m-none-eabi -- -D clippy::all
     run_cargo_step clippy-rp2040-release clippy --manifest-path firmware/shrike_rp2040/Cargo.toml \
@@ -41,11 +41,11 @@ if [[ "$MODE" != "quick" ]]; then
         --target riscv64gc-unknown-none-elf -- -D clippy::all
 
     run_step signed-bpf-test-key cargo run --locked \
-        --manifest-path userspace/rk_cli/Cargo.toml -- key generate --output "$SIGNING_KEY_PREFIX"
+        --manifest-path userspace/tools/rk_cli/Cargo.toml -- key generate --output "$SIGNING_KEY_PREFIX"
     run_step signed-bpf-test-object clang -target bpf -O2 -c examples/bpf/hello.bpf.c \
         -o "$SIGNED_BPF_OBJECT"
     run_step signed-bpf-test-container cargo run --locked \
-        --manifest-path userspace/rk_cli/Cargo.toml -- sign --input "$SIGNED_BPF_OBJECT" \
+        --manifest-path userspace/tools/rk_cli/Cargo.toml -- sign --input "$SIGNED_BPF_OBJECT" \
         --output "$SIGNED_BPF_CONTAINER" --key "$SIGNING_PRIVATE_KEY"
     export AXIOM_BPF_TRUSTED_KEY_PATH="$TRUSTED_KEY_FIXTURE"
     export AXIOM_SIGNED_BPF_STARTUP_PATH="$SIGNED_BPF_CONTAINER"
@@ -61,7 +61,7 @@ if [[ "$MODE" != "quick" ]]; then
     run_step_in_dir bpf-fuzz-build kernel/crates/kernel_bpf env RUSTUP_TOOLCHAIN=nightly-2026-07-02 cargo fuzz build
     run_step_in_dir elfloader-fuzz-build kernel/crates/kernel_elfloader env RUSTUP_TOOLCHAIN=nightly-2026-07-02 cargo fuzz build
     run_step_in_dir syscall-fuzz-build kernel/crates/kernel_syscall env RUSTUP_TOOLCHAIN=nightly-2026-07-02 cargo fuzz build
-    run_step_in_dir rk-bridge-fuzz-build userspace/rk_bridge/fuzz env RUSTUP_TOOLCHAIN=nightly-2026-07-02 cargo fuzz build
+    run_step_in_dir rk-bridge-fuzz-build userspace/tools/rk_bridge/fuzz env RUSTUP_TOOLCHAIN=nightly-2026-07-02 cargo fuzz build
     run_step artifact-manifest hash_release_artifacts "$ARTIFACTS"
 
     if [[ "$RUN_QEMU" -eq 1 ]]; then
@@ -74,5 +74,3 @@ if [[ "$MODE" != "quick" ]]; then
         skip_step qemu-smp4-scheduler-smoke "disabled by option"
     fi
 fi
-
-

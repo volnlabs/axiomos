@@ -109,7 +109,7 @@ def main() -> None:
     dispatched_helpers = {variant_constants[variant] for variant in dispatched_variants}
     require_equal("BPF helper", helper_catalog, dispatched_helpers)
 
-    minilib = source("userspace/minilib/src/lib.rs")
+    minilib = source("userspace/core/minilib/src/lib.rs")
     raw_wrappers = re.findall(r"syscall[0-4]\(\s*\d+", minilib)
     if raw_wrappers:
         raise SystemExit(f"minilib contains raw syscall wrapper numbers: {raw_wrappers}")

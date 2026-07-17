@@ -1,8 +1,0 @@
-[package]
-name = "signed_bpf_loader"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-minilib = { path = "../minilib" }
-kernel_abi = { path = "../../kernel/crates/kernel_abi" }

@@ -100,7 +100,7 @@ Other attach points (`sys_enter`, `sys_exit`, `gpio`, `pwm`, `iio`) are
 expected to follow the same pattern: a `type` matching the attach name,
 followed by the fields of the corresponding kernel context struct. Each
 new event type must be added to `WireRecord` in
-`userspace/rk_bridge/src/input.rs` so the host consumer can decode it.
+`userspace/tools/rk_bridge/src/input.rs` so the host consumer can decode it.
 
 ## Consumer behaviour
 

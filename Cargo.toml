@@ -8,46 +8,46 @@ default-run = "axiomos"
 
 [build-dependencies]
 ovmf-prebuilt = "=0.2.4"
-file_structure = { path = "userspace/file_structure" }
+file_structure = { path = "userspace/core/file_structure" }
 
 # x86_64 dependencies
-init_x86 = { package = "init", path = "userspace/init", artifact = "bin", target = "x86_64-unknown-none", optional = true }
-gpio_demo_x86 = { package = "gpio_demo", path = "userspace/gpio_demo", artifact = "bin", target = "x86_64-unknown-none", optional = true }
-pwm_demo_x86 = { package = "pwm_demo", path = "userspace/pwm_demo", artifact = "bin", target = "x86_64-unknown-none", optional = true }
-timeseries_demo_x86 = { package = "timeseries_demo", path = "userspace/timeseries_demo", artifact = "bin", target = "x86_64-unknown-none", optional = true }
-iio_demo_x86 = { package = "iio_demo", path = "userspace/iio_demo", artifact = "bin", target = "x86_64-unknown-none", optional = true }
-syscall_demo_x86 = { package = "syscall_demo", path = "userspace/syscall_demo", artifact = "bin", target = "x86_64-unknown-none", optional = true }
-sys_exit_demo_x86 = { package = "sys_exit_demo", path = "userspace/sys_exit_demo", artifact = "bin", target = "x86_64-unknown-none", optional = true }
-sched_switch_demo_x86 = { package = "sched_switch_demo", path = "userspace/sched_switch_demo", artifact = "bin", target = "x86_64-unknown-none", optional = true }
-sched_switch_export_demo_x86 = { package = "sched_switch_export_demo", path = "userspace/sched_switch_export_demo", artifact = "bin", target = "x86_64-unknown-none", optional = true }
-sched_switch_bridge_demo_x86 = { package = "sched_switch_bridge_demo", path = "userspace/sched_switch_bridge_demo", artifact = "bin", target = "x86_64-unknown-none", optional = true }
-file_io_demo_x86 = { package = "file_io_demo", path = "userspace/file_io_demo", artifact = "bin", target = "x86_64-unknown-none", optional = true }
-fork_test_x86 = { package = "fork_test", path = "userspace/fork_test", artifact = "bin", target = "x86_64-unknown-none", optional = true }
-bpf_loader_x86 = { package = "bpf_loader", path = "userspace/bpf_loader", artifact = "bin", target = "x86_64-unknown-none", optional = true }
-signed_bpf_loader_x86 = { package = "signed_bpf_loader", path = "userspace/signed_bpf_loader", artifact = "bin", target = "x86_64-unknown-none", optional = true }
-benchmark_x86 = { package = "benchmark", path = "userspace/benchmark", artifact = "bin", target = "x86_64-unknown-none", optional = true }
-rk_uart_forwarder_x86 = { package = "rk_uart_forwarder", path = "userspace/rk_uart_forwarder", artifact = "bin", target = "x86_64-unknown-none", optional = true }
-verifier_bench_x86 = { package = "verifier_bench", path = "userspace/verifier_bench", artifact = "bin", target = "x86_64-unknown-none", optional = true }
+init_x86 = { package = "init", path = "userspace/core/init", artifact = "bin", target = "x86_64-unknown-none", optional = true }
+gpio_demo_x86 = { package = "gpio_demo", path = "userspace/demos/gpio_demo", artifact = "bin", target = "x86_64-unknown-none", optional = true }
+pwm_demo_x86 = { package = "pwm_demo", path = "userspace/demos/pwm_demo", artifact = "bin", target = "x86_64-unknown-none", optional = true }
+timeseries_demo_x86 = { package = "timeseries_demo", path = "userspace/demos/timeseries_demo", artifact = "bin", target = "x86_64-unknown-none", optional = true }
+iio_demo_x86 = { package = "iio_demo", path = "userspace/demos/iio_demo", artifact = "bin", target = "x86_64-unknown-none", optional = true }
+syscall_demo_x86 = { package = "syscall_demo", path = "userspace/demos/syscall_demo", artifact = "bin", target = "x86_64-unknown-none", optional = true }
+sys_exit_demo_x86 = { package = "sys_exit_demo", path = "userspace/demos/sys_exit_demo", artifact = "bin", target = "x86_64-unknown-none", optional = true }
+sched_switch_demo_x86 = { package = "sched_switch_demo", path = "userspace/demos/sched_switch_demo", artifact = "bin", target = "x86_64-unknown-none", optional = true }
+sched_switch_export_demo_x86 = { package = "sched_switch_export_demo", path = "userspace/demos/sched_switch_export_demo", artifact = "bin", target = "x86_64-unknown-none", optional = true }
+sched_switch_bridge_demo_x86 = { package = "sched_switch_bridge_demo", path = "userspace/demos/sched_switch_bridge_demo", artifact = "bin", target = "x86_64-unknown-none", optional = true }
+file_io_demo_x86 = { package = "file_io_demo", path = "userspace/demos/file_io_demo", artifact = "bin", target = "x86_64-unknown-none", optional = true }
+fork_test_x86 = { package = "fork_test", path = "userspace/demos/fork_test", artifact = "bin", target = "x86_64-unknown-none", optional = true }
+bpf_loader_x86 = { package = "bpf_loader", path = "userspace/tools/bpf_loader", artifact = "bin", target = "x86_64-unknown-none", optional = true }
+signed_bpf_loader_x86 = { package = "signed_bpf_loader", path = "userspace/tools/signed_bpf_loader", artifact = "bin", target = "x86_64-unknown-none", optional = true }
+benchmark_x86 = { package = "benchmark", path = "userspace/benchmarks/system", artifact = "bin", target = "x86_64-unknown-none", optional = true }
+rk_uart_forwarder_x86 = { package = "rk_uart_forwarder", path = "userspace/tools/rk_uart_forwarder", artifact = "bin", target = "x86_64-unknown-none", optional = true }
+verifier_bench_x86 = { package = "verifier_bench", path = "userspace/benchmarks/verifier", artifact = "bin", target = "x86_64-unknown-none", optional = true }
 kernel_x86 = { package = "kernel", path = "kernel", artifact = "bin", target = "x86_64-unknown-none", optional = true, features = ["cloud-profile"] }
 
 # aarch64 dependencies
-init_aarch64 = { package = "init", path = "userspace/init", artifact = "bin", target = "aarch64-unknown-none", optional = true }
-gpio_demo_aarch64 = { package = "gpio_demo", path = "userspace/gpio_demo", artifact = "bin", target = "aarch64-unknown-none", optional = true }
-pwm_demo_aarch64 = { package = "pwm_demo", path = "userspace/pwm_demo", artifact = "bin", target = "aarch64-unknown-none", optional = true }
-timeseries_demo_aarch64 = { package = "timeseries_demo", path = "userspace/timeseries_demo", artifact = "bin", target = "aarch64-unknown-none", optional = true }
-iio_demo_aarch64 = { package = "iio_demo", path = "userspace/iio_demo", artifact = "bin", target = "aarch64-unknown-none", optional = true }
-syscall_demo_aarch64 = { package = "syscall_demo", path = "userspace/syscall_demo", artifact = "bin", target = "aarch64-unknown-none", optional = true }
-sys_exit_demo_aarch64 = { package = "sys_exit_demo", path = "userspace/sys_exit_demo", artifact = "bin", target = "aarch64-unknown-none", optional = true }
-sched_switch_demo_aarch64 = { package = "sched_switch_demo", path = "userspace/sched_switch_demo", artifact = "bin", target = "aarch64-unknown-none", optional = true }
-sched_switch_export_demo_aarch64 = { package = "sched_switch_export_demo", path = "userspace/sched_switch_export_demo", artifact = "bin", target = "aarch64-unknown-none", optional = true }
-sched_switch_bridge_demo_aarch64 = { package = "sched_switch_bridge_demo", path = "userspace/sched_switch_bridge_demo", artifact = "bin", target = "aarch64-unknown-none", optional = true }
-file_io_demo_aarch64 = { package = "file_io_demo", path = "userspace/file_io_demo", artifact = "bin", target = "aarch64-unknown-none", optional = true }
-fork_test_aarch64 = { package = "fork_test", path = "userspace/fork_test", artifact = "bin", target = "aarch64-unknown-none", optional = true }
-bpf_loader_aarch64 = { package = "bpf_loader", path = "userspace/bpf_loader", artifact = "bin", target = "aarch64-unknown-none", optional = true }
-signed_bpf_loader_aarch64 = { package = "signed_bpf_loader", path = "userspace/signed_bpf_loader", artifact = "bin", target = "aarch64-unknown-none", optional = true }
-benchmark_aarch64 = { package = "benchmark", path = "userspace/benchmark", artifact = "bin", target = "aarch64-unknown-none", optional = true }
-rk_uart_forwarder_aarch64 = { package = "rk_uart_forwarder", path = "userspace/rk_uart_forwarder", artifact = "bin", target = "aarch64-unknown-none", optional = true }
-verifier_bench_aarch64 = { package = "verifier_bench", path = "userspace/verifier_bench", artifact = "bin", target = "aarch64-unknown-none", optional = true }
+init_aarch64 = { package = "init", path = "userspace/core/init", artifact = "bin", target = "aarch64-unknown-none", optional = true }
+gpio_demo_aarch64 = { package = "gpio_demo", path = "userspace/demos/gpio_demo", artifact = "bin", target = "aarch64-unknown-none", optional = true }
+pwm_demo_aarch64 = { package = "pwm_demo", path = "userspace/demos/pwm_demo", artifact = "bin", target = "aarch64-unknown-none", optional = true }
+timeseries_demo_aarch64 = { package = "timeseries_demo", path = "userspace/demos/timeseries_demo", artifact = "bin", target = "aarch64-unknown-none", optional = true }
+iio_demo_aarch64 = { package = "iio_demo", path = "userspace/demos/iio_demo", artifact = "bin", target = "aarch64-unknown-none", optional = true }
+syscall_demo_aarch64 = { package = "syscall_demo", path = "userspace/demos/syscall_demo", artifact = "bin", target = "aarch64-unknown-none", optional = true }
+sys_exit_demo_aarch64 = { package = "sys_exit_demo", path = "userspace/demos/sys_exit_demo", artifact = "bin", target = "aarch64-unknown-none", optional = true }
+sched_switch_demo_aarch64 = { package = "sched_switch_demo", path = "userspace/demos/sched_switch_demo", artifact = "bin", target = "aarch64-unknown-none", optional = true }
+sched_switch_export_demo_aarch64 = { package = "sched_switch_export_demo", path = "userspace/demos/sched_switch_export_demo", artifact = "bin", target = "aarch64-unknown-none", optional = true }
+sched_switch_bridge_demo_aarch64 = { package = "sched_switch_bridge_demo", path = "userspace/demos/sched_switch_bridge_demo", artifact = "bin", target = "aarch64-unknown-none", optional = true }
+file_io_demo_aarch64 = { package = "file_io_demo", path = "userspace/demos/file_io_demo", artifact = "bin", target = "aarch64-unknown-none", optional = true }
+fork_test_aarch64 = { package = "fork_test", path = "userspace/demos/fork_test", artifact = "bin", target = "aarch64-unknown-none", optional = true }
+bpf_loader_aarch64 = { package = "bpf_loader", path = "userspace/tools/bpf_loader", artifact = "bin", target = "aarch64-unknown-none", optional = true }
+signed_bpf_loader_aarch64 = { package = "signed_bpf_loader", path = "userspace/tools/signed_bpf_loader", artifact = "bin", target = "aarch64-unknown-none", optional = true }
+benchmark_aarch64 = { package = "benchmark", path = "userspace/benchmarks/system", artifact = "bin", target = "aarch64-unknown-none", optional = true }
+rk_uart_forwarder_aarch64 = { package = "rk_uart_forwarder", path = "userspace/tools/rk_uart_forwarder", artifact = "bin", target = "aarch64-unknown-none", optional = true }
+verifier_bench_aarch64 = { package = "verifier_bench", path = "userspace/benchmarks/verifier", artifact = "bin", target = "aarch64-unknown-none", optional = true }
 kernel_aarch64 = { package = "kernel", path = "kernel", artifact = "bin", target = "aarch64-unknown-none", optional = true, features = ["cloud-profile"] }
 
 [features]
@@ -114,7 +114,7 @@ aarch64_deps = [
 [workspace]
 exclude = [
   "kernel/demos/riscv",
-  "userspace/rk_bridge",
+  "userspace/tools/rk_bridge",
   "kernel/crates/kernel_bpf/fuzz",
   "firmware/shrike_rp2040",
 ]
@@ -139,26 +139,26 @@ members = [
   "kernel/crates/shrike_link",
   "firmware/shrike_control",
   "firmware/shrike_rp2040_host_sim",
-  "userspace/bpf_loader",
-  "userspace/signed_bpf_loader",
-  "userspace/file_structure",
-  "userspace/init",
-  "userspace/minilib",
-  "userspace/gpio_demo",
-  "userspace/pwm_demo",
-  "userspace/timeseries_demo",
-  "userspace/iio_demo",
-  "userspace/syscall_demo",
-  "userspace/sys_exit_demo",
-  "userspace/sched_switch_demo",
-  "userspace/sched_switch_export_demo",
-  "userspace/sched_switch_bridge_demo",
-  "userspace/file_io_demo",
-  "userspace/safety_demo",
-  "userspace/fork_test",
-  "userspace/benchmark",
-  "userspace/rk_uart_forwarder",
-  "userspace/verifier_bench",
+  "userspace/tools/bpf_loader",
+  "userspace/tools/signed_bpf_loader",
+  "userspace/core/file_structure",
+  "userspace/core/init",
+  "userspace/core/minilib",
+  "userspace/demos/gpio_demo",
+  "userspace/demos/pwm_demo",
+  "userspace/demos/timeseries_demo",
+  "userspace/demos/iio_demo",
+  "userspace/demos/syscall_demo",
+  "userspace/demos/sys_exit_demo",
+  "userspace/demos/sched_switch_demo",
+  "userspace/demos/sched_switch_export_demo",
+  "userspace/demos/sched_switch_bridge_demo",
+  "userspace/demos/file_io_demo",
+  "userspace/demos/safety_demo",
+  "userspace/demos/fork_test",
+  "userspace/benchmarks/system",
+  "userspace/tools/rk_uart_forwarder",
+  "userspace/benchmarks/verifier",
 ]
 default-members = [
   ".",
@@ -175,7 +175,7 @@ default-members = [
   "kernel/crates/kernel_vfs",
   "kernel/crates/kernel_map_transaction",
   "kernel/crates/kernel_virtual_memory",
-  "userspace/file_structure",
+  "userspace/core/file_structure",
 ]
 
 [dependencies]

@@ -1,4 +1,7 @@
 /target
+**/target/
+**/fuzz/artifacts/
+**/fuzz/corpus/
 artifacts/*
 !artifacts/.gitkeep
 __pycache__/

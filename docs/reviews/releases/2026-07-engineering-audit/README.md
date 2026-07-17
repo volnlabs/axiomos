@@ -153,7 +153,7 @@ production, HIL, hosted, or independent-review work.
 | External | Hosted H-06 | CI/release owner | External evidence | A hosted run starts real jobs and passes the required workflow; the run URL and exact commit are recorded here | Blocked on GitHub Actions billing/monthly quota. Local success is not a substitute. |
 | External | Physical RPi5/RP2040 HIL and GPIO IRQ stress | platform/firmware owners | Hardware + test | Hardware runner contract plus retained UART/control-link logs proves Pi boot/SMP and RP2040 GPIO/control failure cases | Blocked on hardware and a concrete runner contract. Host simulation proves sampled-state logic, not IRQ-edge behavior. |
 | External | Independent safety/concurrency review | independent reviewer | External review | Reviewer signs off the unsafe ledger, scheduler/VM shootdown, BPF epoch/snapshot, and remediation dispositions with tracked findings | Must be independent of the implementation authors; local gate and model results are inputs, not substitutes. |
-| Conditional | Historical ring-3 page fault | `userspace/init`, kernel VM/task owners | Investigation | Only if the symptom reproduces: a pinned, hash-verified OVMF plus capture evidence identifies ownership; a targeted fix then has a failing-before/passing-after regression | Currently non-reproducing, historical cause unresolved, and no reproducible artifact exists. Do not create a pass-either-way watcher or mark it fixed. |
+| Conditional | Historical ring-3 page fault | `userspace/core/init`, kernel VM/task owners | Investigation | Only if the symptom reproduces: a pinned, hash-verified OVMF plus capture evidence identifies ownership; a targeted fix then has a failing-before/passing-after regression | Currently non-reproducing, historical cause unresolved, and no reproducible artifact exists. Do not create a pass-either-way watcher or mark it fixed. |
 
 ## Remediation checklist (current branch, assessed through `8b406a6`)
 
@@ -333,7 +333,7 @@ The code does build for the supported x86_64 and AArch64 targets, both BPF profi
 - The path-sensitive BPF verifier is isolated in a host-testable `no_std` crate and has unusually deep unit, integration, property, semantic-profile, and fuzz coverage for a project of this size.
 - `shrike_link` has a small, cohesive protocol core with CRC/framing tests, RFC1982-style sequence handling, fail-safe cold start, e-stop latching, stale-command rejection, and watchdog tests. Its 52 host tests all passed.
 - Build-time cloud/embedded profile exclusion is explicit and is tested in both configurations, even though several profile abstractions are not wired into runtime resource allocation.
-- The signed-program format produced by `userspace/rk_cli` currently matches the kernel format (120-byte header, SHA3-256, Ed25519 over the hash, signer-id derivation). The cryptographic pieces are real rather than placeholders.
+- The signed-program format produced by `userspace/tools/rk_cli` currently matches the kernel format (120-byte header, SHA3-256, Ed25519 over the hash, signer-id derivation). The cryptographic pieces are real rather than placeholders.
 - The repository is frank in several places about being a research kernel, missing signals, lacking demand paging, having a single global queue, and accepting unsigned BPF by default. That honesty should be preserved while the inaccurate assurance claims are removed.
 - Rust formatting, both BPF profile test suites, the release builds, the firmware check, and the isolated Lean build are reproducible locally with the pinned toolchain.
 
@@ -458,7 +458,7 @@ The root contains three different classes of binaries (host runner, bare-metal a
 
 `kernel_bpf` is a 30k+ line subsystem whose largest files are already review bottlenecks: `verifier/core.rs` (2,552 lines), `jit_aarch64.rs` (1,546), `actuation/mod.rs` (1,493), x86 JIT `jit/mod.rs` (1,142), signing verifier (1,077), verifier state (1,034), and process management (1,009). The split is by implementation history more than by owned invariant.
 
-Sixteen userspace binaries are embedded by `userspace/file_structure/src/lib.rs:3-31`; current init starts two (`userspace/init/src/main.rs:6-25`) and then pauses. `safety_demo` is a workspace member but is neither an artifact dependency nor shipped. Host tools are hidden inside `userspace/` even though they run on Linux and use independent locks/workspaces.
+Sixteen userspace binaries are embedded by `userspace/core/file_structure/src/lib.rs:3-31`; current init starts two (`userspace/core/init/src/main.rs:6-25`) and then pauses. `safety_demo` is a workspace member but is neither an artifact dependency nor shipped. Host tools are hidden inside `userspace/` even though they run on Linux and use independent locks/workspaces.
 
 ## Recommended structure
 
@@ -598,7 +598,7 @@ Do not perform this as a cosmetic mega-move. First define workspace/package owne
 ## H-04 — Program authenticity and privilege tiers are not operable controls
 
 - **Severity:** High
-- **Affected files:** `kernel/src/bpf/mod.rs:145-151,198-238,264-286`; `kernel/crates/kernel_bpf/src/signing/**`; `verifier/caller.rs`; `userspace/rk_cli/src/{signing.rs,commands/sign.rs}`; boot/configuration code
+- **Affected files:** `kernel/src/bpf/mod.rs:145-151,198-238,264-286`; `kernel/crates/kernel_bpf/src/signing/**`; `verifier/caller.rs`; `userspace/tools/rk_cli/src/{signing.rs,commands/sign.rs}`; boot/configuration code
 - **Evidence:** `BpfManager::new` sets `allow_unsigned = true`. No production caller registers a trusted key or calls `set_allow_unsigned`; there is no build-time key source, boot policy, revocation, or operator status. Every verification config uses `LoadCaller::Privileged` because process credentials do not exist. Attach permission errors exist in types but are not enforced at the syscall boundary. The CLI and kernel formats match, but there is no shared format crate or end-to-end valid-signature test.
 - **Explanation:** Crypto code does not establish a trust boundary unless policy, key lifecycle, identity, and audit are wired. Today any process that can call `sys_bpf` receives privileged helper policy and can attach to any hook.
 - **Recommended fix:** Add process credentials/capabilities and separate `BPF_LOAD`, attach-point, map, and actuation rights. Provision immutable root keys from a signed build/boot configuration, default to signed-only outside an explicit development feature, share the container format in one crate, and test CLI-sign → kernel-authenticate. Audit every privilege transition.
@@ -741,8 +741,8 @@ Correctness fixes take priority over optimization. The main performance problem 
 | `cargo test -p kernel_bpf --no-default-features --features cloud-profile` | Pass | 384 unit tests plus integration suites; 9 doctests ignored. |
 | `cargo test -p kernel_bpf --no-default-features --features embedded-profile` | Pass | 390 unit tests plus integration suites; 8 doctests ignored. |
 | `cargo test -p shrike_link` | Pass | 52 protocol, ring, sequence, motor, session, e-stop, and watchdog tests. |
-| `cargo test --manifest-path userspace/rk_bridge/Cargo.toml` | Pass | 19 unit tests; no real axiomos kernel or ROS graph. |
-| `cargo test --manifest-path userspace/rk_cli/Cargo.toml` | Pass with warning | Zero tests; unused `programs_dir`. |
+| `cargo test --manifest-path userspace/tools/rk_bridge/Cargo.toml` | Pass | 19 unit tests; no real axiomos kernel or ROS graph. |
+| `cargo test --manifest-path userspace/tools/rk_cli/Cargo.toml` | Pass with warning | Zero tests; unused `programs_dir`. |
 | strict Clippy on root | Fail | `kernel_bpf/src/loader/reloc.rs:164,256` exceed argument limit. |
 | strict Clippy on `rk_bridge` | Fail | Unnecessary casts at `ringbuf.rs:114,148`. |
 | strict Clippy on `rk_cli` | Fail | Dead `config.rs:19` function. |
@@ -921,9 +921,9 @@ Evidence was required before classifying code as dead. “No production caller�
 | Medium | `kernel/src/arch/mod_new.rs` | Active module is `arch/mod.rs`; no module declaration selects `mod_new.rs`. | Delete. | S | Removes competing architecture root. |
 | Medium | `kernel/src/main_riscv_minimal.rs` | No active manifest points to it. `Cargo_riscv.toml` points to `main_riscv.rs`; root uses `main.rs`; demo has its own main. | Delete or move into a clearly named experiment. | S | One RISC-V path per experiment. |
 | Medium | `kernel/Cargo_riscv.toml` and `kernel/src/main_riscv.rs` | Alternative nonstandard manifest is outside root matrix; root config directs users to the separate demo. | Retire in favor of the demo until main-kernel RISC-V support is real. | S | Clear support boundary. |
-| Medium | `userspace/init/src/main.rs:26-254` | A 228-line block-commented former BPF demo cannot compile or be tested. | Delete; history is in Git. Replace with a compiled example if still useful. | S | Smaller init and no stale duplicate ABI code. |
-| Medium | `userspace/safety_demo` | Workspace member, but absent from root bindep artifacts and shipped image; default tests/CI do not build it. | Delete or add a deliberate experiment target/CI owner. | S | No abandoned safety implementation. |
-| Low | `userspace/rk_cli/src/config.rs:19` `programs_dir` | Compiler and strict Clippy report no caller. | Delete or use in command path with tests. | S | Green lint. |
+| Medium | `userspace/core/init/src/main.rs:26-254` | A 228-line block-commented former BPF demo cannot compile or be tested. | Delete; history is in Git. Replace with a compiled example if still useful. | S | Smaller init and no stale duplicate ABI code. |
+| Medium | `userspace/demos/safety_demo` | Workspace member, but absent from root bindep artifacts and shipped image; default tests/CI do not build it. | Delete or add a deliberate experiment target/CI owner. | S | No abandoned safety implementation. |
+| Low | `userspace/tools/rk_cli/src/config.rs:19` `programs_dir` | Compiler and strict Clippy report no caller. | Delete or use in command path with tests. | S | Green lint. |
 | Medium | ABI map/program variants and unsupported commands | 29 map tags/large Linux command list exported; runtime creates only types 1, 2, 27, 100. | Move unsupported constants to reserved compatibility docs or implement only with an owner/test. | M | Smaller v1 API/dead conceptual surface. |
 | Low | `examples/bpf/hello.bpf.c` | Not part of build/test; only its README references it, and the repository otherwise constructs bytecode in Rust. | Either compile it in CI with pinned clang or archive/delete it. | S | Examples remain executable. |
 

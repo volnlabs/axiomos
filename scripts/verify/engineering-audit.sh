@@ -196,6 +196,7 @@ hash_tracked_lockfiles() {
     local lockfile
     : >"$output"
     while IFS= read -r lockfile; do
+        [[ -f "$lockfile" ]] || continue
         sha256sum "$lockfile" >>"$output"
     done < <(git ls-files 'Cargo.lock' '*/Cargo.lock' '**/Cargo.lock' | sort -u)
 }

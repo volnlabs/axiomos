@@ -284,7 +284,7 @@ Pre-conditions:
   cargo, gdb, xorriso, qemu-system-x86_64, /dev/kvm available.
   GNU readelf available for --break-addr and OVMF binary checks.
 
-Triage evidence ownership: @userspace/init and @kernel/mcore/mtask/vm.
+Triage evidence ownership: @userspace/core/init and @kernel/mcore/mtask/vm.
 This script only provides the evidence path.
 EOF
 }

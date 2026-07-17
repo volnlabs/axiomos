@@ -35,29 +35,29 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 | `kernel/crates/shrike_link/Cargo.toml` | control-link protocol | measured |
 | `kernel/demos/riscv/Cargo.toml` | experimental RISC-V demo | experimental-target |
 | `tools/xtask/Cargo.toml` | validation authority | measured |
-| `userspace/benchmark/Cargo.toml` | benchmark image | target-image |
-| `userspace/bpf_loader/Cargo.toml` | BPF loader image | target-image |
-| `userspace/file_io_demo/Cargo.toml` | filesystem demo | target-image |
-| `userspace/file_structure/Cargo.toml` | image filesystem model | measured |
-| `userspace/fork_test/Cargo.toml` | process lifecycle probe | target-image |
-| `userspace/gpio_demo/Cargo.toml` | GPIO demo | target-image |
-| `userspace/iio_demo/Cargo.toml` | IIO demo | target-image |
-| `userspace/init/Cargo.toml` | init and integration probes | target-image |
-| `userspace/minilib/Cargo.toml` | userspace runtime | target-image |
-| `userspace/pwm_demo/Cargo.toml` | PWM demo | target-image |
-| `userspace/rk_bridge/Cargo.toml` | host robotics bridge | measured |
-| `userspace/rk_bridge/fuzz/Cargo.toml` | rk_bridge protocol fuzz target | fuzz-harness |
-| `userspace/rk_cli/Cargo.toml` | host signing CLI | measured |
-| `userspace/rk_uart_forwarder/Cargo.toml` | UART forwarder image | target-image |
-| `userspace/safety_demo/Cargo.toml` | safety-state demo | target-image |
-| `userspace/sched_switch_bridge_demo/Cargo.toml` | scheduler bridge demo | target-image |
-| `userspace/sched_switch_demo/Cargo.toml` | scheduler demo | target-image |
-| `userspace/sched_switch_export_demo/Cargo.toml` | scheduler export demo | target-image |
-| `userspace/signed_bpf_loader/Cargo.toml` | signed BPF integration image | target-image |
-| `userspace/sys_exit_demo/Cargo.toml` | task-exit probe | target-image |
-| `userspace/syscall_demo/Cargo.toml` | syscall demo | target-image |
-| `userspace/timeseries_demo/Cargo.toml` | time-series map demo | target-image |
-| `userspace/verifier_bench/Cargo.toml` | verifier benchmark image | target-image |
+| `userspace/benchmarks/system/Cargo.toml` | benchmark image | target-image |
+| `userspace/benchmarks/verifier/Cargo.toml` | verifier benchmark image | target-image |
+| `userspace/core/file_structure/Cargo.toml` | image filesystem model | measured |
+| `userspace/core/init/Cargo.toml` | init and integration probes | target-image |
+| `userspace/core/minilib/Cargo.toml` | userspace runtime | target-image |
+| `userspace/demos/file_io_demo/Cargo.toml` | filesystem demo | target-image |
+| `userspace/demos/fork_test/Cargo.toml` | process lifecycle probe | target-image |
+| `userspace/demos/gpio_demo/Cargo.toml` | GPIO demo | target-image |
+| `userspace/demos/iio_demo/Cargo.toml` | IIO demo | target-image |
+| `userspace/demos/pwm_demo/Cargo.toml` | PWM demo | target-image |
+| `userspace/demos/safety_demo/Cargo.toml` | safety-state demo | target-image |
+| `userspace/demos/sched_switch_bridge_demo/Cargo.toml` | scheduler bridge demo | target-image |
+| `userspace/demos/sched_switch_demo/Cargo.toml` | scheduler demo | target-image |
+| `userspace/demos/sched_switch_export_demo/Cargo.toml` | scheduler export demo | target-image |
+| `userspace/demos/sys_exit_demo/Cargo.toml` | task-exit probe | target-image |
+| `userspace/demos/syscall_demo/Cargo.toml` | syscall demo | target-image |
+| `userspace/demos/timeseries_demo/Cargo.toml` | time-series map demo | target-image |
+| `userspace/tools/bpf_loader/Cargo.toml` | BPF loader image | target-image |
+| `userspace/tools/rk_bridge/Cargo.toml` | host robotics bridge | measured |
+| `userspace/tools/rk_bridge/fuzz/Cargo.toml` | rk_bridge protocol fuzz target | fuzz-harness |
+| `userspace/tools/rk_cli/Cargo.toml` | host signing CLI | measured |
+| `userspace/tools/rk_uart_forwarder/Cargo.toml` | UART forwarder image | target-image |
+| `userspace/tools/signed_bpf_loader/Cargo.toml` | signed BPF integration image | target-image |
 
 ## Coverage baselines
 
@@ -82,9 +82,9 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 | shrike-link | `kernel/crates/shrike_link/Cargo.toml` | 98.57% | 94.44% | 98.00% | 94.00% | `fdf8580` |
 | shrike-control | `firmware/shrike_control/Cargo.toml` | 99.40% | 91.18% | 99.00% | 91.00% | `617ae0f` |
 | shrike-rp2040-host-sim | `firmware/shrike_rp2040_host_sim/Cargo.toml` | 73.85% | 50.00% | 73.00% | 49.00% | `617ae0f` |
-| rk-bridge | `userspace/rk_bridge/Cargo.toml` | 40.93% | 56.25% | 40.00% | 56.00% | `fdf8580` |
-| file-structure | `userspace/file_structure/Cargo.toml` | 100.00% | 82.14% | 99.00% | 82.00% | `9e1d6af` |
-| rk-cli | `userspace/rk_cli/Cargo.toml` | 62.80% | 34.68% | 62.00% | 34.00% | `97c1f91` |
+| rk-bridge | `userspace/tools/rk_bridge/Cargo.toml` | 40.93% | 56.25% | 40.00% | 56.00% | `fdf8580` |
+| file-structure | `userspace/core/file_structure/Cargo.toml` | 100.00% | 82.14% | 99.00% | 82.00% | `9e1d6af` |
+| rk-cli | `userspace/tools/rk_cli/Cargo.toml` | 62.80% | 34.68% | 62.00% | 34.00% | `97c1f91` |
 
 ## Mutation baselines
 

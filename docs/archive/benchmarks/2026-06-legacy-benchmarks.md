@@ -52,7 +52,7 @@ All results are reproducible and tied to specific environments and kernel versio
 * **Platform:** QEMU x86_64 emulator
 * **Memory:** 2 GB
 * **Kernel:** axiomos kernel (dev branch)
-* **Measurement Tool:** `userspace/benchmark` program
+* **Measurement Tool:** `userspace/benchmarks/system` program
 * **Date:** 2026-03-06
 
 ## Benchmark Results

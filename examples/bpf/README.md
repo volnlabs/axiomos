@@ -62,7 +62,7 @@ pub struct BpfAttr {
 
 ## Example: Timer Hook
 
-See `userspace/init/src/main.rs` for a complete working example that:
+See `userspace/core/init/src/main.rs` for a complete working example that:
 1. Loads a BPF program
 2. Attaches it to the timer interrupt
 3. Observes execution via kernel logs

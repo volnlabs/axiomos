@@ -209,7 +209,7 @@ role = "RP2040 firmware"
 gate = "RP2040 target lint and build"
 
 [[component]]
-path = "userspace/benchmark/Cargo.toml"
+path = "userspace/benchmarks/system/Cargo.toml"
 workspace = "member"
 artifact = "rootfs:benchmark"
 kind = "cargo"
@@ -217,7 +217,7 @@ role = "benchmark image"
 gate = "target build"
 
 [[component]]
-path = "userspace/bpf_loader/Cargo.toml"
+path = "userspace/tools/bpf_loader/Cargo.toml"
 workspace = "member"
 artifact = "rootfs:bpf_loader"
 kind = "cargo"
@@ -225,7 +225,7 @@ role = "BPF loader image"
 gate = "target build"
 
 [[component]]
-path = "userspace/file_io_demo/Cargo.toml"
+path = "userspace/demos/file_io_demo/Cargo.toml"
 workspace = "member"
 artifact = "rootfs:file_io_demo"
 kind = "cargo"
@@ -233,7 +233,7 @@ role = "filesystem demo"
 gate = "target build"
 
 [[component]]
-path = "userspace/file_structure/Cargo.toml"
+path = "userspace/core/file_structure/Cargo.toml"
 workspace = "member"
 artifact = "none"
 kind = "cargo"
@@ -241,7 +241,7 @@ role = "image filesystem model"
 gate = "host lint and tests"
 
 [[component]]
-path = "userspace/fork_test/Cargo.toml"
+path = "userspace/demos/fork_test/Cargo.toml"
 workspace = "member"
 artifact = "rootfs:fork_test"
 kind = "cargo"
@@ -249,7 +249,7 @@ role = "process lifecycle probe"
 gate = "target build and QEMU"
 
 [[component]]
-path = "userspace/gpio_demo/Cargo.toml"
+path = "userspace/demos/gpio_demo/Cargo.toml"
 workspace = "member"
 artifact = "rootfs:gpio_demo"
 kind = "cargo"
@@ -257,7 +257,7 @@ role = "GPIO demo"
 gate = "target build"
 
 [[component]]
-path = "userspace/iio_demo/Cargo.toml"
+path = "userspace/demos/iio_demo/Cargo.toml"
 workspace = "member"
 artifact = "rootfs:iio_demo"
 kind = "cargo"
@@ -265,7 +265,7 @@ role = "IIO demo"
 gate = "target build"
 
 [[component]]
-path = "userspace/init/Cargo.toml"
+path = "userspace/core/init/Cargo.toml"
 workspace = "member"
 artifact = "rootfs:init"
 kind = "cargo"
@@ -273,7 +273,7 @@ role = "init and integration probes"
 gate = "target build and QEMU"
 
 [[component]]
-path = "userspace/minilib/Cargo.toml"
+path = "userspace/core/minilib/Cargo.toml"
 workspace = "member"
 artifact = "none"
 kind = "cargo"
@@ -281,7 +281,7 @@ role = "userspace runtime"
 gate = "target build"
 
 [[component]]
-path = "userspace/pwm_demo/Cargo.toml"
+path = "userspace/demos/pwm_demo/Cargo.toml"
 workspace = "member"
 artifact = "rootfs:pwm_demo"
 kind = "cargo"
@@ -289,7 +289,7 @@ role = "PWM demo"
 gate = "target build"
 
 [[component]]
-path = "userspace/rk_bridge/Cargo.toml"
+path = "userspace/tools/rk_bridge/Cargo.toml"
 workspace = "excluded"
 artifact = "host:rk-to-ros"
 kind = "cargo"
@@ -297,7 +297,7 @@ role = "host robotics bridge"
 gate = "standalone host lint and tests"
 
 [[component]]
-path = "userspace/rk_bridge/fuzz/Cargo.toml"
+path = "userspace/tools/rk_bridge/fuzz/Cargo.toml"
 workspace = "standalone"
 artifact = "none"
 kind = "cargo"
@@ -305,7 +305,7 @@ role = "rk_bridge protocol fuzz target"
 gate = "fuzz build"
 
 [[component]]
-path = "userspace/rk_cli/Cargo.toml"
+path = "userspace/tools/rk_cli/Cargo.toml"
 workspace = "standalone"
 artifact = "host:rk"
 kind = "cargo"
@@ -313,7 +313,7 @@ role = "host signing CLI"
 gate = "standalone host lint and tests"
 
 [[component]]
-path = "userspace/rk_uart_forwarder/Cargo.toml"
+path = "userspace/tools/rk_uart_forwarder/Cargo.toml"
 workspace = "member"
 artifact = "rootfs:rk_uart_forwarder"
 kind = "cargo"
@@ -321,7 +321,7 @@ role = "UART forwarder image"
 gate = "target build"
 
 [[component]]
-path = "userspace/safety_demo/Cargo.toml"
+path = "userspace/demos/safety_demo/Cargo.toml"
 workspace = "member"
 artifact = "none"
 kind = "cargo"
@@ -329,7 +329,7 @@ role = "safety-state demo"
 gate = "target build"
 
 [[component]]
-path = "userspace/sched_switch_bridge_demo/Cargo.toml"
+path = "userspace/demos/sched_switch_bridge_demo/Cargo.toml"
 workspace = "member"
 artifact = "rootfs:sched_switch_bridge_demo"
 kind = "cargo"
@@ -337,7 +337,7 @@ role = "scheduler bridge demo"
 gate = "target build"
 
 [[component]]
-path = "userspace/sched_switch_demo/Cargo.toml"
+path = "userspace/demos/sched_switch_demo/Cargo.toml"
 workspace = "member"
 artifact = "rootfs:sched_switch_demo"
 kind = "cargo"
@@ -345,7 +345,7 @@ role = "scheduler demo"
 gate = "target build"
 
 [[component]]
-path = "userspace/sched_switch_export_demo/Cargo.toml"
+path = "userspace/demos/sched_switch_export_demo/Cargo.toml"
 workspace = "member"
 artifact = "rootfs:sched_switch_export_demo"
 kind = "cargo"
@@ -353,7 +353,7 @@ role = "scheduler export demo"
 gate = "target build"
 
 [[component]]
-path = "userspace/signed_bpf_loader/Cargo.toml"
+path = "userspace/tools/signed_bpf_loader/Cargo.toml"
 workspace = "member"
 artifact = "rootfs:signed_bpf_loader"
 kind = "cargo"
@@ -361,7 +361,7 @@ role = "signed BPF integration image"
 gate = "target build and QEMU"
 
 [[component]]
-path = "userspace/sys_exit_demo/Cargo.toml"
+path = "userspace/demos/sys_exit_demo/Cargo.toml"
 workspace = "member"
 artifact = "rootfs:sys_exit_demo"
 kind = "cargo"
@@ -369,7 +369,7 @@ role = "task-exit probe"
 gate = "target build and QEMU"
 
 [[component]]
-path = "userspace/syscall_demo/Cargo.toml"
+path = "userspace/demos/syscall_demo/Cargo.toml"
 workspace = "member"
 artifact = "rootfs:syscall_demo"
 kind = "cargo"
@@ -377,7 +377,7 @@ role = "syscall demo"
 gate = "target build"
 
 [[component]]
-path = "userspace/timeseries_demo/Cargo.toml"
+path = "userspace/demos/timeseries_demo/Cargo.toml"
 workspace = "member"
 artifact = "rootfs:timeseries_demo"
 kind = "cargo"
@@ -385,7 +385,7 @@ role = "time-series map demo"
 gate = "target build"
 
 [[component]]
-path = "userspace/verifier_bench/Cargo.toml"
+path = "userspace/benchmarks/verifier/Cargo.toml"
 workspace = "member"
 artifact = "rootfs:verifier_bench"
 kind = "cargo"

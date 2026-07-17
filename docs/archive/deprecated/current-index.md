@@ -38,7 +38,7 @@ cargo xtask boundary --check
 
 The check compares workspace declarations with the root `Cargo.toml`, rejects
 duplicate artifact identities, and requires the declared `rootfs:*` artifacts
-to match the executable files in `userspace/file_structure::STRUCTURE`. The
+to match the executable files in `userspace/core/file_structure::STRUCTURE`. The
 required local gate runs the same contract as `xtask-manifest-drift` before any
 build or QEMU step.
 

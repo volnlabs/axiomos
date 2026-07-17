@@ -8,7 +8,7 @@ the fault.
 
 This document describes the developer workflow for triaging the fault
 with an external debugger. The actual diagnosis is owned by
-`@userspace/init` and `@kernel/mcore/mtask/vm`; this workflow only
+`@userspace/core/init` and `@kernel/mcore/mtask/vm`; this workflow only
 provides the evidence path.
 
 ## Quick start
@@ -130,7 +130,7 @@ under the system OVMF — which is what this script does.
 
 ## Triage evidence ownership
 
-The diagnosis is owned by `@userspace/init` and
+The diagnosis is owned by `@userspace/core/init` and
 `@kernel/mcore/mtask/vm`. This workflow only provides the evidence
 path. Once the root cause is known and the fix lands in those
 modules, the fix owner may add a bounded regression (the gate's
