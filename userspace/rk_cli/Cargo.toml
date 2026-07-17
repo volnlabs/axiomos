@@ -46,3 +46,4 @@ sha3 = "0.10"
 
 [dev-dependencies]
 kernel_bpf = { path = "../../kernel/crates/kernel_bpf", default-features = false, features = ["cloud-profile"] }
+tempfile = "3.20"
