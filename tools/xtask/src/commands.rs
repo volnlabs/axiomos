@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::process::Command as ProcessCommand;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cli::{self, Command};
 use crate::context::repo_root;
@@ -7,11 +8,22 @@ use crate::model::RepositoryModel;
 use crate::{check_or_write_docs, validate_boundary, validate_inventory};
 
 fn run_ci(root: &Path, arguments: &[String]) -> Result<(), String> {
-    let script_arguments: Vec<_> = arguments
+    let mut script_arguments: Vec<_> = arguments
         .iter()
         .filter(|argument| argument.as_str() != "--full")
         .cloned()
         .collect();
+    if !script_arguments
+        .iter()
+        .any(|argument| argument == "--output")
+    {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("system clock before UNIX epoch: {error}"))?
+            .as_secs();
+        script_arguments.push("--output".to_owned());
+        script_arguments.push(format!("artifacts/runs/{timestamp}-check-all"));
+    }
     let status = ProcessCommand::new(root.join("scripts/verify-engineering-audit.sh"))
         .args(&script_arguments)
         .current_dir(root)

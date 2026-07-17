@@ -78,6 +78,7 @@ mkdir -p "$OUTPUT_DIR/logs"
 OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 RESULTS="$OUTPUT_DIR/results.tsv"
 MANIFEST="$OUTPUT_DIR/manifest.txt"
+SUMMARY_JSON="$OUTPUT_DIR/summary.json"
 ARTIFACTS="$OUTPUT_DIR/artifacts.sha256"
 PRODUCTION_ARTIFACTS="$OUTPUT_DIR/production-artifacts.sha256"
 LOCKFILES_BEFORE="$OUTPUT_DIR/lockfiles.before.sha256"
@@ -803,11 +804,13 @@ else
     OVERALL="FAIL"
 fi
 write_manifest "$FINISHED_AT" "$OVERALL"
+python3 -B scripts/verify/reporters/summary.py "$RESULTS" "$MANIFEST" "$SUMMARY_JSON"
 
 echo
 echo "Audit verification: $OVERALL ($passes passed, $failures failed, $skips skipped)"
 echo "Manifest: $MANIFEST"
 echo "Results:  $RESULTS"
+echo "Summary:  $SUMMARY_JSON"
 echo "Logs:     $OUTPUT_DIR/logs"
 
 [[ "$failures" -eq 0 ]]
