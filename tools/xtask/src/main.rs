@@ -22,7 +22,8 @@ fn main() -> ExitCode {
     match commands::execute() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            let error = if error.starts_with("unknown xtask command")
+            let error = if error.starts_with("error:")
+                || error.starts_with("unknown xtask command")
                 || error.starts_with("missing xtask command")
                 || error.contains("accepts only")
                 || error.contains("requires exactly")

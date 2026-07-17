@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -137,42 +137,73 @@ fn run_check_all(root: &Path, arguments: &[String]) -> Result<(), String> {
     }
 }
 
-fn run_forward(root: &Path, program: &str, arguments: &[String]) -> Result<(), String> {
-    let (script, mut forwarded) = match program {
-        "build" => ("scripts/build/rpi5.sh", arguments.to_vec()),
-        "run" => ("scripts/run/virt.sh", arguments.to_vec()),
-        "deploy" => ("scripts/deploy/rpi5.sh", arguments.to_vec()),
-        "bench" => ("scripts/benchmark/verifier-cost.py", arguments.to_vec()),
-        "debug" => ("scripts/debug/qemu-triage.sh", arguments.to_vec()),
-        _ => return Err(format!("unsupported forwarded command: {program}")),
+fn run_forward(
+    root: &Path,
+    program: &str,
+    target: &str,
+    arguments: &[String],
+    dry_run: bool,
+) -> Result<(), String> {
+    let (executable, mut forwarded): (PathBuf, Vec<String>) = match (program, target) {
+        ("build", "rpi5") => (root.join("scripts/build/rpi5.sh"), Vec::new()),
+        ("build", "riscv") => (root.join("scripts/build/riscv.sh"), Vec::new()),
+        ("build", "x86_64") => (
+            PathBuf::from("cargo"),
+            vec!["build", "--locked", "-p", "axiomos"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        ),
+        ("run", "virt") => (root.join("scripts/run/virt.sh"), Vec::new()),
+        ("run", "riscv") => (root.join("scripts/run/riscv.sh"), Vec::new()),
+        ("run", "x86_64") => (
+            PathBuf::from("cargo"),
+            vec!["run", "--locked", "-p", "axiomos", "--"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        ),
+        ("deploy", "rpi5") => (root.join("scripts/deploy/rpi5.sh"), Vec::new()),
+        ("bench", "verifier" | "verifier-cost") => {
+            (root.join("scripts/benchmark/verifier-cost.py"), Vec::new())
+        }
+        ("debug", "qemu") => (root.join("scripts/debug/qemu-triage.sh"), Vec::new()),
+        _ => return Err(format!("unsupported {program} target: {target}")),
     };
-    if forwarded.first().is_some_and(|arg| arg == "--dry-run") {
-        forwarded.remove(0);
-        println!("cargo xtask {program} {}", forwarded.join(" "));
+    forwarded.extend_from_slice(arguments);
+    if dry_run {
+        println!("{}", display_command(&executable, &forwarded));
         return Ok(());
     }
-    let status = ProcessCommand::new(root.join(script))
+    let status = ProcessCommand::new(&executable)
         .args(&forwarded)
         .current_dir(root)
         .status()
-        .map_err(|e| format!("failed to run {script}: {e}"))?;
+        .map_err(|error| format!("failed to run {}: {error}", executable.display()))?;
     status
         .success()
         .then_some(())
         .ok_or_else(|| format!("{program} command exited with {status}"))
 }
 
+fn display_command(executable: &Path, arguments: &[String]) -> String {
+    std::iter::once(executable.display().to_string())
+        .chain(arguments.iter().map(|argument| format!("{argument:?}")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub(crate) fn usage() {
     eprintln!(
-        "Usage:\n  cargo xtask inventory --check\n  cargo xtask boundary --check\n  cargo xtask docs [--check]\n  cargo xtask check <name>|all [--profile quick|full|extended] [--format human|json]\n  cargo xtask ci [--quick|--full|--extended] [audit options]\n  cargo xtask build|run|deploy|bench|debug [args] [--dry-run]"
+        "Usage:\n  cargo xtask inventory --check\n  cargo xtask boundary --check\n  cargo xtask docs [--check]\n  cargo xtask check <name>|all [--profile quick|full|extended] [--format human|json]\n  cargo xtask ci [--quick|--full|--extended] [audit options]\n  cargo xtask build <x86_64|rpi5|riscv> [--dry-run] [-- args]\n  cargo xtask run <x86_64|virt|riscv> [--dry-run] [-- args]\n  cargo xtask deploy rpi5 [--dry-run] [-- args]\n  cargo xtask bench verifier [--dry-run] [-- args]\n  cargo xtask debug qemu [--dry-run] [-- args]"
     );
 }
 
 pub(crate) fn execute() -> Result<(), String> {
     let root = repo_root();
-    let model = RepositoryModel::load(&root)?;
     match cli::parse(std::env::args().skip(1))? {
-        Command::Inventory { .. } => {
+        Command::Inventory(_) => {
+            let model = RepositoryModel::load(&root)?;
             validate_inventory(&root, &model.components)?;
             println!(
                 "component inventory: PASS ({} components)",
@@ -180,7 +211,8 @@ pub(crate) fn execute() -> Result<(), String> {
             );
             Ok(())
         }
-        Command::Boundary { .. } => {
+        Command::Boundary(_) => {
+            let model = RepositoryModel::load(&root)?;
             validate_inventory(&root, &model.components)?;
             validate_boundary(&root, &model.components)?;
             println!(
@@ -189,21 +221,57 @@ pub(crate) fn execute() -> Result<(), String> {
             );
             Ok(())
         }
-        Command::Docs { check } => {
+        Command::Docs(arguments) => {
+            let model = RepositoryModel::load(&root)?;
             validate_inventory(&root, &model.components)?;
             validate_boundary(&root, &model.components)?;
-            check_or_write_docs(&root, &model, check)
+            check_or_write_docs(&root, &model, arguments.check)
         }
-        Command::Ci { arguments } => {
+        Command::Ci(arguments) => {
+            let model = RepositoryModel::load(&root)?;
             validate_inventory(&root, &model.components)?;
             validate_boundary(&root, &model.components)?;
             check_or_write_docs(&root, &model, true)?;
-            run_ci(&root, &arguments)
+            run_ci(&root, &arguments.arguments)
         }
-        Command::Check { arguments } => run_check(&root, &arguments),
-        Command::Forward { program, arguments } => run_forward(&root, &program, &arguments),
-        Command::Help => {
-            usage();
+        Command::Check(arguments) => run_check(&root, &arguments.arguments),
+        Command::Build(arguments) => run_forward(
+            &root,
+            "build",
+            &arguments.target,
+            &arguments.arguments,
+            arguments.dry_run,
+        ),
+        Command::Run(arguments) => run_forward(
+            &root,
+            "run",
+            &arguments.target,
+            &arguments.arguments,
+            arguments.dry_run,
+        ),
+        Command::Deploy(arguments) => run_forward(
+            &root,
+            "deploy",
+            &arguments.target,
+            &arguments.arguments,
+            arguments.dry_run,
+        ),
+        Command::Bench(arguments) => run_forward(
+            &root,
+            "bench",
+            &arguments.target,
+            &arguments.arguments,
+            arguments.dry_run,
+        ),
+        Command::Debug(arguments) => run_forward(
+            &root,
+            "debug",
+            &arguments.target,
+            &arguments.arguments,
+            arguments.dry_run,
+        ),
+        Command::Help(message) => {
+            print!("{message}");
             Ok(())
         }
     }

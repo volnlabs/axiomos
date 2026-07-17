@@ -1,73 +1,76 @@
-#[derive(Debug, Eq, PartialEq)]
+use clap::error::ErrorKind;
+use clap::{Args, Parser, Subcommand};
+
+#[derive(Debug, Parser)]
+#[command(name = "cargo xtask", disable_help_subcommand = true)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+#[derive(Debug, Subcommand)]
 pub enum Command {
-    Inventory {
-        check: bool,
-    },
-    Boundary {
-        check: bool,
-    },
-    Docs {
-        check: bool,
-    },
-    Ci {
-        arguments: Vec<String>,
-    },
-    Check {
-        arguments: Vec<String>,
-    },
-    Forward {
-        program: String,
-        arguments: Vec<String>,
-    },
-    Help,
+    Inventory(CheckArgs),
+    Boundary(RequiredCheckArgs),
+    Docs(CheckArgs),
+    Ci(PassthroughArgs),
+    Check(PassthroughArgs),
+    Build(ForwardArgs),
+    Run(ForwardArgs),
+    Deploy(ForwardArgs),
+    Bench(ForwardArgs),
+    Debug(ForwardArgs),
+    #[command(skip)]
+    Help(String),
+}
+
+#[derive(Debug, Args)]
+pub struct CheckArgs {
+    #[arg(long)]
+    pub check: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RequiredCheckArgs {
+    #[arg(long, required = true)]
+    pub check: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct PassthroughArgs {
+    #[arg(allow_hyphen_values = true)]
+    pub arguments: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ForwardArgs {
+    pub target: String,
+
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Arguments passed to the focused implementation after `--`.
+    #[arg(last = true)]
+    pub arguments: Vec<String>,
 }
 
 pub fn parse<I>(arguments: I) -> Result<Command, String>
 where
     I: IntoIterator<Item = String>,
 {
-    let mut arguments = arguments.into_iter();
-    let command = arguments
-        .next()
-        .ok_or_else(|| "missing xtask command".to_owned())?;
-    let remaining: Vec<_> = arguments.collect();
-    match command.as_str() {
-        "inventory" => Ok(Command::Inventory {
-            check: parse_check_only(&remaining, "inventory")?,
-        }),
-        "boundary" => Ok(Command::Boundary {
-            check: parse_exact_check(&remaining, "boundary")?,
-        }),
-        "docs" => Ok(Command::Docs {
-            check: parse_check_only(&remaining, "docs")?,
-        }),
-        "ci" => Ok(Command::Ci {
-            arguments: remaining,
-        }),
-        "check" => Ok(Command::Check {
-            arguments: remaining,
-        }),
-        "build" | "run" | "deploy" | "bench" | "debug" => Ok(Command::Forward {
-            program: command,
-            arguments: remaining,
-        }),
-        "help" | "--help" | "-h" => Ok(Command::Help),
-        _ => Err(format!("unknown xtask command: {command}")),
+    let args = std::iter::once("cargo xtask".to_owned()).chain(arguments);
+    match Cli::try_parse_from(args) {
+        Ok(cli) => Ok(cli.command),
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) =>
+        {
+            Ok(Command::Help(error.to_string()))
+        }
+        Err(error) => Err(error.to_string()),
     }
-}
-
-fn parse_check_only(arguments: &[String], command: &str) -> Result<bool, String> {
-    if arguments.iter().any(|argument| argument != "--check") {
-        return Err(format!("{command} accepts only --check"));
-    }
-    Ok(arguments.iter().any(|argument| argument == "--check"))
-}
-
-fn parse_exact_check(arguments: &[String], command: &str) -> Result<bool, String> {
-    if arguments != ["--check"] {
-        return Err(format!("{command} requires exactly --check"));
-    }
-    Ok(true)
 }
 
 #[cfg(test)]
@@ -80,40 +83,30 @@ mod tests {
 
     #[test]
     fn parses_existing_command_grammar() {
-        assert_eq!(
+        assert!(matches!(
             parse(args(&["inventory", "--check"])),
-            Ok(Command::Inventory { check: true })
-        );
-        assert_eq!(
+            Ok(Command::Inventory(arguments)) if arguments.check
+        ));
+        assert!(matches!(
             parse(args(&["boundary", "--check"])),
-            Ok(Command::Boundary { check: true })
-        );
-        assert_eq!(parse(args(&["docs"])), Ok(Command::Docs { check: false }));
-        assert_eq!(
+            Ok(Command::Boundary(arguments)) if arguments.check
+        ));
+        assert!(matches!(
             parse(args(&["ci", "--quick"])),
-            Ok(Command::Ci {
-                arguments: args(&["--quick"])
-            })
-        );
-        assert_eq!(
-            parse(args(&["build", "rpi5"])),
-            Ok(Command::Forward {
-                program: "build".to_owned(),
-                arguments: args(&["rpi5"]),
-            })
-        );
-        assert_eq!(
-            parse(args(&["check", "all", "--profile", "quick"])),
-            Ok(Command::Check {
-                arguments: args(&["all", "--profile", "quick"]),
-            })
-        );
+            Ok(Command::Ci(arguments)) if arguments.arguments == args(&["--quick"])
+        ));
+        assert!(matches!(
+            parse(args(&["build", "rpi5", "--dry-run"])),
+            Ok(Command::Build(arguments))
+                if arguments.target == "rpi5" && arguments.dry_run
+        ));
     }
 
     #[test]
     fn rejects_invalid_command_arguments() {
         assert!(parse(args(&["boundary"])).is_err());
         assert!(parse(args(&["inventory", "--quick"])).is_err());
+        assert!(parse(args(&["build"])).is_err());
         assert!(parse(args(&["unknown"])).is_err());
     }
 }

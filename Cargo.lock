@@ -2736,6 +2736,7 @@ dependencies = [
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "file_structure",
  "kernel_abi",
  "serde",
