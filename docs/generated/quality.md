@@ -21,7 +21,7 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 | `kernel/crates/kernel_device/Cargo.toml` | device contracts | deferred-host |
 | `kernel/crates/kernel_elfloader/Cargo.toml` | ELF loader | measured |
 | `kernel/crates/kernel_elfloader/fuzz/Cargo.toml` | ELF fuzz target | fuzz-harness |
-| `kernel/crates/kernel_map_transaction/Cargo.toml` | map_range rollback bookkeeping | deferred-host |
+| `kernel/crates/kernel_map_transaction/Cargo.toml` | map_range rollback bookkeeping | measured |
 | `kernel/crates/kernel_memapi/Cargo.toml` | mapped-memory contract | deferred-host |
 | `kernel/crates/kernel_pci/Cargo.toml` | PCI contracts | deferred-host |
 | `kernel/crates/kernel_physical_memory/Cargo.toml` | physical memory | deferred-host |
@@ -64,6 +64,7 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 |---|---|---:|---:|---:|---:|---|
 | kernel-bpf-cloud | `kernel/crates/kernel_bpf/Cargo.toml` | 77.71% | 63.43% | 77.00% | 63.00% | `2c3bd2c` |
 | kernel-elfloader | `kernel/crates/kernel_elfloader/Cargo.toml` | 83.29% | 66.67% | 83.00% | 66.00% | `2c3bd2c` |
+| kernel-map-transaction | `kernel/crates/kernel_map_transaction/Cargo.toml` | 94.35% | 100.00% | 94.00% | 99.00% | `97f514c` |
 
 ## Mutation baselines
 

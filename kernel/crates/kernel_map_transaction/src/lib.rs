@@ -308,8 +308,7 @@ mod tests {
 
     #[test]
     fn empty_transaction_rolls_back_to_nothing() {
-        let tx: MapRangeTransaction<Size4KiB, MAPPED_CAP, PENDING_CAP> =
-            MapRangeTransaction::new();
+        let tx: MapRangeTransaction<Size4KiB, MAPPED_CAP, PENDING_CAP> = MapRangeTransaction::new();
         let mut unmapped: Vec<u64> = Vec::new();
         let mut released: Vec<u64> = Vec::new();
         tx.rollback(
