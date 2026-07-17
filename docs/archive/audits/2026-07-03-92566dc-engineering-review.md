@@ -8,7 +8,7 @@
 cross-checked against code. Findings verified against the tree at commit
 `92566dc` on `feat_verifier_hardening`.
 
-Companion at the time of review: [`TODO_NOW.md`](../../../TODO_NOW.md).
+Companion at the time of review: [`TODO_NOW.md`](../../plans/completed/TODO_NOW-2026-07-03.md).
 
 > **Correction appended 2026-07-03 (same day):** during fix implementation, two
 > of this review's claims were verified against the code and revised. (1) **C1

@@ -46,10 +46,10 @@ this refactor; it does not replace architecture, reference, or ADR documents.
       so extraction requires preserving its result manifest and failure
       semantics rather than duplicating checks.
 - [x] Add kernel crate-boundary and component-naming documentation.
-- [~] Relocate generated root artifacts and consolidate TODO tracking. Root
-      generated outputs are ignored and `artifacts/` is the designated output
-      area; the historical `TODO_NOW.md` snapshot remains until its audit links
-      are migrated together.
+- [x] Relocate generated root artifacts and consolidate TODO tracking. Root
+      generated outputs are ignored, `artifacts/` is the designated output
+      area, and the historical TODO snapshot is archived under
+      `docs/plans/completed/` with links preserved.
 - [x] Reassess root `src/main.rs` and `build.rs` ownership before creating an
       image-builder crate. The current root package is the authoritative
       host-side image/QEMU runner; the boundary is documented in
