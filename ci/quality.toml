@@ -130,6 +130,7 @@ no_default_features = false
 minimum_score = 80.0
 baseline_caught = 67
 baseline_missed = 15
+baseline_timeout = 0
 baseline_unviable = 36
 baseline_commit = "2c3bd2c"
 
@@ -147,5 +148,21 @@ no_default_features = true
 minimum_score = 75.0
 baseline_caught = 72
 baseline_missed = 21
+baseline_timeout = 0
 baseline_unviable = 8
 baseline_commit = "2c3bd2c"
+
+[[mutation]]
+name = "shrike-link-protocol"
+package = "shrike_link"
+files = ["kernel/crates/shrike_link/src/*.rs"]
+features = []
+no_default_features = false
+minimum_score = 90.0
+baseline_caught = 143
+baseline_missed = 10
+baseline_timeout = 2
+baseline_unviable = 8
+baseline_commit = "2cd870d"
+evidence = "docs/quality-evidence/2cd870d/shrike-link-protocol.json"
+evidence_sha256 = "265b085181741ad7fe8cb06331706f5efc4f62d8b00a5388c3a73b039602d9dc"

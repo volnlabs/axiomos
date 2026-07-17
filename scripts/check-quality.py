@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -30,6 +32,98 @@ ALLOWED_DISPOSITIONS = {
 def load_toml(path: Path) -> dict:
     with path.open("rb") as source:
         return tomllib.load(source)
+
+
+def sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def git_blob(commit: str, relative: str) -> bytes:
+    result = subprocess.run(
+        ["git", "show", f"{commit}:{relative}"],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return result.stdout
+
+
+def validate_mutation_evidence(row: dict, quality: dict) -> None:
+    evidence_relative = row.get("evidence")
+    if evidence_relative is None:
+        return
+
+    evidence = (ROOT / evidence_relative).resolve()
+    if not evidence.is_relative_to(ROOT) or not evidence.is_file():
+        raise ValueError(f"{row['name']}: mutation evidence is missing or escapes the repository")
+    if sha256(evidence.read_bytes()) != row["evidence_sha256"]:
+        raise ValueError(f"{row['name']}: mutation evidence hash mismatch")
+
+    report = json.loads(evidence.read_text(encoding="utf-8"))
+    if report.get("format_version") != 1 or report.get("campaign") != row["name"]:
+        raise ValueError(f"{row['name']}: mutation evidence identity mismatch")
+    commit = report.get("baseline_commit", "")
+    if len(commit) != 40 or not commit.startswith(row["baseline_commit"]):
+        raise ValueError(f"{row['name']}: mutation evidence commit mismatch")
+    if report.get("cargo_mutants_version") != quality["cargo_mutants_version"]:
+        raise ValueError(f"{row['name']}: mutation evidence tool version mismatch")
+
+    command = report.get("command", [])
+    if command[:4] != ["cargo", "mutants", "-p", row["package"]]:
+        raise ValueError(f"{row['name']}: mutation evidence command/package mismatch")
+    command_files = [command[index + 1] for index, arg in enumerate(command[:-1]) if arg == "-f"]
+    if command_files != row["files"]:
+        raise ValueError(f"{row['name']}: mutation evidence file scope mismatch")
+    if ("--no-default-features" in command) != bool(row["no_default_features"]):
+        raise ValueError(f"{row['name']}: mutation evidence default-feature mismatch")
+    report_features = []
+    if "--features" in command:
+        report_features = command[command.index("--features") + 1].split(",")
+    if report_features != row["features"]:
+        raise ValueError(f"{row['name']}: mutation evidence feature mismatch")
+
+    outcomes = report.get("outcomes", [])
+    names = [outcome.get("mutant") for outcome in outcomes]
+    if names != sorted(names) or len(names) != len(set(names)):
+        raise ValueError(f"{row['name']}: mutation evidence outcomes are not unique and sorted")
+    counts = Counter(outcome.get("summary") for outcome in outcomes)
+    expected_counts = {
+        "CaughtMutant": int(row["baseline_caught"]),
+        "MissedMutant": int(row["baseline_missed"]),
+        "Timeout": int(row.get("baseline_timeout", 0)),
+        "Unviable": int(row["baseline_unviable"]),
+    }
+    if counts != expected_counts or report.get("total_mutants") != len(outcomes):
+        raise ValueError(f"{row['name']}: mutation evidence outcome totals mismatch")
+    report_counts = report.get("counts", {})
+    if report_counts != {
+        "caught": expected_counts["CaughtMutant"],
+        "missed": expected_counts["MissedMutant"],
+        "timeout": expected_counts["Timeout"],
+        "unviable": expected_counts["Unviable"],
+    }:
+        raise ValueError(f"{row['name']}: mutation evidence summary mismatch")
+    score = mutation_score(
+        expected_counts["CaughtMutant"],
+        expected_counts["MissedMutant"],
+        expected_counts["Timeout"],
+    )
+    if abs(float(report.get("score", -1.0)) - score) > 1e-9:
+        raise ValueError(f"{row['name']}: mutation evidence score mismatch")
+
+    inputs = report.get("inputs", {})
+    source_inputs = {
+        path.relative_to(ROOT).as_posix()
+        for pattern in row["files"]
+        for path in ROOT.glob(pattern)
+    }
+    required_inputs = source_inputs | {"Cargo.lock", "rust-toolchain.toml"}
+    if set(inputs) != required_inputs:
+        raise ValueError(f"{row['name']}: mutation evidence input set mismatch")
+    for relative, expected_hash in inputs.items():
+        if sha256(git_blob(commit, relative)) != expected_hash:
+            raise ValueError(f"{row['name']}: historical input hash mismatch for {relative}")
 
 
 def validate(components: dict, quality: dict) -> None:
@@ -83,9 +177,11 @@ def validate(components: dict, quality: dict) -> None:
     for row in mutations:
         caught = int(row["baseline_caught"])
         missed = int(row["baseline_missed"])
-        score = mutation_score(caught, missed, 0)
+        timeout = int(row.get("baseline_timeout", 0))
+        score = mutation_score(caught, missed, timeout)
         if score < float(row["minimum_score"]):
             raise ValueError(f"{row['name']}: mutation baseline is below minimum")
+        validate_mutation_evidence(row, quality)
 
 
 def mutation_score(caught: int, missed: int, timeout: int) -> float:
@@ -131,16 +227,18 @@ def render(components: dict, quality: dict) -> str:
             "",
             "## Mutation baselines",
             "",
-            "| Campaign | Caught | Missed | Unviable | Score | Minimum | Commit |",
-            "|---|---:|---:|---:|---:|---:|---|",
+            "| Campaign | Caught | Missed | Timeout | Unviable | Score | Minimum | Commit | Evidence |",
+            "|---|---:|---:|---:|---:|---:|---:|---|---|",
         ]
     )
     for row in quality["mutation"]:
-        score = mutation_score(row["baseline_caught"], row["baseline_missed"], 0)
+        timeout = row.get("baseline_timeout", 0)
+        score = mutation_score(row["baseline_caught"], row["baseline_missed"], timeout)
+        evidence = f"[`report`](../{row['evidence'].removeprefix('docs/')})" if row.get("evidence") else "-"
         lines.append(
             f"| {row['name']} | {row['baseline_caught']} | {row['baseline_missed']} | "
-            f"{row['baseline_unviable']} | {score:.2f}% | {row['minimum_score']:.2f}% | "
-            f"`{row['baseline_commit']}` |"
+            f"{timeout} | {row['baseline_unviable']} | {score:.2f}% | "
+            f"{row['minimum_score']:.2f}% | `{row['baseline_commit']}` | {evidence} |"
         )
     lines.append("")
     return "\n".join(lines)
@@ -230,7 +328,7 @@ def run_mutations(quality: dict, output: Path) -> None:
         if row["features"]:
             command += ["--features", ",".join(row["features"])]
         result = subprocess.run(command, cwd=ROOT, check=False)
-        if result.returncode not in {0, 2}:
+        if result.returncode not in {0, 2, 3}:
             raise RuntimeError(f"{row['name']}: cargo-mutants exited {result.returncode}")
         outcomes_path = campaign / "mutants.out/outcomes.json"
         outcomes = json.loads(outcomes_path.read_text(encoding="utf-8"))["outcomes"]

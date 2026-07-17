@@ -70,7 +70,8 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 
 ## Mutation baselines
 
-| Campaign | Caught | Missed | Unviable | Score | Minimum | Commit |
-|---|---:|---:|---:|---:|---:|---|
-| elf-parser-loader | 67 | 15 | 36 | 81.71% | 80.00% | `2c3bd2c` |
-| bpf-verifier-policy | 72 | 21 | 8 | 77.42% | 75.00% | `2c3bd2c` |
+| Campaign | Caught | Missed | Timeout | Unviable | Score | Minimum | Commit | Evidence |
+|---|---:|---:|---:|---:|---:|---:|---|---|
+| elf-parser-loader | 67 | 15 | 0 | 36 | 81.71% | 80.00% | `2c3bd2c` | - |
+| bpf-verifier-policy | 72 | 21 | 0 | 8 | 77.42% | 75.00% | `2c3bd2c` | - |
+| shrike-link-protocol | 143 | 10 | 2 | 8 | 92.26% | 90.00% | `2cd870d` | [`report`](../quality-evidence/2cd870d/shrike-link-protocol.json) |
