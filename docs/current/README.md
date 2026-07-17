@@ -48,12 +48,12 @@ Miri and QEMU and is not complete release evidence.
 
 Current generated authority:
 
-- [Component inventory](../generated/components.md)
-- [Shipped-image and artifact provenance](../generated/artifacts.md)
-- [Immutable build inputs](../generated/build-inputs.md)
-- [Coverage and mutation quality boundary](../generated/quality.md)
-- [Versioned userspace ABI](../generated/abi.md)
-- [Supported target and feature matrix](../generated/targets.md)
+- [Component inventory](../reference/generated/components.md)
+- [Shipped-image and artifact provenance](../reference/generated/artifacts.md)
+- [Immutable build inputs](../reference/generated/build-inputs.md)
+- [Coverage and mutation quality boundary](../reference/generated/quality.md)
+- [Versioned userspace ABI](../reference/generated/abi.md)
+- [Supported target and feature matrix](../reference/generated/targets.md)
 
 Repository-local links in current, generated, archived, and audit Markdown are
 enforced by `scripts/check-doc-links.py` through the required

@@ -39,7 +39,7 @@ axiomos documentation is divided by authority:
   supported release surface.
 - [`adr/`](adr/) records accepted architecture decisions. Later ADRs supersede
   earlier ones; accepted ADRs are not edited to hide historical decisions.
-- [`generated/`](generated/README.md) is produced from checked-in manifests and
+- [`reference/generated/`](reference/generated/README.md) is produced from checked-in manifests and
   ABI descriptors. Generated files must not be edited by hand.
 - [`archive/`](archive/README.md) contains historical proposals, plans, audits,
   and specifications that are retained for traceability but are not current

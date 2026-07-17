@@ -87,7 +87,7 @@ they may not bypass the contract with a raw userspace dereference.
 
 The required gate covers the user-memory contract, mapping rollback, exec
 rollback, x86/AArch64 target checks, and QEMU fault probes. The generated
-[quality boundary](../generated/quality.md) records which VM components still
+[quality boundary](../reference/generated/quality.md) records which VM components still
 lack measured host coverage.
 
 Any change to frame ownership, invalidation ordering, fork/COW, or user-copy

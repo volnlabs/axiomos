@@ -2,7 +2,7 @@
 
 **Status:** Normative for the shipped BPF control and execution planes.
 
-The versioned [ABI catalog](../generated/abi.md) is the authority for supported
+The versioned [ABI catalog](../reference/generated/abi.md) is the authority for supported
 commands, map types, helpers, and attach types. This document defines how those
 operations acquire authority and how their objects remain bounded.
 
@@ -114,7 +114,7 @@ This is deterministic lifecycle ownership, not garbage collection.
 The required gate covers signed production loading, command/capability mapping,
 generation-safe handles, quotas, unload/reclamation, map leases, publication
 failure, `EpochSnapshot` Loom models, and the cloud-profile Miri suite. The
-[quality boundary](../generated/quality.md) publishes the current BPF coverage
+[quality boundary](../reference/generated/quality.md) publishes the current BPF coverage
 and verifier mutation floor.
 
 Remaining assurance limits are recorded in `ENGINEERING_AUDIT.md`: physical

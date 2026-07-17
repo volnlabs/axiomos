@@ -40,14 +40,14 @@ RP2040 firmware control loop
 
 The root workspace and every standalone Cargo, fuzz, firmware, and Lean
 component are enumerated by [`ci/components.toml`](../../ci/components.toml).
-The generated [component inventory](../generated/components.md) is the readable
+The generated [component inventory](../reference/generated/components.md) is the readable
 view of that boundary.
 
 ## Supported targets
 
 The supported target/feature combinations are defined by
 [ADR-0003](../adr/0003-supported-targets.md) and generated in the
-[target matrix](../generated/targets.md):
+[target matrix](../reference/generated/targets.md):
 
 - x86_64 bare metal under the pinned QEMU/OVMF launch path is the primary
   release-gate target.
@@ -56,8 +56,8 @@ The supported target/feature combinations are defined by
 - RISC-V is an isolated experimental demo and is not a shipped kernel target.
 
 Produced boot images, root filesystems, firmware, and trust roots are listed in
-the [artifact provenance table](../generated/artifacts.md). Build inputs such as
-OVMF and Limine are listed in the [immutable input table](../generated/build-inputs.md).
+the [artifact provenance table](../reference/generated/artifacts.md). Build inputs such as
+OVMF and Limine are listed in the [immutable input table](../reference/generated/build-inputs.md).
 
 ## Runtime ownership
 
@@ -74,7 +74,7 @@ OVMF and Limine are listed in the [immutable input table](../generated/build-inp
   and resident-CPU mask. Mapping, rollback, user-copy, shootdown, and fault
   semantics are normative in [VM ownership and faults](vm.md).
 - **VFS and syscalls:** ABI-visible commands are limited to the generated
-  [ABI v1 catalog](../generated/abi.md). Typed error policy is defined by
+  [ABI v1 catalog](../reference/generated/abi.md). Typed error policy is defined by
   [ADR-0002](../adr/0002-kernel-error-policy.md).
 - **BPF:** the kernel binary owns credentials, handles, quotas, attachment
   publication, and object reclamation. `kernel_bpf` owns parsing,
