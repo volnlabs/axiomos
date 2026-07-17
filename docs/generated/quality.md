@@ -37,7 +37,7 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 | `userspace/benchmark/Cargo.toml` | benchmark image | target-image |
 | `userspace/bpf_loader/Cargo.toml` | BPF loader image | target-image |
 | `userspace/file_io_demo/Cargo.toml` | filesystem demo | target-image |
-| `userspace/file_structure/Cargo.toml` | image filesystem model | deferred-host |
+| `userspace/file_structure/Cargo.toml` | image filesystem model | measured |
 | `userspace/fork_test/Cargo.toml` | process lifecycle probe | target-image |
 | `userspace/gpio_demo/Cargo.toml` | GPIO demo | target-image |
 | `userspace/iio_demo/Cargo.toml` | IIO demo | target-image |
@@ -78,6 +78,7 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 | shrike-control | `firmware/shrike_control/Cargo.toml` | 99.40% | 91.18% | 99.00% | 91.00% | `617ae0f` |
 | shrike-rp2040-host-sim | `firmware/shrike_rp2040_host_sim/Cargo.toml` | 73.85% | 50.00% | 73.00% | 49.00% | `617ae0f` |
 | rk-bridge | `userspace/rk_bridge/Cargo.toml` | 40.93% | 56.25% | 40.00% | 56.00% | `fdf8580` |
+| file-structure | `userspace/file_structure/Cargo.toml` | 100.00% | 82.14% | 99.00% | 82.00% | `9e1d6af` |
 
 ## Mutation baselines
 

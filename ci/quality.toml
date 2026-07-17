@@ -34,7 +34,7 @@ cargo_mutants_version = "27.1.0"
 "userspace/benchmark/Cargo.toml" = "target-image"
 "userspace/bpf_loader/Cargo.toml" = "target-image"
 "userspace/file_io_demo/Cargo.toml" = "target-image"
-"userspace/file_structure/Cargo.toml" = "deferred-host"
+"userspace/file_structure/Cargo.toml" = "measured"
 "userspace/fork_test/Cargo.toml" = "target-image"
 "userspace/gpio_demo/Cargo.toml" = "target-image"
 "userspace/iio_demo/Cargo.toml" = "target-image"
@@ -263,6 +263,19 @@ minimum_branches = 56.0
 baseline_lines = 40.93
 baseline_branches = 56.25
 baseline_commit = "fdf8580"
+
+[[coverage]]
+name = "file-structure"
+component = "userspace/file_structure/Cargo.toml"
+package = "file_structure"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 99.0
+minimum_branches = 82.0
+baseline_lines = 100.0
+baseline_branches = 82.14
+baseline_commit = "9e1d6af"
 
 [[mutation]]
 name = "elf-parser-loader"
