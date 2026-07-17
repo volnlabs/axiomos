@@ -11,6 +11,26 @@ const PHASE4_BRIDGE_DEMO: &str = "/bin/sched_switch_bridge_demo";
 const SIGNED_BPF_LOADER: &str = "/bin/signed_bpf_loader";
 const UNMAPPED_USER_ADDRESS: usize = 0x0000_7000_0000_0000;
 
+// Private audit-diagnostics operations. They deliberately remain outside
+// kernel_abi: production kernels reject them with EINVAL.
+const DEBUG_OP_GET_PIPE_READ_BLOCKS: usize = 3;
+const DEBUG_OP_GET_CHILD_WAIT_BLOCKS: usize = 4;
+
+#[derive(Clone, Copy)]
+struct BlockingProbeResult {
+    functional: bool,
+    blocked: Option<bool>,
+}
+
+impl BlockingProbeResult {
+    const fn failed() -> Self {
+        Self {
+            functional: false,
+            blocked: None,
+        }
+    }
+}
+
 #[cfg(feature = "bpf-unsigned-development")]
 #[repr(C)]
 struct BpfInsn {
@@ -47,13 +67,56 @@ pub extern "C" fn _start() -> ! {
         write(1, b"NANOSLEEP_INTERRUPT_FAIL\n");
     }
 
-    if pipe_wait_queue_probe() {
+    let pipe_reader_data_wake = pipe_blocked_reader_data_wake_probe();
+    if pipe_reader_data_wake.functional {
+        write(1, b"PIPE_WAIT_READER_DATA_OK\n");
+    } else {
+        write(1, b"PIPE_WAIT_READER_DATA_FAIL\n");
+    }
+    emit_blocked_marker(
+        pipe_reader_data_wake,
+        b"PIPE_WAIT_READER_DATA_BLOCKED_OK\n",
+        b"PIPE_WAIT_READER_DATA_BLOCKED_FAIL\n",
+    );
+
+    let pipe_reader_eof_wake = pipe_blocked_reader_eof_wake_probe();
+    if pipe_reader_eof_wake.functional {
+        write(1, b"PIPE_WAIT_READER_EOF_OK\n");
+    } else {
+        write(1, b"PIPE_WAIT_READER_EOF_FAIL\n");
+    }
+    emit_blocked_marker(
+        pipe_reader_eof_wake,
+        b"PIPE_WAIT_READER_EOF_BLOCKED_OK\n",
+        b"PIPE_WAIT_READER_EOF_BLOCKED_FAIL\n",
+    );
+
+    if pipe_reader_data_wake.functional && pipe_reader_eof_wake.functional {
         write(1, b"PIPE_WAITQ_OK\n");
     } else {
         write(1, b"PIPE_WAITQ_FAIL\n");
     }
 
-    if lifecycle_exit_wait_probe() {
+    let child_wait_before_exit = child_wait_before_exit_probe();
+    if child_wait_before_exit.functional {
+        write(1, b"CHILD_WAIT_BEFORE_EXIT_OK\n");
+    } else {
+        write(1, b"CHILD_WAIT_BEFORE_EXIT_FAIL\n");
+    }
+    emit_blocked_marker(
+        child_wait_before_exit,
+        b"CHILD_WAIT_BEFORE_EXIT_BLOCKED_OK\n",
+        b"CHILD_WAIT_BEFORE_EXIT_BLOCKED_FAIL\n",
+    );
+
+    let child_exit_before_wait = child_exit_before_wait_probe();
+    if child_exit_before_wait {
+        write(1, b"CHILD_EXIT_BEFORE_WAIT_OK\n");
+    } else {
+        write(1, b"CHILD_EXIT_BEFORE_WAIT_FAIL\n");
+    }
+
+    if child_wait_before_exit.functional && child_exit_before_wait {
         write(1, b"LIFECYCLE_EXIT_WAIT_OK\n");
     } else {
         write(1, b"LIFECYCLE_EXIT_WAIT_FAIL\n");
@@ -608,55 +671,239 @@ fn bpf_hook_snapshot_smp_probe() -> bool {
     probe_ok && execution_seen && cleanup_ok
 }
 
-fn lifecycle_exit_wait_probe() -> bool {
-    let child = minilib::fork();
-    if child < 0 {
-        return false;
-    }
-    if child == 0 {
-        minilib::exit(42);
-    }
-
-    let mut status = 0;
-    minilib::waitpid(child, &mut status, 0) == child && status == 42 << 8
+fn read_audit_counter(op: usize) -> Option<usize> {
+    let value = minilib::debug_syscall(op, 0);
+    (value >= 0).then_some(value as usize)
 }
 
-fn pipe_wait_queue_probe() -> bool {
-    let mut fds = [-1; 2];
-    if minilib::pipe(fds.as_mut_ptr()) != 0 {
-        return false;
+fn counter_increased(before: Option<usize>, after: Option<usize>) -> Option<bool> {
+    Some(after? > before?)
+}
+
+fn emit_blocked_marker(result: BlockingProbeResult, ok: &[u8], fail: &[u8]) {
+    if let Some(blocked) = result.blocked {
+        write(
+            1,
+            if result.functional && blocked {
+                ok
+            } else {
+                fail
+            },
+        );
+    }
+}
+
+fn wait_probe_delay() -> bool {
+    let delay = minilib::timespec {
+        tv_sec: 0,
+        tv_nsec: 50_000_000,
+    };
+    minilib::nanosleep(&raw const delay, core::ptr::null_mut()) == 0
+}
+
+fn pipe_blocked_reader_data_wake_probe() -> BlockingProbeResult {
+    let mut data = [-1; 2];
+    if minilib::pipe(data.as_mut_ptr()) != 0 {
+        return BlockingProbeResult::failed();
+    }
+    let mut ready = [-1; 2];
+    if minilib::pipe(ready.as_mut_ptr()) != 0 {
+        let _ = minilib::close(data[0]);
+        let _ = minilib::close(data[1]);
+        return BlockingProbeResult::failed();
     }
 
     let child = minilib::fork();
     if child < 0 {
-        let _ = minilib::close(fds[0]);
-        let _ = minilib::close(fds[1]);
-        return false;
+        for fd in [data[0], data[1], ready[0], ready[1]] {
+            let _ = minilib::close(fd);
+        }
+        return BlockingProbeResult::failed();
     }
     if child == 0 {
-        let _ = minilib::close(fds[0]);
-        let delay = minilib::timespec {
-            tv_sec: 0,
-            tv_nsec: 5_000_000,
-        };
-        if minilib::nanosleep(&raw const delay, core::ptr::null_mut()) != 0 {
-            minilib::exit(1);
-        }
-        let wrote_payload = minilib::write(fds[1], b"wake") == 4;
-        let closed_writer = minilib::close(fds[1]) == 0;
+        let setup = minilib::close(data[0]) == 0
+            && minilib::close(ready[0]) == 0
+            && minilib::write(ready[1], b"R") == 1
+            && minilib::close(ready[1]) == 0;
+        let delayed = setup && wait_probe_delay();
+        let wrote_payload = delayed && minilib::write(data[1], b"wake") == 4;
+        let closed_writer = minilib::close(data[1]) == 0;
         minilib::exit(if wrote_payload && closed_writer { 0 } else { 1 });
     }
 
-    let closed_writer = minilib::close(fds[1]) == 0;
+    let setup = minilib::close(data[1]) == 0 && minilib::close(ready[1]) == 0;
+    let mut ready_byte = [0; 1];
+    let child_is_delaying =
+        setup && minilib::read(ready[0], &mut ready_byte) == 1 && ready_byte == *b"R";
+    let closed_ready = minilib::close(ready[0]) == 0;
     let mut payload = [0; 4];
-    let received_payload = minilib::read(fds[0], &mut payload) == 4 && payload == *b"wake";
-    let mut eof_probe = [0; 1];
-    let received_eof = minilib::read(fds[0], &mut eof_probe) == 0;
-    let closed_reader = minilib::close(fds[0]) == 0;
+    let block_count_before = if child_is_delaying {
+        read_audit_counter(DEBUG_OP_GET_PIPE_READ_BLOCKS)
+    } else {
+        None
+    };
+    let received_payload =
+        child_is_delaying && minilib::read(data[0], &mut payload) == 4 && payload == *b"wake";
+    let block_count_after = if child_is_delaying {
+        read_audit_counter(DEBUG_OP_GET_PIPE_READ_BLOCKS)
+    } else {
+        None
+    };
+    let closed_reader = minilib::close(data[0]) == 0;
     let mut status = 0;
     let reaped_child = minilib::waitpid(child, &raw mut status, 0) == child && status == 0;
 
-    closed_writer && received_payload && received_eof && closed_reader && reaped_child
+    BlockingProbeResult {
+        functional: child_is_delaying
+            && closed_ready
+            && received_payload
+            && closed_reader
+            && reaped_child,
+        blocked: counter_increased(block_count_before, block_count_after),
+    }
+}
+
+fn pipe_blocked_reader_eof_wake_probe() -> BlockingProbeResult {
+    let mut data = [-1; 2];
+    if minilib::pipe(data.as_mut_ptr()) != 0 {
+        return BlockingProbeResult::failed();
+    }
+    let mut ready = [-1; 2];
+    if minilib::pipe(ready.as_mut_ptr()) != 0 {
+        let _ = minilib::close(data[0]);
+        let _ = minilib::close(data[1]);
+        return BlockingProbeResult::failed();
+    }
+
+    let child = minilib::fork();
+    if child < 0 {
+        for fd in [data[0], data[1], ready[0], ready[1]] {
+            let _ = minilib::close(fd);
+        }
+        return BlockingProbeResult::failed();
+    }
+    if child == 0 {
+        let setup = minilib::close(data[0]) == 0
+            && minilib::close(ready[0]) == 0
+            && minilib::write(ready[1], b"R") == 1
+            && minilib::close(ready[1]) == 0;
+        let delayed = setup && wait_probe_delay();
+        let closed_writer = minilib::close(data[1]) == 0;
+        minilib::exit(if delayed && closed_writer { 0 } else { 1 });
+    }
+
+    let setup = minilib::close(data[1]) == 0 && minilib::close(ready[1]) == 0;
+    let mut ready_byte = [0; 1];
+    let child_is_delaying =
+        setup && minilib::read(ready[0], &mut ready_byte) == 1 && ready_byte == *b"R";
+    let closed_ready = minilib::close(ready[0]) == 0;
+    let mut eof_probe = [0; 1];
+    let block_count_before = if child_is_delaying {
+        read_audit_counter(DEBUG_OP_GET_PIPE_READ_BLOCKS)
+    } else {
+        None
+    };
+    let received_eof = child_is_delaying && minilib::read(data[0], &mut eof_probe) == 0;
+    let block_count_after = if child_is_delaying {
+        read_audit_counter(DEBUG_OP_GET_PIPE_READ_BLOCKS)
+    } else {
+        None
+    };
+    let closed_reader = minilib::close(data[0]) == 0;
+    let mut status = 0;
+    let reaped_child = minilib::waitpid(child, &raw mut status, 0) == child && status == 0;
+
+    BlockingProbeResult {
+        functional: child_is_delaying
+            && closed_ready
+            && received_eof
+            && closed_reader
+            && reaped_child,
+        blocked: counter_increased(block_count_before, block_count_after),
+    }
+}
+
+fn child_wait_before_exit_probe() -> BlockingProbeResult {
+    let mut ready = [-1; 2];
+    if minilib::pipe(ready.as_mut_ptr()) != 0 {
+        return BlockingProbeResult::failed();
+    }
+
+    let child = minilib::fork();
+    if child < 0 {
+        let _ = minilib::close(ready[0]);
+        let _ = minilib::close(ready[1]);
+        return BlockingProbeResult::failed();
+    }
+    if child == 0 {
+        let setup = minilib::close(ready[0]) == 0
+            && minilib::write(ready[1], b"R") == 1
+            && minilib::close(ready[1]) == 0;
+        let delayed = setup && wait_probe_delay();
+        minilib::exit(if delayed { 42 } else { 1 });
+    }
+
+    let setup = minilib::close(ready[1]) == 0;
+    let mut ready_byte = [0; 1];
+    let child_is_delaying =
+        setup && minilib::read(ready[0], &mut ready_byte) == 1 && ready_byte == *b"R";
+    let closed_ready = minilib::close(ready[0]) == 0;
+    let mut status = 0;
+    let observed_running =
+        child_is_delaying && minilib::waitpid(child, &raw mut status, minilib::WNOHANG) == 0;
+    let block_count_before = if observed_running {
+        read_audit_counter(DEBUG_OP_GET_CHILD_WAIT_BLOCKS)
+    } else {
+        None
+    };
+    let reaped_child = minilib::waitpid(child, &raw mut status, 0) == child && status == 42 << 8;
+    let block_count_after = if observed_running {
+        read_audit_counter(DEBUG_OP_GET_CHILD_WAIT_BLOCKS)
+    } else {
+        None
+    };
+
+    BlockingProbeResult {
+        functional: child_is_delaying && closed_ready && observed_running && reaped_child,
+        blocked: counter_increased(block_count_before, block_count_after),
+    }
+}
+
+fn child_exit_before_wait_probe() -> bool {
+    let mut ready = [-1; 2];
+    if minilib::pipe(ready.as_mut_ptr()) != 0 {
+        return false;
+    }
+
+    let child = minilib::fork();
+    if child < 0 {
+        let _ = minilib::close(ready[0]);
+        let _ = minilib::close(ready[1]);
+        return false;
+    }
+    if child == 0 {
+        let setup = minilib::close(ready[0]) == 0 && minilib::write(ready[1], b"R") == 1;
+        // Leave the writer open. Process::mark_exited must publish the status
+        // and close inherited descriptors before the parent can observe EOF.
+        minilib::exit(if setup { 43 } else { 1 });
+    }
+
+    let setup = minilib::close(ready[1]) == 0;
+    let mut ready_byte = [0; 1];
+    let child_started =
+        setup && minilib::read(ready[0], &mut ready_byte) == 1 && ready_byte == *b"R";
+    let mut eof_probe = [0; 1];
+    let exit_teardown_observed = child_started && minilib::read(ready[0], &mut eof_probe) == 0;
+    let closed_ready = minilib::close(ready[0]) == 0;
+    let mut status = 0;
+    let reaped_without_blocking = exit_teardown_observed
+        && minilib::waitpid(child, &raw mut status, minilib::WNOHANG) == child
+        && status == 43 << 8;
+    if !reaped_without_blocking {
+        let _ = minilib::waitpid(child, &raw mut status, 0);
+    }
+
+    child_started && exit_teardown_observed && closed_ready && reaped_without_blocking
 }
 
 fn lifecycle_fault_wait_probe() -> bool {

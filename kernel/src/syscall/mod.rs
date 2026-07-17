@@ -65,6 +65,10 @@ static EXPORTED_RINGBUF_MAP_ID: AtomicU32 = AtomicU32::new(u32::MAX);
 
 const DEBUG_OP_SET_EXPORTED_RINGBUF_MAP_ID: usize = 1;
 const DEBUG_OP_GET_EXPORTED_RINGBUF_MAP_ID: usize = 2;
+#[cfg(feature = "audit-diagnostics")]
+const DEBUG_OP_GET_PIPE_READ_BLOCKS: usize = 3;
+#[cfg(feature = "audit-diagnostics")]
+const DEBUG_OP_GET_CHILD_WAIT_BLOCKS: usize = 4;
 
 #[cfg(feature = "rpi5")]
 fn require_current_bpf_capability(
@@ -274,6 +278,18 @@ fn dispatch_sys_debug(op: usize, value: usize) -> Result<usize, Errno> {
                 Ok(map_id as usize)
             }
         }
+        #[cfg(feature = "audit-diagnostics")]
+        DEBUG_OP_GET_PIPE_READ_BLOCKS => Ok(crate::mcore::context::ExecutionContext::load()
+            .current_process()
+            .telemetry()
+            .pipe_read_blocks
+            .load(AtomicOrdering::Relaxed)),
+        #[cfg(feature = "audit-diagnostics")]
+        DEBUG_OP_GET_CHILD_WAIT_BLOCKS => Ok(crate::mcore::context::ExecutionContext::load()
+            .current_process()
+            .telemetry()
+            .child_wait_blocks
+            .load(AtomicOrdering::Relaxed)),
         _ => Err(EINVAL),
     }
 }

@@ -24,6 +24,18 @@ impl Process {
             return;
         }
         *exit_code = Some(status);
+        drop(exit_code);
+
+        // Publish the status before closing descriptors so an endpoint wakeup
+        // cannot expose a zombie whose exit code is still absent. Detach the
+        // table under its lock, then run endpoint destructors without that lock:
+        // pipe close callbacks may wake tasks and enqueue scheduler work.
+        let detached_descriptors = {
+            let mut descriptors = self.file_descriptors.write();
+            core::mem::take(&mut *descriptors)
+        };
+        drop(detached_descriptors);
+
         if let Some(parent_exit_wait) = self.parent_exit_wait.as_ref() {
             parent_exit_wait.wake_all();
         }

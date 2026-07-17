@@ -65,7 +65,19 @@ impl PipeEndpoint {
                 }
                 PipeRead::EndOfFile => return Ok(0),
                 PipeRead::Block => {
-                    TaskWait::block_current(&self.pipe.readable, move || drop(state));
+                    let blocked = TaskWait::block_current(&self.pipe.readable, move || drop(state));
+                    #[cfg(not(feature = "audit-diagnostics"))]
+                    let _ = blocked;
+                    #[cfg(feature = "audit-diagnostics")]
+                    if blocked {
+                        use core::sync::atomic::Ordering;
+
+                        crate::mcore::context::ExecutionContext::load()
+                            .current_process()
+                            .telemetry()
+                            .pipe_read_blocks
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
         }

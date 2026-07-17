@@ -222,8 +222,20 @@ pub fn sys_waitpid(pid: isize, status_ptr: usize, options: usize) -> Result<usiz
         }
 
         let wait_channel = current_process.child_exit_wait().clone();
-        crate::mcore::mtask::scheduler::wait::TaskWait::block_current(&wait_channel, move || {
-            drop(tree);
-        });
+        let blocked = crate::mcore::mtask::scheduler::wait::TaskWait::block_current(
+            &wait_channel,
+            move || {
+                drop(tree);
+            },
+        );
+        #[cfg(not(feature = "audit-diagnostics"))]
+        let _ = blocked;
+        #[cfg(feature = "audit-diagnostics")]
+        if blocked {
+            current_process
+                .telemetry()
+                .child_wait_blocks
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
     }
 }
