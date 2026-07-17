@@ -19,9 +19,9 @@ this refactor; it does not replace architecture, reference, or ADR documents.
 
 ## Execution checklist
 
-- [ ] Inventory authoritative, generated, operational, proposed, and historical
-      files.
-- [ ] Add `docs/README.md` and `scripts/README.md` authority guidance.
+- [x] Inventory authoritative, generated, operational, proposed, and historical
+      files; see `docs/plans/active/repository-inventory.md`.
+- [x] Add `docs/README.md` and `scripts/README.md` authority guidance.
 - [ ] Add metadata to substantial active docs and ADRs.
 - [ ] Move generated documentation under `docs/reference/generated/` and update
       xtask paths.
