@@ -185,4 +185,11 @@ mod tests {
         // Cursor one probes CPUs 2, 3, 4, and 5.
         assert_eq!(queues.try_take_from(0, || 0b11_1111).unwrap().id, 55);
     }
+
+    #[test]
+    fn supports_the_maximum_cpu_count_and_full_online_mask() {
+        let queues = queues(u64::BITS as usize);
+
+        assert!(queues.try_take_from(63, || u64::MAX).is_none());
+    }
 }
