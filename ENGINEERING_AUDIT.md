@@ -56,7 +56,13 @@ Current release-gate checklist:
 - [x] Document the historical post-boot ring-3 page fault at 0x2a00000012 in `init_x86` as a separate runtime finding in `docs/security/audit-runtime-findings.md`. It is currently non-reproducing on this host; the historical cause remains unresolved, there is no reproducible regression artifact, and it is not gated.
 - [x] Wire `miri-bpf-cloud` into the default required gate so the regression test runs on every normal/full local gate (`f5338dc`).
 - [x] Model the genuine BPF hook-snapshot reader/writer boundary with Loom and enforce the serialized handle-generation boundary. Four `EpochSnapshot` lifecycle models exercise publish/read consistency, delayed reclamation, post-reader publication, and counter saturation; `bpf-concurrency-boundary-static` rejects lock-free handle state because production handles remain behind `Mutex<BpfManager>` with exclusive vector borrows (`558ee19`).
-- [ ] Extend wait-channel fault-injection coverage to child exit, pipes, and device/I/O paths.
+- [~] Extend wait-channel fault-injection coverage to child exit, pipes, and
+  device/I/O paths. Commit `b597e2b` drives the production pipe and waitpid
+  paths under QEMU and requires audit-only counters that increment only after
+  `TaskWait::block_current` switches and the waiter resumes. It covers blocked
+  read-to-data, blocked read-to-EOF, wait-before-exit, and exit-before-wait.
+  Device/I/O completion remains conditional because no production driver uses
+  `WaitChannel` for completion.
 - [ ] Run H-06 on hosted GitHub runners after billing/monthly quota is restored.
 - [ ] Pass physical RPi5 and RP2040 HIL, including GPIO interrupt and control-link failure cases.
 - [ ] Obtain an independent safety/concurrency review of the unsafe ledger, scheduler/VM shootdown, and BPF epoch/snapshot invariants.
@@ -94,18 +100,14 @@ the pre-condition for landing it.
    reproducible, its eventual fix also needs a pinned regression artifact;
    the current non-reproducing observation is not such a guard.
 
-4. **Pipe / child-exit / device wait-channel fixtures** — Deferred
-   pending host-testable production fixtures. The current channel-
-   core tests in `kernel/src/mcore/mtask/scheduler/wait_channel.rs::tests`
-   cover the algorithm with `MockSink<T>`; subsystem call-site tests
-   require a real task scheduler / process model that can run on the
-   host, which does not exist yet. When such a seam is available
-   (e.g., a host-runnable `RunQueues` test-double or a full host
-   kernel harness), pipe and child-exit fixtures will be added as
-   separate tests against the production types `PipeEndpoint` /
-   `Process::mark_exited`. Device fixtures will be added once a
-   driver actually uses `WaitChannel` for completion — currently no
-   driver does, so writing a device fixture today would be a stub.
+4. **Device wait-channel fixture** — Pipe and child-exit integration is no
+   longer deferred: commit `b597e2b` runs the real `PipeEndpoint`, waitpid,
+   `Process::mark_exited`, scheduler, and descriptor teardown paths in the
+   full QEMU kernel. Audit-only counters prove that each targeted waiter
+   completed a scheduler block and resumed after its wake event; production
+   builds retain only the functional probes. Device coverage remains
+   conditional: no production driver currently uses `WaitChannel` for
+   completion, so a device fixture today would be a stub rather than evidence.
 
 5. **Ring-3 fault regression** — The symptom is currently
    non-reproducing on this system OVMF at this build
@@ -141,12 +143,12 @@ production, HIL, hosted, or independent-review work.
 | Done | Default-gate BPF Miri | `kernel/crates/kernel_bpf`, audit gate | Test/CI | Landed at `f5338dc` and verified at `a409522`: the required `miri-setup` and `miri-bpf-cloud` steps run the existing cloud-profile suite and fail the normal/full gate on UB; 427 tests pass (43 ignored) | Default gate-recorded warm-host runtime was 1236 seconds. `--quick` deliberately omits Miri for iteration; it is not release evidence. |
 | Done | BPF concurrency model boundary | `kernel/src/bpf`, `kernel_bpf` | Test/model | Four required Loom tests exercise the genuine `EpochSnapshot` reader/publisher/reclamation boundary; `bpf-concurrency-boundary-static` enforces mutex-serialized, exclusive-borrow handle generations (`558ee19`, reverified at `a409522`) | No additional handle Loom wrapper is valid while handle state is private `BpfManager` state behind one production mutex. Reopen only if production synchronization changes. |
 | 4 | Run-queue ownership, stealing, and wakeup | `kernel/src/mcore/mtask/scheduler`, x86/APIC and AArch64 interrupt owners | Kernel + ADR + test | Updated ADR plus an SMP-4 regression and a model proving the chosen local-consumer/remote-steal contract; scheduler wakeup IPI is implemented only if its measured latency case and ownership contract justify it | Current per-CPU topology remains. Requires the three predicates in `docs/reviews/scheduler-runqueues.md`; no `CpuContext` seam or queue replacement before them. |
-| 5 | Pipe and child-exit wait-channel integration | scheduler, `kernel/src/file`, process/syscall owners | Test + production seam | Host-runnable tests drive the production pipe and child-exit types without recreating kernel globals; device coverage is added only when a production driver uses `WaitChannel` for completion | Requires a real host scheduler/process seam or full host-kernel harness. Current channel-core/model tests remain valid but do not close subsystem integration. |
+| Done / conditional | Pipe, child-exit, and device wait-channel integration | scheduler, `kernel/src/file`, process/syscall and driver owners | Test + production seam | Production QEMU probes drive blocked pipe data/EOF and both child-exit orderings; device coverage is added only when a production driver uses `WaitChannel` for completion | Landed at `b597e2b`: three audit-only counters/markers prove completed scheduler block-and-resume cycles, while the functional markers also run in production configuration. `Process::mark_exited` detaches descriptors before the parent wake, so inherited pipe writers deliver EOF on exit. Device completion remains conditional on a real consumer. |
 | Done | Process-manager split | `kernel/src/mcore/mtask/process` | Kernel refactor | Process tree, file-descriptor state, construction/fork, exec transaction, and userspace-entry invariants live in separately reviewed modules with unchanged ABI and passing gate | `construction.rs`, `fork.rs`, `execve.rs`, and `trampoline.rs` landed in `8a3473e`, `b2c1bb3`, and `a409522`; `process-module-boundaries-static`, both kernel target checks, and both full gates pass at `a409522`. |
 | Done | Uniform error policy | boot, syscall, VM, VFS, BPF, platform owners | Architecture + kernel refactor | Every supported boundary conforms to ADR-0002 with typed errors and explicit panic/halt policy | Completed at `111337f`: all designated boot, filesystem, driver, address, process fork/exec, and AArch64 paging/DTB boundaries expose typed errors under the required `error-policy-static` check. AArch64 copy-on-write replacement restores the old mapping if private-page publication fails; both full gates pass. |
 | Done | Supported target and entrypoint cleanup | root manifests, `ci/targets.toml`, platform owners | Build/architecture | One generated supported matrix names every shipped entrypoint; parallel RISC-V experiments are removed or relocated outside shipped targets | The canonical manifest assigns RISC-V ownership solely to `kernel/demos/riscv`; the alternate main-kernel manifest, entrypoints, linker, dependency/feature, null allocator, and dormant architecture module are retired. `target-boundary-static` prevents their return while the standalone demo retains strict target lint. |
 | Done | Artifact pinning and shipped-image provenance | build scripts, Limine/OVMF/Pi image owners | Build/release | Landed at `1fcf1a9`: `ci/artifacts.toml` and the generated authority enumerate eight produced images with pinned-toolchain inputs, exact selection rules, and SHA-256 evidence locations; the required `artifact-provenance-static` step rejects drift | OVMF and Limine remain pinned. AArch64 virt and Pi builds consume the `DISK_IMAGE` reported by their exact build invocation rather than scanning mtimes; the Pi release producer hashes its ELF, raw kernel, rootfs, and trust root before deployment. External Pi boot firmware remains part of HIL evidence, not a repository-produced image. |
-| 10 | Broader deterministic fault injection | physical allocator, mapping, exec/spawn, BPF manager, remaining allocation owners | Test/kernel | Fail-after-N sweeps cover the remaining allocation/mapping transactions and prove rollback/no-leak invariants at each supported failure boundary | Physical allocation, mapper, exec/spawn, both BPF handle append reservations, authorization-grant reservation, pinned-map path reservation, and cloud time-series and ring-buffer resize reservations are covered for their stated scope. The map tests inject the production reservation seams and prove live storage plus control metadata remain unchanged. Continue by owned transaction, not a global failure switch. |
+| 10 | Broader deterministic fault injection | physical allocator, mapping, exec/spawn, BPF manager, remaining allocation owners | Test/kernel | Fail-after-N sweeps cover the remaining allocation/mapping transactions and prove rollback/no-leak invariants at each supported failure boundary | Physical allocation, mapper, exec/spawn, both BPF handle append reservations, authorization-grant reservation, pinned-map path reservation, and cloud array, time-series, and ring-buffer resize reservations are covered for their stated scope. The map tests inject the production reservation seams and prove live storage plus control metadata remain unchanged. Continue by owned transaction, not a global failure switch. |
 | 11 | Coverage and mutation budgets | all first-party crates, parser/verifier owners | Test/quality | Per-crate line/branch reports are published from the canonical manifest; parser/verifier mutation thresholds are versioned and enforced | **Partial.** `ci/quality.toml` enumerates all 49 canonical components and the required `quality-boundary-static` check rejects denominator or budget drift. Nineteen components now have enforced line/branch baselines: `xtask` (41.50% / 59.00%), `kernel_abi` (68.35% / no branch sites), `kernel_bpf` (77.71% / 63.43%), `kernel_devfs` (91.11% / 81.03%), `kernel_elfloader` (83.29% / 66.67%), `kernel_map_transaction` (94.35% / 100.00%), `kernel_pci` (47.86% / 100.00%; privileged x86 port I/O remains outside host execution), `kernel_physical_memory` with `fault-injection` enabled (94.71% / 77.08%), `kernel_syscall` (67.47% / 77.08%), `kernel_time` (96.76% / 88.24%), `kernel_usermem` (98.40% / 86.67%), `kernel_vfs` (93.26% / 84.62%), `kernel_virtual_memory` (100.00% / 100.00%), `shrike_link` (98.57% / 94.44%), `shrike_control` (99.40% / 91.18%), `shrike_rp2040_host_sim` (73.85% / 50.00%), `file_structure` (100.00% / 82.14%), standalone `rk_bridge` (40.93% / 56.25%), and standalone `rk_cli` (62.80% / 34.68%). Mutation floors are enforced for the BPF verifier (77.42%), ELF parser/loader (81.71%), full `shrike_link` protocol/state-machine crate (92.26%), and bounded physical-memory `region.rs` scope (93.55%), with exact per-mutant evidence for both newer campaigns. Three `deferred-host` components still need measured coverage baselines before this row closes. |
 | Done | Documentation authority and archival | `docs/current`, ADR owners, audit owner | Documentation | Obsolete plans/audits/specifications move under an explicit archive; current VM, BPF-trust, JIT, scheduler, and platform documents identify their normative source and supported version | The pitch, execution plans, branch-specific review, legacy architecture, and superseded designs are bannered and indexed under `docs/archive`. `docs/current` now owns the architecture, VM, and BPF-trust contracts and links the accepted scheduler, target, error-policy, and JIT ADRs. |
 | Done | Naming, benchmark, documentation-link, and command cleanup | product/docs owners, benchmark owners, release gate | Documentation + release | Remaining Axiom/AxiomOS/axiom-ebpf drift is resolved; benchmark tables include commit, toolchain, raw-log location, and artifact hashes; required links and commands are checked by the gate | Required `documentation-links`, `product-naming-static`, `benchmark-provenance-static`, and `command-smoke` steps validate local links, active naming, attributable campaigns, and eight shell-free documented entrypoints. Unsupported hardware/QEMU/Linux claims are archived rather than published. |
@@ -169,9 +171,11 @@ snapshot below.
   bounded rotating victim scan; ADR-0001 defines the ownership and wakeup
   contract.
 - [~] Add event-driven wait channels for child exit, pipes, and I/O. Timer,
-  child-exit, and pipe waits use generation-checked channels; channel-core and
-  protocol tests exist. Device/I/O completion has no production consumer or
-  host-runnable integration fixture yet.
+  child-exit, and pipe waits use generation-checked channels. Commit `b597e2b`
+  exercises the production pipe and waitpid paths in QEMU; audit-only counters
+  prove blocked read-to-data, blocked read-to-EOF, and wait-before-exit actually
+  switched and resumed, while exit-before-wait validates descriptor teardown.
+  Device/I/O completion has no production `WaitChannel` consumer yet.
 - [x] Define preemption, interrupt, and lock-order rules in an ADR.
   [ADR-0001](docs/adr/0001-runtime-scheduling-locking.md) is accepted with
   an implementation gap: it covers current ownership, interrupts,
@@ -239,8 +243,9 @@ snapshot below.
 - [~] Add deterministic fail-after-N allocation and mapping fault injection.
   Physical allocation, mapping rollback, exec/spawn, both BPF handle-table
   append reservations, authorization-grant reservation, pinned-map path
-  reservation, and cloud time-series and ring-buffer resize reservations are
-  covered; the broader allocation/mapping surface is not yet exhausted.
+  reservation, and cloud array, time-series, and ring-buffer resize
+  reservations are covered; the broader allocation/mapping surface is not yet
+  exhausted.
 - [~] Publish per-crate line/branch coverage and add parser/verifier mutation
   testing. `ci/quality.toml` enumerates the exact 49-component denominator;
   required line/branch baselines cover 19 host-testable components, including
