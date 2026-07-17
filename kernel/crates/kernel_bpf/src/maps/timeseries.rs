@@ -226,6 +226,20 @@ impl TimeSeriesStorage {
     /// Resize storage (cloud profile only).
     #[cfg(feature = "cloud-profile")]
     fn resize(&mut self, new_capacity: usize) -> MapResult<()> {
+        self.resize_with_reservation(new_capacity, |buffer, len| {
+            buffer
+                .try_reserve_exact(len)
+                .map_err(|_| MapError::OutOfMemory)
+        })
+    }
+
+    /// Build the replacement completely before publishing any resize state.
+    #[cfg(feature = "cloud-profile")]
+    fn resize_with_reservation(
+        &mut self,
+        new_capacity: usize,
+        reserve: impl FnOnce(&mut Vec<u8>, usize) -> MapResult<()>,
+    ) -> MapResult<()> {
         if new_capacity == 0 {
             return Err(MapError::InvalidValue);
         }
@@ -238,9 +252,7 @@ impl TimeSeriesStorage {
             .checked_mul(new_capacity)
             .ok_or(MapError::OutOfMemory)?;
         let mut new_buffer = Vec::new();
-        new_buffer
-            .try_reserve_exact(new_len)
-            .map_err(|_| MapError::OutOfMemory)?;
+        reserve(&mut new_buffer, new_len)?;
         new_buffer.resize(new_len, 0);
 
         // Copy existing entries in order (oldest to newest)
@@ -717,6 +729,54 @@ mod tests {
         map.resize(3).expect("resize smaller");
         assert_eq!(map.capacity(), 3);
         assert_eq!(map.len(), 3);
+    }
+
+    #[cfg(feature = "cloud-profile")]
+    #[test]
+    fn timeseries_resize_fail_after_n_preserves_storage() {
+        let mut storage = TimeSeriesStorage::new(4, 3).expect("create storage");
+        for value in 0u32..3 {
+            assert!(storage.push(value as u64 * 1000, &value.to_ne_bytes()));
+        }
+
+        let before_buffer = storage.buffer.clone();
+        let before_entries = storage.get_last_n(storage.count);
+        let before = (
+            storage.entry_size,
+            storage.value_size,
+            storage.capacity,
+            storage.count,
+            storage.head_idx,
+        );
+
+        for fail_at in 1..=1 {
+            let mut checkpoint = 0;
+            let error = storage
+                .resize_with_reservation(8, |_replacement, _len| {
+                    checkpoint += 1;
+                    if checkpoint == fail_at {
+                        Err(MapError::OutOfMemory)
+                    } else {
+                        Ok(())
+                    }
+                })
+                .expect_err("injected reservation must fail");
+
+            assert_eq!(error, MapError::OutOfMemory);
+            assert_eq!(checkpoint, fail_at);
+            assert_eq!(storage.buffer, before_buffer);
+            assert_eq!(storage.get_last_n(storage.count), before_entries);
+            assert_eq!(
+                (
+                    storage.entry_size,
+                    storage.value_size,
+                    storage.capacity,
+                    storage.count,
+                    storage.head_idx,
+                ),
+                before
+            );
+        }
     }
 
     #[test]
