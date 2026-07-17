@@ -125,6 +125,10 @@ fn build_os_disk_image(target_arch: &str) -> PathBuf {
 }
 
 fn build_os_disk_dir(target_arch: &str) -> PathBuf {
+    file_structure::STRUCTURE
+        .validate()
+        .expect("root filesystem manifest must contain safe, unique path components");
+
     let disk = out_dir().join("disk");
     let _ = remove_dir_all(&disk);
     create_dir(&disk).expect("should be able to create disk directory");
