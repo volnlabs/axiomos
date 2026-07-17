@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::{env, fs};
 
+mod error;
+use error::XtaskError;
+
 const COMPONENT_MANIFEST: &str = "ci/components.toml";
 const GENERATED_COMPONENTS: &str = "docs/reference/generated/components.md";
 const ARTIFACT_MANIFEST: &str = "ci/artifacts.toml";
@@ -974,9 +977,22 @@ fn main() -> ExitCode {
     match execute() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("xtask: {error}");
+            let error = if error.starts_with("unknown xtask command")
+                || error.starts_with("missing xtask command")
+                || error.contains("accepts only")
+                || error.contains("requires exactly")
+            {
+                XtaskError::Usage(error)
+            } else if error.contains("No such file or directory") {
+                XtaskError::MissingDependency(error)
+            } else if error.starts_with("failed to run audit gate") {
+                XtaskError::Infrastructure(error)
+            } else {
+                XtaskError::Verification(error)
+            };
+            error.render();
             usage();
-            ExitCode::FAILURE
+            error.exit_code()
         }
     }
 }
