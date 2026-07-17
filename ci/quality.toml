@@ -23,7 +23,7 @@ cargo_mutants_version = "27.1.0"
 "kernel/crates/kernel_syscall/Cargo.toml" = "deferred-host"
 "kernel/crates/kernel_syscall/fuzz/Cargo.toml" = "fuzz-harness"
 "kernel/crates/kernel_time/Cargo.toml" = "deferred-host"
-"kernel/crates/kernel_usermem/Cargo.toml" = "deferred-host"
+"kernel/crates/kernel_usermem/Cargo.toml" = "measured"
 "kernel/crates/kernel_vfs/Cargo.toml" = "deferred-host"
 "kernel/crates/kernel_virtual_memory/Cargo.toml" = "deferred-host"
 "kernel/crates/shrike_link/Cargo.toml" = "deferred-host"
@@ -94,6 +94,19 @@ minimum_branches = 99.0
 baseline_lines = 94.35
 baseline_branches = 100.0
 baseline_commit = "97f514c"
+
+[[coverage]]
+name = "kernel-usermem"
+component = "kernel/crates/kernel_usermem/Cargo.toml"
+package = "kernel_usermem"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 98.0
+minimum_branches = 86.0
+baseline_lines = 98.40
+baseline_branches = 86.67
+baseline_commit = "946c2d2"
 
 [[mutation]]
 name = "elf-parser-loader"

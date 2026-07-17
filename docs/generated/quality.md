@@ -28,7 +28,7 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 | `kernel/crates/kernel_syscall/Cargo.toml` | syscall contracts | deferred-host |
 | `kernel/crates/kernel_syscall/fuzz/Cargo.toml` | syscall argument fuzz target | fuzz-harness |
 | `kernel/crates/kernel_time/Cargo.toml` | time and deadline queues | deferred-host |
-| `kernel/crates/kernel_usermem/Cargo.toml` | userspace memory boundary | deferred-host |
+| `kernel/crates/kernel_usermem/Cargo.toml` | userspace memory boundary | measured |
 | `kernel/crates/kernel_vfs/Cargo.toml` | virtual filesystem | deferred-host |
 | `kernel/crates/kernel_virtual_memory/Cargo.toml` | virtual memory | deferred-host |
 | `kernel/crates/shrike_link/Cargo.toml` | control-link protocol | deferred-host |
@@ -65,6 +65,7 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 | kernel-bpf-cloud | `kernel/crates/kernel_bpf/Cargo.toml` | 77.71% | 63.43% | 77.00% | 63.00% | `2c3bd2c` |
 | kernel-elfloader | `kernel/crates/kernel_elfloader/Cargo.toml` | 83.29% | 66.67% | 83.00% | 66.00% | `2c3bd2c` |
 | kernel-map-transaction | `kernel/crates/kernel_map_transaction/Cargo.toml` | 94.35% | 100.00% | 94.00% | 99.00% | `97f514c` |
+| kernel-usermem | `kernel/crates/kernel_usermem/Cargo.toml` | 98.40% | 86.67% | 98.00% | 86.00% | `946c2d2` |
 
 ## Mutation baselines
 
