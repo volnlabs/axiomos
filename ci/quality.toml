@@ -13,7 +13,7 @@ cargo_mutants_version = "27.1.0"
 "kernel/crates/kernel_bpf/Cargo.toml" = "measured"
 "kernel/crates/kernel_bpf/fuzz/Cargo.toml" = "fuzz-harness"
 "kernel/crates/kernel_devfs/Cargo.toml" = "measured"
-"kernel/crates/kernel_device/Cargo.toml" = "deferred-host"
+"kernel/crates/kernel_device/Cargo.toml" = "measured"
 "kernel/crates/kernel_elfloader/Cargo.toml" = "measured"
 "kernel/crates/kernel_elfloader/fuzz/Cargo.toml" = "fuzz-harness"
 "kernel/crates/kernel_memapi/Cargo.toml" = "deferred-host"
@@ -107,6 +107,19 @@ minimum_branches = 81.0
 baseline_lines = 91.11
 baseline_branches = 81.03
 baseline_commit = "fdf8580"
+
+[[coverage]]
+name = "kernel-device"
+component = "kernel/crates/kernel_device/Cargo.toml"
+package = "kernel_device"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 99.0
+minimum_branches = 99.0
+baseline_lines = 100.0
+baseline_branches = 100.0
+baseline_commit = "74bf881"
 
 [[coverage]]
 name = "kernel-elfloader"

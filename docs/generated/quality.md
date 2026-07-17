@@ -18,7 +18,7 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 | `kernel/crates/kernel_bpf/Cargo.toml` | BPF runtime | measured |
 | `kernel/crates/kernel_bpf/fuzz/Cargo.toml` | BPF fuzz targets | fuzz-harness |
 | `kernel/crates/kernel_devfs/Cargo.toml` | device filesystem | measured |
-| `kernel/crates/kernel_device/Cargo.toml` | device contracts | deferred-host |
+| `kernel/crates/kernel_device/Cargo.toml` | device contracts | measured |
 | `kernel/crates/kernel_elfloader/Cargo.toml` | ELF loader | measured |
 | `kernel/crates/kernel_elfloader/fuzz/Cargo.toml` | ELF fuzz target | fuzz-harness |
 | `kernel/crates/kernel_map_transaction/Cargo.toml` | map_range rollback bookkeeping | measured |
@@ -66,6 +66,7 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 | kernel-abi | `kernel/crates/kernel_abi/Cargo.toml` | 68.35% | 0.00% | 68.00% | 0.00% | `fdf8580` |
 | kernel-bpf-cloud | `kernel/crates/kernel_bpf/Cargo.toml` | 77.71% | 63.43% | 77.00% | 63.00% | `2c3bd2c` |
 | kernel-devfs | `kernel/crates/kernel_devfs/Cargo.toml` | 91.11% | 81.03% | 91.00% | 81.00% | `fdf8580` |
+| kernel-device | `kernel/crates/kernel_device/Cargo.toml` | 100.00% | 100.00% | 99.00% | 99.00% | `74bf881` |
 | kernel-elfloader | `kernel/crates/kernel_elfloader/Cargo.toml` | 83.29% | 66.67% | 83.00% | 66.00% | `2c3bd2c` |
 | kernel-map-transaction | `kernel/crates/kernel_map_transaction/Cargo.toml` | 94.35% | 100.00% | 94.00% | 99.00% | `97f514c` |
 | kernel-pci | `kernel/crates/kernel_pci/Cargo.toml` | 47.86% | 100.00% | 47.00% | 99.00% | `31d373f` |
