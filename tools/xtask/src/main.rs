@@ -1,12 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command as ProcessCommand, ExitCode};
 use std::{env, fs};
 
 use serde::Deserialize;
 
+mod cli;
 mod error;
+use cli::Command;
 use error::XtaskError;
 
 const COMPONENT_MANIFEST: &str = "ci/components.toml";
@@ -940,7 +942,7 @@ fn run_ci(root: &Path, arguments: &[String]) -> Result<(), String> {
         }
         script_arguments.push(argument.clone());
     }
-    let status = Command::new(root.join("scripts/verify-engineering-audit.sh"))
+    let status = ProcessCommand::new(root.join("scripts/verify-engineering-audit.sh"))
         .args(&script_arguments)
         .current_dir(root)
         .status()
@@ -961,17 +963,8 @@ fn usage() {
 fn execute() -> Result<(), String> {
     let root = repo_root();
     let components = load_components(&root)?;
-    let mut args = env::args().skip(1);
-    let command = args
-        .next()
-        .ok_or_else(|| "missing xtask command".to_owned())?;
-    let remaining = args.collect::<Vec<_>>();
-
-    match command.as_str() {
-        "inventory" => {
-            if remaining.iter().any(|arg| arg != "--check") {
-                return Err("inventory accepts only --check".to_owned());
-            }
+    match cli::parse(env::args().skip(1))? {
+        Command::Inventory { .. } => {
             validate_inventory(&root, &components)?;
             println!(
                 "component inventory: PASS ({} components)",
@@ -979,10 +972,7 @@ fn execute() -> Result<(), String> {
             );
             Ok(())
         }
-        "boundary" => {
-            if remaining.as_slice() != ["--check"] {
-                return Err("boundary requires exactly --check".to_owned());
-            }
+        Command::Boundary { .. } => {
             validate_inventory(&root, &components)?;
             validate_boundary(&root, &components)?;
             println!(
@@ -991,29 +981,21 @@ fn execute() -> Result<(), String> {
             );
             Ok(())
         }
-        "docs" => {
-            if remaining.iter().any(|arg| arg != "--check") {
-                return Err("docs accepts only --check".to_owned());
-            }
+        Command::Docs { check } => {
             validate_inventory(&root, &components)?;
             validate_boundary(&root, &components)?;
-            check_or_write_docs(
-                &root,
-                &components,
-                remaining.iter().any(|arg| arg == "--check"),
-            )
+            check_or_write_docs(&root, &components, check)
         }
-        "ci" => {
+        Command::Ci { arguments } => {
             validate_inventory(&root, &components)?;
             validate_boundary(&root, &components)?;
             check_or_write_docs(&root, &components, true)?;
-            run_ci(&root, &remaining)
+            run_ci(&root, &arguments)
         }
-        "help" | "--help" | "-h" => {
+        Command::Help => {
             usage();
             Ok(())
         }
-        _ => Err(format!("unknown xtask command: {command}")),
     }
 }
 
