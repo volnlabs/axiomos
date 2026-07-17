@@ -697,7 +697,7 @@ under load.
 
 # References
 
-* Axiom Proposal (`docs/proposal.md`)
+* Archived Axiom proposal (`docs/archive/pitches/2026-01-proposal.md`)
 * Linux eBPF documentation
 * Cyclictest realtime benchmarks
 * Criterion.rs benchmarking framework

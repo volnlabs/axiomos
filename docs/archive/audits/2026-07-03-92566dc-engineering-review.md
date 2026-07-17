@@ -1,11 +1,14 @@
 # AxiomOS — Engineering Review
 
+> **Archived historical record.** This review covers commit `92566dc` and is
+> not current assurance evidence. See the [current documentation authority](../../current/README.md).
+
 **Date:** 2026-07-03 · **Reviewer role:** lead systems engineer, first pass ·
 **Method:** implementation as source of truth; roadmap docs read as context and
 cross-checked against code. Findings verified against the tree at commit
 `92566dc` on `feat_verifier_hardening`.
 
-Companion: [`TODO_NOW.md`](../TODO_NOW.md) (actionable task list, prioritized).
+Companion at the time of review: [`TODO_NOW.md`](../../../TODO_NOW.md).
 
 > **Correction appended 2026-07-03 (same day):** during fix implementation, two
 > of this review's claims were verified against the code and revised. (1) **C1

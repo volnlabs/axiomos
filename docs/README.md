@@ -14,6 +14,7 @@ axiomos documentation is divided by authority:
 - [`security/`](security/) contains the generated unsafe ledger and release-gate
   evidence.
 
-Files still located directly under `docs/` are legacy material until they are
-classified into one of these directories. Their claims are not normative unless
-linked from `current/README.md`.
+The original proposal, execution plans, branch-specific engineering review, and
+superseded design specifications are indexed under `archive/`. Files still
+located directly under `docs/` are legacy material awaiting normalization;
+their claims are not normative unless linked from `current/README.md`.

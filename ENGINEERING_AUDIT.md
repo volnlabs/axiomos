@@ -148,7 +148,7 @@ production, HIL, hosted, or independent-review work.
 | Done | Artifact pinning and shipped-image provenance | build scripts, Limine/OVMF/Pi image owners | Build/release | Landed at `1fcf1a9`: `ci/artifacts.toml` and the generated authority enumerate eight produced images with pinned-toolchain inputs, exact selection rules, and SHA-256 evidence locations; the required `artifact-provenance-static` step rejects drift | OVMF and Limine remain pinned. AArch64 virt and Pi builds consume the `DISK_IMAGE` reported by their exact build invocation rather than scanning mtimes; the Pi release producer hashes its ELF, raw kernel, rootfs, and trust root before deployment. External Pi boot firmware remains part of HIL evidence, not a repository-produced image. |
 | 10 | Broader deterministic fault injection | physical allocator, mapping, exec/spawn, BPF manager, remaining allocation owners | Test/kernel | Fail-after-N sweeps cover the remaining allocation/mapping transactions and prove rollback/no-leak invariants at each supported failure boundary | Physical allocation, mapper, exec/spawn, both BPF handle append reservations, authorization-grant reservation, and pinned-map path reservation are covered for their stated scope (`9819edb`). Continue by owned transaction, not a global failure switch. |
 | 11 | Coverage and mutation budgets | all first-party crates, parser/verifier owners | Test/quality | Per-crate line/branch reports are published from the canonical manifest; parser/verifier mutation thresholds are versioned and enforced | **Partial at `6e1ae57`.** `ci/quality.toml` enumerates all 49 canonical components and the required `quality-boundary-static` check rejects denominator or budget drift. Actual baselines are enforced for `kernel_bpf` (77.71% lines / 63.43% branches) and `kernel_elfloader` (83.29% / 66.67%); mutation floors are enforced for the BPF verifier (77.42%) and ELF parser/loader (81.71%). The remaining `deferred-host` components still need measured baselines before this row closes. |
-| 12 | Documentation authority and archival | `docs/current`, ADR owners, audit owner | Documentation | Obsolete plans/audits/specifications move under an explicit archive; current VM, BPF-trust, JIT, scheduler, and platform documents identify their normative source and supported version | Historical audit content stays intact as historical evidence; only its authority label changes. |
+| 12 | Documentation authority and archival | `docs/current`, ADR owners, audit owner | Documentation | Obsolete plans/audits/specifications move under an explicit archive; current VM, BPF-trust, JIT, scheduler, and platform documents identify their normative source and supported version | **Partial.** The obsolete pitch, execution plans, branch-specific review, and superseded designs are now bannered and indexed under `docs/archive`; historical content remains intact as evidence. VM/BPF-trust normalization and a replacement for the legacy root architecture document remain open. |
 | 13 | Naming, benchmark, and documentation-link cleanup | product/docs owners, benchmark owners, release gate | Documentation + release | Remaining Axiom/AxiomOS/axiom-ebpf drift is resolved; benchmark tables include commit, toolchain, raw-log location, and artifact hashes; required links and commands are checked by the gate | Depends on generated artifact provenance for stable benchmark references. |
 | External | Hosted H-06 | CI/release owner | External evidence | A hosted run starts real jobs and passes the required workflow; the run URL and exact commit are recorded here | Blocked on GitHub Actions billing/monthly quota. Local success is not a substitute. |
 | External | Physical RPi5/RP2040 HIL and GPIO IRQ stress | platform/firmware owners | Hardware + test | Hardware runner contract plus retained UART/control-link logs proves Pi boot/SMP and RP2040 GPIO/control failure cases | Blocked on hardware and a concrete runner contract. Host simulation proves sampled-state logic, not IRQ-edge behavior. |
@@ -252,11 +252,14 @@ snapshot below.
 
 ### Documentation
 
-- [ ] Archive obsolete pitches, plans, old audits, and superseded
-  specifications.
+- [x] Archive obsolete pitches, plans, old audits, and superseded
+  specifications. The January pitch, March execution plan, branch-specific
+  engineering review, two completed agent plans, and five superseded designs
+  now live under the bannered and indexed `docs/archive` authority.
 - [~] Create normative current documentation and ADRs for scheduler, VM, BPF
   trust, JIT, and platform support. `docs/current` and ADRs 0001-0004 exist;
-  archival and full VM/BPF-trust normalization remain open.
+  full VM/BPF-trust normalization and a current architecture overview remain
+  open.
 - [x] Generate workspace, shipped-image, syscall/map/helper capability, and
   artifact-provenance tables. `ci/components.toml`, `ci/targets.toml`,
   `ci/artifacts.toml`, and ABI v1 generate the four authorities; required gate

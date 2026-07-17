@@ -1,5 +1,8 @@
 # Axiom: A Runtime-Programmable Kernel for Robotics
 
+> **Archived historical record.** Retained for provenance; not a current
+> implementation contract. See the [current documentation authority](../../current/README.md).
+
 **The kernel that never needs reflashing.**
 
 ---
@@ -11,9 +14,10 @@
 
 > **Note (2026-06):** this is the original pitch document, kept for the vision
 > and rationale. For the current, honest implementation state see the
-> [README](../README.md) (Limitations section), [benchmarks.md](benchmarks.md)
-> for measured numbers, and [implementation.md](implementation.md) for the
-> execution plan.
+> [README](../../../README.md) (Limitations section),
+> [benchmarks.md](../../benchmarks.md) for measured numbers, and the
+> [archived implementation plan](../plans/2026-03-19-implementation-plan.md)
+> for the historical execution plan.
 
 ---
 

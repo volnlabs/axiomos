@@ -1,10 +1,13 @@
 # BPF-to-BPF Call Canonicalization Implementation Plan
 
+> **Archived historical record.** Retained for provenance; not a current
+> implementation contract. See the [current documentation authority](../../current/README.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Support BPF-to-BPF (subprogram) calls by inlining them in a loader-side normalization pass *before* verification, so the verifier keeps seeing a single flat loop-free program.
 
-**Architecture:** A new `loader/normalize.rs` module resolves pseudo-calls, builds a subprogram call graph, rejects recursion / excess depth / excess expanded size, then inline-expands every subprogram call into one flat instruction vector — rewriting `EXIT`→`JA`, fixing internal jump offsets, and rebasing each inlined frame's `r10`-relative stack accesses to a distinct stack window. The verifier and its soundness proof are unchanged: it consumes the flattened program. (Full rationale: `docs/superpowers/specs/2026-06-30-bpf-call-canonicalization-design.md`.)
+**Architecture:** A new `loader/normalize.rs` module resolves pseudo-calls, builds a subprogram call graph, rejects recursion / excess depth / excess expanded size, then inline-expands every subprogram call into one flat instruction vector — rewriting `EXIT`→`JA`, fixing internal jump offsets, and rebasing each inlined frame's `r10`-relative stack accesses to a distinct stack window. The verifier and its soundness proof are unchanged: it consumes the flattened program. (Full rationale: `docs/archive/specs/2026-06-30-bpf-call-canonicalization-design.md`.)
 
 **Tech Stack:** Rust, `no_std` (`extern crate alloc`), crate `kernel_bpf`.
 
@@ -95,7 +98,7 @@ Top of `normalize.rs`:
 //! Transforms arbitrary loaded bytecode into the canonical flat program the
 //! verifier consumes. Today this resolves BPF-to-BPF (subprogram) calls by
 //! inline expansion; it is the intended home for future BTF/CO-RE rewrites.
-//! See `docs/superpowers/specs/2026-06-30-bpf-call-canonicalization-design.md`.
+//! See `docs/archive/specs/2026-06-30-bpf-call-canonicalization-design.md`.
 
 extern crate alloc;
 

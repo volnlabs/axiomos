@@ -1,5 +1,8 @@
 # Pi5 PL011 control transport (v0.4) — design plan
 
+> **Archived historical record.** Retained for provenance; not a current
+> implementation contract. See the [current documentation authority](../../current/README.md).
+
 **Status:** plan, pre-council. **Decision (user):** implement entirely in the kernel, no userspace
 daemon. Dedicated PL011 for the robot link; never multiplex the debug console. `shrike_link` is the single
 shared protocol (kernel + RP2040). Watchdog authoritative on both ends. Transport is dumb (moves bytes,

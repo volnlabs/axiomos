@@ -1,5 +1,8 @@
 # Trust / External Validation Track — Design
 
+> **Archived historical record.** Retained for provenance; not a current
+> implementation contract. See the [current documentation authority](../../current/README.md).
+
 **Date:** 2026-07-03
 **Issues:** #39 (threat model RFC), #77 (external security review), #91 (formal proof of verifier invariants)
 **Branch:** `feat_verifier_hardening`

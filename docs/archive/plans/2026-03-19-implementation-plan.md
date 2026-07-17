@@ -1,7 +1,10 @@
 # Axiom Implementation Plan
 
+> **Archived historical record.** Retained for provenance; not a current
+> implementation contract. See the [current documentation authority](../../current/README.md).
+
 **Date:** 2026-03-19
-**Status:** Active execution plan
+**Status:** Archived execution plan
 **Scope:** Kernel runtime programmability first, demoability second, optimization third
 
 > **Progress note (2026-06-11).** Landed since this plan was written:
