@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::{env, fs};
 
+use serde::Deserialize;
+
 mod error;
 use error::XtaskError;
 
@@ -17,7 +19,7 @@ const TARGET_MANIFEST: &str = "ci/targets.toml";
 const GENERATED_TARGETS: &str = "docs/reference/generated/targets.md";
 const GENERATED_ABI: &str = "docs/reference/generated/abi.md";
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
 struct Component {
     path: String,
     kind: String,
@@ -27,12 +29,13 @@ struct Component {
     artifact: String,
 }
 
+#[cfg(test)]
 #[derive(Default)]
 struct ComponentBuilder {
     fields: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
 struct Target {
     name: String,
     triple: String,
@@ -42,12 +45,13 @@ struct Target {
     evidence: String,
 }
 
+#[cfg(test)]
 #[derive(Default)]
 struct TargetBuilder {
     fields: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
 struct Artifact {
     name: String,
     platform: String,
@@ -60,11 +64,15 @@ struct Artifact {
     hash_evidence: String,
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 #[derive(Default)]
 struct ArtifactBuilder {
     fields: BTreeMap<String, String>,
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 impl ArtifactBuilder {
     fn finish(self, line: usize) -> Result<Artifact, String> {
         let get = |name: &str| {
@@ -87,6 +95,7 @@ impl ArtifactBuilder {
     }
 }
 
+#[cfg(test)]
 impl TargetBuilder {
     fn finish(self, line: usize) -> Result<Target, String> {
         let get = |name: &str| {
@@ -106,6 +115,7 @@ impl TargetBuilder {
     }
 }
 
+#[cfg(test)]
 impl ComponentBuilder {
     fn finish(self, line: usize) -> Result<Component, String> {
         let get = |name: &str| {
@@ -150,9 +160,20 @@ fn parse_quoted(value: &str, line: usize) -> Result<String, String> {
 fn load_components(root: &Path) -> Result<Vec<Component>, String> {
     let path = root.join(COMPONENT_MANIFEST);
     let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    parse_components(&text)
+    #[derive(Deserialize)]
+    struct Manifest {
+        format_version: u32,
+        component: Vec<Component>,
+    }
+    let manifest: Manifest = toml::from_str(&text)
+        .map_err(|error| format!("{}: invalid TOML: {error}", path.display()))?;
+    if manifest.format_version != 1 {
+        return Err(format!("{}: unsupported format_version", path.display()));
+    }
+    Ok(manifest.component)
 }
 
+#[cfg(test)]
 fn parse_components(text: &str) -> Result<Vec<Component>, String> {
     let mut components = Vec::new();
     let mut current: Option<ComponentBuilder> = None;
@@ -203,15 +224,37 @@ fn parse_components(text: &str) -> Result<Vec<Component>, String> {
 fn load_targets(root: &Path) -> Result<Vec<Target>, String> {
     let path = root.join(TARGET_MANIFEST);
     let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    parse_targets(&text)
+    #[derive(Deserialize)]
+    struct Manifest {
+        format_version: u32,
+        target: Vec<Target>,
+    }
+    let manifest: Manifest = toml::from_str(&text)
+        .map_err(|error| format!("{}: invalid TOML: {error}", path.display()))?;
+    if manifest.format_version != 1 {
+        return Err(format!("{}: unsupported format_version", path.display()));
+    }
+    Ok(manifest.target)
 }
 
 fn load_artifacts(root: &Path) -> Result<Vec<Artifact>, String> {
     let path = root.join(ARTIFACT_MANIFEST);
     let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    parse_artifacts(&text)
+    #[derive(Deserialize)]
+    struct Manifest {
+        format_version: u32,
+        artifact: Vec<Artifact>,
+    }
+    let manifest: Manifest = toml::from_str(&text)
+        .map_err(|error| format!("{}: invalid TOML: {error}", path.display()))?;
+    if manifest.format_version != 1 {
+        return Err(format!("{}: unsupported format_version", path.display()));
+    }
+    Ok(manifest.artifact)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn parse_artifacts(text: &str) -> Result<Vec<Artifact>, String> {
     let mut artifacts = Vec::new();
     let mut current: Option<ArtifactBuilder> = None;
@@ -328,6 +371,7 @@ fn validate_artifacts(artifacts: &[Artifact], targets: &[Target]) -> Result<(), 
     Ok(())
 }
 
+#[cfg(test)]
 fn parse_targets(text: &str) -> Result<Vec<Target>, String> {
     let mut targets = Vec::new();
     let mut current: Option<TargetBuilder> = None;

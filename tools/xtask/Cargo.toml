@@ -7,3 +7,5 @@ publish = false
 [dependencies]
 file_structure = { path = "../../userspace/file_structure" }
 kernel_abi = { path = "../../kernel/crates/kernel_abi" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
