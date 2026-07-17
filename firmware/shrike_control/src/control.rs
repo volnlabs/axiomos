@@ -61,9 +61,8 @@ pub struct RunSummary {
     pub motor_coast_calls: u32,
     /// Total bytes written via `ByteIo::write`.
     pub bytes_written: u32,
-    /// Number of `EstopLine::asserted` calls that returned `true` AND
-    /// matched the previous call's value (i.e., the line was held
-    /// asserted at this sample, not a fresh edge).
+    /// Number of `EstopLine::asserted` samples that returned `true`, including
+    /// both the assertion edge and subsequent held samples.
     pub estop_asserts: u32,
 }
 
@@ -190,5 +189,430 @@ where
                 return Some(summary);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::cell::{Cell, RefCell};
+
+    use super::*;
+
+    const MAX_CAPTURED_BYTES: usize = MAX_FRAME * 8;
+    const MAX_MOTOR_CALLS: usize = 8;
+
+    struct ByteCapture {
+        bytes: [u8; MAX_CAPTURED_BYTES],
+        len: usize,
+    }
+
+    impl ByteCapture {
+        const fn new() -> Self {
+            Self {
+                bytes: [0; MAX_CAPTURED_BYTES],
+                len: 0,
+            }
+        }
+
+        fn extend_from_slice(&mut self, bytes: &[u8]) {
+            let end = self.len + bytes.len();
+            assert!(end <= self.bytes.len(), "test output capture overflow");
+            self.bytes[self.len..end].copy_from_slice(bytes);
+            self.len = end;
+        }
+
+        fn as_slice(&self) -> &[u8] {
+            &self.bytes[..self.len]
+        }
+    }
+
+    struct TestIo<'a> {
+        input: &'a [u8],
+        next: usize,
+        output: &'a RefCell<ByteCapture>,
+    }
+
+    impl<'a> TestIo<'a> {
+        fn new(input: &'a [u8], output: &'a RefCell<ByteCapture>) -> Self {
+            Self {
+                input,
+                next: 0,
+                output,
+            }
+        }
+    }
+
+    impl ByteIo for TestIo<'_> {
+        fn read(&mut self) -> Option<u8> {
+            let byte = self.input.get(self.next).copied();
+            self.next = self.next.saturating_add(1);
+            byte
+        }
+
+        fn write(&mut self, bytes: &[u8]) {
+            self.output.borrow_mut().extend_from_slice(bytes);
+        }
+    }
+
+    struct SequenceClock<'a> {
+        samples: &'a [u64],
+        next: Cell<usize>,
+    }
+
+    impl<'a> SequenceClock<'a> {
+        const fn new(samples: &'a [u64]) -> Self {
+            Self {
+                samples,
+                next: Cell::new(0),
+            }
+        }
+    }
+
+    impl MicrosClock for SequenceClock<'_> {
+        fn now_us(&self) -> u64 {
+            let next = self.next.get();
+            let sample = self
+                .samples
+                .get(next)
+                .or_else(|| self.samples.last())
+                .copied()
+                .unwrap_or(0);
+            self.next.set(next.saturating_add(1));
+            sample
+        }
+    }
+
+    struct PanickingClock {
+        calls: Cell<u8>,
+    }
+
+    impl MicrosClock for PanickingClock {
+        fn now_us(&self) -> u64 {
+            if self.calls.replace(self.calls.get().wrapping_add(1)) == 0 {
+                0
+            } else {
+                panic!("stop unbounded control-loop test")
+            }
+        }
+    }
+
+    struct TestUltrasonic<'a> {
+        echoes: &'a [Option<u16>],
+        next: usize,
+        triggers: &'a Cell<u32>,
+    }
+
+    impl<'a> TestUltrasonic<'a> {
+        const fn new(echoes: &'a [Option<u16>], triggers: &'a Cell<u32>) -> Self {
+            Self {
+                echoes,
+                next: 0,
+                triggers,
+            }
+        }
+    }
+
+    impl Ultrasonic for TestUltrasonic<'_> {
+        fn trigger(&mut self) {
+            self.triggers.set(self.triggers.get().wrapping_add(1));
+        }
+
+        fn take_echo_us(&mut self) -> Option<u16> {
+            let echo = self.echoes.get(self.next).copied().flatten();
+            self.next = self.next.saturating_add(1);
+            echo
+        }
+    }
+
+    struct TestEstop<'a> {
+        samples: &'a [bool],
+        next: usize,
+    }
+
+    impl<'a> TestEstop<'a> {
+        const fn new(samples: &'a [bool]) -> Self {
+            Self { samples, next: 0 }
+        }
+    }
+
+    impl EstopLine for TestEstop<'_> {
+        fn asserted(&mut self) -> bool {
+            let asserted = self
+                .samples
+                .get(self.next)
+                .or_else(|| self.samples.last())
+                .copied()
+                .unwrap_or(false);
+            self.next = self.next.saturating_add(1);
+            asserted
+        }
+    }
+
+    struct MotorLog {
+        duties: [i16; MAX_MOTOR_CALLS],
+        len: usize,
+    }
+
+    impl MotorLog {
+        const fn new() -> Self {
+            Self {
+                duties: [0; MAX_MOTOR_CALLS],
+                len: 0,
+            }
+        }
+
+        fn push(&mut self, duty: i16) {
+            assert!(self.len < self.duties.len(), "test motor log overflow");
+            self.duties[self.len] = duty;
+            self.len += 1;
+        }
+
+        fn as_slice(&self) -> &[i16] {
+            &self.duties[..self.len]
+        }
+    }
+
+    struct TestMotor<'a> {
+        log: &'a RefCell<MotorLog>,
+    }
+
+    impl MotorChannel for TestMotor<'_> {
+        fn drive(&mut self, duty: i16) {
+            self.log.borrow_mut().push(duty);
+        }
+    }
+
+    fn config(link_timeout_us: u64, ping_period_us: u64, heartbeat_us: u64) -> Config {
+        Config {
+            link_timeout_us,
+            ping_period_us,
+            peer_heartbeat_period_us: heartbeat_us,
+        }
+    }
+
+    fn decode_output(bytes: &[u8]) -> ([Option<Msg>; 8], usize) {
+        let mut decoder = Decoder::new();
+        let mut messages = [None; 8];
+        let mut count = 0;
+        for &byte in bytes {
+            if let Some(result) = decoder.push(byte) {
+                assert!(count < messages.len(), "too many captured messages");
+                messages[count] = Some(result.expect("control loop emitted an invalid frame"));
+                count += 1;
+            }
+        }
+        (messages, count)
+    }
+
+    #[test]
+    fn zero_iteration_limit_still_executes_one_safe_iteration() {
+        let output = RefCell::new(ByteCapture::new());
+        let triggers = Cell::new(0);
+        let left = RefCell::new(MotorLog::new());
+        let right = RefCell::new(MotorLog::new());
+
+        let summary = run(
+            TestIo::new(&[], &output),
+            SequenceClock::new(&[0]),
+            TestUltrasonic::new(&[None], &triggers),
+            TestEstop::new(&[false]),
+            TestMotor { log: &left },
+            TestMotor { log: &right },
+            config(100, u64::MAX, 0),
+            Some(0),
+        )
+        .expect("bounded run must return a summary");
+
+        assert_eq!(summary.iterations, 1);
+        assert_eq!(summary.motor_drive_calls, 0);
+        assert_eq!(summary.motor_coast_calls, 2);
+        assert_eq!(left.borrow().as_slice(), [0]);
+        assert_eq!(right.borrow().as_slice(), [0]);
+        assert_eq!(triggers.get(), 0);
+        assert_eq!(output.borrow().as_slice(), []);
+    }
+
+    #[test]
+    fn fresh_setpoint_drives_then_link_timeout_coasts() {
+        let mut frame = [0; MAX_FRAME];
+        let frame_len = encode(
+            &Msg::MotorSetpoint {
+                seq: 1,
+                left: 400,
+                right: -250,
+            },
+            &mut frame,
+        )
+        .unwrap();
+        let output = RefCell::new(ByteCapture::new());
+        let triggers = Cell::new(0);
+        let left = RefCell::new(MotorLog::new());
+        let right = RefCell::new(MotorLog::new());
+
+        let summary = run(
+            TestIo::new(&frame[..frame_len], &output),
+            SequenceClock::new(&[1, 12]),
+            TestUltrasonic::new(&[None, None], &triggers),
+            TestEstop::new(&[false, false]),
+            TestMotor { log: &left },
+            TestMotor { log: &right },
+            config(10, u64::MAX, 100),
+            Some(2),
+        )
+        .unwrap();
+
+        assert_eq!(summary.motor_drive_calls, 2);
+        assert_eq!(summary.motor_coast_calls, 2);
+        assert_eq!(left.borrow().as_slice(), [400, 0]);
+        assert_eq!(right.borrow().as_slice(), [-250, 0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "stop unbounded control-loop test")]
+    fn absent_iteration_limit_continues_into_the_next_iteration() {
+        let output = RefCell::new(ByteCapture::new());
+        let triggers = Cell::new(0);
+        let left = RefCell::new(MotorLog::new());
+        let right = RefCell::new(MotorLog::new());
+
+        let _ = run(
+            TestIo::new(&[], &output),
+            PanickingClock {
+                calls: Cell::new(0),
+            },
+            TestUltrasonic::new(&[None], &triggers),
+            TestEstop::new(&[false]),
+            TestMotor { log: &left },
+            TestMotor { log: &right },
+            config(100, u64::MAX, 0),
+            None,
+        );
+    }
+
+    #[test]
+    fn corrupt_frame_is_dropped_and_decoder_accepts_following_command() {
+        let mut corrupt = [0; MAX_FRAME];
+        let corrupt_len = encode(
+            &Msg::MotorSetpoint {
+                seq: 9,
+                left: 900,
+                right: 900,
+            },
+            &mut corrupt,
+        )
+        .unwrap();
+        corrupt[5] ^= 1;
+
+        let mut valid = [0; MAX_FRAME];
+        let valid_len = encode(
+            &Msg::MotorSetpoint {
+                seq: 1,
+                left: 20,
+                right: -30,
+            },
+            &mut valid,
+        )
+        .unwrap();
+        let mut input = [0; MAX_FRAME * 2];
+        input[..corrupt_len].copy_from_slice(&corrupt[..corrupt_len]);
+        input[corrupt_len..corrupt_len + valid_len].copy_from_slice(&valid[..valid_len]);
+
+        let output = RefCell::new(ByteCapture::new());
+        let triggers = Cell::new(0);
+        let left = RefCell::new(MotorLog::new());
+        let right = RefCell::new(MotorLog::new());
+        let summary = run(
+            TestIo::new(&input[..corrupt_len + valid_len], &output),
+            SequenceClock::new(&[1]),
+            TestUltrasonic::new(&[None], &triggers),
+            TestEstop::new(&[false]),
+            TestMotor { log: &left },
+            TestMotor { log: &right },
+            config(100, u64::MAX, 0),
+            Some(1),
+        )
+        .unwrap();
+
+        assert_eq!(summary.motor_drive_calls, 2);
+        assert_eq!(left.borrow().as_slice(), [20]);
+        assert_eq!(right.borrow().as_slice(), [-30]);
+    }
+
+    #[test]
+    fn hardware_estop_dominates_and_release_does_not_rearm_stale_setpoint() {
+        let mut frame = [0; MAX_FRAME];
+        let frame_len = encode(
+            &Msg::MotorSetpoint {
+                seq: 1,
+                left: 500,
+                right: 500,
+            },
+            &mut frame,
+        )
+        .unwrap();
+        let output = RefCell::new(ByteCapture::new());
+        let triggers = Cell::new(0);
+        let left = RefCell::new(MotorLog::new());
+        let right = RefCell::new(MotorLog::new());
+
+        let summary = run(
+            TestIo::new(&frame[..frame_len], &output),
+            SequenceClock::new(&[1, 2, 3]),
+            TestUltrasonic::new(&[None, None, None], &triggers),
+            TestEstop::new(&[true, true, false]),
+            TestMotor { log: &left },
+            TestMotor { log: &right },
+            config(100, u64::MAX, 0),
+            Some(3),
+        )
+        .unwrap();
+
+        assert_eq!(summary.estop_asserts, 2);
+        assert_eq!(summary.motor_drive_calls, 0);
+        assert_eq!(summary.motor_coast_calls, 6);
+        assert_eq!(left.borrow().as_slice(), [0, 0, 0]);
+        assert_eq!(right.borrow().as_slice(), [0, 0, 0]);
+    }
+
+    #[test]
+    fn periodic_telemetry_uses_wrapping_time_and_increments_heartbeat_sequence() {
+        let output = RefCell::new(ByteCapture::new());
+        let triggers = Cell::new(0);
+        let left = RefCell::new(MotorLog::new());
+        let right = RefCell::new(MotorLog::new());
+        let summary = run(
+            TestIo::new(&[], &output),
+            SequenceClock::new(&[u64::MAX - 4, 6]),
+            TestUltrasonic::new(&[Some(123), Some(456)], &triggers),
+            TestEstop::new(&[false, false]),
+            TestMotor { log: &left },
+            TestMotor { log: &right },
+            config(100, 10, 10),
+            Some(2),
+        )
+        .unwrap();
+
+        let output = output.borrow();
+        let (messages, count) = decode_output(output.as_slice());
+        assert_eq!(triggers.get(), 2);
+        assert_eq!(summary.bytes_written as usize, output.len);
+        assert_eq!(count, 4);
+        assert_eq!(
+            &messages[..count],
+            [
+                Some(Msg::Sensor {
+                    ultrasonic_echo_us: 123,
+                    estop_line: false,
+                    flags: 0,
+                }),
+                Some(Msg::HeartbeatToPi { seq: 0 }),
+                Some(Msg::Sensor {
+                    ultrasonic_echo_us: 456,
+                    estop_line: false,
+                    flags: 0,
+                }),
+                Some(Msg::HeartbeatToPi { seq: 1 }),
+            ]
+        );
     }
 }
