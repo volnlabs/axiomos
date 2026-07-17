@@ -26,9 +26,7 @@ fn run_ci(root: &Path, arguments: &[String]) -> Result<(), String> {
         script_arguments.push("--output".to_owned());
         script_arguments.push(format!("artifacts/runs/{timestamp}-check-all"));
     }
-    let status = ProcessCommand::new(root.join("scripts/verify-engineering-audit.sh"))
-        .args(&script_arguments)
-        .current_dir(root)
+    let status = audit_command(root, &script_arguments)
         .status()
         .map_err(|e| format!("failed to run audit gate: {e}"))?;
     if status.success() {
@@ -36,6 +34,24 @@ fn run_ci(root: &Path, arguments: &[String]) -> Result<(), String> {
     } else {
         Err(format!("audit gate exited with {status}"))
     }
+}
+
+fn audit_command(root: &Path, arguments: &[String]) -> ProcessCommand {
+    let mut command = ProcessCommand::new(root.join("scripts/verify/engineering-audit.sh"));
+    command
+        .args(arguments)
+        .current_dir(root)
+        .env("AXIOM_RUN_COMMAND", public_invocation());
+    command
+}
+
+fn public_invocation() -> String {
+    std::iter::once("cargo".to_owned())
+        .chain(std::iter::once("xtask".to_owned()))
+        .chain(std::env::args().skip(1))
+        .map(|argument| format!("{argument:?}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn run_status(root: &Path, program: &str, arguments: &[&str]) -> Result<(), String> {
@@ -119,9 +135,7 @@ fn run_check_all(root: &Path, arguments: &[String]) -> Result<(), String> {
     audit_arguments.push(output.display().to_string());
 
     if json {
-        let result = ProcessCommand::new(root.join("scripts/verify-engineering-audit.sh"))
-            .args(&audit_arguments)
-            .current_dir(root)
+        let result = audit_command(root, &audit_arguments)
             .output()
             .map_err(|error| format!("failed to run audit gate: {error}"))?;
         let summary = fs::read_to_string(output.join("summary.json"))

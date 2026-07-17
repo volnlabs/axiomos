@@ -25,6 +25,7 @@ fn main() -> ExitCode {
             let error = if error.starts_with("error:")
                 || error.starts_with("unknown xtask command")
                 || error.starts_with("missing xtask command")
+                || error.starts_with("unsupported ")
                 || error.contains("accepts only")
                 || error.contains("requires exactly")
             {

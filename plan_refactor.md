@@ -1,7 +1,7 @@
 # Repository Refactor Plan
 
 This plan tracks the repository-structure and tooling migration on the
-`audit/runtime-architecture-hardening` branch. It is the execution ledger for
+`refactor/repository-structure-tooling` branch. It is the execution ledger for
 this refactor; it does not replace architecture, reference, or ADR documents.
 
 ## Invariants
@@ -28,23 +28,21 @@ this refactor; it does not replace architecture, reference, or ADR documents.
 - [x] Move generated documentation under `docs/reference/generated/` and update
       xtask paths.
 - [x] Group scripts by responsibility with compatibility wrappers.
-- [~] Split xtask into CLI, command, manifest, validation, documentation, and
-      process modules without changing behavior. CLI, command dispatch,
-      context, typed manifest loading, and the shared repository model are
-      extracted; validation/rendering remains in `main.rs`.
+- [x] Split xtask into CLI, command, manifest, validation, documentation, and
+      process modules without changing behavior. `main.rs` is now only the
+      module declaration, error rendering, and process exit boundary.
 - [x] Replace handwritten TOML parsing with `serde` and `toml` for production
       manifest loading. Legacy line-parser helpers remain only under tests.
-- [~] Add typed xtask exit categories and structured command output. Typed exit
-      categories and tests are complete; human/JSON structured reporting is not.
+- [x] Add typed xtask exit categories and structured command output. The check
+      surface supports human and JSON output, and substantial audit runs retain
+      structured summaries and logs under `artifacts/runs/`.
 - [x] Add declarative quick/full/extended CI profiles while retaining `xtask ci`.
 - [x] Add shared repository-model loading for component, target, artifact, and
       build-input manifests. Workspace boundary loading remains a validation
       concern.
-- [~] Decompose the audit shell script. Equivalent inventory, boundary, and
-      generated-doc checks now run through xtask; the remaining script still
-      owns a large ordered matrix of inline static assertions and QEMU probes,
-      so extraction requires preserving its result manifest and failure
-      semantics rather than duplicating checks.
+- [x] Decompose the audit shell script into ordered core, required, extended,
+      and Miri phases while preserving the shared result manifest, counters,
+      logs, skip behavior, and final JSON summary.
 - [x] Add kernel crate-boundary and component-naming documentation.
 - [x] Relocate generated root artifacts and consolidate TODO tracking. Root
       generated outputs are ignored, `artifacts/` is the designated output
@@ -55,15 +53,30 @@ this refactor; it does not replace architecture, reference, or ADR documents.
       host-side image/QEMU runner; the boundary is documented in
       `docs/architecture/build-ownership.md`. Extraction remains optional.
 
+## Remaining migration checklist
+
+- [x] Complete the documentation taxonomy and move remaining root-level docs to
+      architecture, reference, operations, performance, reviews, or security.
+- [x] Split the relocated engineering-audit package into topical authoritative
+      and evidence files without losing historical content or link targets.
+- [x] Move declarative repository manifests under `ci/manifests/` and update all
+      typed loaders, generators, build inputs, and verification callers.
+- [x] Add end-to-end tooling tests for CLI errors, dry-run dispatch, JSON schema,
+      repository-root discovery, stale docs, malformed manifests, and exit-code
+      propagation. Rust unit tests cover malformed manifests and stale generated
+      docs; Python integration tests cover the process-level contracts.
+- [x] Group userspace crates by core, tools, demos, and benchmarks, then update
+      Cargo paths, component manifests, artifact recipes, scripts, and docs.
+- [x] Resolve the Shrike firmware grouping decision by grouping the control,
+      RP2040, and simulation crates under `firmware/shrike/` while preserving
+      crate package identities.
+- [ ] Run the full supported audit profile after all moves, then remove only the
+      compatibility paths proven to have no remaining callers.
+
 ## Explicitly deferred
 
-- Optional TUI; it follows a stable CLI and must display the equivalent command.
-- Broad userspace and firmware directory moves until workspace and component
-  manifests can validate them automatically.
-- Splitting the relocated engineering-audit package into topical files; the
-  canonical package now lives under `docs/reviews/releases/`.
-- Deleting old paths; compatibility wrappers remain until one full gate confirms
-  all callers have migrated.
+- Optional TUI. It is not required for repository correctness; if added later,
+  it must dispatch the stable xtask CLI and display the equivalent command.
 
 ## Per-commit verification
 

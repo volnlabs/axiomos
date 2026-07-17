@@ -9,10 +9,11 @@ RUN_QEMU=1
 RUN_MIRI=1
 OUTPUT_DIR=""
 QEMU_TIMEOUT="${AUDIT_QEMU_TIMEOUT:-90}"
+ORIGINAL_ARGS=("$@")
 
 usage() {
     cat <<'EOF'
-Usage: scripts/verify-engineering-audit.sh [options]
+Usage: scripts/verify/engineering-audit.sh [options]
 
 Options:
   --quick          Run formatting, ledger, focused tests, and kernel checks; skip Miri.
@@ -79,6 +80,8 @@ OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 RESULTS="$OUTPUT_DIR/results.tsv"
 MANIFEST="$OUTPUT_DIR/manifest.txt"
 SUMMARY_JSON="$OUTPUT_DIR/summary.json"
+COMMAND_RECORD="$OUTPUT_DIR/command.txt"
+ENVIRONMENT_RECORD="$OUTPUT_DIR/environment.txt"
 ARTIFACTS="$OUTPUT_DIR/artifacts.sha256"
 PRODUCTION_ARTIFACTS="$OUTPUT_DIR/production-artifacts.sha256"
 LOCKFILES_BEFORE="$OUTPUT_DIR/lockfiles.before.sha256"
@@ -88,6 +91,25 @@ SIGNING_PRIVATE_KEY="$SIGNING_KEY_PREFIX.key"
 TRUSTED_KEY_FIXTURE="$SIGNING_KEY_PREFIX.pub"
 SIGNED_BPF_OBJECT="$OUTPUT_DIR/startup.bpf.o"
 SIGNED_BPF_CONTAINER="$OUTPUT_DIR/startup.rbpf"
+
+{
+    if [[ -n "${AXIOM_RUN_COMMAND:-}" ]]; then
+        printf '%s\n' "$AXIOM_RUN_COMMAND"
+    else
+        printf '%q ' "$0" "${ORIGINAL_ARGS[@]}"
+        printf '\n'
+    fi
+} >"$COMMAND_RECORD"
+
+{
+    echo "repository=$ROOT"
+    echo "path=$PATH"
+    echo "rustup_toolchain=${RUSTUP_TOOLCHAIN:-}"
+    echo "cargo_home=${CARGO_HOME:-}"
+    echo "audit_qemu_timeout=$QEMU_TIMEOUT"
+    echo "run_audit_fault=${RUN_AUDIT_FAULT:-0}"
+    echo "source_date_epoch=${SOURCE_DATE_EPOCH:-}"
+} >"$ENVIRONMENT_RECORD"
 
 # Quick mode still compiles the fail-closed kernel before the end-to-end
 # signing fixture is generated. Production builds below replace this key with
@@ -229,6 +251,8 @@ write_manifest() {
         echo "passes=$passes"
         echo "failures=$failures"
         echo "skips=$skips"
+        echo "command_record=$COMMAND_RECORD"
+        echo "environment_record=$ENVIRONMENT_RECORD"
         echo "results=$RESULTS"
         echo "artifact_hashes=$ARTIFACTS"
         echo "production_artifact_hashes=$PRODUCTION_ARTIFACTS"
