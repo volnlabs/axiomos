@@ -3,7 +3,8 @@ use std::fs;
 use std::path::Path;
 
 use crate::context::*;
-use crate::{model, validate_artifacts, Artifact, Component, Target};
+use crate::manifests::{validate_artifacts, Artifact, Component, Target};
+use crate::model;
 
 pub(crate) fn render_components(components: &[Component]) -> String {
     let mut components = components.to_vec();

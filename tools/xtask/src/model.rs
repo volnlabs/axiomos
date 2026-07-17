@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::docs::load_build_inputs;
-use crate::{load_artifacts, load_components, load_targets, Artifact, Component, Target};
+use crate::manifests::{
+    load_artifacts, load_components, load_targets, Artifact, Component, Target,
+};
 
 #[derive(Debug)]
 pub(crate) struct RepositoryModel {
