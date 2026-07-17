@@ -217,7 +217,7 @@ fn ident_version_is_validated() {
 
 #[test]
 fn nonzero_entry_point_survives_parse_and_load() {
-    const ENTRY: u64 = 0x4020_10;
+    const ENTRY: u64 = 0x0040_2010;
     let mut buf = zero_header();
     set_elf_header_basics(&mut buf, 2, 0, 0);
     buf[24..32].copy_from_slice(&ENTRY.to_le_bytes());
