@@ -3,7 +3,8 @@ use std::process::Command as ProcessCommand;
 
 use crate::cli::{self, Command};
 use crate::context::repo_root;
-use crate::{check_or_write_docs, load_components, validate_boundary, validate_inventory};
+use crate::model::RepositoryModel;
+use crate::{check_or_write_docs, validate_boundary, validate_inventory};
 
 fn run_ci(root: &Path, arguments: &[String]) -> Result<(), String> {
     let script_arguments: Vec<_> = arguments
@@ -31,34 +32,34 @@ pub(crate) fn usage() {
 
 pub(crate) fn execute() -> Result<(), String> {
     let root = repo_root();
-    let components = load_components(&root)?;
+    let model = RepositoryModel::load(&root)?;
     match cli::parse(std::env::args().skip(1))? {
         Command::Inventory { .. } => {
-            validate_inventory(&root, &components)?;
+            validate_inventory(&root, &model.components)?;
             println!(
                 "component inventory: PASS ({} components)",
-                components.len()
+                model.components.len()
             );
             Ok(())
         }
         Command::Boundary { .. } => {
-            validate_inventory(&root, &components)?;
-            validate_boundary(&root, &components)?;
+            validate_inventory(&root, &model.components)?;
+            validate_boundary(&root, &model.components)?;
             println!(
                 "workspace/artifact boundary: PASS ({} components)",
-                components.len()
+                model.components.len()
             );
             Ok(())
         }
         Command::Docs { check } => {
-            validate_inventory(&root, &components)?;
-            validate_boundary(&root, &components)?;
-            check_or_write_docs(&root, &components, check)
+            validate_inventory(&root, &model.components)?;
+            validate_boundary(&root, &model.components)?;
+            check_or_write_docs(&root, &model, check)
         }
         Command::Ci { arguments } => {
-            validate_inventory(&root, &components)?;
-            validate_boundary(&root, &components)?;
-            check_or_write_docs(&root, &components, true)?;
+            validate_inventory(&root, &model.components)?;
+            validate_boundary(&root, &model.components)?;
+            check_or_write_docs(&root, &model, true)?;
             run_ci(&root, &arguments)
         }
         Command::Help => {

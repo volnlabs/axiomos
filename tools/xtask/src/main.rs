@@ -10,6 +10,7 @@ mod cli;
 mod commands;
 mod context;
 mod error;
+mod model;
 use context::*;
 use error::XtaskError;
 
@@ -890,28 +891,30 @@ fn check_or_write(path: &Path, expected: &str, check: bool) -> Result<(), String
     Ok(())
 }
 
-fn check_or_write_docs(root: &Path, components: &[Component], check: bool) -> Result<(), String> {
-    let targets = load_targets(root)?;
-    let artifacts = load_artifacts(root)?;
-    validate_artifacts(&artifacts, &targets)?;
+fn check_or_write_docs(
+    root: &Path,
+    model: &model::RepositoryModel,
+    check: bool,
+) -> Result<(), String> {
+    validate_artifacts(&model.artifacts, &model.targets)?;
     check_or_write(
         &root.join(GENERATED_COMPONENTS),
-        &render_components(components),
+        &render_components(&model.components),
         check,
     )?;
     check_or_write(
         &root.join(GENERATED_BUILD_INPUTS),
-        &render_build_inputs(&load_build_inputs(root)?),
+        &render_build_inputs(&model.build_inputs),
         check,
     )?;
     check_or_write(
         &root.join(GENERATED_TARGETS),
-        &render_targets(&targets),
+        &render_targets(&model.targets),
         check,
     )?;
     check_or_write(
         &root.join(GENERATED_ARTIFACTS),
-        &render_artifacts(&artifacts),
+        &render_artifacts(&model.artifacts),
         check,
     )?;
     check_or_write(&root.join(GENERATED_ABI), &render_abi(), check)?;
