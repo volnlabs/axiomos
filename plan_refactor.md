@@ -45,8 +45,10 @@ this refactor; it does not replace architecture, reference, or ADR documents.
       generated outputs are ignored and `artifacts/` is the designated output
       area; the historical `TODO_NOW.md` snapshot remains until its audit links
       are migrated together.
-- [ ] Reassess root `src/main.rs` and `build.rs` ownership before creating an
-      image-builder crate.
+- [x] Reassess root `src/main.rs` and `build.rs` ownership before creating an
+      image-builder crate. The current root package is the authoritative
+      host-side image/QEMU runner; the boundary is documented in
+      `docs/architecture/build-ownership.md`. Extraction remains optional.
 
 ## Explicitly deferred
 
