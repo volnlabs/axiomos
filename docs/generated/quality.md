@@ -2,13 +2,13 @@
 
 # Coverage and mutation quality boundary
 
-Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + missed + timeout), excluding mutants that do not compile. Percentages are evidence, not a quality score. Target-only, fuzz, formal, and hardware components retain explicit dispositions rather than fabricated host coverage.
+Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + missed + timeout), excluding mutants that do not compile. Percentages are evidence, not a quality score. Interface-only components have no executable regions to measure; target-only, fuzz, formal, and hardware components retain explicit dispositions rather than fabricated host coverage.
 
 ## Component denominator
 
 | Component | Role | Disposition |
 |---|---|---|
-| `Cargo.toml` | runner and image assembly | deferred-host |
+| `Cargo.toml` | runner and image assembly | measured |
 | `firmware/shrike_control/Cargo.toml` | firmware control-loop traits and run loop | measured |
 | `firmware/shrike_rp2040/Cargo.toml` | RP2040 firmware | hardware-hil |
 | `firmware/shrike_rp2040_host_sim/Cargo.toml` | firmware host simulation (mocks + sampled-state tests) | measured |
@@ -22,10 +22,10 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 | `kernel/crates/kernel_elfloader/Cargo.toml` | ELF loader | measured |
 | `kernel/crates/kernel_elfloader/fuzz/Cargo.toml` | ELF fuzz target | fuzz-harness |
 | `kernel/crates/kernel_map_transaction/Cargo.toml` | map_range rollback bookkeeping | measured |
-| `kernel/crates/kernel_memapi/Cargo.toml` | mapped-memory contract | deferred-host |
+| `kernel/crates/kernel_memapi/Cargo.toml` | mapped-memory contract | interface-only |
 | `kernel/crates/kernel_pci/Cargo.toml` | PCI contracts | measured |
 | `kernel/crates/kernel_physical_memory/Cargo.toml` | physical memory | measured |
-| `kernel/crates/kernel_run_queue/Cargo.toml` | per-CPU runnable queue core | deferred-host |
+| `kernel/crates/kernel_run_queue/Cargo.toml` | per-CPU runnable queue core | measured |
 | `kernel/crates/kernel_syscall/Cargo.toml` | syscall contracts | measured |
 | `kernel/crates/kernel_syscall/fuzz/Cargo.toml` | syscall argument fuzz target | fuzz-harness |
 | `kernel/crates/kernel_time/Cargo.toml` | time and deadline queues | measured |
@@ -63,6 +63,7 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 
 | Campaign | Component | Lines | Branches | Minimum lines | Minimum branches | Commit |
 |---|---|---:|---:|---:|---:|---|
+| axiomos-host-runner | `Cargo.toml` | 80.25% | 100.00% | 80.00% | 99.00% | `e495c43` |
 | xtask | `tools/xtask/Cargo.toml` | 41.50% | 59.00% | 41.00% | 59.00% | `fdf8580` |
 | kernel-abi | `kernel/crates/kernel_abi/Cargo.toml` | 68.35% | 0.00% | 68.00% | 0.00% | `fdf8580` |
 | kernel-bpf-cloud | `kernel/crates/kernel_bpf/Cargo.toml` | 77.71% | 63.43% | 77.00% | 63.00% | `2c3bd2c` |
@@ -72,6 +73,7 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 | kernel-map-transaction | `kernel/crates/kernel_map_transaction/Cargo.toml` | 94.35% | 100.00% | 94.00% | 99.00% | `97f514c` |
 | kernel-pci | `kernel/crates/kernel_pci/Cargo.toml` | 47.86% | 100.00% | 47.00% | 99.00% | `31d373f` |
 | kernel-physical-memory | `kernel/crates/kernel_physical_memory/Cargo.toml` | 94.71% | 77.08% | 94.00% | 77.00% | `a5316b4` |
+| kernel-run-queue | `kernel/crates/kernel_run_queue/Cargo.toml` | 97.18% | 85.71% | 97.00% | 85.00% | `e0272ca` |
 | kernel-syscall | `kernel/crates/kernel_syscall/Cargo.toml` | 67.47% | 77.08% | 67.00% | 77.00% | `fdf8580` |
 | kernel-time | `kernel/crates/kernel_time/Cargo.toml` | 96.76% | 88.24% | 96.00% | 88.00% | `fbaed42` |
 | kernel-usermem | `kernel/crates/kernel_usermem/Cargo.toml` | 98.40% | 86.67% | 98.00% | 86.00% | `946c2d2` |

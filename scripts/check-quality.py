@@ -19,6 +19,7 @@ QUALITY = ROOT / "ci/quality.toml"
 GENERATED = ROOT / "docs/generated/quality.md"
 ALLOWED_DISPOSITIONS = {
     "measured",
+    "interface-only",
     "deferred-host",
     "target-qemu",
     "target-image",
@@ -196,7 +197,7 @@ def render(components: dict, quality: dict) -> str:
         "",
         "# Coverage and mutation quality boundary",
         "",
-        "Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + missed + timeout), excluding mutants that do not compile. Percentages are evidence, not a quality score. Target-only, fuzz, formal, and hardware components retain explicit dispositions rather than fabricated host coverage.",
+        "Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + missed + timeout), excluding mutants that do not compile. Percentages are evidence, not a quality score. Interface-only components have no executable regions to measure; target-only, fuzz, formal, and hardware components retain explicit dispositions rather than fabricated host coverage.",
         "",
         "## Component denominator",
         "",

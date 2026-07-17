@@ -6,7 +6,7 @@ cargo_mutants_version = "27.1.0"
 # means the component has a coverage campaign below; the other values explain
 # why a host source-coverage percentage is not currently published.
 [disposition]
-"Cargo.toml" = "deferred-host"
+"Cargo.toml" = "measured"
 "tools/xtask/Cargo.toml" = "measured"
 "kernel/Cargo.toml" = "target-qemu"
 "kernel/crates/kernel_abi/Cargo.toml" = "measured"
@@ -16,11 +16,11 @@ cargo_mutants_version = "27.1.0"
 "kernel/crates/kernel_device/Cargo.toml" = "measured"
 "kernel/crates/kernel_elfloader/Cargo.toml" = "measured"
 "kernel/crates/kernel_elfloader/fuzz/Cargo.toml" = "fuzz-harness"
-"kernel/crates/kernel_memapi/Cargo.toml" = "deferred-host"
+"kernel/crates/kernel_memapi/Cargo.toml" = "interface-only"
 "kernel/crates/kernel_map_transaction/Cargo.toml" = "measured"
 "kernel/crates/kernel_pci/Cargo.toml" = "measured"
 "kernel/crates/kernel_physical_memory/Cargo.toml" = "measured"
-"kernel/crates/kernel_run_queue/Cargo.toml" = "deferred-host"
+"kernel/crates/kernel_run_queue/Cargo.toml" = "measured"
 "kernel/crates/kernel_syscall/Cargo.toml" = "measured"
 "kernel/crates/kernel_syscall/fuzz/Cargo.toml" = "fuzz-harness"
 "kernel/crates/kernel_time/Cargo.toml" = "measured"
@@ -56,6 +56,19 @@ cargo_mutants_version = "27.1.0"
 "userspace/timeseries_demo/Cargo.toml" = "target-image"
 "userspace/verifier_bench/Cargo.toml" = "target-image"
 "formal/lakefile.toml" = "formal-proof"
+
+[[coverage]]
+name = "axiomos-host-runner"
+component = "Cargo.toml"
+package = "axiomos"
+mode = "workspace"
+features = ["host-runner-tests"]
+no_default_features = true
+minimum_lines = 80.0
+minimum_branches = 99.0
+baseline_lines = 80.25
+baseline_branches = 100.0
+baseline_commit = "e495c43"
 
 [[coverage]]
 name = "xtask"
@@ -173,6 +186,19 @@ minimum_branches = 77.0
 baseline_lines = 94.71
 baseline_branches = 77.08
 baseline_commit = "a5316b4"
+
+[[coverage]]
+name = "kernel-run-queue"
+component = "kernel/crates/kernel_run_queue/Cargo.toml"
+package = "kernel_run_queue"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 97.0
+minimum_branches = 85.0
+baseline_lines = 97.18
+baseline_branches = 85.71
+baseline_commit = "e0272ca"
 
 [[coverage]]
 name = "kernel-syscall"
