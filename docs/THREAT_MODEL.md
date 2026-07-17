@@ -1,4 +1,4 @@
-# Axiom Threat Model & Assurance Positioning
+# axiomos Threat Model & Assurance Positioning
 
 **Status:** Living document. Line citations refer to commit `f2e38bc`
 (branch `feat_verifier_hardening`, 2026-07-03); they drift as code moves —
@@ -32,19 +32,19 @@ trust the named function over the line number.
 
 ## 1. Summary
 
-Axiom is a research kernel for robotics workloads. Untrusted logic runs as
+axiomos is a research kernel for robotics workloads. Untrusted logic runs as
 eBPF-style programs verified before execution; the kernel itself is Rust
-`no_std` with audited `unsafe`. This document defines what Axiom defends
+`no_std` with audited `unsafe`. This document defines what axiomos defends
 against, which code enforces each boundary, how large the trusted computing
-base is, and where Axiom honestly sits relative to seL4.
+base is, and where axiomos honestly sits relative to seL4.
 
-The one-line answer to #39's question — *what safety class does Axiom belong
+The one-line answer to #39's question — *what safety class does axiomos belong
 to?* — is:
 
 > **Engineering safety.** Memory-safe implementation language, a
 > load-bearing static verifier with zero `unsafe`, WCET admission control,
 > and a growing test corpus — but no machine-checked proofs, no verified
-> scheduler, and no capability system. Axiom is "safer than Linux by
+> scheduler, and no capability system. axiomos is "safer than Linux by
 > construction" in its BPF path, and materially less proven than seL4
 > everywhere. The roadmap (section 8) narrows that gap where it pays.
 
@@ -201,7 +201,7 @@ Measured with `wc -l` over `*.rs` (excluding `tests/` directories), commit
 | BPF subsystem (`kernel_bpf`, incl. verifier) | 26,258 | Yes |
 | — of which verifier | 7,649 | Yes (zero `unsafe`) |
 | All kernel crates | 36,564 | Yes |
-| **Axiom TCB (order of magnitude)** | **~57k LoC Rust** | — |
+| **axiomos TCB (order of magnitude)** | **~57k LoC Rust** | — |
 | `unsafe` occurrences across kernel (grep, incl. some comments) | ~700 | audit surface |
 
 seL4 for contrast: ~8,700 LoC of C (+~600 asm) with machine-checked
@@ -209,12 +209,12 @@ functional correctness in Isabelle/HOL, plus proved integrity and
 information-flow properties, binary-level verification on ARM, and published
 WCET analysis.
 
-The honest read: Axiom's TCB is ~6× seL4's, and seL4's is *proven* while
+The honest read: axiomos' TCB is ~6× seL4's, and seL4's is *proven* while
 ours is *trusted*. "TCB" means different things in the two systems —
-seL4's is bounded by proof, Axiom's by Rust's type system, the verifier
+seL4's is bounded by proof, axiomos' by Rust's type system, the verifier
 (itself unproven, hence #91), tests, and review.
 
-| Dimension | Axiom (today) | seL4 |
+| Dimension | axiomos (today) | seL4 |
 |---|---|---|
 | Implementation language | Rust `no_std` | C + asm |
 | Memory safety basis | Type system + audited `unsafe` (~700 sites) | Machine-checked proof |
@@ -226,10 +226,10 @@ seL4's is bounded by proof, Axiom's by Rust's type system, the verifier
 | WCET story | Pi5-calibrated cost model + EDF admission | Published WCET analysis of kernel paths |
 | External review | Pending (#77) | 15+ years of it |
 
-Axiom's differentiator is not assurance depth — it is that **untrusted,
+axiomos' differentiator is not assurance depth — it is that **untrusted,
 hot-swappable robotics logic is a first-class kernel object** with static
 safety and timing admission. seL4 gives you a proven microkernel and leaves
-policy to userland; Axiom gives you an unproven but verifier-guarded
+policy to userland; axiomos gives you an unproven but verifier-guarded
 programmable data path. These are different points in the design space, and
 the roadmap borrows seL4's discipline where it fits.
 

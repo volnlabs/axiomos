@@ -1,4 +1,4 @@
-# Axiom Kernel Benchmarks
+# axiomos Kernel Benchmarks
 
 > **⚠ Benchmark validity warning (2026-07-11, ENGINEERING_AUDIT.md):**
 > The x86 boot timing and all HPET-derived latencies in this document
@@ -23,7 +23,7 @@
 > The non-time metrics (memory footprint, kernel image size) are
 > unaffected by H-02 and remain reproducible.
 
-This benchmark suite provides reproducible measurements for comparing Axiom and Linux on identical hardware, focusing on metrics critical for high-performance robotics and real-time control.
+This benchmark suite provides reproducible measurements for comparing axiomos and Linux on identical hardware, focusing on metrics critical for high-performance robotics and real-time control.
 
 The goal is to measure:
 
@@ -36,13 +36,13 @@ All results are reproducible and tied to specific environments and kernel versio
 
 ---
 
-# 1. Axiom Benchmark Results (QEMU x86_64)
+# 1. axiomos Benchmark Results (QEMU x86_64)
 
 ## Test Environment
 
 * **Platform:** QEMU x86_64 emulator
 * **Memory:** 2 GB
-* **Kernel:** Axiom kernel (dev branch)
+* **Kernel:** axiomos kernel (dev branch)
 * **Measurement Tool:** `userspace/benchmark` program
 * **Date:** 2026-03-06
 
@@ -70,14 +70,14 @@ Hardware measurements on Raspberry Pi 5 provide the authoritative numbers.
 
 ---
 
-# 2. Axiom Benchmark Results (Raspberry Pi 5)
+# 2. axiomos Benchmark Results (Raspberry Pi 5)
 
 ## Test Environment
 
 * **Platform:** Raspberry Pi 5 Model B Rev 1.0 (8GB)
 * **CPU:** Cortex-A76 @ 2.4 GHz
 * **CPU frequency scaling:** disabled (fixed at maximum)
-* **Kernel:** `axiom-ebpf`
+* **Kernel:** `axiomos`
 * **Kernel Commit:** bedc93c
 * **Date:** 2026-03-14
 * **Build Command**
@@ -157,7 +157,7 @@ Hardware measurements confirm the correct operation of multiple kernel subsystem
 * timer-driven BPF execution
 
 ### Interrupt Latency Performance
-The measured **211 ns** latency (hardware vector entry to BPF execution) demonstrates the efficiency of the minimal interrupt path and the Axiom BPF execution model.
+The measured **211 ns** latency (hardware vector entry to BPF execution) demonstrates the efficiency of the minimal interrupt path and the axiomos BPF execution model.
 
 *   **10x faster than Linux** (Linux baseline: 2000 ns).
 *   **Well below stretch target** (< 1000 ns).
@@ -208,7 +208,7 @@ BPF program load overhead is effectively **negligible** in interpreter mode.
 
 ### Relative Performance (RPi5)
 
-| Metric | Axiom Advantage |
+| Metric | axiomos Advantage |
 |------|------|
 | Boot time | ~5.8x faster |
 | BPF load | ~25x faster |
@@ -216,14 +216,14 @@ BPF program load overhead is effectively **negligible** in interpreter mode.
 
 ### Side-by-Side Comparison
 
-| Metric            | Axiom (RPi5) | Linux (RPi5)         | Notes                          |
+| Metric            | axiomos (RPi5) | Linux (RPi5)         | Notes                          |
 | ----------------- | ------------ | -------------------- | ------------------------------ |
 | Boot time         | 99 ms        | 573 ms               | measured to init process spawn |
-| Kernel image size | 10 MB        | ~15 MB               | Axiom is ~1.5x smaller         |
-| Kernel memory     | ~22 MB       | ~60 MB (footprint)   | image + heap (Axiom)           |
+| Kernel image size | 10 MB        | ~15 MB               | axiomos is ~1.5x smaller       |
+| Kernel memory     | ~22 MB       | ~60 MB (footprint)   | image + heap (axiomos)         |
 | BPF load time     | <1 µs        | 24.8 µs              | interpreter vs full verifier   |
 | Timer interval    | 9999 µs      | configurable         | kernel tick                    |
-| Interrupt latency | 211 ns       | 2000 ns (2 µs)       | Axiom is ~10x faster           |
+| Interrupt latency | 211 ns       | 2000 ns (2 µs)       | axiomos is ~10x faster         |
 
 ---
 
@@ -373,8 +373,8 @@ Hardware measurements are authoritative.
 ## Build
 
 ```
-git clone https://github.com/axiom/axiom-ebpf
-cd axiom-ebpf
+git clone https://github.com/pro-utkarshM/axiomOS axiomos
+cd axiomos
 cargo build --release
 ```
 
@@ -697,7 +697,7 @@ under load.
 
 # References
 
-* Archived Axiom proposal (`docs/archive/pitches/2026-01-proposal.md`)
+* Archived axiomos proposal (`docs/archive/pitches/2026-01-proposal.md`)
 * Linux eBPF documentation
 * Cyclictest realtime benchmarks
 * Criterion.rs benchmarking framework

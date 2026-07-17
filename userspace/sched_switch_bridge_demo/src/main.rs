@@ -26,7 +26,7 @@ fn panic(_info: &PanicInfo) -> ! {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     write(1, b"\n========================================\n");
-    write(1, b"  Axiom sched_switch Bridge Demo\n");
+    write(1, b"  axiomos sched_switch bridge demo\n");
     write(1, b"  pinned-object consumer -> live scheduler events\n");
     write(1, b"========================================\n\n");
 

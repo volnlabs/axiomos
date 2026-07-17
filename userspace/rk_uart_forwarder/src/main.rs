@@ -1,4 +1,4 @@
-// Axiom-side forwarder. Polls the pinned sched_switch ring buffer and emits
+// axiomos-side forwarder. Polls the pinned sched_switch ring buffer and emits
 // newline-delimited JSON lines to stdout (which is the UART when run from
 // init on Pi5). Host-side `rk_bridge --input` consumes the same stream and
 // publishes to ROS2.

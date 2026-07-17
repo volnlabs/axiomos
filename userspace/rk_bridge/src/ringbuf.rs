@@ -1,4 +1,4 @@
-//! Ring buffer consumer for reading rkBPF events through the Axiom BPF syscall path.
+//! Ring buffer consumer for reading rkBPF events through the axiomos BPF syscall path.
 //!
 //! The current kernel exposes pinned map lookup plus `BPF_RINGBUF_POLL`, not a
 //! file-backed `mmap` interface. This consumer opens a pinned object path,

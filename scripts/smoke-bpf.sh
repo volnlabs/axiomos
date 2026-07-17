@@ -16,7 +16,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-LOG="$(mktemp -t axiom-smoke-bpf.XXXXXX.log)"
+LOG="$(mktemp -t axiomos-smoke-bpf.XXXXXX.log)"
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-540}"
 
 cd "$PROJECT_DIR"

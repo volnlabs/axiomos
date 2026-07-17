@@ -139,7 +139,7 @@ fn build_os_disk_dir(target_arch: &str) -> PathBuf {
         .expect("AXIOM_SIGNED_BPF_STARTUP_PATH must name a readable signed program");
     }
 
-    fs::write(disk.join("var/hello.txt"), "Hello, axiom-ebpf!\n")
+    fs::write(disk.join("var/hello.txt"), "Hello, axiomos!\n")
         .expect("should be able to write hello.txt");
 
     disk

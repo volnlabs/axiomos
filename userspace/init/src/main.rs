@@ -113,7 +113,7 @@ pub extern "C" fn _start() -> ! {
         write(1, b"BPF_CAPABILITY_PROBE_START_FAIL\n");
     }
 
-    write(1, b"=== Axiom eBPF Init ===\n");
+    write(1, b"=== axiomos eBPF init ===\n");
     #[cfg(feature = "bpf-unsigned-development")]
     {
         write(1, b"Phase 4 demo boot: ");

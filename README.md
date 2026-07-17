@@ -1,8 +1,8 @@
-# Axiom
+# axiomos
 
 A bare-metal Rust kernel with runtime-programmable behavior through verified eBPF programs.
 
-Axiom targets robotics and embedded systems where kernel logic should evolve without reflashing firmware. Instead of recompiling to change kernel behavior, verified programs are loaded and attached to kernel hooks at runtime.
+axiomos targets robotics and embedded systems where kernel logic should evolve without reflashing firmware. Instead of recompiling to change kernel behavior, verified programs are loaded and attached to kernel hooks at runtime.
 
 > **Status: research kernel under active hardware bring-up on Raspberry Pi 5.** Not production-ready. See [Limitations](#limitations) for the current honest list of what works and what doesn't. Benchmarks in [docs/benchmarks.md](docs/benchmarks.md) are measured on real hardware; the headline numbers (e.g. 211 ns interrupt latency) are single-core, single-program, no-contention measurements — multi-core RT claims require the scheduler work tracked under [issue #57](https://github.com/pro-utkarshM/axiomOS/issues/57).
 
@@ -15,9 +15,9 @@ Axiom targets robotics and embedded systems where kernel logic should evolve wit
 
 ---
 
-## Why Axiom Exists
+## Why axiomos Exists
 
-Embedded systems deployed in the field need behavioral updates — new sensor fusion algorithms, modified control loops, updated safety policies. Traditional kernels require full reflash cycles: risky, slow, and capable of bricking devices. Axiom instead hot-loads verified eBPF programs onto kernel hooks (syscalls, timers, GPIO, PWM, IIO) at runtime, detachable on the fly.
+Embedded systems deployed in the field need behavioral updates — new sensor fusion algorithms, modified control loops, updated safety policies. Traditional kernels require full reflash cycles: risky, slow, and capable of bricking devices. axiomos instead hot-loads verified eBPF programs onto kernel hooks (syscalls, timers, GPIO, PWM, IIO) at runtime, detachable on the fly.
 
 This is proven in Linux, but Linux is unsuitable for hard real-time robotics due to unpredictable latency and resource overhead:
 
@@ -25,7 +25,7 @@ This is proven in Linux, but Linux is unsuitable for hard real-time robotics due
 |----------|---------|-----------|---------|------------|
 | Linux + eBPF | ~2,000ns jitter | ~60MB (kernel) | Limited | Lower |
 | RTOS + custom | <10,000ns | ~1MB | Partial | Medium |
-| **Axiom (Pi5)** | **211ns avg, single-core** | **~22MB** | **Total** | **Higher** |
+| **axiomos (Pi5)** | **211ns avg, single-core** | **~22MB** | **Total** | **Higher** |
 
 The latency figure is honest about its boundary: hardware vector entry → BPF dispatch, single core, no contention. Tail latency under load is not yet measured ([#74](https://github.com/pro-utkarshM/axiomOS/issues/74)). Full methodology in [docs/benchmarks.md](docs/benchmarks.md).
 
@@ -134,7 +134,7 @@ The full picture lives in [issue #81 — execution roadmap](https://github.com/p
 
 ## Design Philosophy
 
-Axiom is **not** a production kernel (yet), not POSIX-compliant (by design), and not a Linux replacement. It **is** a research platform for runtime kernel extension, exploring:
+axiomos is **not** a production kernel (yet), not POSIX-compliant (by design), and not a Linux replacement. It **is** a research platform for runtime kernel extension, exploring:
 
 1. Can eBPF verification provide sufficient safety for kernel extensions?
 2. Does Rust's type system meaningfully reduce kernel bugs in practice?

@@ -18,7 +18,7 @@ fn panic(_info: &PanicInfo) -> ! {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     write(1, b"\n========================================\n");
-    write(1, b"  Axiom BPF End-to-End Demo\n");
+    write(1, b"  axiomos BPF end-to-end demo\n");
     write(1, b"  Maps + Ringbuf + Timer Attach\n");
     write(1, b"========================================\n\n");
 

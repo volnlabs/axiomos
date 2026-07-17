@@ -90,7 +90,7 @@ impl BpfInsn {
 pub extern "C" fn _start() -> ! {
     print("\n");
     print("========================================\n");
-    print("  Axiom Legacy BPF Reflex Demo\n");
+    print("  axiomos legacy BPF reflex demo\n");
     print("========================================\n");
     print("\n");
     print("This demo shows a monitored BPF reflex path.\n");

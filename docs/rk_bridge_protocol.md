@@ -1,11 +1,11 @@
 # `rk_bridge` wire protocol
 
 This document specifies the line-oriented JSON protocol used between the
-Axiom-side forwarder (`rk_uart_forwarder`) and a host-side `rk_bridge`
+axiomos-side forwarder (`rk_uart_forwarder`) and a host-side `rk_bridge`
 running in stream-ingest mode (`rk-to-ros --input stdin`).
 
 The motivation is straightforward: `rk_bridge` resolves pinned BPF objects
-through Axiom's `sys_bpf` interface, which only exists on a running Axiom
+through axiomos' `sys_bpf` interface, which only exists on a running axiomos
 kernel. To get the same events into a ROS2 graph on a developer's host
 machine, we need an out-of-band transport. The smallest one available
 today is the existing UART debug probe wired up for benchmarks.
@@ -22,7 +22,7 @@ consumer; this lets the forwarder emit a human-readable banner alongside
 the structured stream without confusing the parser, and tolerates kernel
 log noise on the same UART before the first JSON line.
 
-The forwarder writes to `stdout`, which on Axiom is the UART when the
+The forwarder writes to `stdout`, which on axiomos is the UART when the
 forwarder is launched from `init`. Pipe to a host with whatever serial
 tool you already use:
 

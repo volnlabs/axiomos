@@ -73,7 +73,7 @@ jobs:
           cargo xtask inventory --check
           cargo xtask docs --check
       - name: Clippy (per-crate, matches local CI recipe)
-        # Per the axiom-kernel skill: per-crate clippy avoids the
+        # Per the kernel build guidance: per-crate clippy avoids the
         # profile-typed kernel_bpf "no default profile" failures that bare
         # `cargo clippy --workspace --lib` triggers on a host build.
         run: |

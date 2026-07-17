@@ -1,4 +1,4 @@
-//! Stream-based event ingestion for hosts that don't have access to the Axiom
+//! Stream-based event ingestion for hosts that don't have access to the axiomos
 //! BPF FS — for example, a Linux box that runs ROS2 and reads forwarded events
 //! from `rk_uart_forwarder` over a UART/serial pipe.
 //!

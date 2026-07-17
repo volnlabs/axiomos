@@ -1,10 +1,10 @@
-# Call for review: break the Axiom BPF verifier
+# Call for review: break the axiomos BPF verifier
 
 > **Status: DRAFT — not yet posted.** Maintainer TODOs before posting: decide
 > the bounty section, fill in the posting date and commit hash, and confirm
 > issue links render on the public repo.
 
-Axiom is a research kernel for robotics workloads (Rust, `no_std`, runs on
+axiomos is a research kernel for robotics workloads (Rust, `no_std`, runs on
 Raspberry Pi 5 and x86_64/QEMU). Untrusted logic runs as eBPF-style programs
 attached to kernel hooks (GPIO, PWM, IIO sensors, timers, syscalls). The only
 thing standing between a loaded program and the kernel is a static verifier.
@@ -102,7 +102,7 @@ divergence from those semantics in our Rust port is a finding.
 No kernel build needed — the verifier runs on the host:
 
 ```sh
-git clone https://github.com/pro-utkarshM/axiomOS && cd axiomOS
+git clone https://github.com/pro-utkarshM/axiomOS axiomos && cd axiomos
 cargo test -p kernel_bpf --features embedded-profile
 ```
 

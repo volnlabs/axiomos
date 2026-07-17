@@ -1,6 +1,6 @@
 //! rk-to-ros: Bridge rkBPF kernel events to stdout or ROS2 topics
 //!
-//! This CLI tool resolves pinned rkBPF ring buffer objects through the Axiom
+//! This CLI tool resolves pinned rkBPF ring buffer objects through the axiomos
 //! `sys_bpf` interface and publishes events to stdout or ROS2.
 //!
 //! # Usage
@@ -38,7 +38,7 @@ use tokio::time::interval;
 #[command(version = "0.1.0")]
 #[command(about = "Bridge pinned rkBPF kernel events to stdout or ROS2 topics")]
 #[command(long_about = r#"
-rk-to-ros opens pinned rkBPF ring buffer objects through the Axiom BPF syscall
+rk-to-ros opens pinned rkBPF ring buffer objects through the axiomos BPF syscall
 surface and forwards their events to stdout or ROS2 topics.
 
 Examples:
@@ -95,7 +95,7 @@ struct Args {
 
     /// Read events from a JSON-lines stream instead of a pinned BPF object.
     /// This is the path used when running `rk-to-ros` on a host that doesn't
-    /// have access to the Axiom BPF syscall — events arrive over UART from
+    /// have access to the axiomos BPF syscall — events arrive over UART from
     /// `rk_uart_forwarder`. Pipe them in with `socat` or similar.
     ///
     /// Currently supported: `stdin`. Serial-port support is a follow-up.

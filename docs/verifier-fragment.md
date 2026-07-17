@@ -7,7 +7,7 @@ write-up lives separately.
 
 ## Why bound verification cost?
 
-Axiom's pitch is on-device, hot-reloadable kernel extensions for real-time
+axiomos' pitch is on-device, hot-reloadable kernel extensions for real-time
 systems. If a program can be *loaded* on a running robot, the act of *verifying*
 it competes for CPU with the control loop. Unlike Linux — whose verifier has
 only a heuristic "complexity limit" and whose verification time is effectively

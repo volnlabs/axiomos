@@ -53,6 +53,11 @@ Current generated authority:
 Repository-local links in current, generated, archived, and audit Markdown are
 enforced by `scripts/check-doc-links.py` through the required
 `documentation-links` local-gate step.
+
+The canonical product and release-artifact name is lowercase `axiomos`.
+Historical records and external repository URL slugs retain their original
+spelling; active prose, banners, package display metadata, and local tooling
+are enforced by the required `product-naming-static` step.
 - [Immutable build inputs](../generated/build-inputs.md)
 - [Coverage and mutation quality boundary](../generated/quality.md)
 - [Versioned userspace ABI](../generated/abi.md)

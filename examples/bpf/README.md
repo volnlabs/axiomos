@@ -1,12 +1,12 @@
-# BPF Examples for Axiom
+# BPF Examples for axiomos
 
-This directory contains example BPF programs for the Axiom kernel.
+This directory contains example BPF programs for the axiomos kernel.
 
 ## Quick Start
 
 ### Raw Bytecode (Current Approach)
 
-Axiom currently loads BPF programs as raw bytecode via the `sys_bpf` syscall:
+axiomos currently loads BPF programs as raw bytecode via the `sys_bpf` syscall:
 
 ```rust
 // Example: Simple program that returns 42

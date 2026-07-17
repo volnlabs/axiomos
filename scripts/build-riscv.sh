@@ -4,7 +4,7 @@ set -e
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "Building axiom-ebpf RISC-V Demo Kernel..."
+echo "Building axiomos RISC-V demo kernel..."
 echo "=========================================="
 echo ""
 echo "Note: This builds the demo kernel (kernel/demos/riscv/)"

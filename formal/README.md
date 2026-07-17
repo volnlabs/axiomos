@@ -1,6 +1,6 @@
-# Axiom verifier formalization (Lean 4)
+# axiomos verifier formalization (Lean 4)
 
-Machine-checked proofs about the abstract domain of Axiom's BPF verifier.
+Machine-checked proofs about the abstract domain of the axiomos BPF verifier.
 This is the running proof-of-concept for
 [#91 — formal proof of verifier core invariants](https://github.com/pro-utkarshM/axiomOS/issues/91).
 

@@ -876,7 +876,7 @@ impl AddressSpace {
 
             // Copy memory content
             // SAFETY: We are accessing valid physical frames. We use phys_to_virt to map them.
-            // On Axiom, all physical memory is mapped in the higher half.
+            // On axiomos, all physical memory is mapped in the higher half.
             unsafe {
                 let src_ptr =
                     crate::mem::phys_to_virt(frame.start_address().as_u64() as usize) as *const u8;
