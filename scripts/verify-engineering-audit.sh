@@ -625,7 +625,7 @@ run_cargo_step fault-injection-tests test -p kernel_physical_memory \
 # collapses the typed error back to `&'static str` would silently
 # lose the ENOMEM signal that the audit-fault-injection work
 # requires.
-run_step execve-typed-error-static python3 /tmp/opencode/check_execve_typed_error.py
+run_step execve-typed-error-static python3 -B scripts/check-execve-typed-error.py
 
 # Audit-fault-injection QEMU smoke. Runs only when RUN_AUDIT_FAULT=1.
 # Uses --smp 1 (single vCPU) so the global fault-counter observed by the
