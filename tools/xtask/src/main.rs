@@ -7,19 +7,11 @@ use std::{env, fs};
 use serde::Deserialize;
 
 mod cli;
+mod context;
 mod error;
 use cli::Command;
+use context::*;
 use error::XtaskError;
-
-const COMPONENT_MANIFEST: &str = "ci/components.toml";
-const GENERATED_COMPONENTS: &str = "docs/reference/generated/components.md";
-const ARTIFACT_MANIFEST: &str = "ci/artifacts.toml";
-const GENERATED_ARTIFACTS: &str = "docs/reference/generated/artifacts.md";
-const BUILD_INPUTS: &str = "ci/build-inputs.env";
-const GENERATED_BUILD_INPUTS: &str = "docs/reference/generated/build-inputs.md";
-const TARGET_MANIFEST: &str = "ci/targets.toml";
-const GENERATED_TARGETS: &str = "docs/reference/generated/targets.md";
-const GENERATED_ABI: &str = "docs/reference/generated/abi.md";
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
 struct Component {
@@ -135,14 +127,6 @@ impl ComponentBuilder {
             artifact: get("artifact")?,
         })
     }
-}
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("xtask must live under tools/xtask")
-        .to_path_buf()
 }
 
 fn parse_quoted(value: &str, line: usize) -> Result<String, String> {
