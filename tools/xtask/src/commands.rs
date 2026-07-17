@@ -1,12 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cli::{self, Command};
 use crate::context::repo_root;
 use crate::docs::check_or_write_docs;
 use crate::model::RepositoryModel;
+use crate::process::{command as process_command, display_command, run_status};
 use crate::validation::{validate_boundary, validate_inventory};
 
 fn run_ci(root: &Path, arguments: &[String]) -> Result<(), String> {
@@ -36,12 +36,10 @@ fn run_ci(root: &Path, arguments: &[String]) -> Result<(), String> {
     }
 }
 
-fn audit_command(root: &Path, arguments: &[String]) -> ProcessCommand {
-    let mut command = ProcessCommand::new(root.join("scripts/verify/engineering-audit.sh"));
-    command
-        .args(arguments)
-        .current_dir(root)
-        .env("AXIOM_RUN_COMMAND", public_invocation());
+fn audit_command(root: &Path, arguments: &[String]) -> std::process::Command {
+    let executable = root.join("scripts/verify/engineering-audit.sh");
+    let mut command = process_command(root, &executable, arguments);
+    command.env("AXIOM_RUN_COMMAND", public_invocation());
     command
 }
 
@@ -52,18 +50,6 @@ fn public_invocation() -> String {
         .map(|argument| format!("{argument:?}"))
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn run_status(root: &Path, program: &str, arguments: &[&str]) -> Result<(), String> {
-    let status = ProcessCommand::new(program)
-        .args(arguments)
-        .current_dir(root)
-        .status()
-        .map_err(|error| format!("failed to run {program}: {error}"))?;
-    status
-        .success()
-        .then_some(())
-        .ok_or_else(|| format!("{program} exited with {status}"))
 }
 
 fn run_check(root: &Path, arguments: &[String]) -> Result<(), String> {
@@ -191,22 +177,13 @@ fn run_forward(
         println!("{}", display_command(&executable, &forwarded));
         return Ok(());
     }
-    let status = ProcessCommand::new(&executable)
-        .args(&forwarded)
-        .current_dir(root)
+    let status = process_command(root, &executable, &forwarded)
         .status()
         .map_err(|error| format!("failed to run {}: {error}", executable.display()))?;
     status
         .success()
         .then_some(())
         .ok_or_else(|| format!("{program} command exited with {status}"))
-}
-
-fn display_command(executable: &Path, arguments: &[String]) -> String {
-    std::iter::once(executable.display().to_string())
-        .chain(arguments.iter().map(|argument| format!("{argument:?}")))
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 pub(crate) fn usage() {

@@ -9,6 +9,7 @@ mod docs;
 mod error;
 mod manifests;
 mod model;
+mod process;
 mod validation;
 #[cfg(test)]
 use docs::render_components;

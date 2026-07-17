@@ -1,7 +1,7 @@
 # Script Ownership
 
 Scripts are focused process adapters. The canonical repository interface is
-`cargo xtask`; scripts remain implementation helpers during migration.
+`cargo xtask`; scripts are its focused implementation helpers.
 
 | Responsibility | Canonical implementation |
 |---|---|
@@ -13,8 +13,8 @@ Scripts are focused process adapters. The canonical repository interface is
 | Benchmark | `benchmark/analyze-v03.py`, `benchmark/verifier-cost.py` |
 | Debug | `debug/qemu-triage.sh` |
 
-Flat paths are compatibility shims only. New code and documentation must use
-the grouped implementations or, preferably, their `cargo xtask` command.
+The grouped implementations are the only supported script paths. New code and
+documentation should prefer their `cargo xtask` command.
 
 ## Rules
 
@@ -22,8 +22,4 @@ the grouped implementations or, preferably, their `cargo xtask` command.
 - Keep structured parsing and reports in Python or Rust, not large shell pipelines.
 - Do not add a second master script. New stable workflows belong behind
   `cargo xtask` and may delegate here.
-- Preserve existing paths with compatibility wrappers during directory moves.
 - Update callers, documentation, workflows, and command smoke checks together.
-
-The grouped layout is authoritative. Compatibility shims may be removed only
-after the full audit proves that no supported caller depends on them.
