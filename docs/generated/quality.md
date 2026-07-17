@@ -14,10 +14,10 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 | `firmware/shrike_rp2040_host_sim/Cargo.toml` | firmware host simulation (mocks + sampled-state tests) | deferred-host |
 | `formal/lakefile.toml` | verifier formal model | formal-proof |
 | `kernel/Cargo.toml` | kernel | target-qemu |
-| `kernel/crates/kernel_abi/Cargo.toml` | public ABI | deferred-host |
+| `kernel/crates/kernel_abi/Cargo.toml` | public ABI | measured |
 | `kernel/crates/kernel_bpf/Cargo.toml` | BPF runtime | measured |
 | `kernel/crates/kernel_bpf/fuzz/Cargo.toml` | BPF fuzz targets | fuzz-harness |
-| `kernel/crates/kernel_devfs/Cargo.toml` | device filesystem | deferred-host |
+| `kernel/crates/kernel_devfs/Cargo.toml` | device filesystem | measured |
 | `kernel/crates/kernel_device/Cargo.toml` | device contracts | deferred-host |
 | `kernel/crates/kernel_elfloader/Cargo.toml` | ELF loader | measured |
 | `kernel/crates/kernel_elfloader/fuzz/Cargo.toml` | ELF fuzz target | fuzz-harness |
@@ -25,15 +25,15 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 | `kernel/crates/kernel_memapi/Cargo.toml` | mapped-memory contract | deferred-host |
 | `kernel/crates/kernel_pci/Cargo.toml` | PCI contracts | deferred-host |
 | `kernel/crates/kernel_physical_memory/Cargo.toml` | physical memory | measured |
-| `kernel/crates/kernel_syscall/Cargo.toml` | syscall contracts | deferred-host |
+| `kernel/crates/kernel_syscall/Cargo.toml` | syscall contracts | measured |
 | `kernel/crates/kernel_syscall/fuzz/Cargo.toml` | syscall argument fuzz target | fuzz-harness |
 | `kernel/crates/kernel_time/Cargo.toml` | time and deadline queues | measured |
 | `kernel/crates/kernel_usermem/Cargo.toml` | userspace memory boundary | measured |
-| `kernel/crates/kernel_vfs/Cargo.toml` | virtual filesystem | deferred-host |
-| `kernel/crates/kernel_virtual_memory/Cargo.toml` | virtual memory | deferred-host |
-| `kernel/crates/shrike_link/Cargo.toml` | control-link protocol | deferred-host |
+| `kernel/crates/kernel_vfs/Cargo.toml` | virtual filesystem | measured |
+| `kernel/crates/kernel_virtual_memory/Cargo.toml` | virtual memory | measured |
+| `kernel/crates/shrike_link/Cargo.toml` | control-link protocol | measured |
 | `kernel/demos/riscv/Cargo.toml` | experimental RISC-V demo | experimental-target |
-| `tools/xtask/Cargo.toml` | validation authority | deferred-host |
+| `tools/xtask/Cargo.toml` | validation authority | measured |
 | `userspace/benchmark/Cargo.toml` | benchmark image | target-image |
 | `userspace/bpf_loader/Cargo.toml` | BPF loader image | target-image |
 | `userspace/file_io_demo/Cargo.toml` | filesystem demo | target-image |
@@ -44,7 +44,7 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 | `userspace/init/Cargo.toml` | init and integration probes | target-image |
 | `userspace/minilib/Cargo.toml` | userspace runtime | target-image |
 | `userspace/pwm_demo/Cargo.toml` | PWM demo | target-image |
-| `userspace/rk_bridge/Cargo.toml` | host robotics bridge | deferred-host |
+| `userspace/rk_bridge/Cargo.toml` | host robotics bridge | measured |
 | `userspace/rk_bridge/fuzz/Cargo.toml` | rk_bridge protocol fuzz target | fuzz-harness |
 | `userspace/rk_cli/Cargo.toml` | host signing CLI | deferred-host |
 | `userspace/rk_uart_forwarder/Cargo.toml` | UART forwarder image | target-image |
@@ -62,12 +62,20 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 
 | Campaign | Component | Lines | Branches | Minimum lines | Minimum branches | Commit |
 |---|---|---:|---:|---:|---:|---|
+| xtask | `tools/xtask/Cargo.toml` | 41.50% | 59.00% | 41.00% | 59.00% | `fdf8580` |
+| kernel-abi | `kernel/crates/kernel_abi/Cargo.toml` | 68.35% | 0.00% | 68.00% | 0.00% | `fdf8580` |
 | kernel-bpf-cloud | `kernel/crates/kernel_bpf/Cargo.toml` | 77.71% | 63.43% | 77.00% | 63.00% | `2c3bd2c` |
+| kernel-devfs | `kernel/crates/kernel_devfs/Cargo.toml` | 91.11% | 81.03% | 91.00% | 81.00% | `fdf8580` |
 | kernel-elfloader | `kernel/crates/kernel_elfloader/Cargo.toml` | 83.29% | 66.67% | 83.00% | 66.00% | `2c3bd2c` |
 | kernel-map-transaction | `kernel/crates/kernel_map_transaction/Cargo.toml` | 94.35% | 100.00% | 94.00% | 99.00% | `97f514c` |
 | kernel-physical-memory | `kernel/crates/kernel_physical_memory/Cargo.toml` | 94.71% | 77.08% | 94.00% | 77.00% | `a5316b4` |
+| kernel-syscall | `kernel/crates/kernel_syscall/Cargo.toml` | 67.47% | 77.08% | 67.00% | 77.00% | `fdf8580` |
 | kernel-time | `kernel/crates/kernel_time/Cargo.toml` | 96.76% | 88.24% | 96.00% | 88.00% | `fbaed42` |
 | kernel-usermem | `kernel/crates/kernel_usermem/Cargo.toml` | 98.40% | 86.67% | 98.00% | 86.00% | `946c2d2` |
+| kernel-vfs | `kernel/crates/kernel_vfs/Cargo.toml` | 93.26% | 84.62% | 93.00% | 84.00% | `fdf8580` |
+| kernel-virtual-memory | `kernel/crates/kernel_virtual_memory/Cargo.toml` | 100.00% | 100.00% | 99.00% | 99.00% | `fdf8580` |
+| shrike-link | `kernel/crates/shrike_link/Cargo.toml` | 98.57% | 94.44% | 98.00% | 94.00% | `fdf8580` |
+| rk-bridge | `userspace/rk_bridge/Cargo.toml` | 40.93% | 56.25% | 40.00% | 56.00% | `fdf8580` |
 
 ## Mutation baselines
 

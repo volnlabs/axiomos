@@ -7,12 +7,12 @@ cargo_mutants_version = "27.1.0"
 # why a host source-coverage percentage is not currently published.
 [disposition]
 "Cargo.toml" = "deferred-host"
-"tools/xtask/Cargo.toml" = "deferred-host"
+"tools/xtask/Cargo.toml" = "measured"
 "kernel/Cargo.toml" = "target-qemu"
-"kernel/crates/kernel_abi/Cargo.toml" = "deferred-host"
+"kernel/crates/kernel_abi/Cargo.toml" = "measured"
 "kernel/crates/kernel_bpf/Cargo.toml" = "measured"
 "kernel/crates/kernel_bpf/fuzz/Cargo.toml" = "fuzz-harness"
-"kernel/crates/kernel_devfs/Cargo.toml" = "deferred-host"
+"kernel/crates/kernel_devfs/Cargo.toml" = "measured"
 "kernel/crates/kernel_device/Cargo.toml" = "deferred-host"
 "kernel/crates/kernel_elfloader/Cargo.toml" = "measured"
 "kernel/crates/kernel_elfloader/fuzz/Cargo.toml" = "fuzz-harness"
@@ -20,13 +20,13 @@ cargo_mutants_version = "27.1.0"
 "kernel/crates/kernel_map_transaction/Cargo.toml" = "measured"
 "kernel/crates/kernel_pci/Cargo.toml" = "deferred-host"
 "kernel/crates/kernel_physical_memory/Cargo.toml" = "measured"
-"kernel/crates/kernel_syscall/Cargo.toml" = "deferred-host"
+"kernel/crates/kernel_syscall/Cargo.toml" = "measured"
 "kernel/crates/kernel_syscall/fuzz/Cargo.toml" = "fuzz-harness"
 "kernel/crates/kernel_time/Cargo.toml" = "measured"
 "kernel/crates/kernel_usermem/Cargo.toml" = "measured"
-"kernel/crates/kernel_vfs/Cargo.toml" = "deferred-host"
-"kernel/crates/kernel_virtual_memory/Cargo.toml" = "deferred-host"
-"kernel/crates/shrike_link/Cargo.toml" = "deferred-host"
+"kernel/crates/kernel_vfs/Cargo.toml" = "measured"
+"kernel/crates/kernel_virtual_memory/Cargo.toml" = "measured"
+"kernel/crates/shrike_link/Cargo.toml" = "measured"
 "firmware/shrike_control/Cargo.toml" = "deferred-host"
 "firmware/shrike_rp2040_host_sim/Cargo.toml" = "deferred-host"
 "kernel/demos/riscv/Cargo.toml" = "experimental-target"
@@ -41,7 +41,7 @@ cargo_mutants_version = "27.1.0"
 "userspace/init/Cargo.toml" = "target-image"
 "userspace/minilib/Cargo.toml" = "target-image"
 "userspace/pwm_demo/Cargo.toml" = "target-image"
-"userspace/rk_bridge/Cargo.toml" = "deferred-host"
+"userspace/rk_bridge/Cargo.toml" = "measured"
 "userspace/rk_bridge/fuzz/Cargo.toml" = "fuzz-harness"
 "userspace/rk_cli/Cargo.toml" = "deferred-host"
 "userspace/rk_uart_forwarder/Cargo.toml" = "target-image"
@@ -57,6 +57,32 @@ cargo_mutants_version = "27.1.0"
 "formal/lakefile.toml" = "formal-proof"
 
 [[coverage]]
+name = "xtask"
+component = "tools/xtask/Cargo.toml"
+package = "xtask"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 41.0
+minimum_branches = 59.0
+baseline_lines = 41.50
+baseline_branches = 59.0
+baseline_commit = "fdf8580"
+
+[[coverage]]
+name = "kernel-abi"
+component = "kernel/crates/kernel_abi/Cargo.toml"
+package = "kernel_abi"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 68.0
+minimum_branches = 0.0
+baseline_lines = 68.35
+baseline_branches = 0.0
+baseline_commit = "fdf8580"
+
+[[coverage]]
 name = "kernel-bpf-cloud"
 component = "kernel/crates/kernel_bpf/Cargo.toml"
 package = "kernel_bpf"
@@ -68,6 +94,19 @@ minimum_branches = 63.0
 baseline_lines = 77.71
 baseline_branches = 63.43
 baseline_commit = "2c3bd2c"
+
+[[coverage]]
+name = "kernel-devfs"
+component = "kernel/crates/kernel_devfs/Cargo.toml"
+package = "kernel_devfs"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 91.0
+minimum_branches = 81.0
+baseline_lines = 91.11
+baseline_branches = 81.03
+baseline_commit = "fdf8580"
 
 [[coverage]]
 name = "kernel-elfloader"
@@ -109,6 +148,19 @@ baseline_branches = 77.08
 baseline_commit = "a5316b4"
 
 [[coverage]]
+name = "kernel-syscall"
+component = "kernel/crates/kernel_syscall/Cargo.toml"
+package = "kernel_syscall"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 67.0
+minimum_branches = 77.0
+baseline_lines = 67.47
+baseline_branches = 77.08
+baseline_commit = "fdf8580"
+
+[[coverage]]
 name = "kernel-time"
 component = "kernel/crates/kernel_time/Cargo.toml"
 package = "kernel_time"
@@ -133,6 +185,58 @@ minimum_branches = 86.0
 baseline_lines = 98.40
 baseline_branches = 86.67
 baseline_commit = "946c2d2"
+
+[[coverage]]
+name = "kernel-vfs"
+component = "kernel/crates/kernel_vfs/Cargo.toml"
+package = "kernel_vfs"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 93.0
+minimum_branches = 84.0
+baseline_lines = 93.26
+baseline_branches = 84.62
+baseline_commit = "fdf8580"
+
+[[coverage]]
+name = "kernel-virtual-memory"
+component = "kernel/crates/kernel_virtual_memory/Cargo.toml"
+package = "kernel_virtual_memory"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 99.0
+minimum_branches = 99.0
+baseline_lines = 100.0
+baseline_branches = 100.0
+baseline_commit = "fdf8580"
+
+[[coverage]]
+name = "shrike-link"
+component = "kernel/crates/shrike_link/Cargo.toml"
+package = "shrike_link"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 98.0
+minimum_branches = 94.0
+baseline_lines = 98.57
+baseline_branches = 94.44
+baseline_commit = "fdf8580"
+
+[[coverage]]
+name = "rk-bridge"
+component = "userspace/rk_bridge/Cargo.toml"
+package = "rk_bridge"
+mode = "standalone"
+features = []
+no_default_features = false
+minimum_lines = 40.0
+minimum_branches = 56.0
+baseline_lines = 40.93
+baseline_branches = 56.25
+baseline_commit = "fdf8580"
 
 [[mutation]]
 name = "elf-parser-loader"
