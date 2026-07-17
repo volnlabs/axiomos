@@ -203,6 +203,33 @@ fn bad_endian_rejected() {
     assert!(matches!(err, ElfParseError::UnsupportedEndian));
 }
 
+#[test]
+fn ident_version_is_validated() {
+    let mut bad_ident = zero_header();
+    set_elf_header_basics(&mut bad_ident, 2, 0, 0);
+    bad_ident[6] = 0;
+    let error = ElfFile::try_parse(&bad_ident).expect_err("ident version must be rejected");
+    assert!(
+        matches!(error, ElfParseError::UnsupportedElfVersion),
+        "unexpected ident-version error: {error:?}"
+    );
+}
+
+#[test]
+fn nonzero_entry_point_survives_parse_and_load() {
+    const ENTRY: u64 = 0x4020_10;
+    let mut buf = zero_header();
+    set_elf_header_basics(&mut buf, 2, 0, 0);
+    buf[24..32].copy_from_slice(&ENTRY.to_le_bytes());
+
+    let elf = ElfFile::try_parse(&buf).expect("header parses");
+    assert_eq!(elf.entry(), ENTRY as usize);
+    let image = ElfLoader::new(TestMemoryApi)
+        .load(elf)
+        .expect("empty executable image loads");
+    assert_eq!(image.entry_point(), ENTRY as usize);
+}
+
 /// Build a syntactically valid ELF64 header (so `try_parse` accepts it)
 /// but with `phoff` / `phnum` / `shoff` / `shnum` set to nonsense values
 /// that would have triggered an out-of-bounds panic in the pre-fix code.
@@ -333,6 +360,72 @@ fn valid_elf_with_oversize_section_name() -> Vec<u8> {
     buf.extend_from_slice(&sh);
 
     buf
+}
+
+fn valid_elf_with_named_sections() -> Vec<u8> {
+    const STRINGS: &[u8] = b"\0.strtab\0.symtab\0target\0";
+    const SECTION_COUNT: usize = 3;
+    let data_offset = 64 + SECTION_COUNT * size_of::<SectionHeader>();
+    let mut buf = vec![0u8; 64];
+    set_elf_header_basics(&mut buf, 2, 0, 0);
+    buf[40..48].copy_from_slice(&64u64.to_le_bytes());
+    buf[60..62].copy_from_slice(&(SECTION_COUNT as u16).to_le_bytes());
+    buf[62..64].copy_from_slice(&1u16.to_le_bytes());
+
+    buf.extend_from_slice(&[0u8; 64]);
+
+    let mut strtab = [0u8; 64];
+    strtab[0..4].copy_from_slice(&1u32.to_le_bytes());
+    strtab[4..8].copy_from_slice(&3u32.to_le_bytes());
+    strtab[24..32].copy_from_slice(&(data_offset as u64).to_le_bytes());
+    strtab[32..40].copy_from_slice(&(STRINGS.len() as u64).to_le_bytes());
+    buf.extend_from_slice(&strtab);
+
+    let mut symtab = [0u8; 64];
+    symtab[0..4].copy_from_slice(&9u32.to_le_bytes());
+    symtab[4..8].copy_from_slice(&2u32.to_le_bytes());
+    symtab[24..32].copy_from_slice(&((data_offset + STRINGS.len()) as u64).to_le_bytes());
+    symtab[40..44].copy_from_slice(&1u32.to_le_bytes());
+    buf.extend_from_slice(&symtab);
+    buf.extend_from_slice(STRINGS);
+    buf
+}
+
+#[test]
+fn valid_section_and_symbol_names_are_returned() {
+    let buf = valid_elf_with_named_sections();
+    let elf = ElfFile::try_parse(&buf).expect("header parses");
+    let symtab_header = elf
+        .section_headers()
+        .nth(2)
+        .expect("symtab section present")
+        .expect("symtab section parses");
+
+    assert_eq!(elf.section_name(symtab_header), Some(".symtab"));
+    assert_eq!(elf.sections_by_name(".symtab").count(), 1);
+    assert_eq!(
+        elf.section_headers_by_type(SectionHeaderType::SYMTAB)
+            .count(),
+        1
+    );
+    assert_eq!(
+        elf.section_headers_by_type(SectionHeaderType::STRTAB)
+            .count(),
+        1
+    );
+
+    let symtab = elf
+        .symtab_data(symtab_header)
+        .expect("symtab data is in bounds");
+    let symbol = Symbol {
+        name: 17,
+        info: 0,
+        other: 0,
+        shndx: 0,
+        value: 0,
+        size: 0,
+    };
+    assert_eq!(elf.symbol_name(&symtab, &symbol), Some("target"));
 }
 
 #[test]
@@ -517,6 +610,80 @@ fn loader_rejects_tls_with_filesz_greater_than_memsz_without_panic() {
     let elf = ElfFile::try_parse(&buf).expect("header parses");
     let err = loader_err(ElfLoader::new(TestMemoryApi).load(elf));
     assert_eq!(err, LoadElfError::SegmentFileLargerThanMemory);
+}
+
+#[test]
+fn loader_accepts_tls_when_file_and_memory_sizes_match() {
+    let mut buf = vec![0u8; 64];
+    set_elf_header_basics(&mut buf, 2, 64, 1);
+    write_program_header(&mut buf, 7, ProgramHeaderFlags::READABLE.0, 120, 4, 4);
+    buf[112..120].copy_from_slice(&1u64.to_le_bytes());
+    buf.extend_from_slice(&[0xAA; 4]);
+
+    let elf = ElfFile::try_parse(&buf).expect("header parses");
+    let image = ElfLoader::new(TestMemoryApi)
+        .load(elf)
+        .expect("equal-size TLS segment loads");
+    assert_eq!(
+        image.tls_allocation().map(AsRef::as_ref),
+        Some(&[0xAA; 4][..])
+    );
+}
+
+#[test]
+fn loaded_image_accessors_report_each_allocation_class() {
+    const HEADER_COUNT: usize = 4;
+    const DATA_OFFSET: usize = 64 + HEADER_COUNT * 56;
+    let mut buf = vec![0u8; 64];
+    set_elf_header_basics(&mut buf, 2, 64, HEADER_COUNT as u16);
+    buf[24..32].copy_from_slice(&0x400000u64.to_le_bytes());
+
+    for (index, (typ, flags)) in [
+        (
+            1,
+            ProgramHeaderFlags::READABLE.0 | ProgramHeaderFlags::EXECUTABLE.0,
+        ),
+        (1, ProgramHeaderFlags::READABLE.0),
+        (
+            1,
+            ProgramHeaderFlags::READABLE.0 | ProgramHeaderFlags::WRITABLE.0,
+        ),
+        (7, ProgramHeaderFlags::READABLE.0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        write_program_header(&mut buf, typ, flags, (DATA_OFFSET + index * 4) as u64, 4, 4);
+        let align_offset = 64 + index * 56 + 48;
+        buf[align_offset..align_offset + 8].copy_from_slice(&1u64.to_le_bytes());
+    }
+    buf.extend_from_slice(&[0x11; 4]);
+    buf.extend_from_slice(&[0x22; 4]);
+    buf.extend_from_slice(&[0x33; 4]);
+    buf.extend_from_slice(&[0x44; 4]);
+
+    let elf = ElfFile::try_parse(&buf).expect("header parses");
+    let image = ElfLoader::new(TestMemoryApi)
+        .load(elf)
+        .expect("mixed allocation image loads");
+    assert_eq!(image.executable_allocations().len(), 1);
+    assert_eq!(image.readonly_allocations().len(), 1);
+    assert_eq!(image.writable_allocations().len(), 1);
+    assert_eq!(
+        image.tls_allocation().map(AsRef::as_ref),
+        Some(&[0x44; 4][..])
+    );
+}
+
+#[test]
+fn section_header_flags_require_the_complete_mask() {
+    let write_and_alloc =
+        SectionHeaderFlags(SectionHeaderFlags::WRITE.0 | SectionHeaderFlags::ALLOC.0);
+    assert!(write_and_alloc.contains(&SectionHeaderFlags::WRITE));
+    assert!(write_and_alloc.contains(&SectionHeaderFlags::ALLOC));
+    assert!(write_and_alloc.contains(&write_and_alloc));
+    assert!(!SectionHeaderFlags::WRITE.contains(&write_and_alloc));
+    assert!(!SectionHeaderFlags(0).contains(&SectionHeaderFlags::WRITE));
 }
 
 #[test]
