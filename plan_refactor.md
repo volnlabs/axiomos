@@ -41,7 +41,10 @@ this refactor; it does not replace architecture, reference, or ADR documents.
       concern.
 - [ ] Decompose the audit shell script only after equivalent xtask checks pass.
 - [x] Add kernel crate-boundary and component-naming documentation.
-- [ ] Relocate generated root artifacts and consolidate TODO tracking.
+- [~] Relocate generated root artifacts and consolidate TODO tracking. Root
+      generated outputs are ignored and `artifacts/` is the designated output
+      area; the historical `TODO_NOW.md` snapshot remains until its audit links
+      are migrated together.
 - [ ] Reassess root `src/main.rs` and `build.rs` ownership before creating an
       image-builder crate.
 
