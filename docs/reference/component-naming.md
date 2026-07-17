@@ -6,7 +6,7 @@ inventories.
 | Prefix/suffix | Meaning |
 |---|---|
 | `kernel_*` | Internal reusable kernel crate |
-| `axiom_*` / `axiomos-*` | Host-side repository or shipped AxiomOS tooling |
+| `axiom_*` / `axiomos-*` | Host-side repository or shipped axiomos tooling |
 | `rk_*` | Runtime-kit tools and services |
 | `shrike_*` | Hardware or firmware components |
 | `*_demo` | Demonstration program or crate |
