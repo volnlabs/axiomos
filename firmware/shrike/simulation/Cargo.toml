@@ -5,5 +5,5 @@ edition = "2021"
 description = "Host-only simulation of shrike_control. Provides mock implementations of the local traits and exercises the production control loop under deterministic clock/state sequences. Not built for any embedded target; the audit gate invokes it explicitly via 'cargo test -p shrike_rp2040_host_sim'."
 
 [dependencies]
-shrike_control = { path = "../shrike_control" }
-shrike_link = { path = "../../kernel/crates/shrike_link" }
+shrike_control = { path = "../control" }
+shrike_link = { path = "../../../kernel/crates/shrike_link" }

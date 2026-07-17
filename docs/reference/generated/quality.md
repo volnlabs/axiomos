@@ -9,9 +9,9 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 | Component | Role | Disposition |
 |---|---|---|
 | `Cargo.toml` | runner and image assembly | measured |
-| `firmware/shrike_control/Cargo.toml` | firmware control-loop traits and run loop | measured |
-| `firmware/shrike_rp2040/Cargo.toml` | RP2040 firmware | hardware-hil |
-| `firmware/shrike_rp2040_host_sim/Cargo.toml` | firmware host simulation (mocks + sampled-state tests) | measured |
+| `firmware/shrike/control/Cargo.toml` | firmware control-loop traits and run loop | measured |
+| `firmware/shrike/rp2040/Cargo.toml` | RP2040 firmware | hardware-hil |
+| `firmware/shrike/simulation/Cargo.toml` | firmware host simulation (mocks + sampled-state tests) | measured |
 | `formal/lakefile.toml` | verifier formal model | formal-proof |
 | `kernel/Cargo.toml` | kernel | target-qemu |
 | `kernel/crates/kernel_abi/Cargo.toml` | public ABI | measured |
@@ -80,8 +80,8 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 | kernel-vfs | `kernel/crates/kernel_vfs/Cargo.toml` | 93.26% | 84.62% | 93.00% | 84.00% | `fdf8580` |
 | kernel-virtual-memory | `kernel/crates/kernel_virtual_memory/Cargo.toml` | 100.00% | 100.00% | 99.00% | 99.00% | `fdf8580` |
 | shrike-link | `kernel/crates/shrike_link/Cargo.toml` | 98.57% | 94.44% | 98.00% | 94.00% | `fdf8580` |
-| shrike-control | `firmware/shrike_control/Cargo.toml` | 99.40% | 91.18% | 99.00% | 91.00% | `617ae0f` |
-| shrike-rp2040-host-sim | `firmware/shrike_rp2040_host_sim/Cargo.toml` | 73.85% | 50.00% | 73.00% | 49.00% | `617ae0f` |
+| shrike-control | `firmware/shrike/control/Cargo.toml` | 99.40% | 91.18% | 99.00% | 91.00% | `617ae0f` |
+| shrike-rp2040-host-sim | `firmware/shrike/simulation/Cargo.toml` | 73.85% | 50.00% | 73.00% | 49.00% | `617ae0f` |
 | rk-bridge | `userspace/tools/rk_bridge/Cargo.toml` | 40.93% | 56.25% | 40.00% | 56.00% | `fdf8580` |
 | file-structure | `userspace/core/file_structure/Cargo.toml` | 100.00% | 82.14% | 99.00% | 82.00% | `9e1d6af` |
 | rk-cli | `userspace/tools/rk_cli/Cargo.toml` | 62.80% | 34.68% | 62.00% | 34.00% | `97c1f91` |

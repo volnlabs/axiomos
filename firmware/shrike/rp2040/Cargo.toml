@@ -12,8 +12,8 @@ fugit = "0.3"
 panic-halt = "0.2"
 rp2040-hal = { version = "0.10", features = ["rt", "critical-section-impl"] }
 rp2040-boot2 = "0.3"
-shrike_control = { path = "../shrike_control" }
-shrike_link = { path = "../../kernel/crates/shrike_link" }
+shrike_control = { path = "../control" }
+shrike_link = { path = "../../../kernel/crates/shrike_link" }
 
 [[bin]]
 name = "shrike_rp2040"

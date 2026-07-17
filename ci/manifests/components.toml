@@ -177,7 +177,7 @@ role = "control-link protocol"
 gate = "host lint and tests"
 
 [[component]]
-path = "firmware/shrike_control/Cargo.toml"
+path = "firmware/shrike/control/Cargo.toml"
 workspace = "member"
 artifact = "none"
 kind = "cargo"
@@ -185,7 +185,7 @@ role = "firmware control-loop traits and run loop"
 gate = "host build and shrike-control-build audit step"
 
 [[component]]
-path = "firmware/shrike_rp2040_host_sim/Cargo.toml"
+path = "firmware/shrike/simulation/Cargo.toml"
 workspace = "member"
 artifact = "none"
 kind = "cargo"
@@ -201,7 +201,7 @@ role = "experimental RISC-V demo"
 gate = "RISC-V target lint"
 
 [[component]]
-path = "firmware/shrike_rp2040/Cargo.toml"
+path = "firmware/shrike/rp2040/Cargo.toml"
 workspace = "excluded"
 artifact = "firmware:shrike_rp2040"
 kind = "cargo"

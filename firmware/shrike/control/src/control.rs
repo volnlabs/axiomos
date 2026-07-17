@@ -69,7 +69,7 @@ pub struct RunSummary {
 /// Run the control loop.
 ///
 /// - When `max_iterations` is `None`, the loop runs forever (production
-///   behavior used by `firmware/shrike_rp2040/src/main.rs`).
+///   behavior used by `firmware/shrike/rp2040/src/main.rs`).
 /// - When `max_iterations` is `Some(n)`, the loop returns after `n`
 ///   iterations with a `RunSummary`. The host simulation crate uses this
 ///   bounded form to exercise the production control loop under mocks.

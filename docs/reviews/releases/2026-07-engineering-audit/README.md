@@ -82,8 +82,8 @@ the pre-condition for landing it.
 
 2. **Physical RPi5 / RP2040 HIL** — Contingent on (a) RP2040 hardware
    availability in CI, and (b) a runner contract that captures UART
-   output without the QEMU serial-port redirect. `firmware/shrike_control`
-   (commit `1d37351`) and `firmware/shrike_rp2040_host_sim`
+   output without the QEMU serial-port redirect. `firmware/shrike/control`
+   (commit `1d37351`) and `firmware/shrike/simulation`
    (commit `70406ad`) cover the firmware-domain contract on the host;
    `ci/manifests/build-inputs.env` does not yet provision real RP2040, and there is
    no equivalent for RPi5 PL011 uart bring-up under load.
@@ -376,7 +376,7 @@ The code does build for the supported x86_64 and AArch64 targets, both BPF profi
 | `kernel/crates/kernel_{abi,syscall,memapi,...}` | Testable ABI, syscall, memory, device, VFS, and allocator components | Direction is mostly inward and acyclic, but these crates often model only half a subsystem; the kernel then adds a second implementation layer with different validation and error semantics. |
 | `kernel/crates/shrike_link/` | Shared Pi5↔RP2040 protocol and safety state machines | Cohesive, well-owned, and appropriately shared. This is the clearest subsystem boundary in the repository. |
 | `userspace/` | Bare-metal programs plus host-only `rk_bridge` and `rk_cli` | Target programs, demos, benchmarks, deployment tooling, and ROS integration are mixed. `rk_bridge` and `rk_cli` are independent workspaces and escape root CI. Sixteen binaries are put in the image while init launches two. |
-| `firmware/shrike_rp2040/` | RP2040 sidecar firmware | Correct separate target/workspace. Hardware glue has no executable host tests; only the shared protocol logic is tested. |
+| `firmware/shrike/rp2040/` | RP2040 sidecar firmware | Correct separate target/workspace. Hardware glue has no executable host tests; only the shared protocol logic is tested. |
 | `formal/` | Lean 4 tnum proof-of-concept | Appropriately isolated and pinned. It proves representative abstract-domain operators, not verifier acceptance soundness; documentation must keep that boundary explicit. |
 | `kernel/demos/riscv/` | Standalone OpenSBI console demo | Correct as an experiment, but competes with unused RISC-V entry files and an alternative manifest in `kernel/`. Move all RISC-V experiments under one explicit `experiments/` boundary. |
 | `docs/` | Architecture, benchmarks, threat model, implementation plan, pitch, historical plans/specs | No distinction between normative current docs and historical artifacts. Several documents directly contradict the implementation. |
@@ -863,7 +863,7 @@ The security posture is weaker than the verifier test count suggests because the
 | C-07/H-04 / Critical–High | `kernel/src/{syscall/bpf.rs,bpf/mod.rs}`; `kernel/crates/kernel_bpf/src/{maps/**,signing/**,verifier/caller.rs}` | Any process is privileged for verification/attach, unsigned is default, no production keys, quotas, or unload. | Capabilities, key provisioning, signed-only production mode, quotas/handles/reclamation. | L | Least privilege and bounded attack surface. |
 | H-05 / High | `kernel/crates/kernel_elfloader/src/file.rs`; `kernel/src/mcore/mtask/process/mod.rs:474,758,771` | Crafted executable offsets/truncation can panic the kernel. | Checked parser and fuzzing. | M | Fail-closed executable input. |
 | High | `kernel/src/acpi.rs:41-80`; `kernel/src/arch/aarch64/{boot.rs,dtb.rs}` | Incorrect unaligned physical mapping violates the unsafe callback contract. DTB/firmware pointers are broadly trusted with limited bounds. | Correct multi-page offset mapping; validate boot object sizes against mapped memory map. | M | Safer firmware/boot boundary. |
-| Medium | `Cargo.toml`; `Cargo.lock`; `build.rs`; `.github/workflows/*.yml`; `userspace/{rk_bridge,rk_cli}/Cargo.toml`; `firmware/shrike_rp2040/Cargo.toml`; `kernel/crates/kernel_bpf/fuzz/Cargo.toml`; `kernel/demos/riscv/Cargo.toml` | Git dependencies, mutable Limine/OVMF, no audit/vet/deny gate, multiple locks and independent manifests. | Pin hashes/commits, add advisory/license/source policy, produce SBOM/provenance. | M | Better supply-chain accountability. |
+| Medium | `Cargo.toml`; `Cargo.lock`; `build.rs`; `.github/workflows/*.yml`; `userspace/{rk_bridge,rk_cli}/Cargo.toml`; `firmware/shrike/rp2040/Cargo.toml`; `kernel/crates/kernel_bpf/fuzz/Cargo.toml`; `kernel/demos/riscv/Cargo.toml` | Git dependencies, mutable Limine/OVMF, no audit/vet/deny gate, multiple locks and independent manifests. | Pin hashes/commits, add advisory/license/source policy, produce SBOM/provenance. | M | Better supply-chain accountability. |
 
 ## Denial-of-service surface
 

@@ -5,9 +5,9 @@
 | Manifest | Kind | Workspace | Artifact disposition | Role | Required gate |
 |---|---|---|---|---|---|
 | `Cargo.toml` | cargo | root | `host:axiomos` | runner and image assembly | build, lint, artifacts, QEMU |
-| `firmware/shrike_control/Cargo.toml` | cargo | member | `none` | firmware control-loop traits and run loop | host build and shrike-control-build audit step |
-| `firmware/shrike_rp2040/Cargo.toml` | cargo | excluded | `firmware:shrike_rp2040` | RP2040 firmware | RP2040 target lint and build |
-| `firmware/shrike_rp2040_host_sim/Cargo.toml` | cargo | member | `none` | firmware host simulation (mocks + sampled-state tests) | explicit shrike_rp2040-host-sim-test-build and shrike_rp2040-host-sim-tests audit steps |
+| `firmware/shrike/control/Cargo.toml` | cargo | member | `none` | firmware control-loop traits and run loop | host build and shrike-control-build audit step |
+| `firmware/shrike/rp2040/Cargo.toml` | cargo | excluded | `firmware:shrike_rp2040` | RP2040 firmware | RP2040 target lint and build |
+| `firmware/shrike/simulation/Cargo.toml` | cargo | member | `none` | firmware host simulation (mocks + sampled-state tests) | explicit shrike_rp2040-host-sim-test-build and shrike_rp2040-host-sim-tests audit steps |
 | `formal/lakefile.toml` | lean | not-cargo | `none` | verifier formal model | Lean build |
 | `kernel/Cargo.toml` | cargo | member | `boot:kernel` | kernel | x86/AArch64 checks and QEMU |
 | `kernel/crates/kernel_abi/Cargo.toml` | cargo | member | `none` | public ABI | host lint and tests |

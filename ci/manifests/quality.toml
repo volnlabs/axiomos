@@ -28,10 +28,10 @@ cargo_mutants_version = "27.1.0"
 "kernel/crates/kernel_vfs/Cargo.toml" = "measured"
 "kernel/crates/kernel_virtual_memory/Cargo.toml" = "measured"
 "kernel/crates/shrike_link/Cargo.toml" = "measured"
-"firmware/shrike_control/Cargo.toml" = "measured"
-"firmware/shrike_rp2040_host_sim/Cargo.toml" = "measured"
+"firmware/shrike/control/Cargo.toml" = "measured"
+"firmware/shrike/simulation/Cargo.toml" = "measured"
 "kernel/demos/riscv/Cargo.toml" = "experimental-target"
-"firmware/shrike_rp2040/Cargo.toml" = "hardware-hil"
+"firmware/shrike/rp2040/Cargo.toml" = "hardware-hil"
 "userspace/benchmarks/system/Cargo.toml" = "target-image"
 "userspace/tools/bpf_loader/Cargo.toml" = "target-image"
 "userspace/demos/file_io_demo/Cargo.toml" = "target-image"
@@ -280,7 +280,7 @@ baseline_commit = "fdf8580"
 
 [[coverage]]
 name = "shrike-control"
-component = "firmware/shrike_control/Cargo.toml"
+component = "firmware/shrike/control/Cargo.toml"
 package = "shrike_control"
 mode = "workspace"
 features = []
@@ -293,7 +293,7 @@ baseline_commit = "617ae0f"
 
 [[coverage]]
 name = "shrike-rp2040-host-sim"
-component = "firmware/shrike_rp2040_host_sim/Cargo.toml"
+component = "firmware/shrike/simulation/Cargo.toml"
 package = "shrike_rp2040_host_sim"
 mode = "workspace"
 features = []

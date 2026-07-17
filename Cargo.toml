@@ -116,7 +116,7 @@ exclude = [
   "kernel/demos/riscv",
   "userspace/tools/rk_bridge",
   "kernel/crates/kernel_bpf/fuzz",
-  "firmware/shrike_rp2040",
+  "firmware/shrike/rp2040",
 ]
 members = [
   "tools/xtask",
@@ -137,8 +137,8 @@ members = [
   "kernel/crates/kernel_virtual_memory",
   "kernel/crates/kernel_usermem",
   "kernel/crates/shrike_link",
-  "firmware/shrike_control",
-  "firmware/shrike_rp2040_host_sim",
+  "firmware/shrike/control",
+  "firmware/shrike/simulation",
   "userspace/tools/bpf_loader",
   "userspace/tools/signed_bpf_loader",
   "userspace/core/file_structure",
