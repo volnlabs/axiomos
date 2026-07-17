@@ -4,7 +4,7 @@ This directory contains historical proposals, plans, audits, and superseded
 specifications. Archived documents are retained as evidence and may describe
 code or policy that no longer exists. They are not implementation contracts.
 
-Use [the current documentation authority](../current/README.md) for supported
+Use [the current documentation authority](../README.md) for supported
 behavior and accepted decisions.
 
 ## Pitches

@@ -1,7 +1,7 @@
 # Axiom Implementation Plan
 
 > **Archived historical record.** Retained for provenance; not a current
-> implementation contract. See the [current documentation authority](../../current/README.md).
+> implementation contract. See the [current documentation authority](../../README.md).
 
 **Date:** 2026-03-19
 **Status:** Archived execution plan

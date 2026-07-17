@@ -175,7 +175,7 @@ snapshot below.
   switched and resumed, while exit-before-wait validates descriptor teardown.
   Device/I/O completion has no production `WaitChannel` consumer yet.
 - [x] Define preemption, interrupt, and lock-order rules in an ADR.
-  [ADR-0001](docs/adr/0001-runtime-scheduling-locking.md) is accepted with
+  [ADR-0001](docs/decisions/0001-runtime-scheduling-locking.md) is accepted with
   an implementation gap: it covers current ownership, interrupts,
   preemption nesting, and lock ranks, while scheduler wakeup IPI remains a
   draft target rather than an enforced invariant.

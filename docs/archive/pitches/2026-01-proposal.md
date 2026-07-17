@@ -1,7 +1,7 @@
 # Axiom: A Runtime-Programmable Kernel for Robotics
 
 > **Archived historical record.** Retained for provenance; not a current
-> implementation contract. See the [current documentation authority](../../current/README.md).
+> implementation contract. See the [current documentation authority](../../README.md).
 
 **The kernel that never needs reflashing.**
 

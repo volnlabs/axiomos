@@ -1,7 +1,7 @@
 # BPF-to-BPF Call Canonicalization Implementation Plan
 
 > **Archived historical record.** Retained for provenance; not a current
-> implementation contract. See the [current documentation authority](../../current/README.md).
+> implementation contract. See the [current documentation authority](../../README.md).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

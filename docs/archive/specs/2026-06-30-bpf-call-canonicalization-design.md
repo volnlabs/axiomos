@@ -1,7 +1,7 @@
 # BPF-to-BPF Calls via a Loader Normalization Pipeline (#87)
 
 > **Archived historical record.** Retained for provenance; not a current
-> implementation contract. See the [current documentation authority](../../current/README.md).
+> implementation contract. See the [current documentation authority](../../README.md).
 
 **Status:** design / approved-for-planning
 **Branch:** `feat_verifier_hardening` (off `feat_v0.4`; merges to `dev` after `feat_v0.4`)

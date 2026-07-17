@@ -19,8 +19,8 @@ current paths before physical moves and the required compatibility rules.
 | Repository tooling | `tools/xtask/` | split xtask modules | Preserve command behavior |
 | Process adapters | `scripts/` | grouped responsibility directories | Retain compatibility wrappers |
 | CI policy | `ci/*.toml`, `ci/*.env` | `ci/manifests/`, `ci/profiles/` | Move after xtask supports new paths |
-| Normative docs | `docs/current/` | architecture/reference | Classify and link before moving |
-| Decisions | `docs/adr/` | `docs/decisions/` | Preserve numbering and history |
+| Normative docs | `docs/architecture/`, `docs/security/` | architecture/reference | migrated; no generic current namespace |
+| Decisions | `docs/decisions/` | `docs/decisions/` | numbering and history preserved |
 | Reviews | `docs/reviews/` | categorized reviews | Add metadata before relocation |
 | Security | `docs/security/` | categorized security docs | Preserve generated ledger paths initially |
 | Proposals/plans | `docs/superpowers/`, `plan_refactor.md` | design/plans | Move after authority links exist |

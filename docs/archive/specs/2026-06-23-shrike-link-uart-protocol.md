@@ -1,7 +1,7 @@
 # Shrike-link — Pi5 ↔ Shrike-lite UART control protocol (v0.4)
 
 > **Archived historical record.** Retained for provenance; not a current
-> implementation contract. See the [current documentation authority](../../current/README.md).
+> implementation contract. See the [current documentation authority](../../README.md).
 
 **Status:** design proposal, pre-council. **Goal (roadmap v0.4 item 2):** Pi5 sends actuation
 commands, receives sensor frames over UART. **Plan delta:** roadmap said "reuse `rk_uart_forwarder`";

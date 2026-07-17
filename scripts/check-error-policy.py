@@ -43,7 +43,7 @@ def reject_forbidden(relative: str, source: str) -> None:
 
 
 def main() -> None:
-    adr = read("docs/adr/0002-kernel-error-policy.md")
+    adr = read("docs/decisions/0002-kernel-error-policy.md")
     require("Boot prerequisite failure" in adr and "`BootError`" in adr, "ADR boot policy missing")
     require("Kernel invariant violation" in adr, "ADR invariant policy missing")
 

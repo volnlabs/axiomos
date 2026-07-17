@@ -41,7 +41,7 @@ signature enforcement is active.
 - `bpf-production-signed` and `bpf-unsigned-development` are mutually
   exclusive at compile time.
 - Shipped profiles use the interpreter. JIT policy is defined separately by
-  [ADR-0004](../adr/0004-bpf-jit-policy.md).
+  [ADR-0004](../decisions/0004-bpf-jit-policy.md).
 
 ## Process capabilities
 

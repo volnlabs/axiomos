@@ -34,7 +34,7 @@ Historical latency methodology covered hardware vector entry → BPF dispatch on
 ## Design
 
 Three decisions define the kernel — detail and rationale in the
-[current architecture](docs/current/architecture.md):
+[current architecture](docs/architecture/system-overview.md):
 
 1. **Bare metal, monolithic.** No host OS, no RTOS. Limine bootloader (x86_64) or device tree (AArch64). Microkernel IPC overhead is unacceptable for control loops; Rust trait boundaries provide the modularity instead.
 2. **Rust core, `no_std`, `panic=abort`.** ~95% Rust; assembly limited to boot stubs and exception vectors. Memory-safety bug classes (use-after-free, double-free, data races) are eliminated at compile time; `unsafe` blocks are explicit and audited.
@@ -163,6 +163,6 @@ Email: utkarsh@kernex.sbs
 ---
 
 **Further reading:**
-- [docs/current/architecture.md](docs/current/architecture.md) — normative system layers and links to VM, BPF trust, scheduler, target, and JIT contracts
+- [docs/architecture/system-overview.md](docs/architecture/system-overview.md) — normative system layers and links to VM, BPF trust, scheduler, target, and JIT contracts
 - [docs/benchmarks.md](docs/benchmarks.md) — attributable benchmark campaigns and historical-claim disposition
 - [kernel_bpf docs](kernel/crates/kernel_bpf/docs/) — eBPF runtime architecture, scheduling, verification, profiles

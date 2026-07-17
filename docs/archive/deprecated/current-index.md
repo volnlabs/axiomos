@@ -4,23 +4,23 @@ This directory is the entry point for normative documentation.
 
 ## Current system contracts
 
-- [Architecture overview](architecture.md)
-- [Virtual-memory ownership and fault semantics](vm.md)
-- [BPF trust, authorization, and lifecycle](bpf-trust.md)
+- [Architecture overview](../../architecture/system-overview.md)
+- [Virtual-memory ownership and fault semantics](../../architecture/memory.md)
+- [BPF trust, authorization, and lifecycle](../../security/bpf-trust.md)
 
 ## Accepted architecture decisions
 
-- [Runtime scheduling, preemption, interrupts, and lock ordering](../adr/0001-runtime-scheduling-locking.md)
-- [Kernel error policy](../adr/0002-kernel-error-policy.md)
-- [Supported target and feature matrix](../adr/0003-supported-targets.md)
-- [BPF JIT policy](../adr/0004-bpf-jit-policy.md)
+- [Runtime scheduling, preemption, interrupts, and lock ordering](../../decisions/0001-runtime-scheduling-locking.md)
+- [Kernel error policy](../../decisions/0002-kernel-error-policy.md)
+- [Supported target and feature matrix](../../decisions/0003-supported-targets.md)
+- [BPF JIT policy](../../decisions/0004-bpf-jit-policy.md)
 
 ## Normative security and validation documents
 
-- [Local audit gate](../security/local-audit-gate.md)
-- [Unsafe ledger](../security/unsafe-ledger.md)
-- [Threat model](../THREAT_MODEL.md)
-- [Benchmark evidence authority](../benchmarks.md)
+- [Local audit gate](../../security/local-audit-gate.md)
+- [Unsafe ledger](../../security/unsafe-ledger.md)
+- [Threat model](../../THREAT_MODEL.md)
+- [Benchmark evidence authority](../../benchmarks.md)
 
 Generated authorities are refreshed by `cargo xtask docs` and checked by the
 local audit gate.
@@ -48,12 +48,12 @@ Miri and QEMU and is not complete release evidence.
 
 Current generated authority:
 
-- [Component inventory](../reference/generated/components.md)
-- [Shipped-image and artifact provenance](../reference/generated/artifacts.md)
-- [Immutable build inputs](../reference/generated/build-inputs.md)
-- [Coverage and mutation quality boundary](../reference/generated/quality.md)
-- [Versioned userspace ABI](../reference/generated/abi.md)
-- [Supported target and feature matrix](../reference/generated/targets.md)
+- [Component inventory](../../reference/generated/components.md)
+- [Shipped-image and artifact provenance](../../reference/generated/artifacts.md)
+- [Immutable build inputs](../../reference/generated/build-inputs.md)
+- [Coverage and mutation quality boundary](../../reference/generated/quality.md)
+- [Versioned userspace ABI](../../reference/generated/abi.md)
+- [Supported target and feature matrix](../../reference/generated/targets.md)
 
 Repository-local links in current, generated, archived, and audit Markdown are
 enforced by `scripts/check-doc-links.py` through the required

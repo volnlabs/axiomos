@@ -1,7 +1,7 @@
 # Axiom Architecture
 
 > **Archived historical record.** This overview contains superseded runtime
-> and security claims. Use the [current architecture](../../current/architecture.md).
+> and security claims. Use the [current architecture](../../architecture/system-overview.md).
 
 Deep-dive companion to the [README](../README.md). The README states what Axiom
 is and what works; this document explains how it is built.

@@ -1,7 +1,7 @@
 # AxiomOS — Engineering Review
 
 > **Archived historical record.** This review covers commit `92566dc` and is
-> not current assurance evidence. See the [current documentation authority](../../current/README.md).
+> not current assurance evidence. See the [current documentation authority](../../README.md).
 
 **Date:** 2026-07-03 · **Reviewer role:** lead systems engineer, first pass ·
 **Method:** implementation as source of truth; roadmap docs read as context and
