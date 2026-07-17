@@ -151,7 +151,9 @@ Primary defense per attack, cited as `file:line` at commit `f2e38bc`:
 
 ### 5.6 A1: real-time starvation via legitimate-looking programs
 - Static WCET budget at verify time: `verifier/core.rs:1220`
-  (`WcetExceeded`), Pi5-calibrated cost model `verifier/cost.rs`.
+  (`WcetExceeded`) using the configured cost model in `verifier/cost.rs`.
+  The historical Pi5 calibration lacks retained raw/artifact evidence and is
+  not a current benchmark claim.
 - EDF utilization admission at attach: `kernel/src/bpf/mod.rs:425` →
   ledger Σ WCETᵢ·freqᵢ ≤ budget, `verifier/admission.rs:94`.
 
@@ -223,7 +225,7 @@ seL4's is bounded by proof, axiomos' by Rust's type system, the verifier
 | Scheduler | EDF + WCET admission (tested, unproven) | Priority; MCS variant with proofs; starvation-freedom analyzable |
 | Formal proofs | None (Lean PoC in `formal/`, #91) | Functional correctness → binary level |
 | TCB size | ~57k LoC Rust | ~9.3k LoC C/asm |
-| WCET story | Pi5-calibrated cost model + EDF admission | Published WCET analysis of kernel paths |
+| WCET story | Configured cost model + tested EDF admission; historical Pi5 calibration is not current evidence | Published WCET analysis of kernel paths |
 | External review | Pending (#77) | 15+ years of it |
 
 axiomos' differentiator is not assurance depth — it is that **untrusted,

@@ -4,7 +4,7 @@ A bare-metal Rust kernel with runtime-programmable behavior through verified eBP
 
 axiomos targets robotics and embedded systems where kernel logic should evolve without reflashing firmware. Instead of recompiling to change kernel behavior, verified programs are loaded and attached to kernel hooks at runtime.
 
-> **Status: research kernel under active hardware bring-up on Raspberry Pi 5.** Not production-ready. See [Limitations](#limitations) for the current honest list of what works and what doesn't. Benchmarks in [docs/benchmarks.md](docs/benchmarks.md) are measured on real hardware; the headline numbers (e.g. 211 ns interrupt latency) are single-core, single-program, no-contention measurements — multi-core RT claims require the scheduler work tracked under [issue #57](https://github.com/pro-utkarshM/axiomOS/issues/57).
+> **Status: research kernel under active hardware bring-up on Raspberry Pi 5.** Not production-ready. See [Limitations](#limitations) for the current honest list of what works and what doesn't. The current [benchmark authority](docs/benchmarks.md) contains one attributable host-verifier campaign; legacy Pi/QEMU/Linux numbers are archived until rerun with retained raw logs and artifact hashes.
 
 **Repository structure:**
 - `kernel/src` — core kernel implementation
@@ -25,9 +25,9 @@ This is proven in Linux, but Linux is unsuitable for hard real-time robotics due
 |----------|---------|-----------|---------|------------|
 | Linux + eBPF | ~2,000ns jitter | ~60MB (kernel) | Limited | Lower |
 | RTOS + custom | <10,000ns | ~1MB | Partial | Medium |
-| **axiomos (Pi5)** | **211ns avg, single-core** | **~22MB** | **Total** | **Higher** |
+| **axiomos (Pi5)** | **Not currently attributable** | **Not currently attributable** | **Total** | **Unmeasured under the current evidence contract** |
 
-The latency figure is honest about its boundary: hardware vector entry → BPF dispatch, single core, no contention. Tail latency under load is not yet measured ([#74](https://github.com/pro-utkarshM/axiomOS/issues/74)). Full methodology in [docs/benchmarks.md](docs/benchmarks.md).
+Historical latency methodology covered hardware vector entry → BPF dispatch on one core without contention, but its raw capture and artifact hash were not retained. Tail latency under load is also unmeasured ([#74](https://github.com/pro-utkarshM/axiomOS/issues/74)); see the [benchmark evidence policy](docs/benchmarks.md).
 
 ---
 
@@ -51,7 +51,7 @@ BPF_PROG(gpio_handler, struct gpio_event *event) {
 }
 ```
 
-**What the verifier guarantees today:** bounded execution, constrained stack, validated memory access, termination proof, and a static WCET cycle bound per program from a Pi5-calibrated cost model. The verifier gates the `sys_bpf` load path — programs that fail do not load. Loads are admission-controlled: a program that can't fit one control-loop period is rejected, and attaches commit `wcet × freq` against a utilization budget (EDF test, validated on hardware — [docs/benchmarks.md §12](docs/benchmarks.md)). Program provenance is authenticated on load (Ed25519, fail-closed; unsigned loads still allowed by default until a userspace signer ships). A libfuzzer harness runs on every PR and nightly.
+**What the verifier guarantees today:** bounded execution, constrained stack, validated memory access, termination proof, and a static WCET cycle bound per program. The verifier gates the `sys_bpf` load path — programs that fail do not load. Loads are admission-controlled: a program that cannot fit one control-loop period is rejected, and attaches commit `wcet × freq` against a utilization budget. The model and admission behavior are tested in the required gate; the historical Pi5 calibration is not current benchmark evidence because its raw capture and kernel-artifact hash were not retained. Program provenance is authenticated on load (Ed25519, fail-closed; unsigned loads still allowed by default until a userspace signer ships). A libfuzzer harness runs on every PR and nightly.
 
 **Execution:** interpreter (portable, ~50ns/insn on x86_64) or JIT (AArch64, <5ns overhead), selected per compile-time profile (8KB-stack embedded → 512KB-stack cloud).
 
@@ -125,8 +125,7 @@ The kernel boots and runs real BPF programs on a Raspberry Pi 5. Several load-be
 - **No persistent crash dump** ([#73](https://github.com/pro-utkarshM/axiomOS/issues/73)), no A/B kernel slots / rollback ([#75](https://github.com/pro-utkarshM/axiomOS/issues/75)), no hardware-in-loop CI — Pi5 testing is manual ([#76](https://github.com/pro-utkarshM/axiomOS/issues/76))
 
 **Benchmark caveats:**
-- The 211 ns interrupt-latency headline is a single-core, single-program, no-contention measurement. Multi-core RT claims require the per-CPU run queue work in [#57](https://github.com/pro-utkarshM/axiomOS/issues/57) plus a 24h soak with P99 / P99.9 histograms ([#74](https://github.com/pro-utkarshM/axiomOS/issues/74)).
-- The 5.8× boot-time improvement is measured against stock Raspberry Pi OS Linux. A minimal Buildroot Linux on the same hardware closes much of that gap. Honest comparative benchmarks against Zephyr / NuttX / Linux PREEMPT_RT are tracked under [#78](https://github.com/pro-utkarshM/axiomOS/issues/78).
+- Historical interrupt-latency and boot-time comparisons are not current release evidence: their raw captures and artifact hashes were not retained. New multi-core RT claims require the per-CPU run-queue work in [#57](https://github.com/pro-utkarshM/axiomOS/issues/57), a 24h soak with P99/P99.9 histograms ([#74](https://github.com/pro-utkarshM/axiomOS/issues/74)), and attributable comparisons against Zephyr, NuttX, or Linux PREEMPT_RT ([#78](https://github.com/pro-utkarshM/axiomOS/issues/78)).
 
 The full picture lives in [issue #81 — execution roadmap](https://github.com/pro-utkarshM/axiomOS/issues/81). If a feature isn't in the list above, treat it as not yet implemented and check the roadmap before relying on it.
 
@@ -165,5 +164,5 @@ Email: utkarsh@kernex.sbs
 
 **Further reading:**
 - [docs/current/architecture.md](docs/current/architecture.md) — normative system layers and links to VM, BPF trust, scheduler, target, and JIT contracts
-- [docs/benchmarks.md](docs/benchmarks.md) — authoritative hardware benchmarks (Pi5) and Linux comparison
+- [docs/benchmarks.md](docs/benchmarks.md) — attributable benchmark campaigns and historical-claim disposition
 - [kernel_bpf docs](kernel/crates/kernel_bpf/docs/) — eBPF runtime architecture, scheduling, verification, profiles

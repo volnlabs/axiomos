@@ -51,7 +51,9 @@ For every program it accepts:
   constraints.
 - `DIV`/`MOD` by a register that can be zero is rejected.
 - Programs on real-time hooks additionally pass WCET admission (a
-  Pi5-calibrated cost model feeding an EDF utilization bound).
+  configured cost model feeding an EDF utilization bound). The historical Pi5
+  calibration is archived rather than current evidence because its raw UART
+  capture and kernel-artifact hash were not retained.
 
 ## What it trusts (attack surface you can ignore, or not)
 

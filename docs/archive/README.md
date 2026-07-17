@@ -21,6 +21,10 @@ behavior and accepted decisions.
 
 - [Engineering review of commit 92566dc](audits/2026-07-03-92566dc-engineering-review.md)
 
+## Benchmarks
+
+- [Legacy benchmark record through June 2026](benchmarks/2026-06-legacy-benchmarks.md)
+
 ## Superseded specifications
 
 - [Legacy architecture overview](specs/legacy-architecture.md)

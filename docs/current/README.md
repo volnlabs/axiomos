@@ -20,6 +20,7 @@ This directory is the entry point for normative documentation.
 - [Local audit gate](../security/local-audit-gate.md)
 - [Unsafe ledger](../security/unsafe-ledger.md)
 - [Threat model](../THREAT_MODEL.md)
+- [Benchmark evidence authority](../benchmarks.md)
 
 Generated authorities are refreshed by `cargo xtask docs` and checked by the
 local audit gate.
@@ -49,6 +50,10 @@ Current generated authority:
 
 - [Component inventory](../generated/components.md)
 - [Shipped-image and artifact provenance](../generated/artifacts.md)
+- [Immutable build inputs](../generated/build-inputs.md)
+- [Coverage and mutation quality boundary](../generated/quality.md)
+- [Versioned userspace ABI](../generated/abi.md)
+- [Supported target and feature matrix](../generated/targets.md)
 
 Repository-local links in current, generated, archived, and audit Markdown are
 enforced by `scripts/check-doc-links.py` through the required
@@ -58,7 +63,3 @@ The canonical product and release-artifact name is lowercase `axiomos`.
 Historical records and external repository URL slugs retain their original
 spelling; active prose, banners, package display metadata, and local tooling
 are enforced by the required `product-naming-static` step.
-- [Immutable build inputs](../generated/build-inputs.md)
-- [Coverage and mutation quality boundary](../generated/quality.md)
-- [Versioned userspace ABI](../generated/abi.md)
-- [Supported target and feature matrix](../generated/targets.md)

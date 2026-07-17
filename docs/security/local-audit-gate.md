@@ -30,6 +30,11 @@ product name. Historical audit/archive records, stable uppercase telemetry
 identifiers, and external repository URL slugs are preserved deliberately;
 active legacy display aliases fail the gate.
 
+The `benchmark-provenance-static` step validates each published benchmark
+campaign's exact commit, raw-log hash, Cargo-reported executable identity and
+hash, required result markers, and immutable source-input hashes. Historical
+numbers without this evidence remain archived rather than release claims.
+
 The host runner treats the pinned OVMF VARS file as an immutable template. Its
 QEMU pflash drive uses `snapshot=on`, so NVRAM writes go to an ephemeral overlay
 instead of the source template; `ovmf-vars-isolation-static` enforces that

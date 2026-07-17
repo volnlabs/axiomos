@@ -57,7 +57,9 @@ const COST_HELPER_MAP: u32 = 16;
 ///
 /// Unlike the others this class is **serial-I/O-bound, not CPU-bound**, and so
 /// is *not* exec-calibrated: at 115200 8N1 one byte costs ~86.8 µs ≈ 15_000
-/// cycle units (1 unit ≈ 5.8 ns, `docs/benchmarks.md §12`), so even a short line
+/// configured cycle units (6 ns/unit). The calibration rationale is retained in
+/// the historical benchmark record, not claimed as current artifact-backed
+/// measurement, so even a short line
 /// is hundreds of thousands of units — and the write would flood the same serial
 /// channel that carries the measurement. The weight stays a nominal "most
 /// expensive helper" ordering value; the real lever for keeping printk out of a
