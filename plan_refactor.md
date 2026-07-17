@@ -39,7 +39,11 @@ this refactor; it does not replace architecture, reference, or ADR documents.
 - [x] Add shared repository-model loading for component, target, artifact, and
       build-input manifests. Workspace boundary loading remains a validation
       concern.
-- [ ] Decompose the audit shell script only after equivalent xtask checks pass.
+- [~] Decompose the audit shell script. Equivalent inventory, boundary, and
+      generated-doc checks now run through xtask; the remaining script still
+      owns a large ordered matrix of inline static assertions and QEMU probes,
+      so extraction requires preserving its result manifest and failure
+      semantics rather than duplicating checks.
 - [x] Add kernel crate-boundary and component-naming documentation.
 - [~] Relocate generated root artifacts and consolidate TODO tracking. Root
       generated outputs are ignored and `artifacts/` is the designated output
