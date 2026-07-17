@@ -23,7 +23,7 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 | `kernel/crates/kernel_elfloader/fuzz/Cargo.toml` | ELF fuzz target | fuzz-harness |
 | `kernel/crates/kernel_map_transaction/Cargo.toml` | map_range rollback bookkeeping | measured |
 | `kernel/crates/kernel_memapi/Cargo.toml` | mapped-memory contract | deferred-host |
-| `kernel/crates/kernel_pci/Cargo.toml` | PCI contracts | deferred-host |
+| `kernel/crates/kernel_pci/Cargo.toml` | PCI contracts | measured |
 | `kernel/crates/kernel_physical_memory/Cargo.toml` | physical memory | measured |
 | `kernel/crates/kernel_syscall/Cargo.toml` | syscall contracts | measured |
 | `kernel/crates/kernel_syscall/fuzz/Cargo.toml` | syscall argument fuzz target | fuzz-harness |
@@ -68,6 +68,7 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 | kernel-devfs | `kernel/crates/kernel_devfs/Cargo.toml` | 91.11% | 81.03% | 91.00% | 81.00% | `fdf8580` |
 | kernel-elfloader | `kernel/crates/kernel_elfloader/Cargo.toml` | 83.29% | 66.67% | 83.00% | 66.00% | `2c3bd2c` |
 | kernel-map-transaction | `kernel/crates/kernel_map_transaction/Cargo.toml` | 94.35% | 100.00% | 94.00% | 99.00% | `97f514c` |
+| kernel-pci | `kernel/crates/kernel_pci/Cargo.toml` | 47.86% | 100.00% | 47.00% | 99.00% | `31d373f` |
 | kernel-physical-memory | `kernel/crates/kernel_physical_memory/Cargo.toml` | 94.71% | 77.08% | 94.00% | 77.00% | `a5316b4` |
 | kernel-syscall | `kernel/crates/kernel_syscall/Cargo.toml` | 67.47% | 77.08% | 67.00% | 77.00% | `fdf8580` |
 | kernel-time | `kernel/crates/kernel_time/Cargo.toml` | 96.76% | 88.24% | 96.00% | 88.00% | `fbaed42` |

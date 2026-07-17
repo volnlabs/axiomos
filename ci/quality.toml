@@ -18,7 +18,7 @@ cargo_mutants_version = "27.1.0"
 "kernel/crates/kernel_elfloader/fuzz/Cargo.toml" = "fuzz-harness"
 "kernel/crates/kernel_memapi/Cargo.toml" = "deferred-host"
 "kernel/crates/kernel_map_transaction/Cargo.toml" = "measured"
-"kernel/crates/kernel_pci/Cargo.toml" = "deferred-host"
+"kernel/crates/kernel_pci/Cargo.toml" = "measured"
 "kernel/crates/kernel_physical_memory/Cargo.toml" = "measured"
 "kernel/crates/kernel_syscall/Cargo.toml" = "measured"
 "kernel/crates/kernel_syscall/fuzz/Cargo.toml" = "fuzz-harness"
@@ -133,6 +133,19 @@ minimum_branches = 99.0
 baseline_lines = 94.35
 baseline_branches = 100.0
 baseline_commit = "97f514c"
+
+[[coverage]]
+name = "kernel-pci"
+component = "kernel/crates/kernel_pci/Cargo.toml"
+package = "kernel_pci"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 47.0
+minimum_branches = 99.0
+baseline_lines = 47.86
+baseline_branches = 100.0
+baseline_commit = "31d373f"
 
 [[coverage]]
 name = "kernel-physical-memory"
