@@ -19,6 +19,7 @@ kernel/crates/kernel_bpf/target/
 #/target
 *.txt
 *.log
+!docs/performance/evidence/**/*.log
 .planning/
 disk.img
 
