@@ -28,13 +28,17 @@ this refactor; it does not replace architecture, reference, or ADR documents.
       xtask paths.
 - [x] Group scripts by responsibility with compatibility wrappers.
 - [~] Split xtask into CLI, command, manifest, validation, documentation, and
-      process modules without changing behavior. Typed error categories are
-      landed; parser and command-module extraction remain.
-- [ ] Replace handwritten TOML parsing with `serde` and `toml`.
+      process modules without changing behavior. CLI, command dispatch,
+      context, typed manifest loading, and the shared repository model are
+      extracted; validation/rendering remains in `main.rs`.
+- [x] Replace handwritten TOML parsing with `serde` and `toml` for production
+      manifest loading. Legacy line-parser helpers remain only under tests.
 - [~] Add typed xtask exit categories and structured command output. Typed exit
       categories and tests are complete; human/JSON structured reporting is not.
 - [x] Add declarative quick/full/extended CI profiles while retaining `xtask ci`.
-- [ ] Add shared repository-model loading for manifests and workspace data.
+- [x] Add shared repository-model loading for component, target, artifact, and
+      build-input manifests. Workspace boundary loading remains a validation
+      concern.
 - [ ] Decompose the audit shell script only after equivalent xtask checks pass.
 - [x] Add kernel crate-boundary and component-naming documentation.
 - [ ] Relocate generated root artifacts and consolidate TODO tracking.
