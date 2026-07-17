@@ -37,10 +37,11 @@ def main() -> None:
         if "SHA-256" not in artifact["hash_evidence"]:
             raise SystemExit(f"{artifact['name']} has no SHA-256 evidence contract")
 
-    run_virt = source("scripts/run-virt.sh")
+    run_virt_path = "scripts/run/virt.sh"
+    run_virt = source(run_virt_path)
     for forbidden in ("%T@", "sort -n", "tail -n", "most recently modified"):
         if forbidden in run_virt:
-            raise SystemExit(f"scripts/run-virt.sh retains time-based selection: {forbidden}")
+            raise SystemExit(f"{run_virt_path} retains time-based selection: {forbidden}")
     for required in (
         "AXIOM_ARTIFACT_PATHS",
         "AXIOM_BPF_TRUSTED_KEY_PATH",
@@ -49,9 +50,10 @@ def main() -> None:
         "sha256sum",
     ):
         if required not in run_virt:
-            raise SystemExit(f"scripts/run-virt.sh is missing exact selection token: {required}")
+            raise SystemExit(f"{run_virt_path} is missing exact selection token: {required}")
 
-    build_rpi5 = source("scripts/build-rpi5.sh")
+    build_rpi5_path = "scripts/build/rpi5.sh"
+    build_rpi5 = source(build_rpi5_path)
     for required in (
         "AXIOM_ARTIFACT_PATHS",
         "AXIOM_BPF_TRUSTED_KEY_PATH",
@@ -60,16 +62,17 @@ def main() -> None:
         'sha256sum "$BUILD_DIR/kernel" "$BUILD_DIR/kernel8.img" "$DISK_PATH"',
     ):
         if required not in build_rpi5:
-            raise SystemExit(f"scripts/build-rpi5.sh is missing provenance token: {required}")
+            raise SystemExit(f"{build_rpi5_path} is missing provenance token: {required}")
 
-    deploy_rpi5 = source("scripts/deploy-rpi5.sh")
+    deploy_rpi5_path = "scripts/deploy/rpi5.sh"
+    deploy_rpi5 = source(deploy_rpi5_path)
     for required in (
         "rpi5-artifacts.sha256",
         "sha256sum -c",
         "axiomos-rpi5-artifacts.sha256",
     ):
         if required not in deploy_rpi5:
-            raise SystemExit(f"scripts/deploy-rpi5.sh is missing provenance token: {required}")
+            raise SystemExit(f"{deploy_rpi5_path} is missing provenance token: {required}")
 
     generated = source("docs/reference/generated/artifacts.md")
     for name in names:
