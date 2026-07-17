@@ -19,6 +19,12 @@ workspace membership/exclusion drift, duplicate shipped-artifact identities,
 and disagreement between declared `rootfs:*` artifacts and the production
 filesystem model before expensive build or QEMU work starts.
 
+The `documentation-links` step checks every tracked or newly added Markdown
+file for repository-local inline, image, and reference link targets. Fenced
+examples, same-page anchors, and external URLs are outside this path-existence
+contract. A missing local file or directory fails the required gate before
+expensive build or QEMU work starts.
+
 The host runner treats the pinned OVMF VARS file as an immutable template. Its
 QEMU pflash drive uses `snapshot=on`, so NVRAM writes go to an ephemeral overlay
 instead of the source template; `ovmf-vars-isolation-static` enforces that
