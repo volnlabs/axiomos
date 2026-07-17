@@ -235,7 +235,7 @@ def render(components: dict, quality: dict) -> str:
     for row in quality["mutation"]:
         timeout = row.get("baseline_timeout", 0)
         score = mutation_score(row["baseline_caught"], row["baseline_missed"], timeout)
-        evidence = f"[`report`](../{row['evidence'].removeprefix('docs/')})" if row.get("evidence") else "-"
+        evidence = f"[`report`](../../{row['evidence'].removeprefix('docs/')})" if row.get("evidence") else "-"
         lines.append(
             f"| {row['name']} | {row['baseline_caught']} | {row['baseline_missed']} | "
             f"{timeout} | {row['baseline_unviable']} | {score:.2f}% | "
