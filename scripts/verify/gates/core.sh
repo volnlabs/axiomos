@@ -151,7 +151,7 @@ run_step execve-typed-error-static python3 -B scripts/check-execve-typed-error.p
 # facade under controller-armed fault scenarios behaves identically
 # regardless of caller concurrency, and --smp 1 collapses the caller
 # dimension to one CPU. --smp 1 + KVM boots cleanly with the OVMF pinned
-# in ci/build-inputs.env (edk2-stable202511-r2 or newer).
+# in ci/manifests/build-inputs.env (edk2-stable202511-r2 or newer).
 #
 # The QEMU exit status is preserved (no `|| true` masking): a kernel panic
 # during the probe must surface as a non-zero status, not as a green smoke.
@@ -211,5 +211,4 @@ run_cargo_step kernel-x86-check check -p kernel --target x86_64-unknown-none \
     --no-default-features --features cloud-profile,x86_64_arch
 run_cargo_step kernel-aarch64-check check -p kernel --target aarch64-unknown-none \
     --no-default-features --features cloud-profile,virt
-
 

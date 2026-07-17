@@ -231,8 +231,8 @@ write_manifest() {
         echo "results=$RESULTS"
         echo "artifact_hashes=$ARTIFACTS"
         echo "production_artifact_hashes=$PRODUCTION_ARTIFACTS"
-        echo "build_inputs=$ROOT/ci/build-inputs.env"
-        echo "build_inputs_sha256=$(sha256sum ci/build-inputs.env | awk '{print $1}')"
+        echo "build_inputs=$ROOT/ci/manifests/build-inputs.env"
+        echo "build_inputs_sha256=$(sha256sum ci/manifests/build-inputs.env | awk '{print $1}')"
         echo "trusted_key=${AXIOM_BPF_TRUSTED_KEY_PATH:-not-built}"
         if [[ -n "${AXIOM_BPF_TRUSTED_KEY_PATH:-}" && -f "$AXIOM_BPF_TRUSTED_KEY_PATH" ]]; then
             echo "trusted_key_sha256=$(sha256sum "$AXIOM_BPF_TRUSTED_KEY_PATH" | awk '{print $1}')"

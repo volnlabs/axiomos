@@ -25,7 +25,7 @@ This directory is the entry point for normative documentation.
 Generated authorities are refreshed by `cargo xtask docs` and checked by the
 local audit gate.
 
-`ci/components.toml` is the canonical workspace and shipped-artifact boundary.
+`ci/manifests/components.toml` is the canonical workspace and shipped-artifact boundary.
 Every discovered Cargo or Lean manifest declares its workspace disposition
 (`root`, `member`, `excluded`, `standalone`, or `not-cargo`) and its artifact
 disposition. `none` and `experimental:*` are explicit non-shipped states;

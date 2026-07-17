@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MANIFEST = ROOT / "ci/commands.toml"
+MANIFEST = ROOT / "ci/manifests/commands.toml"
 ALLOWED_ARGV = {
     ("cargo", "xtask", "--help"),
     ("cargo", "xtask", "inventory", "--check"),

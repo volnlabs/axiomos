@@ -93,7 +93,7 @@ echo "Creating kernel8.img..."
 $OBJCOPY -O binary "$BUILD_DIR/kernel" "$BUILD_DIR/kernel8.img"
 
 # Retain hashes for the exact ELF, raw kernel, and rootfs used by this build.
-# The artifact recipe is generated from ci/artifacts.toml.
+# The artifact recipe is generated from ci/manifests/artifacts.toml.
 PROVENANCE_MANIFEST="$BUILD_DIR/rpi5-artifacts.sha256"
 sha256sum "$BUILD_DIR/kernel" "$BUILD_DIR/kernel8.img" "$DISK_PATH" \
     "$AXIOM_BPF_TRUSTED_KEY_PATH" \

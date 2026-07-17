@@ -14,7 +14,7 @@ def require(condition: bool, message: str) -> None:
 
 
 def main() -> None:
-    targets = tomllib.loads((ROOT / "ci/targets.toml").read_text(encoding="utf-8"))["target"]
+    targets = tomllib.loads((ROOT / "ci/manifests/targets.toml").read_text(encoding="utf-8"))["target"]
     by_name = {target["name"]: target for target in targets}
 
     require(by_name["x86_64 QEMU/OVMF"]["status"] == "supported", "x86_64 target lost support")
@@ -52,7 +52,7 @@ def main() -> None:
     demo = demo_manifest.read_text(encoding="utf-8")
     require("[workspace]" in demo, "RISC-V demo must remain isolated from the root workspace")
 
-    components = (ROOT / "ci/components.toml").read_text(encoding="utf-8")
+    components = (ROOT / "ci/manifests/components.toml").read_text(encoding="utf-8")
     require(
         'path = "kernel/demos/riscv/Cargo.toml"' in components
         and 'artifact = "experimental:riscv-kernel-demo"' in components,

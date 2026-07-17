@@ -14,8 +14,8 @@ import tomllib
 
 
 ROOT = Path(__file__).resolve().parent.parent
-COMPONENTS = ROOT / "ci/components.toml"
-QUALITY = ROOT / "ci/quality.toml"
+COMPONENTS = ROOT / "ci/manifests/components.toml"
+QUALITY = ROOT / "ci/manifests/quality.toml"
 GENERATED = ROOT / "docs/reference/generated/quality.md"
 ALLOWED_DISPOSITIONS = {
     "measured",
@@ -129,7 +129,7 @@ def validate_mutation_evidence(row: dict, quality: dict) -> None:
 
 def validate(components: dict, quality: dict) -> None:
     if quality.get("format_version") != 1:
-        raise ValueError("ci/quality.toml must declare format_version = 1")
+        raise ValueError("ci/manifests/quality.toml must declare format_version = 1")
 
     component_paths = {row["path"] for row in components["component"]}
     dispositions = quality.get("disposition", {})

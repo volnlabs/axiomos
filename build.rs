@@ -6,13 +6,13 @@ use std::process::{Command, Stdio};
 use file_structure::{Dir, Kind};
 use ovmf_prebuilt::{Arch, FileType, Prebuilt, Source};
 
-const BUILD_INPUTS: &str = include_str!("ci/build-inputs.env");
+const BUILD_INPUTS: &str = include_str!("ci/manifests/build-inputs.env");
 const HOST_RUNNER_TEST_FEATURE: &str = "CARGO_FEATURE_HOST_RUNNER_TESTS";
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=limine.conf");
-    println!("cargo:rerun-if-changed=ci/build-inputs.env");
+    println!("cargo:rerun-if-changed=ci/manifests/build-inputs.env");
     println!("cargo:rerun-if-env-changed=AXIOM_SIGNED_BPF_STARTUP_PATH");
     println!("cargo:rerun-if-env-changed=AXIOM_ARTIFACT_PATHS");
     if host_runner_test_only() {
@@ -96,7 +96,7 @@ fn pinned_input(name: &str) -> &'static str {
         .lines()
         .filter_map(|line| line.split_once('='))
         .find_map(|(key, value)| (key.trim() == name).then_some(value.trim()))
-        .unwrap_or_else(|| panic!("missing {name} in ci/build-inputs.env"))
+        .unwrap_or_else(|| panic!("missing {name} in ci/manifests/build-inputs.env"))
 }
 
 fn write_artifact_paths(kernel: &Path, disk: &Path, iso: Option<&Path>) {
@@ -341,7 +341,7 @@ fn limine() -> PathBuf {
         assert_eq!(
             actual.trim(),
             expected_revision,
-            "cached Limine revision does not match ci/build-inputs.env; remove target/limine"
+            "cached Limine revision does not match ci/manifests/build-inputs.env; remove target/limine"
         );
         return limine_dir;
     }

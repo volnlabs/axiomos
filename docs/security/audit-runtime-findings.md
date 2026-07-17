@@ -65,10 +65,10 @@ classification of the historical defect.
 
 **Why no regression gate is added.** A required regression step
 needs a pinned, hash-verified OVMF input — analogous to
-`OVMF_TAG=edk2-stable202511-r2` from `ci/build-inputs.env` for the
+`OVMF_TAG=edk2-stable202511-r2` from `ci/manifests/build-inputs.env` for the
 wrapper's pinned OVMF. The system OVMF on this host is whatever the
 distro installs (`edk2-ovmf 202602-3` candidate, dated Apr 23);
-without a hash-verified prebuilt in `ci/build-inputs.env`, a CI
+without a hash-verified prebuilt in `ci/manifests/build-inputs.env`, a CI
 gate cannot deterministically provision it. The
 `scripts/qemu-debug-triage.sh --ovmf system --capture ...` flow is
 the developer-side capture path; promoting it to a gate step requires
@@ -123,7 +123,7 @@ the decision not to add a partial instrument.
 ## OVMF prebuilt pinning history
 
 The single-CPU boot path was previously held back by the OVMF
-prebuilt pinned in `ci/build-inputs.env`. `edk2-stable202508-r1`
+prebuilt pinned in `ci/manifests/build-inputs.env`. `edk2-stable202508-r1`
 failed to bring the kernel up under `--smp 1 + KVM`: Limine reloaded
 immediately after `Loading executable` and the kernel produced no
 serial output. Bumping to `edk2-stable202511-r2` (commit

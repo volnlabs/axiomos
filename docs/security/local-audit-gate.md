@@ -36,7 +36,7 @@ hash, required result markers, and immutable source-input hashes. Historical
 numbers without this evidence remain archived rather than release claims.
 
 The `command-smoke` step executes the safe documented entrypoints declared in
-`ci/commands.toml`. The boundary is intentionally small and shell-free:
+`ci/manifests/commands.toml`. The boundary is intentionally small and shell-free:
 
 ```sh
 cargo xtask --help

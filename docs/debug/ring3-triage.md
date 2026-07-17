@@ -120,7 +120,7 @@ NOT add a `--no-reboot` change; the existing `--no-reboot` flag
 ## Why the audit gate does not reproduce the fault
 
 The gate uses the wrapper's pinned OVMF
-(`edk2-stable202511-r2` from `ci/build-inputs.env`). The system
+(`edk2-stable202511-r2` from `ci/manifests/build-inputs.env`). The system
 OVMF (`edk2-ovmf 202602-3`, shipped by the host distro) is newer
 and triggers the fault consistently. The `qemu-smp1-smoke` step
 in the gate records (without failing) any post-boot `kernel

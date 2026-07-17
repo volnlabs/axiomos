@@ -2,7 +2,7 @@ format_version = 1
 cargo_llvm_cov_version = "0.8.7"
 cargo_mutants_version = "27.1.0"
 
-# Every entry in ci/components.toml must appear exactly once here. "measured"
+# Every entry in ci/manifests/components.toml must appear exactly once here. "measured"
 # means the component has a coverage campaign below; the other values explain
 # why a host source-coverage percentage is not currently published.
 [disposition]

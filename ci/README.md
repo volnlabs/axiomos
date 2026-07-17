@@ -1,7 +1,10 @@
 # CI Policy
 
-`components.toml`, `targets.toml`, `artifacts.toml`, and `quality.toml` are
-declarative manifests consumed by xtask and the local audit gate.
+`ci/manifests/` is the sole declarative policy authority. It contains the
+component, target, artifact, command-smoke, quality, and immutable build-input
+manifests consumed by xtask, Cargo build orchestration, and the local audit
+gate. Do not introduce compatibility copies at `ci/` root because duplicated
+policy files create ambiguous sources of truth.
 
 Profiles under `ci/profiles/` describe intended validation scope:
 

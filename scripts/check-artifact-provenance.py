@@ -13,14 +13,14 @@ def source(path: str) -> str:
 
 
 def main() -> None:
-    manifest = tomllib.loads(source("ci/artifacts.toml"))
+    manifest = tomllib.loads(source("ci/manifests/artifacts.toml"))
     artifacts = manifest.get("artifact", [])
     if not artifacts:
-        raise SystemExit("ci/artifacts.toml contains no artifact recipes")
+        raise SystemExit("ci/manifests/artifacts.toml contains no artifact recipes")
 
     names = [artifact["name"] for artifact in artifacts]
     if len(names) != len(set(names)):
-        raise SystemExit("ci/artifacts.toml contains duplicate artifact names")
+        raise SystemExit("ci/manifests/artifacts.toml contains duplicate artifact names")
     for artifact in artifacts:
         missing = {
             "platform",

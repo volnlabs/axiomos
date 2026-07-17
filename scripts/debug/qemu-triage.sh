@@ -214,7 +214,7 @@ Options:
                             OVMF firmware. Default: system (the one that
                             triggers the ring-3 fault at edk2-ovmf 202602-3).
                             'pinned' uses the wrapper's pinned prebuilt
-                            (edk2-stable202511-r2 from ci/build-inputs.env).
+                            (edk2-stable202511-r2 from ci/manifests/build-inputs.env).
                             A literal path selects custom mode.
   --ovmf-vars PATH          OVMF VARS path for custom mode
                             (--ovmf /path/to/code.fd). Required when the
@@ -394,7 +394,7 @@ case "$OVMF_CHOICE" in
     pinned)
         # The runner's build.rs uses the ovmf-prebuilt crate which
         # fetches a specific pinned prebuilt (configured via
-        # OVMF_TAG / OVMF_SHA256 in ci/build-inputs.env) and writes it
+        # OVMF_TAG / OVMF_SHA256 in ci/manifests/build-inputs.env) and writes it
         # to target/ovmf/x64/{code,vars}.fd in the workspace root.
         # Resolve these paths directly so we can pass them to QEMU
         # without going through the runner.
@@ -852,7 +852,7 @@ fi
 # Why not go through the runner:
 #   The runner's build.rs uses the ovmf-prebuilt crate which fetches a
 #   specific pinned OVMF tag (configured via OVMF_TAG / OVMF_SHA256 in
-#   ci/build-inputs.env) and ignores OVMF_X86_64_CODE / OVMF_X86_64_VARS
+#   ci/manifests/build-inputs.env) and ignores OVMF_X86_64_CODE / OVMF_X86_64_VARS
 #   env vars. When the user wants system OVMF or a custom OVMF, the
 #   runner has no mechanism to use it — the OVMF paths are baked in at
 #   compile time. To run with system / custom OVMF, we invoke QEMU

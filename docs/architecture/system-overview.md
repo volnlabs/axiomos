@@ -39,7 +39,7 @@ RP2040 firmware control loop
 ```
 
 The root workspace and every standalone Cargo, fuzz, firmware, and Lean
-component are enumerated by [`ci/components.toml`](../../ci/components.toml).
+component are enumerated by [`ci/manifests/components.toml`](../../ci/manifests/components.toml).
 The generated [component inventory](../reference/generated/components.md) is the readable
 view of that boundary.
 
