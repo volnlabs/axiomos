@@ -13,6 +13,10 @@ Scripts are focused process adapters. The canonical repository interface is
 | Benchmark | `analyze-v03-bench.py`, `verifier-cost.py` |
 | Debug | `qemu-debug-triage.sh` |
 
+Grouped compatibility entry points now exist under `build/`, `run/`,
+`deploy/`, `test/`, `benchmark/`, and `debug/`. The original flat paths remain
+the implementation paths until all callers and static checks migrate.
+
 ## Rules
 
 - Keep shell focused on process wiring, environment setup, QEMU, and deploy.
