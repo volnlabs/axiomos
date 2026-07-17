@@ -12,6 +12,9 @@ pub enum Command {
     Ci {
         arguments: Vec<String>,
     },
+    Check {
+        arguments: Vec<String>,
+    },
     Forward {
         program: String,
         arguments: Vec<String>,
@@ -39,6 +42,9 @@ where
             check: parse_check_only(&remaining, "docs")?,
         }),
         "ci" => Ok(Command::Ci {
+            arguments: remaining,
+        }),
+        "check" => Ok(Command::Check {
             arguments: remaining,
         }),
         "build" | "run" | "deploy" | "bench" | "debug" => Ok(Command::Forward {
@@ -94,6 +100,12 @@ mod tests {
             Ok(Command::Forward {
                 program: "build".to_owned(),
                 arguments: args(&["rpi5"]),
+            })
+        );
+        assert_eq!(
+            parse(args(&["check", "all", "--profile", "quick"])),
+            Ok(Command::Check {
+                arguments: args(&["all", "--profile", "quick"]),
             })
         );
     }
