@@ -1,4 +1,4 @@
-# AxiomOS Documentation
+# axiomos Documentation
 
 ## Start Here
 
@@ -13,7 +13,7 @@
 
 | Question | Authority |
 |---|---|
-| How does AxiomOS currently work? | `docs/current/` |
+| How does axiomos currently work? | `docs/current/` |
 | Why was a decision made? | `docs/adr/` |
 | What problems were found? | `docs/reviews/` and `docs/security/` |
 | Which files are generated? | `docs/reference/generated/` and checked-in manifests |
