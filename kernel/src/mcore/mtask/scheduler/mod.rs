@@ -36,7 +36,6 @@ use crate::mcore::mtask::task::{State, Task};
 
 pub mod cleanup;
 pub mod run_queue;
-mod run_queue_policy;
 pub mod sleep;
 mod switch;
 pub mod wait;

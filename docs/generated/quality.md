@@ -25,6 +25,7 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 | `kernel/crates/kernel_memapi/Cargo.toml` | mapped-memory contract | deferred-host |
 | `kernel/crates/kernel_pci/Cargo.toml` | PCI contracts | measured |
 | `kernel/crates/kernel_physical_memory/Cargo.toml` | physical memory | measured |
+| `kernel/crates/kernel_run_queue/Cargo.toml` | per-CPU runnable queue core | deferred-host |
 | `kernel/crates/kernel_syscall/Cargo.toml` | syscall contracts | measured |
 | `kernel/crates/kernel_syscall/fuzz/Cargo.toml` | syscall argument fuzz target | fuzz-harness |
 | `kernel/crates/kernel_time/Cargo.toml` | time and deadline queues | measured |

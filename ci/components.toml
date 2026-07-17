@@ -113,6 +113,14 @@ role = "physical memory"
 gate = "host lint and tests"
 
 [[component]]
+path = "kernel/crates/kernel_run_queue/Cargo.toml"
+workspace = "member"
+artifact = "none"
+kind = "cargo"
+role = "per-CPU runnable queue core"
+gate = "host lint, tests, and Loom model"
+
+[[component]]
 path = "kernel/crates/kernel_syscall/Cargo.toml"
 workspace = "member"
 artifact = "none"

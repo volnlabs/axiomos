@@ -12,6 +12,7 @@ kernel_elfloader = { path = "crates/kernel_elfloader" }
 kernel_memapi = { path = "crates/kernel_memapi" }
 kernel_pci = { path = "crates/kernel_pci" }
 kernel_physical_memory = { path = "crates/kernel_physical_memory" }
+kernel_run_queue = { path = "crates/kernel_run_queue" }
 kernel_syscall = { path = "crates/kernel_syscall" }
 kernel_time = { path = "crates/kernel_time" }
 kernel_usermem = { path = "crates/kernel_usermem" }

@@ -45,12 +45,7 @@ impl WaiterSink for TaskQueue {
     type Item = Pin<Box<Task>>;
 
     fn enqueue(&self, item: Self::Item) {
-        // The pre-refactor code did `self.waiters.enqueue(task)`,
-        // which resolved through `Deref<Target = MpscQueue<Task>>`.
-        // The MPSC's `enqueue` is `&self` and takes
-        // `T::Handle = Pin<Box<Task>>`, matching `Self::Item`.
-        let mpsc: &cordyceps::mpsc_queue::MpscQueue<Task> = &**self;
-        mpsc.enqueue(item);
+        TaskQueue::enqueue(self, item);
     }
 
     fn try_take(&self) -> Option<Self::Item> {

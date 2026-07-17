@@ -1,9 +1,10 @@
+/// Maximum number of remote queues inspected by one dequeue attempt.
 pub const MAX_STEAL_ATTEMPTS: usize = 4;
 
 /// Select an online victim by ordinal, excluding the local CPU.
 ///
 /// The ordinal wraps across eligible CPUs so each dequeue probes at most
-/// `MAX_STEAL_ATTEMPTS` actual queues rather than scanning empty CPU slots.
+/// [`MAX_STEAL_ATTEMPTS`] actual queues rather than scanning empty CPU slots.
 #[must_use]
 pub fn victim_at(online_mask: u64, local_cpu: usize, ordinal: usize) -> Option<usize> {
     let local_bit = 1u64.checked_shl(u32::try_from(local_cpu).ok()?)?;
