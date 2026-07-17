@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command as ProcessCommand, ExitCode};
 use std::{env, fs};
 
