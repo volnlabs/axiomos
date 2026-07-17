@@ -95,7 +95,17 @@ impl VirtualMemoryManager {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec::Vec;
+
     use super::*;
+
+    fn segment(start: u64, len: u64) -> Segment {
+        Segment::new(VirtAddr::new(start), len)
+    }
+
+    fn snapshot(vmm: &VirtualMemoryManager) -> Vec<Segment> {
+        vmm.segments().copied().collect()
+    }
 
     #[test]
     fn test_reserve_release() {
@@ -104,7 +114,7 @@ mod tests {
         for n in (1..=size).step_by(713) {
             let segment = vmm
                 .reserve(n)
-                .unwrap_or_else(|| panic!("should be able to reserve segment of size {n}"));
+                .expect("each request should fit after the previous release");
 
             assert_eq!(segment.len, n as u64);
 
@@ -137,5 +147,91 @@ mod tests {
 
         vmm.release(segment1);
         vmm.mark_as_reserved(segment1_5).unwrap();
+    }
+
+    #[test]
+    fn reserve_rejects_zero_without_changing_state() {
+        let mut vmm = VirtualMemoryManager::new(VirtAddr::new(0x1000), 0x1000);
+
+        assert_eq!(vmm.reserve(0), None);
+        assert!(vmm.segments().next().is_none());
+    }
+
+    #[test]
+    fn reserve_uses_the_first_gap_large_enough_for_the_request() {
+        let mut vmm = VirtualMemoryManager::new(VirtAddr::new(0x1000), 0x1000);
+        vmm.mark_as_reserved(segment(0x1000, 0x100)).unwrap();
+        vmm.mark_as_reserved(segment(0x1200, 0x100)).unwrap();
+
+        assert_eq!(vmm.reserve(0x80), Some(segment(0x1100, 0x80)));
+        assert_eq!(vmm.reserve(0x90), Some(segment(0x1300, 0x90)));
+    }
+
+    #[test]
+    fn reserve_accepts_a_request_that_ends_at_the_manager_boundary() {
+        let mut vmm = VirtualMemoryManager::new(VirtAddr::new(0x1000), 0x200);
+
+        assert_eq!(vmm.reserve(0x200), Some(segment(0x1000, 0x200)));
+        assert_eq!(vmm.reserve(1), None);
+    }
+
+    #[test]
+    fn failed_reserve_leaves_existing_reservations_unchanged() {
+        let mut vmm = VirtualMemoryManager::new(VirtAddr::new(0x1000), 0x300);
+        let occupied = segment(0x1000, 0x200);
+        vmm.mark_as_reserved(occupied).unwrap();
+        let before = snapshot(&vmm);
+
+        assert_eq!(vmm.reserve(0x200), None);
+        assert_eq!(snapshot(&vmm), before);
+    }
+
+    #[test]
+    fn failed_overlapping_mark_leaves_reservations_unchanged() {
+        let mut vmm = VirtualMemoryManager::new(VirtAddr::new(0x1000), 0x1000);
+        let occupied = segment(0x1200, 0x100);
+        vmm.mark_as_reserved(occupied).unwrap();
+
+        for overlapping in [
+            segment(0x1180, 0x100),
+            segment(0x1280, 0x100),
+            segment(0x1100, 0x300),
+            segment(0x1240, 0x20),
+            occupied,
+        ] {
+            let before = snapshot(&vmm);
+            assert_eq!(vmm.mark_as_reserved(overlapping), Err(AlreadyReserved));
+            assert_eq!(snapshot(&vmm), before);
+        }
+    }
+
+    #[test]
+    fn mark_accepts_segments_adjacent_to_existing_reservations() {
+        let mut vmm = VirtualMemoryManager::new(VirtAddr::new(0x1000), 0x1000);
+        vmm.mark_as_reserved(segment(0x1200, 0x100)).unwrap();
+
+        assert_eq!(vmm.mark_as_reserved(segment(0x1100, 0x100)), Ok(()));
+        assert_eq!(vmm.mark_as_reserved(segment(0x1300, 0x100)), Ok(()));
+        assert_eq!(
+            snapshot(&vmm),
+            [
+                segment(0x1100, 0x100),
+                segment(0x1200, 0x100),
+                segment(0x1300, 0x100),
+            ]
+        );
+    }
+
+    #[test]
+    fn release_only_removes_the_exact_owned_segment_and_frees_its_gap() {
+        let mut vmm = VirtualMemoryManager::new(VirtAddr::new(0x1000), 0x400);
+        let first = vmm.reserve(0x100).unwrap();
+        let second = vmm.reserve(0x100).unwrap();
+
+        assert!(!vmm.release(segment(first.start.as_u64(), first.len / 2)));
+        assert_eq!(snapshot(&vmm), [first, second]);
+        assert!(vmm.release(first));
+        assert!(!vmm.release(first));
+        assert_eq!(vmm.reserve(0x80), Some(segment(0x1000, 0x80)));
     }
 }
