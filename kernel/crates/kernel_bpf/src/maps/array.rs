@@ -86,14 +86,30 @@ impl ArrayStorage {
     /// Resize storage (cloud profile only).
     #[cfg(feature = "cloud-profile")]
     fn resize(&mut self, new_max_entries: usize) -> MapResult<()> {
+        self.resize_with_reservation(new_max_entries, |buffer, additional| {
+            buffer
+                .try_reserve_exact(additional)
+                .map_err(|_| MapError::OutOfMemory)
+        })
+    }
+
+    /// Resize after the caller-provided growth reservation succeeds.
+    ///
+    /// No published storage metadata changes before the sole fallible step, so
+    /// reservation failure leaves the live array byte-for-byte unchanged.
+    #[cfg(feature = "cloud-profile")]
+    fn resize_with_reservation(
+        &mut self,
+        new_max_entries: usize,
+        reserve: impl FnOnce(&mut Vec<u8>, usize) -> MapResult<()>,
+    ) -> MapResult<()> {
         let new_size = self
             .value_size
             .checked_mul(new_max_entries)
             .ok_or(MapError::OutOfMemory)?;
         if new_size > self.buffer.len() {
-            self.buffer
-                .try_reserve_exact(new_size - self.buffer.len())
-                .map_err(|_| MapError::OutOfMemory)?;
+            let additional = new_size - self.buffer.len();
+            reserve(&mut self.buffer, additional)?;
         }
         self.buffer.resize(new_size, 0);
         self.max_entries = new_max_entries;
@@ -312,5 +328,42 @@ mod tests {
         // Can now write to index 15
         let key2 = 15u32.to_ne_bytes();
         map.update(&key2, &value, 0).expect("update after resize");
+    }
+
+    #[cfg(feature = "cloud-profile")]
+    #[test]
+    fn array_map_resize_fail_after_n_preserves_live_storage() {
+        let mut map = ArrayMap::<ActiveProfile>::with_entries(4, 4).expect("create map");
+        let key = 2u32.to_ne_bytes();
+        let value = 42u32.to_ne_bytes();
+        map.update(&key, &value, 0).expect("seed live value");
+
+        let before_def_max_entries = map.def.max_entries;
+        let storage = map.data.get_mut();
+        let before_buffer = storage.buffer.clone();
+        let before_max_entries = storage.max_entries;
+
+        for fail_at in 1..=1 {
+            let mut checkpoint = 0;
+            let error = storage
+                .resize_with_reservation(8, |_buffer, additional| {
+                    checkpoint += 1;
+                    assert_eq!(additional, 16);
+                    if checkpoint == fail_at {
+                        Err(MapError::OutOfMemory)
+                    } else {
+                        Ok(())
+                    }
+                })
+                .expect_err("injected reservation must fail");
+
+            assert_eq!(error, MapError::OutOfMemory);
+            assert_eq!(checkpoint, fail_at);
+            assert_eq!(storage.buffer, before_buffer);
+            assert_eq!(storage.max_entries, before_max_entries);
+        }
+
+        assert_eq!(map.def.max_entries, before_def_max_entries);
+        assert_eq!(map.lookup(&key).as_deref(), Some(value.as_slice()));
     }
 }

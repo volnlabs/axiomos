@@ -613,7 +613,9 @@ mod tests {
         assert_eq!(ringbuf.def().max_entries, 128);
         assert!(ringbuf.is_empty());
         assert!(ringbuf.poll().is_none());
-        ringbuf.output(b"new event", 0).expect("publish after resize");
+        ringbuf
+            .output(b"new event", 0)
+            .expect("publish after resize");
         assert_eq!(ringbuf.poll().as_deref(), Some(b"new event".as_slice()));
     }
 
