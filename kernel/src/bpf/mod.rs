@@ -6,7 +6,6 @@ mod snapshot;
 mod trust;
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -37,7 +36,9 @@ use kernel_bpf::loader::BpfLoader;
 use kernel_bpf::maps::{ArrayMap, BpfMap, HashMap as BpfHashMap, RingBufMap, TimeSeriesMap};
 use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
 use kernel_bpf::signing::SignatureVerifier;
-use kernel_bpf::verifier::admission::AdmissionLedger;
+use kernel_bpf::verifier::admission::{
+    commit_attachment, AdmissionLedger, AttachmentCommitError, AttachmentTable,
+};
 use kernel_bpf::verifier::{MapPerm, Verifier, VerifyConfig};
 use limits::BpfLimits;
 use snapshot::EpochSnapshot;
@@ -380,7 +381,7 @@ pub struct BpfManager {
     // hook readers borrow immutable ProgramRuntime entries under an epoch pin.
     programs: Vec<Option<ProgramEntry>>,
     program_generations: Vec<u32>,
-    attachments: BTreeMap<u32, Vec<u32>>,
+    attachments: AttachmentTable,
     maps: Vec<Option<MapEntry>>,
     map_generations: Vec<u32>,
     pinned_maps: Vec<PinnedMap>,
@@ -486,7 +487,7 @@ impl BpfManager {
     #[cfg(not(test))]
     fn publish_hook_snapshot(&self, mut prepared: PreparedHookSnapshot) {
         let snapshot = &mut prepared.snapshot;
-        for (&attach_type, program_ids) in &self.attachments {
+        for (&attach_type, program_ids) in self.attachments.iter() {
             let programs = snapshot
                 .generic_mut(attach_type)
                 .expect("supported attach types have direct snapshot slots");
@@ -521,7 +522,7 @@ impl BpfManager {
         let mut manager = Self {
             programs: Vec::new(),
             program_generations: Vec::new(),
-            attachments: BTreeMap::new(),
+            attachments: AttachmentTable::new(),
             maps: Vec::new(),
             map_generations: Vec::new(),
             pinned_maps: Vec::new(),
@@ -1224,17 +1225,21 @@ impl BpfManager {
             .ok_or(BpfError::NotLoaded)?
             .wcet_cycles;
         let freq = hook_frequency_hz(attach_type);
-        if let Err(e) = self.admission.admit(attach_type, prog_id, wcet, freq) {
-            log::error!("BpfManager: {}", e);
-            return Err(BpfError::AdmissionRejected);
+        match commit_attachment(
+            &mut self.attachments,
+            &mut self.admission,
+            attach_type,
+            prog_id,
+            wcet,
+            freq,
+        ) {
+            Ok(()) => Ok(()),
+            Err(AttachmentCommitError::Admission(error)) => {
+                log::error!("BpfManager: {}", error);
+                Err(BpfError::AdmissionRejected)
+            }
+            Err(AttachmentCommitError::Reservation) => Err(BpfError::OutOfMemory),
         }
-        let programs = self.attachments.entry(attach_type).or_default();
-        if programs.try_reserve(1).is_err() {
-            self.admission.release(attach_type, prog_id);
-            return Err(BpfError::OutOfMemory);
-        }
-        programs.push(prog_id);
-        Ok(())
     }
 
     fn attach_verified_for(
@@ -2764,9 +2769,11 @@ mod tests {
                     .expect("program within test quota"),
             );
         }
-        manager
-            .attachments
-            .insert(ATTACH_TYPE_TIMER, ids[..HOOK_FANOUT_LIMIT].to_vec());
+        for &id in &ids[..HOOK_FANOUT_LIMIT] {
+            manager
+                .attach(ATTACH_TYPE_TIMER, id)
+                .expect("attachment within fanout limit");
+        }
 
         assert_eq!(
             manager.attach(ATTACH_TYPE_TIMER, ids[HOOK_FANOUT_LIMIT]),
@@ -2774,7 +2781,11 @@ mod tests {
         );
 
         assert_eq!(
-            manager.attachments[&ATTACH_TYPE_TIMER].len(),
+            manager
+                .attachments
+                .get(&ATTACH_TYPE_TIMER)
+                .expect("fanout test hook")
+                .len(),
             HOOK_FANOUT_LIMIT
         );
         assert!(ids[..HOOK_FANOUT_LIMIT]
