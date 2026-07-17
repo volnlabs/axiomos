@@ -27,8 +27,8 @@ cargo_mutants_version = "27.1.0"
 "kernel/crates/kernel_vfs/Cargo.toml" = "measured"
 "kernel/crates/kernel_virtual_memory/Cargo.toml" = "measured"
 "kernel/crates/shrike_link/Cargo.toml" = "measured"
-"firmware/shrike_control/Cargo.toml" = "deferred-host"
-"firmware/shrike_rp2040_host_sim/Cargo.toml" = "deferred-host"
+"firmware/shrike_control/Cargo.toml" = "measured"
+"firmware/shrike_rp2040_host_sim/Cargo.toml" = "measured"
 "kernel/demos/riscv/Cargo.toml" = "experimental-target"
 "firmware/shrike_rp2040/Cargo.toml" = "hardware-hil"
 "userspace/benchmark/Cargo.toml" = "target-image"
@@ -224,6 +224,32 @@ minimum_branches = 94.0
 baseline_lines = 98.57
 baseline_branches = 94.44
 baseline_commit = "fdf8580"
+
+[[coverage]]
+name = "shrike-control"
+component = "firmware/shrike_control/Cargo.toml"
+package = "shrike_control"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 99.0
+minimum_branches = 91.0
+baseline_lines = 99.40
+baseline_branches = 91.18
+baseline_commit = "617ae0f"
+
+[[coverage]]
+name = "shrike-rp2040-host-sim"
+component = "firmware/shrike_rp2040_host_sim/Cargo.toml"
+package = "shrike_rp2040_host_sim"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 73.0
+minimum_branches = 49.0
+baseline_lines = 73.85
+baseline_branches = 50.0
+baseline_commit = "617ae0f"
 
 [[coverage]]
 name = "rk-bridge"
