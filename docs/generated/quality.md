@@ -46,7 +46,7 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 | `userspace/pwm_demo/Cargo.toml` | PWM demo | target-image |
 | `userspace/rk_bridge/Cargo.toml` | host robotics bridge | measured |
 | `userspace/rk_bridge/fuzz/Cargo.toml` | rk_bridge protocol fuzz target | fuzz-harness |
-| `userspace/rk_cli/Cargo.toml` | host signing CLI | deferred-host |
+| `userspace/rk_cli/Cargo.toml` | host signing CLI | measured |
 | `userspace/rk_uart_forwarder/Cargo.toml` | UART forwarder image | target-image |
 | `userspace/safety_demo/Cargo.toml` | safety-state demo | target-image |
 | `userspace/sched_switch_bridge_demo/Cargo.toml` | scheduler bridge demo | target-image |
@@ -79,6 +79,7 @@ Coverage uses `cargo-llvm-cov --branch`; mutation scores are caught / (caught + 
 | shrike-rp2040-host-sim | `firmware/shrike_rp2040_host_sim/Cargo.toml` | 73.85% | 50.00% | 73.00% | 49.00% | `617ae0f` |
 | rk-bridge | `userspace/rk_bridge/Cargo.toml` | 40.93% | 56.25% | 40.00% | 56.00% | `fdf8580` |
 | file-structure | `userspace/file_structure/Cargo.toml` | 100.00% | 82.14% | 99.00% | 82.00% | `9e1d6af` |
+| rk-cli | `userspace/rk_cli/Cargo.toml` | 62.80% | 34.68% | 62.00% | 34.00% | `97c1f91` |
 
 ## Mutation baselines
 

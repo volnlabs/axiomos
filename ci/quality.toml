@@ -43,7 +43,7 @@ cargo_mutants_version = "27.1.0"
 "userspace/pwm_demo/Cargo.toml" = "target-image"
 "userspace/rk_bridge/Cargo.toml" = "measured"
 "userspace/rk_bridge/fuzz/Cargo.toml" = "fuzz-harness"
-"userspace/rk_cli/Cargo.toml" = "deferred-host"
+"userspace/rk_cli/Cargo.toml" = "measured"
 "userspace/rk_uart_forwarder/Cargo.toml" = "target-image"
 "userspace/safety_demo/Cargo.toml" = "target-image"
 "userspace/sched_switch_bridge_demo/Cargo.toml" = "target-image"
@@ -276,6 +276,19 @@ minimum_branches = 82.0
 baseline_lines = 100.0
 baseline_branches = 82.14
 baseline_commit = "9e1d6af"
+
+[[coverage]]
+name = "rk-cli"
+component = "userspace/rk_cli/Cargo.toml"
+package = "rk-cli"
+mode = "standalone"
+features = []
+no_default_features = false
+minimum_lines = 62.0
+minimum_branches = 34.0
+baseline_lines = 62.80
+baseline_branches = 34.68
+baseline_commit = "97c1f91"
 
 [[mutation]]
 name = "elf-parser-loader"
