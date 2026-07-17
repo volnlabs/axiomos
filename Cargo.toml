@@ -52,6 +52,9 @@ kernel_aarch64 = { package = "kernel", path = "kernel", artifact = "bin", target
 
 [features]
 default = ["x86_64_deps"]
+# Compile only the host runner and its unit tests. The build script rejects
+# this feature outside debug profile or alongside target artifact features.
+host-runner-tests = []
 bpf-unsigned-development = [
   "kernel_x86/bpf-unsigned-development",
   "init_x86/bpf-unsigned-development",

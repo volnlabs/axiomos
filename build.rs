@@ -7,6 +7,7 @@ use file_structure::{Dir, Kind};
 use ovmf_prebuilt::{Arch, FileType, Prebuilt, Source};
 
 const BUILD_INPUTS: &str = include_str!("ci/build-inputs.env");
+const HOST_RUNNER_TEST_FEATURE: &str = "CARGO_FEATURE_HOST_RUNNER_TESTS";
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -14,6 +15,10 @@ fn main() {
     println!("cargo:rerun-if-changed=ci/build-inputs.env");
     println!("cargo:rerun-if-env-changed=AXIOM_SIGNED_BPF_STARTUP_PATH");
     println!("cargo:rerun-if-env-changed=AXIOM_ARTIFACT_PATHS");
+    if host_runner_test_only() {
+        emit_host_runner_test_inputs();
+        return;
+    }
 
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
 
@@ -59,6 +64,31 @@ fn main() {
     let disk_image = build_os_disk_image(&target_arch);
     println!("cargo:rustc-env=DISK_IMAGE={}", disk_image.display());
     write_artifact_paths(&kernel, &disk_image, bootable_iso.as_deref());
+}
+
+fn host_runner_test_only() -> bool {
+    if std::env::var_os(HOST_RUNNER_TEST_FEATURE).is_none() {
+        return false;
+    }
+    assert_eq!(
+        std::env::var("PROFILE").as_deref(),
+        Ok("debug"),
+        "host-runner-tests is restricted to debug-profile tooling tests"
+    );
+    assert!(
+        std::env::var_os("CARGO_FEATURE_X86_64_DEPS").is_none()
+            && std::env::var_os("CARGO_FEATURE_AARCH64_DEPS").is_none(),
+        "host-runner-tests requires --no-default-features"
+    );
+    true
+}
+
+fn emit_host_runner_test_inputs() {
+    println!("cargo:rustc-env=KERNEL_BINARY=test-only/kernel");
+    println!("cargo:rustc-env=BOOTABLE_ISO=test-only/axiomos.iso");
+    println!("cargo:rustc-env=OVMF_X86_64_CODE=test-only/ovmf-code.fd");
+    println!("cargo:rustc-env=OVMF_X86_64_VARS=test-only/ovmf-vars.fd");
+    println!("cargo:rustc-env=DISK_IMAGE=test-only/disk.img");
 }
 
 fn pinned_input(name: &str) -> &'static str {
