@@ -5,8 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cli::{self, Command};
 use crate::context::repo_root;
+use crate::docs::check_or_write_docs;
 use crate::model::RepositoryModel;
-use crate::{check_or_write_docs, validate_boundary, validate_inventory};
+use crate::{validate_boundary, validate_inventory};
 
 fn run_ci(root: &Path, arguments: &[String]) -> Result<(), String> {
     let mut script_arguments: Vec<_> = arguments
