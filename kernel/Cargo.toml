@@ -97,7 +97,7 @@ bringup-diagnostics = []
 # Forward the kernel_physical_memory fault-injection controller into a
 # controlled boot probe (kernel/src/audit_fault_probe.rs). Off by default;
 # opt in for fault-path QEMU scenarios only. The QEMU scenario lives
-# behind `RUN_AUDIT_FAULT=1` in scripts/verify-engineering-audit.sh.
+# behind `RUN_AUDIT_FAULT=1` in scripts/verify/engineering-audit.sh.
 audit-fault-injection = ["kernel_physical_memory/fault-injection"]
 
 # v0.3 HW bench (Task 11): on-chip latency instrumentation (M-A/M-B/M-C),

@@ -3,21 +3,21 @@ require_commands cargo clang rustc rustup git python3 timeout sha256sum
 hash_tracked_lockfiles "$LOCKFILES_BEFORE"
 
 run_step fmt cargo fmt --all -- --check
-run_step unsafe-ledger python3 -B scripts/unsafe-ledger.py --check
+run_step unsafe-ledger python3 -B scripts/verify/unsafe-ledger.py --check
 run_step component-inventory cargo xtask inventory --check
 run_step xtask-manifest-drift cargo xtask boundary --check
 run_step generated-docs cargo xtask docs --check
-run_step documentation-links python3 -B scripts/check-doc-links.py
-run_step product-naming-static python3 -B scripts/check-product-naming.py
-run_step benchmark-provenance-static python3 -B scripts/check-benchmark-provenance.py
-run_step command-smoke python3 -B scripts/check-command-smoke.py
+run_step documentation-links python3 -B scripts/verify/doc-links.py
+run_step product-naming-static python3 -B scripts/verify/product-naming.py
+run_step benchmark-provenance-static python3 -B scripts/verify/benchmark-provenance.py
+run_step command-smoke python3 -B scripts/verify/command-smoke.py
 run_step tooling-integration-tests python3 -B tests/scripts/test_xtask_cli.py
-run_step quality-boundary-static python3 -B scripts/check-quality.py --check
-run_step artifact-provenance-static python3 scripts/check-artifact-provenance.py
-run_step target-boundary-static python3 scripts/check-target-boundary.py
+run_step quality-boundary-static python3 -B scripts/verify/quality.py --check
+run_step artifact-provenance-static python3 scripts/verify/artifact-provenance.py
+run_step target-boundary-static python3 scripts/verify/target-boundary.py
 run_step ovmf-vars-isolation-static python3 -c \
     'from pathlib import Path; source=Path("src/main.rs").read_text(); qemu=source.split("fn qemu_command", 1)[1].split("\n#[cfg(not(target_os = \"none\"))]\nfn main", 1)[0]; assert "file={OVMF_VARS},snapshot=on" in qemu, "OVMF VARS writes must use a QEMU snapshot instead of mutating the pinned source"'
-run_step abi-surface-static python3 -B scripts/check-abi-surface.py
+run_step abi-surface-static python3 -B scripts/verify/abi-surface.py
 run_step workflow-yaml python3 -c \
     'import yaml; [yaml.safe_load(open(p, encoding="utf-8")) for p in (".github/workflows/build.yml", ".github/workflows/fuzz.yml", ".github/workflows/bpf-profiles.yml")]'
 run_step nanosleep-waitq-static python3 -c \
@@ -46,7 +46,7 @@ run_step wait-channel-static python3 -c \
     'from pathlib import Path; chan=Path("kernel/src/mcore/mtask/scheduler/wait_channel.rs").read_text(); wait=Path("kernel/src/mcore/mtask/scheduler/wait.rs").read_text(); mod_text=Path("kernel/src/mcore/mtask/scheduler/mod.rs").read_text(); idx=chan.find("mod tests"); chan_prod=chan if idx==-1 else chan[:idx]; assert "mod wait_channel" in mod_text, "wait_channel module must be declared in scheduler/mod.rs"; assert chan_prod.count("changed_since(observed_generation)") >= 2, "generic WaitChannel::park must check changed_since(observed_generation)"; assert "self.waiters.enqueue(item)" in chan_prod, "generic WaitChannel::park must call WaiterSink::enqueue"; assert "self.waiters.try_take()" in chan_prod, "generic WaitChannel::drain_waiters must call WaiterSink::try_take"; assert "self.waiters.on_wake(item)" in chan_prod, "generic WaitChannel must call WaiterSink::on_wake"; assert all(token not in chan_prod for token in ("Mutex", "RwLock", "Vec", "log::")), "no kernel-internals leakage in generic wait_channel production"; assert all(token not in wait for token in ("Mutex", "RwLock", "Vec", "log::")), "no kernel-internals leakage in production wait"; assert "impl Drop" not in chan_prod, "no custom Drop impl in wait_channel production (compiler-generated drop_glue only)"; assert "impl Drop" not in wait, "no custom Drop impl in wait (compiler-generated drop_glue only)"; assert "State::Waiting" in mod_text and "registration.park(zombie_task)" in mod_text, "scheduler integration unchanged"'
 run_step release-diagnostics-static python3 -c \
     'from pathlib import Path; root=Path("Cargo.toml").read_text(); kernel=Path("kernel/Cargo.toml").read_text(); syscall=Path("kernel/src/syscall/mod.rs").read_text(); scheduler=Path("kernel/src/mcore/mtask/scheduler/mod.rs").read_text(); assert "release_max_level_off" in root and "audit-diagnostics = []" in kernel and "bringup-diagnostics = []" in kernel; assert "INIT_PROCESS_STARTED pid=" in Path("kernel/src/main.rs").read_text(); assert syscall.count("feature = \"bringup-diagnostics\"") >= 7 and scheduler.count("feature = \"bringup-diagnostics\"") >= 8'
-run_step error-policy-static python3 -B scripts/check-error-policy.py
+run_step error-policy-static python3 -B scripts/verify/error-policy.py
 run_step pipe-state-test-build rustc --edition 2021 -D warnings --test \
     kernel/src/file/pipe_state.rs -o "$OUTPUT_DIR/pipe-state-tests"
 run_step pipe-state-tests "$OUTPUT_DIR/pipe-state-tests"
@@ -144,7 +144,7 @@ run_cargo_step fault-injection-tests test -p kernel_physical_memory \
 # collapses the typed error back to `&'static str` would silently
 # lose the ENOMEM signal that the audit-fault-injection work
 # requires.
-run_step execve-typed-error-static python3 -B scripts/check-execve-typed-error.py
+run_step execve-typed-error-static python3 -B scripts/verify/execve-typed-error.py
 
 # Audit-fault-injection QEMU smoke. Runs only when RUN_AUDIT_FAULT=1.
 # Uses --smp 1 (single vCPU) so the global fault-counter observed by the

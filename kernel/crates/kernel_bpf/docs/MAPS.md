@@ -52,4 +52,4 @@ cargo test -p kernel_bpf --no-default-features --features embedded-profile maps:
 ```
 
 Kernel-level lifecycle, ownership, grant, quota, and reclamation probes are part
-of `scripts/verify-engineering-audit.sh`.
+of `scripts/verify/engineering-audit.sh`.

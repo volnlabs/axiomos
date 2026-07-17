@@ -10,7 +10,7 @@ source inputs at the recorded commit, and links from
 [`current-results.md`](current-results.md):
 
 ```sh
-python3 scripts/check-benchmark-provenance.py
+python3 scripts/verify/benchmark-provenance.py
 ```
 
 QEMU timing, physical-device timing, and cross-system comparisons require

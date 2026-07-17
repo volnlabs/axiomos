@@ -1,7 +1,7 @@
 #!/bin/bash
 # Deploy axiomos to a Raspberry Pi 5 SD card
 #
-# Usage: ./scripts/deploy-rpi5.sh /path/to/sdcard/boot
+# Usage: cargo xtask deploy rpi5 -- /path/to/sdcard/boot
 #
 # This script copies the kernel and configuration to a mounted SD card.
 # The SD card should be formatted with a FAT32 boot partition.
@@ -41,13 +41,13 @@ fi
 KERNEL_IMG="$BUILD_DIR/kernel8.img"
 if [ ! -f "$KERNEL_IMG" ]; then
     echo "Error: Kernel image not found at $KERNEL_IMG"
-    echo "Run './scripts/build-rpi5.sh' first."
+    echo "Run 'cargo xtask build rpi5' first."
     exit 1
 fi
 PROVENANCE_MANIFEST="$BUILD_DIR/rpi5-artifacts.sha256"
 if [ ! -f "$PROVENANCE_MANIFEST" ]; then
     echo "Error: Provenance manifest not found at $PROVENANCE_MANIFEST"
-    echo "Run './scripts/build-rpi5.sh' before deployment."
+    echo "Run 'cargo xtask build rpi5' before deployment."
     exit 1
 fi
 

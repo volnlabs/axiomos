@@ -135,7 +135,7 @@ and thus the size of programs verifiable in bounded cost — rise substantially.
   `cycles` is a `CNTVCT_EL0` delta around `verify_with_stats` (verification cost)
   and `wcet` is the program's static WCET cycle bound (execution cost; see below). The `verifier_bench` userspace
   driver loads a size series (`cost_corpus::MEASUREMENT_SIZES`); capture the UART
-  log and run `scripts/verifier-cost.py` to get the cost-vs-size CSV and plot
+  log and run `cargo xtask bench verifier -- <log>` to get the cost-vs-size CSV and plot
   (states with the `T(n)=(h+1)·n` overlay, cycles vs `n`). The shared shapes live
   in `kernel_bpf::cost_corpus`, whose `cost_corpus` unit tests pin the
   `states_explored ≤ n` bound at the exact measurement sizes. This is the

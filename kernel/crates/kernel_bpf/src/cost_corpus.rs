@@ -86,7 +86,7 @@ pub fn straight_line(n: usize) -> Vec<BpfInsn> {
 }
 
 /// One verifier-cost measurement, emitted over serial by the kernel load path
-/// (under the `verifier-cost` feature) and parsed by `scripts/verifier-cost.py`.
+/// (under the `verifier-cost` feature) and parsed by `scripts/benchmark/verifier-cost.py`.
 ///
 /// Its [`Display`](core::fmt::Display) form is a single self-describing marker
 /// line — the on-wire contract with the parser. Keeping the formatter here (a
@@ -302,7 +302,7 @@ pub fn calibration_corpus(map_id: i32, rb_id: i32) -> Vec<CorpusProgram> {
 /// One execution-cost measurement: the kernel ran a loaded program `runs`
 /// times back-to-back and measured the total `CNTVCT_EL0` delta. Emitted by
 /// the feature-gated `BPF_BENCH_EXEC` command; parsed by
-/// `scripts/verifier-cost.py`. Like [`CostRecord`], the `Display` form is the
+/// `scripts/benchmark/verifier-cost.py`. Like [`CostRecord`], the `Display` form is the
 /// on-wire contract, pinned by a unit test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExecRecord {
@@ -343,7 +343,7 @@ mod tests {
             cycles: 1234,
             wcet_cycles: 140,
         };
-        // The exact contract the `scripts/verifier-cost.py` parser keys off.
+        // The exact contract the `scripts/benchmark/verifier-cost.py` parser keys off.
         assert_eq!(
             rec.to_string(),
             "AXIOM VERIFIER COST prog_id=7 insns=100 states=99 cycles=1234 wcet=140"

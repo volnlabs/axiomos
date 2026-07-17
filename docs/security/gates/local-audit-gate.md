@@ -4,7 +4,7 @@ GitHub Actions availability is not a prerequisite for audit remediation. Run
 the required local gate from the repository root:
 
 ```sh
-scripts/verify-engineering-audit.sh
+cargo xtask check all --profile full
 ```
 
 The gate runs formatting, the unsafe ledger, component inventory and
@@ -43,10 +43,10 @@ cargo xtask --help
 cargo xtask inventory --check
 cargo xtask boundary --check
 cargo xtask docs --check
-scripts/verify-engineering-audit.sh --help
-scripts/qemu-debug-triage.sh --help
-scripts/analyze-v03-bench.py --self-test
-scripts/verifier-cost.py --help
+scripts/verify/engineering-audit.sh --help
+scripts/debug/qemu-triage.sh --help
+scripts/benchmark/analyze-v03.py --self-test
+scripts/benchmark/verifier-cost.py --help
 ```
 
 Each command has a 30-second timeout and an expected success/output contract.
@@ -81,7 +81,7 @@ Results are written below `target/audit-verification/`. Each run contains:
 Use the short gate while iterating:
 
 ```sh
-scripts/verify-engineering-audit.sh --quick
+cargo xtask check all --profile quick
 ```
 
 Use `--extended` before a release candidate to add release-profile host tests

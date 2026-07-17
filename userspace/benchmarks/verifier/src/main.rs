@@ -5,7 +5,7 @@
 //!
 //! Loads a series of straight-line BPF programs of increasing size so the
 //! kernel's load path (built with `--features verifier-cost`) emits one
-//! `AXIOM VERIFIER COST` marker per load. `scripts/verifier-cost.py` parses the
+//! `AXIOM VERIFIER COST` marker per load. `scripts/benchmark/verifier-cost.py` parses the
 //! serial log into the cost-vs-size curve.
 //!
 //! The shapes mirror `kernel_bpf::cost_corpus` (the host-side corpus) and the

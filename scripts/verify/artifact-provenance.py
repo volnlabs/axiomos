@@ -5,7 +5,7 @@ from pathlib import Path
 import tomllib
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def source(path: str) -> str:

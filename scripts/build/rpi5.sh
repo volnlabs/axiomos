@@ -8,8 +8,8 @@
 # The disk image (ext2 rootfs with userspace binaries) is embedded
 # directly into the kernel binary via include_bytes!().
 #
-# Usage: ./scripts/build-rpi5.sh [release|debug] [kernel_features]
-# Example: ./scripts/build-rpi5.sh release embedded-rpi5,bench
+# Usage: cargo xtask build rpi5 -- [release|debug] [kernel_features]
+# Example: cargo xtask build rpi5 -- release embedded-rpi5,bench
 
 set -e
 
@@ -109,4 +109,4 @@ echo "Provenance: $PROVENANCE_MANIFEST"
 echo "Size: $SIZE bytes"
 echo ""
 echo "To deploy to SD card, run:"
-echo "  ./scripts/deploy-rpi5.sh /path/to/sdcard/boot"
+echo "  cargo xtask deploy rpi5 -- /path/to/sdcard/boot"

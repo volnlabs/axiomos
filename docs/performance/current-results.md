@@ -64,7 +64,7 @@ the raw output, and every declared source input, then compare them with the
 manifest. The required local gate performs the durable checks:
 
 ```sh
-python3 -B scripts/check-benchmark-provenance.py
+python3 -B scripts/verify/benchmark-provenance.py
 ```
 
 The checker verifies the tracked raw-log hash, confirms the Cargo-reported

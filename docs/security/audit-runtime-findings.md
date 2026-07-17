@@ -33,7 +33,7 @@ observation does not establish whether the originating defect was in
 userspace state construction or in the kernel's VM/context handling.
 
 **Re-investigation result (commit `423e785` on this branch).** After
-the `--capture` mode of `scripts/qemu-debug-triage.sh` was added, a
+the `--capture` mode of `cargo xtask debug qemu` was added, a
 direct-QEMU re-test of the symptoms was run. With the current kernel
 at `b16eb1b` + `423e785` and the system OVMF on this host
 (`/usr/share/edk2/x64/OVMF_CODE.4m.fd`, dated Apr 23 2025), the
@@ -70,7 +70,7 @@ wrapper's pinned OVMF. The system OVMF on this host is whatever the
 distro installs (`edk2-ovmf 202602-3` candidate, dated Apr 23);
 without a hash-verified prebuilt in `ci/manifests/build-inputs.env`, a CI
 gate cannot deterministically provision it. The
-`scripts/qemu-debug-triage.sh --ovmf system --capture ...` flow is
+`cargo xtask debug qemu -- --ovmf system --capture ...` flow is
 the developer-side capture path; promoting it to a gate step requires
 the same `OVMF_SYSTEM_TAG=...` / `OVMF_SYSTEM_SHA256=...`
 `build-inputs.env` entries the wrapper relies on. Out of scope for
@@ -80,7 +80,7 @@ this branch.
 `qemu-smoke` (commit `4da09ab` in this branch) runs **before** the
 init process is scheduled, so all five `AUDIT_FAULT_PROBE:*` markers
 are emitted regardless of any fault. The new `qemu-smp1-smoke` (see
-`scripts/verify-engineering-audit.sh`) asserts only the boot-to-init
+`cargo xtask check all --profile full`) asserts only the boot-to-init
 markers (`QEMU_BOOT_OK`, `INIT_PROCESS_STARTED`) and explicitly
 records (without failing) any post-boot `kernel panicked` text. The
 single-CPU boot path is now exercised end-to-end; sustained userspace

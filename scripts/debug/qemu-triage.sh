@@ -871,9 +871,8 @@ fi
 #   different default), the script's QEMU invocation must be updated
 #   to match. The script's --interactive mode and --capture mode both
 #   invoke the same QEMU command (modulo -S) so a divergence affects
-#   both. This is documented in scripts/qemu-debug-triage.sh:723 as a
-#   known compatibility surface that must be kept in sync with
-#   src/main.rs.
+#   both. This is a known compatibility surface that must be kept in sync
+#   with src/main.rs.
 #
 # Future direction:
 #   Adding a `--ovmf-code PATH --ovmf-vars PATH` flag to the runner

@@ -74,15 +74,17 @@ fn run_check(root: &Path, arguments: &[String]) -> Result<(), String> {
         "inventory" => run_status(root, "cargo", &["xtask", "inventory", "--check"]),
         "boundary" => run_status(root, "cargo", &["xtask", "boundary", "--check"]),
         "docs" => run_status(root, "cargo", &["xtask", "docs", "--check"]),
-        "abi" => run_status(root, "python3", &["-B", "scripts/check-abi-surface.py"]),
-        "error-policy" => run_status(root, "python3", &["-B", "scripts/check-error-policy.py"]),
-        "target-boundary" => {
-            run_status(root, "python3", &["-B", "scripts/check-target-boundary.py"])
-        }
+        "abi" => run_status(root, "python3", &["-B", "scripts/verify/abi-surface.py"]),
+        "error-policy" => run_status(root, "python3", &["-B", "scripts/verify/error-policy.py"]),
+        "target-boundary" => run_status(
+            root,
+            "python3",
+            &["-B", "scripts/verify/target-boundary.py"],
+        ),
         "unsafe" => run_status(
             root,
             "python3",
-            &["-B", "scripts/unsafe-ledger.py", "--check"],
+            &["-B", "scripts/verify/unsafe-ledger.py", "--check"],
         ),
         "host-tests" => run_status(root, "cargo", &["test", "--locked", "-p", "xtask"]),
         "all" => run_check_all(root, &arguments[1..]),

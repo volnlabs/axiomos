@@ -10,17 +10,17 @@ import tomllib
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "ci/manifests/commands.toml"
 ALLOWED_ARGV = {
     ("cargo", "xtask", "--help"),
     ("cargo", "xtask", "inventory", "--check"),
     ("cargo", "xtask", "boundary", "--check"),
     ("cargo", "xtask", "docs", "--check"),
-    ("scripts/verify-engineering-audit.sh", "--help"),
-    ("scripts/qemu-debug-triage.sh", "--help"),
-    ("scripts/analyze-v03-bench.py", "--self-test"),
-    ("scripts/verifier-cost.py", "--help"),
+    ("scripts/verify/engineering-audit.sh", "--help"),
+    ("scripts/debug/qemu-triage.sh", "--help"),
+    ("scripts/benchmark/analyze-v03.py", "--self-test"),
+    ("scripts/benchmark/verifier-cost.py", "--help"),
 }
 
 

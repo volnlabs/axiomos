@@ -76,7 +76,7 @@ BPF_PROG(gpio_handler, struct gpio_event *event) {
 cargo run
 
 # RPi5 build (kernel8.img with embedded ext2 rootfs)
-./scripts/build-rpi5.sh
+cargo xtask build rpi5
 ```
 
 ---

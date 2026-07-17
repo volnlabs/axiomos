@@ -14,7 +14,7 @@ cargo test -p kernel_bpf --no-default-features --features embedded-profile
 Run the repository gate, including both profiles and kernel lifecycle probes:
 
 ```bash
-scripts/verify-engineering-audit.sh --output /tmp/axiomos-audit
+scripts/verify/engineering-audit.sh --output /tmp/axiomos-audit
 ```
 
 ## Shipped profile contract

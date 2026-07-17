@@ -87,7 +87,7 @@ cargo fmt --all -- --check
 cargo xtask inventory --check
 cargo xtask boundary --check
 cargo xtask docs --check
-scripts/verify-engineering-audit.sh --quick
+cargo xtask check all --profile quick
 git diff --check
 ```
 

@@ -9,7 +9,7 @@
 #
 # Fails loudly if any success marker is missing or any reject/panic appears.
 #
-# Usage: ./scripts/smoke-bpf.sh
+# Usage: scripts/test/smoke-bpf.sh
 # Requires /dev/kvm for the x86 accel path.
 
 set -uo pipefail

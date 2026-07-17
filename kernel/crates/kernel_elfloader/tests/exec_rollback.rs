@@ -27,7 +27,7 @@
 //!
 //! See the audit-gate step `exec-rollback-tests` and the
 //! `audit-fault-injection-qemu-smoke` step in
-//! `scripts/verify-engineering-audit.sh`. The end-to-end QEMU
+//! `scripts/verify/engineering-audit.sh`. The end-to-end QEMU
 //! smoke is a separate, runtime-level check; this file is the
 //! host-side, deterministic, no-kernel-needed proof.
 

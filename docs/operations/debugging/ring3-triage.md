@@ -15,15 +15,15 @@ provides the evidence path.
 
 ```sh
 # Default: system OVMF, --smp 1, --mem 1G, 120s timeout
-scripts/qemu-debug-triage.sh
+cargo xtask debug qemu
 
 # Add validated breakpoints
-scripts/qemu-debug-triage.sh \
+cargo xtask debug qemu -- \
     --break kernel::arch::idt::page_fault_handler \
     --break kernel::mcore::mtask::scheduler::wait_protocol::WaitEpoch::publish
 
 # Use the wrapper's pinned OVMF (the gate's OVMF) to verify the baseline
-scripts/qemu-debug-triage.sh --ovmf pinned
+cargo xtask debug qemu -- --ovmf pinned
 ```
 
 In a second terminal, attach GDB:

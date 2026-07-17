@@ -29,28 +29,28 @@ docs = ["docs/security/gates/local-audit-gate.md"]
 
 [[command]]
 name = "audit-help"
-display = "scripts/verify-engineering-audit.sh --help"
-argv = ["scripts/verify-engineering-audit.sh", "--help"]
+display = "scripts/verify/engineering-audit.sh --help"
+argv = ["scripts/verify/engineering-audit.sh", "--help"]
 docs = ["docs/security/gates/local-audit-gate.md"]
 expect = "Usage:"
 
 [[command]]
 name = "triage-help"
-display = "scripts/qemu-debug-triage.sh --help"
-argv = ["scripts/qemu-debug-triage.sh", "--help"]
+display = "scripts/debug/qemu-triage.sh --help"
+argv = ["scripts/debug/qemu-triage.sh", "--help"]
 docs = ["docs/security/gates/local-audit-gate.md"]
 expect = "Ring-3 page-fault triage helper"
 
 [[command]]
 name = "benchmark-analyzer-self-test"
-display = "scripts/analyze-v03-bench.py --self-test"
-argv = ["scripts/analyze-v03-bench.py", "--self-test"]
+display = "scripts/benchmark/analyze-v03.py --self-test"
+argv = ["scripts/benchmark/analyze-v03.py", "--self-test"]
 docs = ["docs/security/gates/local-audit-gate.md"]
 expect = "Ran 2 tests"
 
 [[command]]
 name = "verifier-cost-help"
-display = "scripts/verifier-cost.py --help"
-argv = ["scripts/verifier-cost.py", "--help"]
+display = "scripts/benchmark/verifier-cost.py --help"
+argv = ["scripts/benchmark/verifier-cost.py", "--help"]
 docs = ["docs/security/gates/local-audit-gate.md"]
 expect = "usage: verifier-cost.py"

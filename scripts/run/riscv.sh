@@ -13,7 +13,7 @@ KERNEL_PATH="$SCRIPT_DIR/../../kernel/demos/riscv/target/riscv64gc-unknown-none-
 # Check if kernel exists
 if [ ! -f "$KERNEL_PATH" ]; then
     echo "Error: Kernel not found at $KERNEL_PATH"
-    echo "Please run ./scripts/build-riscv.sh first"
+    echo "Please run 'cargo xtask build riscv' first"
     exit 1
 fi
 

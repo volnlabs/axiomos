@@ -159,7 +159,7 @@ unsafe extern "C" fn main() -> ! {
 
         // Audit-fault-injection probe (gated feature). Exercises the
         // PhysicalMemory facade under controller-armed fault scenarios.
-        // Required by `scripts/verify-engineering-audit.sh` with
+        // Required by `scripts/verify/engineering-audit.sh` with
         // `RUN_AUDIT_FAULT=1`; absent the feature, this branch is dead.
         #[cfg(all(feature = "audit-fault-injection", target_arch = "x86_64"))]
         audit_fault_probe::run_probe();

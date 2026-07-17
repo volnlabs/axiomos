@@ -37,7 +37,7 @@ and defer recovery to task context.
 
 - Clippy plus a repository check rejects unit/string errors at designated public
   kernel boundaries.
-- `scripts/check-error-policy.py` rejects panic/unwrap/todo and unit-error
+- `cargo xtask check error-policy` rejects panic/unwrap/todo and unit-error
   regressions in supported boot, filesystem-initialization, and driver paths;
   rejects unit/string errors at low-level address, process fork/exec, and
   AArch64 paging/DTB boundaries; and enforces the bounded release fatal path
