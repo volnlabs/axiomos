@@ -1,9 +1,21 @@
 #[derive(Debug, Eq, PartialEq)]
 pub enum Command {
-    Inventory { check: bool },
-    Boundary { check: bool },
-    Docs { check: bool },
-    Ci { arguments: Vec<String> },
+    Inventory {
+        check: bool,
+    },
+    Boundary {
+        check: bool,
+    },
+    Docs {
+        check: bool,
+    },
+    Ci {
+        arguments: Vec<String>,
+    },
+    Forward {
+        program: String,
+        arguments: Vec<String>,
+    },
     Help,
 }
 
@@ -27,6 +39,10 @@ where
             check: parse_check_only(&remaining, "docs")?,
         }),
         "ci" => Ok(Command::Ci {
+            arguments: remaining,
+        }),
+        "build" | "run" | "deploy" | "bench" | "debug" => Ok(Command::Forward {
+            program: command,
             arguments: remaining,
         }),
         "help" | "--help" | "-h" => Ok(Command::Help),
@@ -71,6 +87,13 @@ mod tests {
             parse(args(&["ci", "--quick"])),
             Ok(Command::Ci {
                 arguments: args(&["--quick"])
+            })
+        );
+        assert_eq!(
+            parse(args(&["build", "rpi5"])),
+            Ok(Command::Forward {
+                program: "build".to_owned(),
+                arguments: args(&["rpi5"]),
             })
         );
     }
