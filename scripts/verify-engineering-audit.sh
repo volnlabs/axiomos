@@ -434,6 +434,7 @@ run_step unsafe-ledger python3 -B scripts/unsafe-ledger.py --check
 run_step component-inventory cargo xtask inventory --check
 run_step xtask-manifest-drift cargo xtask boundary --check
 run_step generated-docs cargo xtask docs --check
+run_step quality-boundary-static python3 -B scripts/check-quality.py --check
 run_step artifact-provenance-static python3 scripts/check-artifact-provenance.py
 run_step target-boundary-static python3 scripts/check-target-boundary.py
 run_step ovmf-vars-isolation-static python3 -c \

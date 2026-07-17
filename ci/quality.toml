@@ -1,0 +1,112 @@
+format_version = 1
+cargo_llvm_cov_version = "0.8.7"
+cargo_mutants_version = "27.1.0"
+
+# Every entry in ci/components.toml must appear exactly once here. "measured"
+# means the component has a coverage campaign below; the other values explain
+# why a host source-coverage percentage is not currently published.
+[disposition]
+"Cargo.toml" = "deferred-host"
+"tools/xtask/Cargo.toml" = "deferred-host"
+"kernel/Cargo.toml" = "target-qemu"
+"kernel/crates/kernel_abi/Cargo.toml" = "deferred-host"
+"kernel/crates/kernel_bpf/Cargo.toml" = "measured"
+"kernel/crates/kernel_bpf/fuzz/Cargo.toml" = "fuzz-harness"
+"kernel/crates/kernel_devfs/Cargo.toml" = "deferred-host"
+"kernel/crates/kernel_device/Cargo.toml" = "deferred-host"
+"kernel/crates/kernel_elfloader/Cargo.toml" = "measured"
+"kernel/crates/kernel_elfloader/fuzz/Cargo.toml" = "fuzz-harness"
+"kernel/crates/kernel_memapi/Cargo.toml" = "deferred-host"
+"kernel/crates/kernel_map_transaction/Cargo.toml" = "deferred-host"
+"kernel/crates/kernel_pci/Cargo.toml" = "deferred-host"
+"kernel/crates/kernel_physical_memory/Cargo.toml" = "deferred-host"
+"kernel/crates/kernel_syscall/Cargo.toml" = "deferred-host"
+"kernel/crates/kernel_syscall/fuzz/Cargo.toml" = "fuzz-harness"
+"kernel/crates/kernel_time/Cargo.toml" = "deferred-host"
+"kernel/crates/kernel_usermem/Cargo.toml" = "deferred-host"
+"kernel/crates/kernel_vfs/Cargo.toml" = "deferred-host"
+"kernel/crates/kernel_virtual_memory/Cargo.toml" = "deferred-host"
+"kernel/crates/shrike_link/Cargo.toml" = "deferred-host"
+"firmware/shrike_control/Cargo.toml" = "deferred-host"
+"firmware/shrike_rp2040_host_sim/Cargo.toml" = "deferred-host"
+"kernel/demos/riscv/Cargo.toml" = "experimental-target"
+"firmware/shrike_rp2040/Cargo.toml" = "hardware-hil"
+"userspace/benchmark/Cargo.toml" = "target-image"
+"userspace/bpf_loader/Cargo.toml" = "target-image"
+"userspace/file_io_demo/Cargo.toml" = "target-image"
+"userspace/file_structure/Cargo.toml" = "deferred-host"
+"userspace/fork_test/Cargo.toml" = "target-image"
+"userspace/gpio_demo/Cargo.toml" = "target-image"
+"userspace/iio_demo/Cargo.toml" = "target-image"
+"userspace/init/Cargo.toml" = "target-image"
+"userspace/minilib/Cargo.toml" = "target-image"
+"userspace/pwm_demo/Cargo.toml" = "target-image"
+"userspace/rk_bridge/Cargo.toml" = "deferred-host"
+"userspace/rk_bridge/fuzz/Cargo.toml" = "fuzz-harness"
+"userspace/rk_cli/Cargo.toml" = "deferred-host"
+"userspace/rk_uart_forwarder/Cargo.toml" = "target-image"
+"userspace/safety_demo/Cargo.toml" = "target-image"
+"userspace/sched_switch_bridge_demo/Cargo.toml" = "target-image"
+"userspace/sched_switch_demo/Cargo.toml" = "target-image"
+"userspace/sched_switch_export_demo/Cargo.toml" = "target-image"
+"userspace/signed_bpf_loader/Cargo.toml" = "target-image"
+"userspace/sys_exit_demo/Cargo.toml" = "target-image"
+"userspace/syscall_demo/Cargo.toml" = "target-image"
+"userspace/timeseries_demo/Cargo.toml" = "target-image"
+"userspace/verifier_bench/Cargo.toml" = "target-image"
+"formal/lakefile.toml" = "formal-proof"
+
+[[coverage]]
+name = "kernel-bpf-cloud"
+component = "kernel/crates/kernel_bpf/Cargo.toml"
+package = "kernel_bpf"
+mode = "workspace"
+features = ["cloud-profile"]
+no_default_features = true
+minimum_lines = 77.0
+minimum_branches = 63.0
+baseline_lines = 77.71
+baseline_branches = 63.43
+baseline_commit = "2c3bd2c"
+
+[[coverage]]
+name = "kernel-elfloader"
+component = "kernel/crates/kernel_elfloader/Cargo.toml"
+package = "kernel_elfloader"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 83.0
+minimum_branches = 66.0
+baseline_lines = 83.29
+baseline_branches = 66.67
+baseline_commit = "2c3bd2c"
+
+[[mutation]]
+name = "elf-parser-loader"
+package = "kernel_elfloader"
+files = ["kernel/crates/kernel_elfloader/src/*.rs"]
+features = []
+no_default_features = false
+minimum_score = 80.0
+baseline_caught = 67
+baseline_missed = 15
+baseline_unviable = 36
+baseline_commit = "2c3bd2c"
+
+[[mutation]]
+name = "bpf-verifier-policy"
+package = "kernel_bpf"
+files = [
+  "kernel/crates/kernel_bpf/src/verifier/admission.rs",
+  "kernel/crates/kernel_bpf/src/verifier/cost.rs",
+  "kernel/crates/kernel_bpf/src/verifier/map_policy.rs",
+  "kernel/crates/kernel_bpf/src/verifier/refine.rs",
+]
+features = ["cloud-profile"]
+no_default_features = true
+minimum_score = 75.0
+baseline_caught = 72
+baseline_missed = 21
+baseline_unviable = 8
+baseline_commit = "2c3bd2c"
