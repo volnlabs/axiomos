@@ -132,11 +132,15 @@ struct BpfLimits {
     max_program_slots: usize,
     max_program_bytes: usize,
     max_single_program_bytes: usize,
+    max_owner_programs: usize,
+    max_owner_program_bytes: usize,
     max_elf_bytes: usize,
     max_live_maps: usize,
     max_map_slots: usize,
     max_map_bytes: usize,
     max_single_map_bytes: usize,
+    max_owner_maps: usize,
+    max_owner_map_bytes: usize,
     max_pinned_maps: usize,
     max_key_size: u32,
     max_value_size: u32,
@@ -151,11 +155,15 @@ impl BpfLimits {
             max_program_slots: 1024,
             max_program_bytes: 16 * 1024 * 1024,
             max_single_program_bytes: 1024 * 1024,
+            max_owner_programs: 32,
+            max_owner_program_bytes: 4 * 1024 * 1024,
             max_elf_bytes: 1024 * 1024,
             max_live_maps: 64,
             max_map_slots: 512,
             max_map_bytes: 64 * 1024 * 1024,
             max_single_map_bytes: 16 * 1024 * 1024,
+            max_owner_maps: 16,
+            max_owner_map_bytes: 16 * 1024 * 1024,
             max_pinned_maps: 128,
             max_key_size: 512,
             max_value_size: 64 * 1024,
@@ -170,11 +178,15 @@ impl BpfLimits {
             max_program_slots: 128,
             max_program_bytes: 2 * 1024 * 1024,
             max_single_program_bytes: 800 * 1024,
+            max_owner_programs: 8,
+            max_owner_program_bytes: 512 * 1024,
             max_elf_bytes: 1024 * 1024,
             max_live_maps: 16,
             max_map_slots: 64,
             max_map_bytes: 64 * 1024,
             max_single_map_bytes: 64 * 1024,
+            max_owner_maps: 4,
+            max_owner_map_bytes: 32 * 1024,
             max_pinned_maps: 32,
             max_key_size: 256,
             max_value_size: 4 * 1024,
@@ -187,16 +199,18 @@ struct ProgramEntry {
     program: Arc<BpfProgram<ActiveProfile>>,
     wcet_cycles: u64,
     charged_bytes: usize,
+    owner: u64,
 }
 
 struct MapEntry {
     map: Box<dyn BpfMap<ActiveProfile>>,
     perm: MapPerm,
     charged_bytes: usize,
+    owner: u64,
 }
 
-/// Global BPF resource usage. Per-process accounting requires a real owned
-/// descriptor table and remains separate from this manager-wide hard ceiling.
+/// Global BPF resource usage. Per-process ceilings are enforced separately
+/// while these counters retain the manager-wide hard ceiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BpfResourceUsage {
     pub live_programs: usize,
@@ -339,6 +353,7 @@ impl BpfManager {
             map,
             perm,
             charged_bytes: 0,
+            owner: 0,
         }));
         id
     }
@@ -347,6 +362,7 @@ impl BpfManager {
         &mut self,
         map: Box<dyn BpfMap<ActiveProfile>>,
         charge: usize,
+        owner: u64,
     ) -> Result<u32, BpfError> {
         self.maps
             .try_reserve(1)
@@ -356,6 +372,7 @@ impl BpfManager {
             map,
             perm: MapPerm::ReadWrite,
             charged_bytes: charge,
+            owner,
         }));
         self.live_maps = self
             .live_maps
@@ -366,22 +383,6 @@ impl BpfManager {
             .checked_add(charge)
             .ok_or(BpfError::ResourceLimit)?;
         Ok(id)
-    }
-
-    /// Per-map value sizes indexed by map id (#123). A map's id is its index in
-    /// `self.maps` (see [`create_map`](Self::create_map)), so this Vec, indexed
-    /// by the constant map id a `bpf_map_lookup_elem` loads, gives that map's
-    /// exact value size for the verifier to bound dereferences with.
-    fn map_value_sizes(&self) -> Vec<u32> {
-        self.maps
-            .iter()
-            .map(|entry| {
-                entry
-                    .as_ref()
-                    .map(|entry| entry.map.def().value_size)
-                    .unwrap_or(0)
-            })
-            .collect()
     }
 
     /// Per-map write permissions indexed by map id. This is the single source
@@ -398,6 +399,18 @@ impl BpfManager {
             .collect()
     }
 
+    fn map_metadata_for_owner(&self, owner: u64) -> (Vec<u32>, Vec<MapPerm>) {
+        self.maps
+            .iter()
+            .map(|slot| match slot.as_ref() {
+                Some(entry) if entry.owner == owner || entry.charged_bytes == 0 => {
+                    (entry.map.def().value_size, entry.perm)
+                }
+                _ => (0, MapPerm::Unavailable),
+            })
+            .unzip()
+    }
+
     pub const fn resource_usage(&self) -> BpfResourceUsage {
         BpfResourceUsage {
             live_programs: self.live_programs,
@@ -408,7 +421,7 @@ impl BpfManager {
         }
     }
 
-    fn ensure_program_quota(&self, charge: usize) -> Result<(), BpfError> {
+    fn ensure_program_quota(&self, owner: u64, charge: usize) -> Result<(), BpfError> {
         if self.live_programs >= self.limits.max_live_programs
             || self.programs.len() >= self.limits.max_program_slots
             || charge > self.limits.max_single_program_bytes
@@ -422,6 +435,26 @@ impl BpfManager {
         if total > self.limits.max_program_bytes {
             return Err(BpfError::ResourceLimit);
         }
+        let (owner_objects, owner_bytes) = self
+            .programs
+            .iter()
+            .filter_map(Option::as_ref)
+            .filter(|entry| entry.owner == owner)
+            .try_fold((0usize, 0usize), |(objects, bytes), entry| {
+                Some((
+                    objects.checked_add(1)?,
+                    bytes.checked_add(entry.charged_bytes)?,
+                ))
+            })
+            .ok_or(BpfError::ResourceLimit)?;
+        if owner_objects >= self.limits.max_owner_programs
+            || owner_bytes
+                .checked_add(charge)
+                .ok_or(BpfError::ResourceLimit)?
+                > self.limits.max_owner_program_bytes
+        {
+            return Err(BpfError::ResourceLimit);
+        }
         Ok(())
     }
 
@@ -430,8 +463,9 @@ impl BpfManager {
         program: BpfProgram<ActiveProfile>,
         wcet_cycles: u64,
         charge: usize,
+        owner: u64,
     ) -> Result<u32, BpfError> {
-        self.ensure_program_quota(charge)?;
+        self.ensure_program_quota(owner, charge)?;
         self.programs
             .try_reserve(1)
             .map_err(|_| BpfError::OutOfMemory)?;
@@ -440,6 +474,7 @@ impl BpfManager {
             program: Arc::new(program),
             wcet_cycles,
             charged_bytes: charge,
+            owner,
         }));
         self.live_programs = self
             .live_programs
@@ -452,8 +487,7 @@ impl BpfManager {
         Ok(id)
     }
 
-    /// Build the verifier config for a load. Borrows `sizes` (built by
-    /// [`map_value_sizes`](Self::map_value_sizes)) for the duration of the call.
+    /// Build the verifier config for a load from the caller's map view.
     fn verify_config<'a>(&self, sizes: &'a [u32], perms: &'a [MapPerm]) -> VerifyConfig<'a> {
         self.verify_config_with_ctx_data(sizes, perms, VERIFY_CTX_DATA_SIZE_MAX)
     }
@@ -478,11 +512,15 @@ impl BpfManager {
     }
 
     pub fn load_program(&mut self, elf_bytes: &[u8]) -> Result<u32, BpfError> {
+        self.load_program_for(0, elf_bytes)
+    }
+
+    pub fn load_program_for(&mut self, owner: u64, elf_bytes: &[u8]) -> Result<u32, BpfError> {
         if elf_bytes.len() > self.limits.max_elf_bytes {
             return Err(BpfError::ResourceLimit);
         }
         // Fail before parsing when the object table is already exhausted.
-        self.ensure_program_quota(0)?;
+        self.ensure_program_quota(owner, 0)?;
 
         // Authenticate provenance before parsing (#20): a signed RBPF container
         // is verified against the trust store and unwrapped to its inner ELF; a
@@ -504,12 +542,11 @@ impl BpfManager {
                 .len()
                 .checked_mul(core::mem::size_of::<BpfInsn>())
                 .ok_or(BpfError::ResourceLimit)?;
-            self.ensure_program_quota(charge)?;
+            self.ensure_program_quota(owner, charge)?;
 
             // Verify before accepting: rejects unsafe bytecode and computes the
             // real stack usage (no longer the hardcoded 0). #48.
-            let map_value_sizes = self.map_value_sizes();
-            let map_perms = self.map_perms();
+            let (map_value_sizes, map_perms) = self.map_metadata_for_owner(owner);
             #[cfg(feature = "verifier-cost")]
             let insn_count = loaded_prog.insns().len();
             #[cfg(feature = "verifier-cost")]
@@ -539,13 +576,21 @@ impl BpfManager {
                     wcet_cycles: stats.wcet_cycles,
                 }
             );
-            self.register_program(bpf_prog, stats.wcet_cycles, charge)
+            self.register_program(bpf_prog, stats.wcet_cycles, charge, owner)
         } else {
             Err(BpfError::NotLoaded)
         }
     }
 
     pub fn load_raw_program(&mut self, insns: Vec<BpfInsn>) -> Result<u32, BpfError> {
+        self.load_raw_program_for(0, insns)
+    }
+
+    pub fn load_raw_program_for(
+        &mut self,
+        owner: u64,
+        insns: Vec<BpfInsn>,
+    ) -> Result<u32, BpfError> {
         // Raw instruction loads carry no signature container, so they cannot be
         // authenticated (#20). Reject them when enforcement is on.
         if !self.allow_unsigned {
@@ -557,13 +602,12 @@ impl BpfManager {
             .len()
             .checked_mul(core::mem::size_of::<BpfInsn>())
             .ok_or(BpfError::ResourceLimit)?;
-        self.ensure_program_quota(charge)?;
+        self.ensure_program_quota(owner, charge)?;
 
         // Verify before accepting: this is the gate that makes the verifier
         // load-bearing — unsafe bytecode is rejected and the real stack usage is
         // computed rather than trusting a hardcoded 0. #48.
-        let map_value_sizes = self.map_value_sizes();
-        let map_perms = self.map_perms();
+        let (map_value_sizes, map_perms) = self.map_metadata_for_owner(owner);
         #[cfg(feature = "verifier-cost")]
         let insn_count = insns.len();
         #[cfg(feature = "verifier-cost")]
@@ -593,7 +637,7 @@ impl BpfManager {
                 wcet_cycles: stats.wcet_cycles,
             }
         );
-        let id = self.register_program(bpf_prog, stats.wcet_cycles, charge)?;
+        let id = self.register_program(bpf_prog, stats.wcet_cycles, charge, owner)?;
         log::info!(
             "BpfManager: Loaded raw program. Assigned id={}. Total programs={}",
             id,
@@ -603,6 +647,15 @@ impl BpfManager {
     }
 
     pub fn attach(&mut self, attach_type: u32, prog_id: u32) -> Result<(), BpfError> {
+        self.attach_for(0, attach_type, prog_id)
+    }
+
+    fn attach_verified_for(
+        &mut self,
+        owner: u64,
+        attach_type: u32,
+        prog_id: u32,
+    ) -> Result<(), BpfError> {
         if !is_supported_attach_type(attach_type) {
             return Err(BpfError::InvalidInstruction);
         }
@@ -622,8 +675,7 @@ impl BpfManager {
             return Err(BpfError::NotLoaded);
         };
 
-        let map_value_sizes = self.map_value_sizes();
-        let map_perms = self.map_perms();
+        let (map_value_sizes, map_perms) = self.map_metadata_for_owner(owner);
         let ctx_data_size = attach_ctx_data_size(attach_type);
         let program = &program_entry.program;
         Verifier::<ActiveProfile>::verify_with_stats(
@@ -673,6 +725,16 @@ impl BpfManager {
         Ok(())
     }
 
+    pub fn attach_for(
+        &mut self,
+        owner: u64,
+        attach_type: u32,
+        prog_id: u32,
+    ) -> Result<(), BpfError> {
+        self.ensure_program_owner(owner, prog_id)?;
+        self.attach_verified_for(owner, attach_type, prog_id)
+    }
+
     pub fn detach(&mut self, attach_type: u32, prog_id: u32) -> Result<(), BpfError> {
         if let Some(list) = self.attachments.get_mut(&attach_type) {
             if let Some(pos) = list.iter().position(|&id| id == prog_id) {
@@ -686,6 +748,29 @@ impl BpfManager {
         Err(BpfError::NotLoaded)
     }
 
+    pub fn detach_for(
+        &mut self,
+        owner: u64,
+        attach_type: u32,
+        prog_id: u32,
+    ) -> Result<(), BpfError> {
+        self.ensure_program_owner(owner, prog_id)?;
+        self.detach(attach_type, prog_id)
+    }
+
+    fn ensure_program_owner(&self, owner: u64, prog_id: u32) -> Result<(), BpfError> {
+        let entry = self
+            .programs
+            .get(prog_id as usize)
+            .and_then(Option::as_ref)
+            .ok_or(BpfError::NotLoaded)?;
+        if entry.owner == owner {
+            Ok(())
+        } else {
+            Err(BpfError::PermissionDenied)
+        }
+    }
+
     /// Remove an unattached program and reclaim its verified bytecode.
     ///
     /// The operation is synchronous: if a hook snapshot still owns an `Arc`,
@@ -693,6 +778,11 @@ impl BpfManager {
     /// have actually been freed. Program IDs are tombstoned, not reused, so an
     /// old raw ID can never silently name a different program.
     pub fn unload_program(&mut self, prog_id: u32) -> Result<(), BpfError> {
+        self.unload_program_for(0, prog_id)
+    }
+
+    pub fn unload_program_for(&mut self, owner: u64, prog_id: u32) -> Result<(), BpfError> {
+        self.ensure_program_owner(owner, prog_id)?;
         if self
             .attachments
             .values()
@@ -760,6 +850,16 @@ impl BpfManager {
             .map(|entry| entry.program.clone())
     }
 
+    #[cfg(feature = "verifier-cost")]
+    pub fn get_program_for(
+        &self,
+        owner: u64,
+        prog_id: u32,
+    ) -> Result<Arc<BpfProgram<ActiveProfile>>, BpfError> {
+        self.ensure_program_owner(owner, prog_id)?;
+        self.get_program(prog_id).ok_or(BpfError::NotLoaded)
+    }
+
     /// Execute `program` `runs` times back-to-back against an empty context
     /// and emit an `AXIOM EXEC COST` marker with the total CNTVCT_EL0 delta.
     /// Timing wraps the production execution path (`execute_program`: JIT on
@@ -824,6 +924,17 @@ impl BpfManager {
         edge: GpioEdge,
         prog_id: u32,
     ) -> Result<(), BpfError> {
+        self.attach_gpio_route_for(0, chip, pin, edge, prog_id)
+    }
+
+    pub fn attach_gpio_route_for(
+        &mut self,
+        owner: u64,
+        chip: u8,
+        pin: u8,
+        edge: GpioEdge,
+        prog_id: u32,
+    ) -> Result<(), BpfError> {
         if !self.can_register_gpio_route(chip, pin, edge, prog_id) {
             log::error!(
                 "BpfManager: GPIO route fan-out exceeded for chip={} pin={} edge={:?}",
@@ -834,7 +945,7 @@ impl BpfManager {
             return Err(BpfError::GpioFanoutExceeded);
         }
 
-        self.attach(ATTACH_TYPE_GPIO, prog_id)?;
+        self.attach_for(owner, ATTACH_TYPE_GPIO, prog_id)?;
         self.register_gpio_route(chip, pin, edge, prog_id)
     }
 
@@ -928,6 +1039,7 @@ impl BpfManager {
 
     fn map_allocation_charge(
         &self,
+        owner: u64,
         map_type: u32,
         key_size: u32,
         value_size: u32,
@@ -972,6 +1084,26 @@ impl BpfManager {
         if total > self.limits.max_map_bytes {
             return Err(BpfError::ResourceLimit);
         }
+        let (owner_objects, owner_bytes) = self
+            .maps
+            .iter()
+            .filter_map(Option::as_ref)
+            .filter(|entry| entry.owner == owner && entry.charged_bytes != 0)
+            .try_fold((0usize, 0usize), |(objects, bytes), entry| {
+                Some((
+                    objects.checked_add(1)?,
+                    bytes.checked_add(entry.charged_bytes)?,
+                ))
+            })
+            .ok_or(BpfError::ResourceLimit)?;
+        if owner_objects >= self.limits.max_owner_maps
+            || owner_bytes
+                .checked_add(charge)
+                .ok_or(BpfError::ResourceLimit)?
+                > self.limits.max_owner_map_bytes
+        {
+            return Err(BpfError::ResourceLimit);
+        }
         Ok(charge)
     }
 
@@ -982,7 +1114,19 @@ impl BpfManager {
         value_size: u32,
         max_entries: u32,
     ) -> Result<u32, BpfError> {
-        let charge = self.map_allocation_charge(map_type, key_size, value_size, max_entries)?;
+        self.create_map_for(0, map_type, key_size, value_size, max_entries)
+    }
+
+    pub fn create_map_for(
+        &mut self,
+        owner: u64,
+        map_type: u32,
+        key_size: u32,
+        value_size: u32,
+        max_entries: u32,
+    ) -> Result<u32, BpfError> {
+        let charge =
+            self.map_allocation_charge(owner, map_type, key_size, value_size, max_entries)?;
         let map: Box<dyn BpfMap<ActiveProfile>> = match map_type {
             1 => {
                 // Hash map
@@ -1018,7 +1162,7 @@ impl BpfManager {
             }
         };
 
-        let id = self.register_user_map(map, charge)?;
+        let id = self.register_user_map(map, charge, owner)?;
         log::info!(
             "Created map id={} type={} key_size={} value_size={} max_entries={}",
             id,
@@ -1032,6 +1176,16 @@ impl BpfManager {
 
     pub fn map_lookup(&self, map_id: u32, key: &[u8]) -> Option<Vec<u8>> {
         self.maps.get(map_id as usize)?.as_ref()?.map.lookup(key)
+    }
+
+    pub fn map_lookup_for(
+        &self,
+        owner: u64,
+        map_id: u32,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, BpfError> {
+        self.ensure_map_owner(owner, map_id)?;
+        Ok(self.map_lookup(map_id, key))
     }
 
     /// Look up a value by key and return a raw pointer.
@@ -1059,8 +1213,22 @@ impl BpfManager {
             .map(|entry| entry.perm)
             .ok_or(BpfError::NotLoaded)?
         {
+            MapPerm::Unavailable => Err(BpfError::PermissionDenied),
             MapPerm::ReadWrite => Ok(()),
             MapPerm::ReadOnly => Err(BpfError::ReadOnlyMap),
+        }
+    }
+
+    fn ensure_map_owner(&self, owner: u64, map_id: u32) -> Result<(), BpfError> {
+        let entry = self
+            .maps
+            .get(map_id as usize)
+            .and_then(Option::as_ref)
+            .ok_or(BpfError::NotLoaded)?;
+        if entry.owner == owner {
+            Ok(())
+        } else {
+            Err(BpfError::PermissionDenied)
         }
     }
 
@@ -1082,6 +1250,18 @@ impl BpfManager {
             .map_err(|_| BpfError::OutOfMemory)
     }
 
+    pub fn map_update_for(
+        &self,
+        owner: u64,
+        map_id: u32,
+        key: &[u8],
+        value: &[u8],
+        flags: u64,
+    ) -> Result<(), BpfError> {
+        self.ensure_map_owner(owner, map_id)?;
+        self.map_update(map_id, key, value, flags)
+    }
+
     pub fn map_delete(&self, map_id: u32, key: &[u8]) -> Result<(), BpfError> {
         self.ensure_map_writable(map_id)?;
         let map = self
@@ -1092,11 +1272,25 @@ impl BpfManager {
         map.map.delete(key).map_err(|_| BpfError::NotLoaded)
     }
 
+    pub fn map_delete_for(&self, owner: u64, map_id: u32, key: &[u8]) -> Result<(), BpfError> {
+        self.ensure_map_owner(owner, map_id)?;
+        self.map_delete(map_id, key)
+    }
+
     pub fn get_map_def(&self, map_id: u32) -> Option<&kernel_bpf::maps::MapDef> {
         self.maps
             .get(map_id as usize)?
             .as_ref()
             .map(|entry| entry.map.def())
+    }
+
+    pub fn get_map_def_for(
+        &self,
+        owner: u64,
+        map_id: u32,
+    ) -> Result<&kernel_bpf::maps::MapDef, BpfError> {
+        self.ensure_map_owner(owner, map_id)?;
+        self.get_map_def(map_id).ok_or(BpfError::NotLoaded)
     }
 
     pub fn pin_map(&mut self, path: String, map_id: u32) -> Result<(), BpfError> {
@@ -1133,11 +1327,22 @@ impl BpfManager {
         Ok(())
     }
 
+    pub fn pin_map_for(&mut self, owner: u64, path: String, map_id: u32) -> Result<(), BpfError> {
+        self.ensure_map_owner(owner, map_id)?;
+        self.pin_map(path, map_id)
+    }
+
     pub fn get_pinned_map(&self, path: &str) -> Option<u32> {
         self.pinned_maps
             .iter()
             .find(|(pinned_path, _)| pinned_path == path)
             .map(|(_, map_id)| *map_id)
+    }
+
+    pub fn get_pinned_map_for(&self, owner: u64, path: &str) -> Result<u32, BpfError> {
+        let map_id = self.get_pinned_map(path).ok_or(BpfError::NotLoaded)?;
+        self.ensure_map_owner(owner, map_id)?;
+        Ok(map_id)
     }
 
     pub fn unpin_map(&mut self, path: &str) -> Result<(), BpfError> {
@@ -1150,15 +1355,26 @@ impl BpfManager {
         Ok(())
     }
 
+    pub fn unpin_map_for(&mut self, owner: u64, path: &str) -> Result<(), BpfError> {
+        let map_id = self.get_pinned_map(path).ok_or(BpfError::NotLoaded)?;
+        self.ensure_map_owner(owner, map_id)?;
+        self.unpin_map(path)
+    }
+
     /// Destroy an unpinned user map and reclaim its backing allocation.
     ///
     /// Until verified programs record their referenced map IDs, destruction is
     /// conservatively refused while any program is loaded. This prevents a map
     /// from disappearing under a helper's escaped raw value pointer.
     pub fn destroy_map(&mut self, map_id: u32) -> Result<(), BpfError> {
+        self.destroy_map_for(0, map_id)
+    }
+
+    pub fn destroy_map_for(&mut self, owner: u64, map_id: u32) -> Result<(), BpfError> {
         if map_id < RESERVED_MAP_COUNT {
             return Err(BpfError::ReadOnlyMap);
         }
+        self.ensure_map_owner(owner, map_id)?;
         if self
             .pinned_maps
             .iter()
@@ -1168,11 +1384,9 @@ impl BpfManager {
             return Err(BpfError::ObjectBusy);
         }
 
-        let entry = self
-            .maps
-            .get_mut(map_id as usize)
-            .and_then(Option::take)
-            .ok_or(BpfError::NotLoaded)?;
+        let entry = self.maps[map_id as usize]
+            .take()
+            .expect("map ownership was checked above");
         self.live_maps = self.live_maps.saturating_sub(1);
         self.map_bytes = self.map_bytes.saturating_sub(entry.charged_bytes);
         drop(entry);
@@ -1191,6 +1405,11 @@ impl BpfManager {
         })
     }
 
+    pub fn get_map_info_for(&self, owner: u64, map_id: u32) -> Result<BpfObjectInfo, BpfError> {
+        self.ensure_map_owner(owner, map_id)?;
+        self.get_map_info(map_id).ok_or(BpfError::NotLoaded)
+    }
+
     /// Poll for the next event from a ring buffer map.
     ///
     /// Returns the event data if available, or None if the ringbuf is empty.
@@ -1199,6 +1418,11 @@ impl BpfManager {
         let map = self.maps.get(map_id as usize)?.as_ref()?;
         // RingBufMap::lookup() delegates to poll(), which reads and advances the tail
         map.map.lookup(&[])
+    }
+
+    pub fn ringbuf_poll_for(&self, owner: u64, map_id: u32) -> Result<Option<Vec<u8>>, BpfError> {
+        self.ensure_map_owner(owner, map_id)?;
+        Ok(self.ringbuf_poll(map_id))
     }
 
     /// Output data to a ring buffer map.
@@ -1226,20 +1450,24 @@ mod tests {
 
     use kernel_bpf::bytecode::insn::BpfInsn;
     use kernel_bpf::maps::MapType;
-    use kernel_bpf::verifier::MapPerm;
+    use kernel_bpf::verifier::{HelperId, MapPerm};
 
     use super::*;
 
     fn tiny_limits() -> BpfLimits {
         let mut limits = BpfLimits::for_active_profile();
-        limits.max_live_programs = 1;
+        limits.max_live_programs = 2;
         limits.max_program_slots = 4;
-        limits.max_program_bytes = 16;
+        limits.max_program_bytes = 32;
         limits.max_single_program_bytes = 16;
-        limits.max_live_maps = 1;
+        limits.max_owner_programs = 1;
+        limits.max_owner_program_bytes = 16;
+        limits.max_live_maps = 2;
         limits.max_map_slots = 4;
-        limits.max_map_bytes = 32;
+        limits.max_map_bytes = 64;
         limits.max_single_map_bytes = 32;
+        limits.max_owner_maps = 1;
+        limits.max_owner_map_bytes = 32;
         limits.max_pinned_maps = 1;
         limits
     }
@@ -1270,8 +1498,7 @@ mod tests {
             .create_map(MapType::Array as u32, 4, 8, 1)
             .expect("create user map");
 
-        let sizes = manager.map_value_sizes();
-        let perms = manager.map_perms();
+        let (sizes, perms) = manager.map_metadata_for_owner(0);
 
         assert_eq!(sizes.len(), perms.len());
         assert_eq!(perms[ENVELOPE_MAP_ID as usize], MapPerm::ReadOnly);
@@ -1361,6 +1588,40 @@ mod tests {
     }
 
     #[test]
+    fn map_quota_and_lifecycle_are_scoped_to_owner() {
+        let mut manager = BpfManager::new_with_limits(tiny_limits());
+        let owner_one = manager
+            .create_map_for(1, MapType::Array as u32, 4, 8, 1)
+            .expect("first owner map");
+        assert_eq!(
+            manager.create_map_for(1, MapType::Array as u32, 4, 8, 1),
+            Err(BpfError::ResourceLimit)
+        );
+        let owner_two = manager
+            .create_map_for(2, MapType::Array as u32, 4, 8, 1)
+            .expect("second owner has an independent quota");
+
+        assert!(matches!(
+            manager.get_map_def_for(2, owner_one),
+            Err(BpfError::PermissionDenied)
+        ));
+        assert_eq!(
+            manager.map_update_for(2, owner_one, &0u32.to_ne_bytes(), &[0; 8], 0),
+            Err(BpfError::PermissionDenied)
+        );
+        assert_eq!(
+            manager.destroy_map_for(2, owner_one),
+            Err(BpfError::PermissionDenied)
+        );
+        manager
+            .destroy_map_for(1, owner_one)
+            .expect("owner destroys own map");
+        manager
+            .destroy_map_for(2, owner_two)
+            .expect("second owner destroys own map");
+    }
+
+    #[test]
     fn program_quota_unload_and_inflight_reclamation_are_synchronous() {
         let mut manager = BpfManager::new_with_limits(tiny_limits());
         let insns = vec![BpfInsn::mov64_imm(0, 0), BpfInsn::exit()];
@@ -1387,6 +1648,77 @@ mod tests {
             .load_raw_program(insns)
             .expect("program quota reclaimed");
         assert!(second > first, "raw tombstone IDs must not be reused");
+    }
+
+    #[test]
+    fn program_quota_and_lifecycle_are_scoped_to_owner() {
+        let mut manager = BpfManager::new_with_limits(tiny_limits());
+        let insns = vec![BpfInsn::mov64_imm(0, 0), BpfInsn::exit()];
+        let owner_one = manager
+            .load_raw_program_for(1, insns.clone())
+            .expect("first owner program");
+        assert_eq!(
+            manager.load_raw_program_for(1, insns.clone()),
+            Err(BpfError::ResourceLimit)
+        );
+        let owner_two = manager
+            .load_raw_program_for(2, insns)
+            .expect("second owner has an independent quota");
+
+        assert_eq!(
+            manager.attach_for(2, ATTACH_TYPE_TIMER, owner_one),
+            Err(BpfError::PermissionDenied)
+        );
+        manager
+            .attach_gpio_route_for(1, 0, 17, GpioEdge::Rising, owner_one)
+            .expect("owner attaches its program to GPIO");
+        manager
+            .detach_for(1, ATTACH_TYPE_GPIO, owner_one)
+            .expect("owner detaches its GPIO program");
+        assert_eq!(
+            manager.unload_program_for(2, owner_one),
+            Err(BpfError::PermissionDenied)
+        );
+        manager
+            .unload_program_for(1, owner_one)
+            .expect("owner unloads own program");
+        manager
+            .unload_program_for(2, owner_two)
+            .expect("second owner unloads own program");
+    }
+
+    #[test]
+    fn program_verification_rejects_foreign_map_ids() {
+        let mut manager = BpfManager::new_with_limits(tiny_limits());
+        let map_id = manager
+            .create_map_for(1, MapType::Array as u32, 4, 8, 1)
+            .expect("owner map");
+        let lookup_program = || {
+            vec![
+                BpfInsn::mov64_imm(1, 0),
+                BpfInsn::new(0x7b, 10, 1, -8, 0),
+                BpfInsn::mov64_imm(1, map_id as i32),
+                BpfInsn::mov64_reg(2, 10),
+                BpfInsn::add64_imm(2, -8),
+                BpfInsn::call(HelperId::MapLookupElem as i32),
+                BpfInsn::mov64_imm(0, 0),
+                BpfInsn::exit(),
+            ]
+        };
+
+        assert_eq!(
+            manager.load_raw_program_for(2, lookup_program()),
+            Err(BpfError::VerificationFailed)
+        );
+        let program_id = manager
+            .load_raw_program_for(1, lookup_program())
+            .expect("owner can reference its own map");
+        manager
+            .unload_program_for(1, program_id)
+            .expect("unload owner program");
+        manager
+            .destroy_map_for(1, map_id)
+            .expect("destroy owner map");
     }
 
     #[test]
