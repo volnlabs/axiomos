@@ -83,6 +83,12 @@ OVMF and Limine are listed in the [immutable input table](../reference/generated
 - **Firmware:** `shrike_control` contains the platform-independent `no_std`
   control loop; RP2040 adapters remain in `shrike_rp2040`. Host simulation
   proves sampled-state behavior, not GPIO IRQ-edge behavior.
+- **FPGA safety envelope:** `firmware/shrike/fpga/shrike_safety_gate.sv` is a
+  synthesizable final PWM gate. It forces both motor PWM outputs low on the
+  physical e-stop line or an out-of-range signed command, independently of
+  axiomos and the RP2040. Its self-checking Icarus-Verilog simulation is part
+  of the full local and hosted gates. Board pin constraints, a ForgeFPGA
+  bitstream, and physical timing evidence remain HIL work.
 
 ## Release policy
 

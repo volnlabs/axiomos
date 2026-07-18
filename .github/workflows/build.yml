@@ -132,6 +132,18 @@ jobs:
           export PATH="$HOME/.elan/bin:$PATH"
           lake build
 
+  fpga-safety-gate:
+    name: "FPGA safety gate"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Icarus Verilog
+        run: |
+          sudo apt update
+          sudo apt install -y iverilog
+      - name: Simulate final PWM safety envelope
+        run: scripts/verify/fpga-safety-gate.sh
+
   test:
       name: "Test (root workspace)"
       runs-on: ubuntu-latest

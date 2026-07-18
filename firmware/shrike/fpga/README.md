@@ -1,7 +1,7 @@
 # Shrike-lite FPGA safety envelope
 
 `shrike_safety_gate.sv` is the v0.4 final motor-PWM gate for the Renesas
-ForgeFPGA on Shrike-lite. It is intentionally independent of AxiomOS and the
+ForgeFPGA on Shrike-lite. It is intentionally independent of axiomos and the
 RP2040 watchdog: a low e-stop input or an out-of-range command turns both
 motor PWM outputs low combinationally.
 

@@ -12,7 +12,7 @@
 - [`operations/`](operations/) for build, boot, test, debug, and release procedures.
 - [`performance/`](performance/) for benchmark methodology, results, and evidence.
 - [`archive/`](archive/) for superseded or historical material.
-- [`../plan_refactor.md`](../plan_refactor.md) for the repository migration plan.
+- [`plans/active/repository-inventory.md`](plans/active/repository-inventory.md) for the repository migration plan.
 
 ## Sources of Truth
 
