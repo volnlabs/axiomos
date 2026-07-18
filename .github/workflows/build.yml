@@ -108,7 +108,7 @@ jobs:
       - name: Clippy (rk_bridge)
         run: cargo clippy --manifest-path userspace/tools/rk_bridge/Cargo.toml --lib -- -D clippy::all
       - name: Clippy (rk_cli)
-        run: cargo clippy --manifest-path userspace/rk_cli/Cargo.toml -- -D clippy::all
+        run: cargo clippy --manifest-path userspace/tools/rk_cli/Cargo.toml -- -D clippy::all
       - name: Clippy (RP2040 firmware, debug)
         run: cargo clippy --manifest-path firmware/shrike/rp2040/Cargo.toml --target thumbv6m-none-eabi -- -D clippy::all
       - name: Clippy (RP2040 firmware, release)
@@ -198,7 +198,7 @@ jobs:
       - name: Test rk_bridge
         run: cargo test --manifest-path userspace/tools/rk_bridge/Cargo.toml
       - name: Test rk_cli
-        run: cargo test --manifest-path userspace/rk_cli/Cargo.toml
+        run: cargo test --manifest-path userspace/tools/rk_cli/Cargo.toml
       - name: Test RP2040 firmware (debug)
         run: cargo test --manifest-path firmware/shrike/rp2040/Cargo.toml --target thumbv6m-none-eabi --no-run
       - name: Test RP2040 firmware (release)
