@@ -37,6 +37,7 @@ fn main() {
     println!("cargo:rustc-env=KERNEL_BINARY={}", kernel.display());
 
     let mut bootable_iso = None;
+    let mut ovmf_files = None;
     if target_arch == "x86_64" {
         let limine_dir = limine();
         let iso = build_iso(&limine_dir, &kernel);
@@ -44,14 +45,11 @@ fn main() {
         bootable_iso = Some(iso);
 
         let ovmf = ovmf();
-        println!(
-            "cargo:rustc-env=OVMF_X86_64_CODE={}",
-            ovmf.get_file(Arch::X64, FileType::Code).display()
-        );
-        println!(
-            "cargo:rustc-env=OVMF_X86_64_VARS={}",
-            ovmf.get_file(Arch::X64, FileType::Vars).display()
-        );
+        let ovmf_code = ovmf.get_file(Arch::X64, FileType::Code);
+        let ovmf_vars = ovmf.get_file(Arch::X64, FileType::Vars);
+        println!("cargo:rustc-env=OVMF_X86_64_CODE={}", ovmf_code.display());
+        println!("cargo:rustc-env=OVMF_X86_64_VARS={}", ovmf_vars.display());
+        ovmf_files = Some((ovmf_code, ovmf_vars));
     } else {
         // Provide dummy values for other architectures to satisfy env!() in main.rs if it's compiled
         // though in our case we cfg-ed it out in main.rs.
@@ -63,7 +61,12 @@ fn main() {
 
     let disk_image = build_os_disk_image(&target_arch);
     println!("cargo:rustc-env=DISK_IMAGE={}", disk_image.display());
-    write_artifact_paths(&kernel, &disk_image, bootable_iso.as_deref());
+    write_artifact_paths(
+        &kernel,
+        &disk_image,
+        bootable_iso.as_deref(),
+        ovmf_files.as_ref(),
+    );
 }
 
 fn host_runner_test_only() -> bool {
@@ -99,7 +102,12 @@ fn pinned_input(name: &str) -> &'static str {
         .unwrap_or_else(|| panic!("missing {name} in ci/manifests/build-inputs.env"))
 }
 
-fn write_artifact_paths(kernel: &Path, disk: &Path, iso: Option<&Path>) {
+fn write_artifact_paths(
+    kernel: &Path,
+    disk: &Path,
+    iso: Option<&Path>,
+    ovmf: Option<&(PathBuf, PathBuf)>,
+) {
     let Some(path) = std::env::var_os("AXIOM_ARTIFACT_PATHS") else {
         return;
     };
@@ -110,6 +118,10 @@ fn write_artifact_paths(kernel: &Path, disk: &Path, iso: Option<&Path>) {
     );
     if let Some(iso) = iso {
         contents.push_str(&format!("BOOTABLE_ISO={}\n", iso.display()));
+    }
+    if let Some((code, vars)) = ovmf {
+        contents.push_str(&format!("OVMF_CODE={}\n", code.display()));
+        contents.push_str(&format!("OVMF_VARS={}\n", vars.display()));
     }
     fs::write(&path, contents).unwrap_or_else(|error| {
         panic!(

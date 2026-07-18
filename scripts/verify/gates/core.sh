@@ -1,5 +1,8 @@
 # Sourced by engineering-audit.sh; shares its gate functions and result state.
 require_commands cargo clang rustc rustup git python3 timeout sha256sum
+if [[ "$MODE" == "full" ]]; then
+    require_commands iverilog lake qemu-system-x86_64 riscv64-unknown-elf-gcc
+fi
 hash_tracked_lockfiles "$LOCKFILES_BEFORE"
 
 run_step fmt cargo fmt --all -- --check
@@ -167,10 +170,11 @@ if [[ "${RUN_AUDIT_FAULT:-0}" == "1" ]]; then
         FIXTURE="$(mktemp)"
         printf "\xd7\x5a\x98\x01\x82\xb1\x0a\xb7\xd5\x4b\xfe\xd3\xc9\x64\x07\x3a\x0e\xe1\x72\xf3\xda\xa6\x23\x25\xaf\x02\x1a\x68\xf7\x07\x51\x1a" > "$FIXTURE"
         rc=0
-        AXIOM_BPF_TRUSTED_KEY_PATH="$FIXTURE" \
+        AXIOMOS_QEMU_AUDIT_NAME=axiomos-audit AXIOMOS_QEMU_DISABLE_MONITOR=1 AXIOM_BPF_TRUSTED_KEY_PATH="$FIXTURE" \
             timeout '"${QEMU_TIMEOUT}"'s cargo run --locked --release \
                 --features audit-fault-injection,bpf-unsigned-development,audit-diagnostics \
                 -- --headless --smp 1 --mem 1G >"'"$OUTPUT_DIR"'/audit-fault-qemu-serial.log" 2>&1 || rc=$?
+        pkill -f "^qemu-system-x86_64 .* -name axiomos-audit( |$)" >/dev/null 2>&1 || true
         if [[ "$rc" -ne 0 && "$rc" -ne 124 ]]; then
             echo "QEMU exited with status $rc (NOT masked)" >>"'"$OUTPUT_DIR"'/audit-fault-qemu-serial.log"
         fi

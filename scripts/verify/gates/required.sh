@@ -8,6 +8,9 @@ if [[ "$MODE" != "quick" ]]; then
     run_cargo_step clippy-virtual-memory clippy -p kernel_virtual_memory --all-targets -- -D clippy::all
     run_cargo_step clippy-vfs clippy -p kernel_vfs --lib -- -D clippy::all
     run_cargo_step clippy-physical-memory clippy -p kernel_physical_memory --lib -- -D clippy::all
+    if [[ "$MODE" == "full" ]]; then
+        run_cargo_step clippy-xtask clippy -p xtask --all-targets -- -D clippy::all
+    fi
     run_cargo_step clippy-bpf-cloud clippy -p kernel_bpf --no-default-features \
         --features cloud-profile --lib -- -D clippy::all
     run_cargo_step clippy-bpf-embedded clippy -p kernel_bpf --no-default-features \
@@ -38,8 +41,16 @@ if [[ "$MODE" != "quick" ]]; then
     run_step fpga-safety-gate scripts/verify/fpga-safety-gate.sh
     run_step shrike_rp2040-host-sim-static python3 -c \
         'from pathlib import Path; lib=Path("firmware/shrike/control/src/lib.rs").read_text(); run=Path("firmware/shrike/control/src/control.rs").read_text(); sim=Path("firmware/shrike/simulation/src/mocks.rs").read_text(); sim_tests_state=Path("firmware/shrike/simulation/tests/state_machine.rs").read_text(); sim_tests_sampled=Path("firmware/shrike/simulation/tests/sampled_state.rs").read_text(); assert "fn run" in run and "max_iterations" in run, "control::run must accept max_iterations: Option<u32>"; assert "RunSummary" in run, "control::run must return RunSummary"; assert all(name in sim for name in ("MockByteIo", "MockClock", "MockUltrasonic", "MockEstop", "MockMotor")), "all 5 mock types must be present"; assert "embedded_hal" not in sim, "mocks must implement local shrike_control traits, not embedded-hal"; assert all(trait_name in sim for trait_name in ("ByteIo", "MicrosClock", "Ultrasonic", "EstopLine", "MotorChannel")), "mocks must implement the 5 local traits"; assert "no_lost_irq_edge" not in (sim_tests_state + sim_tests_sampled) and "no lost IRQ" not in (sim_tests_state + sim_tests_sampled).lower() and "no_lost_edge" not in (sim_tests_state + sim_tests_sampled), "tests must not claim hardware-level IRQ edge-loss"'
-    run_cargo_step clippy-riscv clippy --manifest-path kernel/demos/riscv/Cargo.toml \
-        --target riscv64gc-unknown-none-elf -- -D clippy::all
+    if [[ "$MODE" == "full" ]]; then
+        RISCV_TARGET_DIR="$(mktemp -d)"
+        run_step clippy-riscv-clean env CARGO_TARGET_DIR="$RISCV_TARGET_DIR" cargo clippy --locked \
+            --manifest-path kernel/demos/riscv/Cargo.toml --target riscv64gc-unknown-none-elf \
+            -- -D clippy::all
+        rm -rf "$RISCV_TARGET_DIR"
+    else
+        run_cargo_step clippy-riscv clippy --manifest-path kernel/demos/riscv/Cargo.toml \
+            --target riscv64gc-unknown-none-elf -- -D clippy::all
+    fi
 
     run_step signed-bpf-test-key cargo run --locked \
         --manifest-path userspace/tools/rk_cli/Cargo.toml -- key generate --output "$SIGNING_KEY_PREFIX"

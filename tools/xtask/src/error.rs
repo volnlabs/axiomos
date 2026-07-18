@@ -8,6 +8,27 @@ pub enum XtaskError {
     Infrastructure(String),
 }
 
+impl XtaskError {
+    pub fn render(&self) {
+        let message = match self {
+            Self::Verification(message)
+            | Self::Usage(message)
+            | Self::MissingDependency(message)
+            | Self::Infrastructure(message) => message,
+        };
+        eprintln!("xtask: {message}");
+    }
+
+    pub fn exit_code(&self) -> ExitCode {
+        ExitCode::from(match self {
+            Self::Verification(_) => 1,
+            Self::Usage(_) => 2,
+            Self::MissingDependency(_) => 3,
+            Self::Infrastructure(_) => 4,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::XtaskError;
@@ -27,26 +48,5 @@ mod tests {
             XtaskError::Infrastructure(String::new()).exit_code(),
             4.into()
         );
-    }
-}
-
-impl XtaskError {
-    pub fn render(&self) {
-        let message = match self {
-            Self::Verification(message)
-            | Self::Usage(message)
-            | Self::MissingDependency(message)
-            | Self::Infrastructure(message) => message,
-        };
-        eprintln!("xtask: {message}");
-    }
-
-    pub fn exit_code(&self) -> ExitCode {
-        ExitCode::from(match self {
-            Self::Verification(_) => 1,
-            Self::Usage(_) => 2,
-            Self::MissingDependency(_) => 3,
-            Self::Infrastructure(_) => 4,
-        })
     }
 }

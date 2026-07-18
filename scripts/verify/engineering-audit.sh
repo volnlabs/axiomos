@@ -18,6 +18,8 @@ Usage: scripts/verify/engineering-audit.sh [options]
 Options:
   --quick          Run formatting, ledger, focused tests, and kernel checks; skip Miri.
   --extended       Add release-profile tests, Lean (when installed), and Miri.
+  --full           Strict hosted-CI parity: require all local tools, full Miri,
+                   fresh RISC-V Clippy, and Lean validation.
   --miri           Explicitly enable Miri (already required outside quick mode).
   --no-qemu        Skip the release QEMU smoke test.
   --output DIR     Store logs and manifest in DIR.
@@ -39,6 +41,10 @@ while (($#)); do
             ;;
         --extended)
             MODE="extended"
+            RUN_MIRI=1
+            ;;
+        --full)
+            MODE="full"
             RUN_MIRI=1
             ;;
         --miri)
@@ -223,6 +229,46 @@ hash_tracked_lockfiles() {
     done < <(git ls-files 'Cargo.lock' '*/Cargo.lock' '**/Cargo.lock' | sort -u)
 }
 
+cleanup_audit_qemu() {
+    pkill -f '^qemu-system-x86_64 .* -name axiomos-audit( |$)' >/dev/null 2>&1 || true
+}
+
+run_audit_qemu() {
+    local log="$1"
+    shift
+    local runner_pid deadline boot_deadline=0 rc=0
+
+    cleanup_audit_qemu
+    AXIOMOS_QEMU_AUDIT_NAME=axiomos-audit AXIOMOS_QEMU_DISABLE_MONITOR=1 "$@" >"$log" 2>&1 &
+    runner_pid=$!
+    deadline=$((SECONDS + QEMU_TIMEOUT))
+
+    while kill -0 "$runner_pid" >/dev/null 2>&1; do
+        if [[ "$boot_deadline" -eq 0 ]] && grep -q 'QEMU_BOOT_OK' "$log"; then
+            # Give post-init probes time to emit their contract markers, then
+            # terminate the audit-owned runner and its named QEMU child.
+            boot_deadline=$((SECONDS + 45))
+        fi
+        if [[ "$boot_deadline" -ne 0 && "$SECONDS" -ge "$boot_deadline" ]]; then
+            kill "$runner_pid" >/dev/null 2>&1 || true
+            wait "$runner_pid" || true
+            cleanup_audit_qemu
+            return 0
+        fi
+        if [[ "$SECONDS" -ge "$deadline" ]]; then
+            kill "$runner_pid" >/dev/null 2>&1 || true
+            wait "$runner_pid" || rc=$?
+            cleanup_audit_qemu
+            return "$rc"
+        fi
+        sleep 1
+    done
+
+    wait "$runner_pid" || rc=$?
+    cleanup_audit_qemu
+    return "$rc"
+}
+
 check_tracked_lockfiles() {
     local after="$OUTPUT_DIR/lockfiles.after.sha256"
     hash_tracked_lockfiles "$after"
@@ -297,9 +343,9 @@ qemu_smoke() {
     local start end rc=0
     start="$(date +%s)"
     printf '[audit] %-34s' "qemu-release-smoke"
-    timeout "${QEMU_TIMEOUT}s" cargo run --locked --release \
+    run_audit_qemu "$log" cargo run --locked --release \
         --features bpf-unsigned-development,audit-diagnostics \
-        -- --headless --smp 2 --mem 1G >"$log" 2>&1 || rc=$?
+        -- --headless --smp 2 --mem 1G || rc=$?
 
     if [[ "$rc" -ne 0 && "$rc" -ne 124 ]]; then
         echo "QEMU command failed with status $rc" >>"$log"
@@ -367,9 +413,9 @@ qemu_smoke_smp1() {
     local start end rc=0
     start="$(date +%s)"
     printf '[audit] %-34s' "qemu-smp1-smoke"
-    timeout "${QEMU_TIMEOUT}s" cargo run --locked --release \
+    run_audit_qemu "$log" cargo run --locked --release \
         --features bpf-unsigned-development,audit-diagnostics \
-        -- --headless --smp 1 --mem 1G >"$log" 2>&1 || rc=$?
+        -- --headless --smp 1 --mem 1G || rc=$?
 
     if [[ "$rc" -ne 0 && "$rc" -ne 124 ]]; then
         echo "QEMU command exited with status $rc (NOT masked)" >>"$log"
@@ -419,9 +465,9 @@ qemu_smp4_scheduler_smoke() {
     local start end rc=0
     start="$(date +%s)"
     printf '[audit] %-34s' "qemu-smp4-scheduler-smoke"
-    timeout "${QEMU_TIMEOUT}s" cargo run --locked --release \
+    run_audit_qemu "$log" cargo run --locked --release \
         --features bpf-unsigned-development,audit-diagnostics \
-        -- --headless --smp 4 --mem 1G >"$log" 2>&1 || rc=$?
+        -- --headless --smp 4 --mem 1G || rc=$?
 
     if [[ "$rc" -ne 0 && "$rc" -ne 124 ]]; then
         echo "QEMU command failed with status $rc" >>"$log"
@@ -461,8 +507,8 @@ qemu_production_smoke() {
     local start end rc=0
     start="$(date +%s)"
     printf '[audit] %-34s' "qemu-production-signed-smoke"
-    timeout "${QEMU_TIMEOUT}s" cargo run --locked --release \
-        -- --headless --smp 2 --mem 1G >"$log" 2>&1 || rc=$?
+    run_audit_qemu "$log" cargo run --locked --release \
+        -- --headless --smp 2 --mem 1G || rc=$?
 
     local failed=0 marker
     for marker in QEMU_BOOT_OK NANOSLEEP_WAITQ_OK NANOSLEEP_INTERRUPT_OK \

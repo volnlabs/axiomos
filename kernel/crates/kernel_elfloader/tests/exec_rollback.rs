@@ -51,9 +51,9 @@ use kernel_memapi::{Allocation, Guarded, Location, MemoryApi, UserAccessible, Wr
 // ---------------------------------------------------------------------------
 
 /// Atomic counters shared between the test and the `MemoryApi`
-/// implementation. The api is moved into `ElfLoader::new`, so all
-/// state that the test wants to read after the call must live in
-/// `&'static AtomicUsize` values.
+/// implementation. The API and any successfully loaded image borrow this
+/// state for the duration of each test, so every fixture can be dropped after
+/// its assertions complete (including under Miri).
 #[derive(Debug)]
 struct SharedCounters {
     /// Number of allocations currently live (allocated, not yet
@@ -93,7 +93,7 @@ impl SharedCounters {
 }
 
 #[derive(Debug)]
-struct CountingAllocation {
+struct CountingAllocation<'a> {
     layout: Layout,
     /// Backing storage for the loader's `copy_from_slice` /
     /// `fill` calls. Sized to `layout.size()` so the loader can
@@ -101,10 +101,10 @@ struct CountingAllocation {
     data: Vec<u8>,
     /// The class of allocation: which `MemoryApi` call produced it.
     kind: &'static str,
-    counters: &'static SharedCounters,
+    counters: &'a SharedCounters,
 }
 
-impl Drop for CountingAllocation {
+impl Drop for CountingAllocation<'_> {
     fn drop(&mut self) {
         self.counters
             .live_allocations
@@ -112,34 +112,34 @@ impl Drop for CountingAllocation {
     }
 }
 
-impl AsRef<[u8]> for CountingAllocation {
+impl AsRef<[u8]> for CountingAllocation<'_> {
     fn as_ref(&self) -> &[u8] {
         &self.data
     }
 }
 
-impl AsMut<[u8]> for CountingAllocation {
+impl AsMut<[u8]> for CountingAllocation<'_> {
     fn as_mut(&mut self) -> &mut [u8] {
         &mut self.data
     }
 }
 
-impl Allocation for CountingAllocation {
+impl Allocation for CountingAllocation<'_> {
     fn layout(&self) -> Layout {
         self.layout
     }
 }
 
-impl WritableAllocation for CountingAllocation {}
+impl WritableAllocation for CountingAllocation<'_> {}
 
-struct CountingMemoryApi {
-    counters: &'static SharedCounters,
+struct CountingMemoryApi<'a> {
+    counters: &'a SharedCounters,
 }
 
-impl MemoryApi for CountingMemoryApi {
-    type ReadonlyAllocation = CountingAllocation;
-    type WritableAllocation = CountingAllocation;
-    type ExecutableAllocation = CountingAllocation;
+impl<'a> MemoryApi for CountingMemoryApi<'a> {
+    type ReadonlyAllocation = CountingAllocation<'a>;
+    type WritableAllocation = CountingAllocation<'a>;
+    type ExecutableAllocation = CountingAllocation<'a>;
 
     fn allocate(
         &mut self,
@@ -320,13 +320,14 @@ fn loader_err<M: MemoryApi>(
 /// must be `LoadElfError::AllocationFailed`.
 #[test]
 fn load_releases_prior_allocations_on_late_allocate_failure() {
-    let counters: &'static SharedCounters =
-        Box::leak(Box::new(SharedCounters::new(Some(3), None, None)));
+    let counters = SharedCounters::new(Some(3), None, None);
     counters.live_allocations.store(0, Ordering::SeqCst);
 
     let buf = build_elf_with_n_load_segments(3);
     let elf = parse_elf(&buf);
-    let api = CountingMemoryApi { counters };
+    let api = CountingMemoryApi {
+        counters: &counters,
+    };
     let err = loader_err(ElfLoader::new(api).load(elf));
     assert_eq!(err, LoadElfError::AllocationFailed);
     assert_eq!(
@@ -340,13 +341,14 @@ fn load_releases_prior_allocations_on_late_allocate_failure() {
 /// have acquired any allocation, so the live counter is zero.
 #[test]
 fn load_releases_zero_allocations_on_first_allocate_failure() {
-    let counters: &'static SharedCounters =
-        Box::leak(Box::new(SharedCounters::new(Some(1), None, None)));
+    let counters = SharedCounters::new(Some(1), None, None);
     counters.live_allocations.store(0, Ordering::SeqCst);
 
     let buf = build_elf_with_n_load_segments(2);
     let elf = parse_elf(&buf);
-    let api = CountingMemoryApi { counters };
+    let api = CountingMemoryApi {
+        counters: &counters,
+    };
     let err = loader_err(ElfLoader::new(api).load(elf));
     assert_eq!(err, LoadElfError::AllocationFailed);
     assert_eq!(counters.live_allocations.load(Ordering::SeqCst), 0);
@@ -357,13 +359,14 @@ fn load_releases_zero_allocations_on_first_allocate_failure() {
 /// caller can drop it. The live counter must end at zero.
 #[test]
 fn load_releases_writable_allocation_on_make_executable_failure() {
-    let counters: &'static SharedCounters =
-        Box::leak(Box::new(SharedCounters::new(None, Some(1), None)));
+    let counters = SharedCounters::new(None, Some(1), None);
     counters.live_allocations.store(0, Ordering::SeqCst);
 
     let buf = build_elf_with_n_load_segments(2);
     let elf = parse_elf(&buf);
-    let api = CountingMemoryApi { counters };
+    let api = CountingMemoryApi {
+        counters: &counters,
+    };
     let err = loader_err(ElfLoader::new(api).load(elf));
     assert_eq!(err, LoadElfError::AllocationFailed);
     assert_eq!(counters.live_allocations.load(Ordering::SeqCst), 0);
@@ -373,15 +376,16 @@ fn load_releases_writable_allocation_on_make_executable_failure() {
 /// allocation back to the caller on failure.
 #[test]
 fn load_releases_writable_allocation_on_make_readonly_failure() {
-    let counters: &'static SharedCounters =
-        Box::leak(Box::new(SharedCounters::new(None, None, Some(1))));
+    let counters = SharedCounters::new(None, None, Some(1));
     counters.live_allocations.store(0, Ordering::SeqCst);
 
     // PF_R only (4): not executable, so the loader hits the
     // `make_readonly` path.
     let buf = build_elf_with_n_load_segments_with_flags(2, 4u32);
     let elf = parse_elf(&buf);
-    let api = CountingMemoryApi { counters };
+    let api = CountingMemoryApi {
+        counters: &counters,
+    };
     let err = loader_err(ElfLoader::new(api).load(elf));
     assert_eq!(err, LoadElfError::AllocationFailed);
     assert_eq!(counters.live_allocations.load(Ordering::SeqCst), 0);
@@ -397,11 +401,12 @@ fn load_releases_writable_allocation_on_make_readonly_failure() {
 fn load_allocate_failure_sweep_leaves_no_leaks() {
     let buf = build_elf_with_n_load_segments(4);
     for n in 1..=4 {
-        let counters: &'static SharedCounters =
-            Box::leak(Box::new(SharedCounters::new(Some(n as usize), None, None)));
+        let counters = SharedCounters::new(Some(n as usize), None, None);
         counters.live_allocations.store(0, Ordering::SeqCst);
         let elf = parse_elf(&buf);
-        let api = CountingMemoryApi { counters };
+        let api = CountingMemoryApi {
+            counters: &counters,
+        };
         let err = loader_err(ElfLoader::new(api).load(elf));
         assert_eq!(err, LoadElfError::AllocationFailed, "n={n}");
         assert_eq!(
@@ -418,13 +423,14 @@ fn load_allocate_failure_sweep_leaves_no_leaks() {
 /// the `ElfImage` releases them all.
 #[test]
 fn load_success_drops_every_allocation_on_image_drop() {
-    let counters: &'static SharedCounters =
-        Box::leak(Box::new(SharedCounters::new(None, None, None)));
+    let counters = SharedCounters::new(None, None, None);
     counters.live_allocations.store(0, Ordering::SeqCst);
 
     let buf = build_elf_with_n_load_segments(2);
     let elf = parse_elf(&buf);
-    let api = CountingMemoryApi { counters };
+    let api = CountingMemoryApi {
+        counters: &counters,
+    };
     let image = ElfLoader::new(api)
         .load(elf)
         .expect("unfaulted load should succeed");

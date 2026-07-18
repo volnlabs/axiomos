@@ -10,11 +10,7 @@ use crate::process::{command as process_command, display_command, run_status};
 use crate::validation::{validate_boundary, validate_inventory};
 
 fn run_ci(root: &Path, arguments: &[String]) -> Result<(), String> {
-    let mut script_arguments: Vec<_> = arguments
-        .iter()
-        .filter(|argument| argument.as_str() != "--full")
-        .cloned()
-        .collect();
+    let mut script_arguments = arguments.to_vec();
     if !script_arguments
         .iter()
         .any(|argument| argument == "--output")

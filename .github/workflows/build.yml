@@ -103,6 +103,8 @@ jobs:
           components: rustfmt, clippy
       - name: Add standalone non-host targets
         run: |
+          sudo apt update
+          sudo apt install -y gcc-riscv64-unknown-elf
           rustup target add thumbv6m-none-eabi
           rustup target add riscv64gc-unknown-none-elf
       - name: Clippy (rk_bridge)
@@ -230,8 +232,22 @@ jobs:
       - uses: actions/checkout@v4
       - id: set-matrix
         run: |
-          # Exclude kernel_bpf - it has its own job with profile matrix
-          export PACKAGES=$(ls kernel/crates | grep -v kernel_bpf | head -c -1 | jq -Rsc 'split("\n")')
+          # Exclude kernel_bpf - it has its own job with profile matrix.
+          # Some kernel/crates directories are non-Cargo fixtures, so build
+          # the matrix from manifests rather than directory names.
+          export PACKAGES="$(find kernel/crates -mindepth 2 -maxdepth 2 -name Cargo.toml -exec awk '
+            /^\[package\]$/ { in_package = 1; next }
+            /^\[/ { in_package = 0 }
+            in_package && /^name[[:space:]]*=/ {
+              sub(/^[^=]*=[[:space:]]*"/, "")
+              sub(/".*/, "")
+              print
+              exit
+            }
+          ' {} \; \
+            | sort -u \
+            | grep -vx 'kernel_bpf' \
+            | jq -Rsc 'split("\n") | map(select(length > 0))')"
           echo "matrix={\"package\":${PACKAGES}}" >> $GITHUB_OUTPUT
 
   miri:
@@ -344,62 +360,53 @@ jobs:
         - name: Install QEMU + ISO/disk build deps
           run: |
             sudo apt update
-            # ovmf explicitly: /usr/share/OVMF/*.fd is required by the pflash
-            # drives below and only ships in the ovmf package (relying on
-            # qemu-system-x86's Recommends is not guaranteed on the runner).
-            sudo apt install -y qemu-system-x86 xorriso mtools e2fsprogs ovmf
+            # The project build fetches pinned UEFI firmware into target/ovmf;
+            # this job only needs QEMU and image-construction dependencies.
+            sudo apt install -y qemu-system-x86 xorriso mtools e2fsprogs
         - name: Build release (produces axiomos.iso + disk image)
           env:
             AXIOMOS_BOOT_TIMEOUT_SECS: "60"
           run: |
             TRUSTED_KEY_FIXTURE="$(mktemp)"
+            ARTIFACT_PATHS="$RUNNER_TEMP/build-artifacts.env"
+            trap 'rm -f "$TRUSTED_KEY_FIXTURE"' EXIT
             printf '\xd7\x5a\x98\x01\x82\xb1\x0a\xb7\xd5\x4b\xfe\xd3\xc9\x64\x07\x3a\x0e\xe1\x72\xf3\xda\xa6\x23\x25\xaf\x02\x1a\x68\xf7\x07\x51\x1a' > "$TRUSTED_KEY_FIXTURE"
+            ARTIFACT_ENV_PREFIX=AXIOM
+            export "${ARTIFACT_ENV_PREFIX}_ARTIFACT_PATHS=$ARTIFACT_PATHS"
             AXIOM_BPF_TRUSTED_KEY_PATH="$TRUSTED_KEY_FIXTURE" cargo build --release --features audit-diagnostics
-        - name: Locate ISO and disk image
+        - name: Load build artifacts
           id: artifacts
           run: |
             set -e
-            ISO_PATH=$(find target/release/build -name axiomos.iso -type f | head -n 1)
-            if [[ -z "$ISO_PATH" ]]; then
-              echo "::error::axiomos.iso not produced by release build"
+            ARTIFACT_PATHS="$RUNNER_TEMP/build-artifacts.env"
+            if [[ ! -s "$ARTIFACT_PATHS" ]]; then
+              echo "::error::release build did not emit its artifact manifest"
               exit 1
             fi
-            DISK_PATH="$(dirname "$ISO_PATH")/disk.img"
-            if [[ ! -f "$DISK_PATH" ]]; then
-              # Fallback for future build.rs layout changes: prefer any disk.img
-              # in the same Cargo target tree, but do not look for retired
-              # artifact names.
-              DISK_PATH=$(find target/release/build -path '*/out/disk.img' -type f | head -n 1)
-            fi
-            if [[ -z "$DISK_PATH" || ! -f "$DISK_PATH" ]]; then
-              echo "::error::disk image not produced next to $ISO_PATH (expected build.rs out/disk.img)"
-              exit 1
-            fi
-            echo "iso-path=$ISO_PATH" >> "$GITHUB_OUTPUT"
-            echo "disk-path=$DISK_PATH" >> "$GITHUB_OUTPUT"
+            source "$ARTIFACT_PATHS"
+            for path in "$BOOTABLE_ISO" "$DISK_IMAGE" "$OVMF_CODE" "$OVMF_VARS"; do
+              if [[ ! -r "$path" ]]; then
+                echo "::error::build artifact is missing or unreadable: $path"
+                exit 1
+              fi
+            done
+            echo "iso-path=$BOOTABLE_ISO" >> "$GITHUB_OUTPUT"
+            echo "disk-path=$DISK_IMAGE" >> "$GITHUB_OUTPUT"
+            echo "ovmf-code=$OVMF_CODE" >> "$GITHUB_OUTPUT"
+            echo "ovmf-vars=$OVMF_VARS" >> "$GITHUB_OUTPUT"
         - name: Boot ISO under QEMU (OVMF + disk)
           env:
             ISO_PATH: ${{ steps.artifacts.outputs.iso-path }}
             DISK_PATH: ${{ steps.artifacts.outputs.disk-path }}
+            OVMF_CODE: ${{ steps.artifacts.outputs.ovmf-code }}
+            OVMF_VARS: ${{ steps.artifacts.outputs.ovmf-vars }}
           run: |
             set -e
             SERIAL_LOG=$(mktemp)
-            # Pre-flight: locate OVMF pflash blobs explicitly. The
-            # `ovmf` package on Ubuntu ships them under
-            # /usr/share/OVMF/x64/, but file naming varies across
-            # distributions (.fd vs .4m.fd). Fail loudly if neither
-            # naming pattern matches so the gate reports the real
-            # problem instead of "QEMU_BOOT_OK missing" downstream.
-            OVMF_CODE=$(find /usr/share/OVMF \( -name 'OVMF_CODE.fd' -o -name 'OVMF_CODE_4M.fd' -o -name 'OVMF_CODE.4m.fd' \) -type f 2>/dev/null | head -n1)
-            OVMF_VARS=$(find /usr/share/OVMF \( -name 'OVMF_VARS.fd' -o -name 'OVMF_VARS_4M.fd' -o -name 'OVMF_VARS.4m.fd' \) -type f 2>/dev/null | head -n1)
-            if [[ -z "$OVMF_CODE" || -z "$OVMF_VARS" ]]; then
-              echo "::error::OVMF pflash blobs not found under /usr/share/OVMF"
-              echo "Expected one of: OVMF_CODE.fd / OVMF_CODE_4M.fd / OVMF_CODE.4m.fd"
-              echo "Audit fix R4 explicit apt install should have provided these; investigate the runner image."
-              exit 1
-            fi
-            echo "OVMF_CODE=$OVMF_CODE"
-            echo "OVMF_VARS=$OVMF_VARS"
+            OVMF_VARS_COPY=$(mktemp)
+            trap 'rm -f "$SERIAL_LOG" "$OVMF_VARS_COPY"' EXIT
+            cp "$OVMF_VARS" "$OVMF_VARS_COPY"
+            chmod u+w "$OVMF_VARS_COPY"
             # Mirror src/main.rs QEMU arguments: OVMF pflash, virtio-blk disk,
             # cdrom ISO, 1 GiB RAM, 2 vCPUs (matches the audit's reproducing run).
             # -no-reboot: panic/halt exits QEMU cleanly rather than spinning.
@@ -407,7 +414,7 @@ jobs:
             # -nographic keeps a graphics device attached (matches the runner).
             timeout 90s qemu-system-x86_64 \
               -drive "if=pflash,unit=0,format=raw,file=$OVMF_CODE,readonly=on" \
-              -drive "if=pflash,unit=1,format=raw,file=$OVMF_VARS" \
+              -drive "if=pflash,unit=1,format=raw,file=$OVMF_VARS_COPY" \
               -cdrom "$ISO_PATH" \
               -drive "id=virtio-disk0,file=$DISK_PATH,format=raw,if=none" \
               -device virtio-blk-pci,drive=virtio-disk0 \

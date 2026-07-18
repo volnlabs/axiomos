@@ -42,11 +42,18 @@ fn qemu_command(args: &Args) -> std::process::Command {
     let mut cmd = std::process::Command::new("qemu-system-x86_64");
     cmd.current_dir(env!("CARGO_MANIFEST_DIR"));
 
-    let monitor_port =
-        std::env::var("AXIOMOS_QEMU_MONITOR_PORT").unwrap_or_else(|_| "45454".to_owned());
     cmd.arg("-serial").arg("stdio");
-    cmd.arg("-monitor")
-        .arg(format!("telnet::{monitor_port},server,nowait"));
+    if std::env::var_os("AXIOMOS_QEMU_DISABLE_MONITOR").is_some() {
+        cmd.arg("-monitor").arg("none");
+    } else {
+        let monitor_port =
+            std::env::var("AXIOMOS_QEMU_MONITOR_PORT").unwrap_or_else(|_| "45454".to_owned());
+        cmd.arg("-monitor")
+            .arg(format!("telnet::{monitor_port},server,nowait"));
+    }
+    if let Some(name) = std::env::var_os("AXIOMOS_QEMU_AUDIT_NAME") {
+        cmd.arg("-name").arg(name);
+    }
     cmd.arg("-s");
 
     if args.debug {
