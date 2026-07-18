@@ -31,8 +31,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install pinned nightly toolchain
-        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-02
           components: rust-src
 
       - name: Install cargo-fuzz
@@ -59,8 +60,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install pinned nightly toolchain
-        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-02
           components: rust-src
 
       - name: Install cargo-fuzz
@@ -99,8 +101,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install pinned nightly toolchain
-        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-02
           components: rust-src
 
       - name: Install cargo-fuzz
@@ -143,8 +146,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install pinned nightly toolchain
-        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-02
           components: rust-src
 
       - name: Install cargo-fuzz
@@ -187,8 +191,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install pinned nightly toolchain
-        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-02
           components: rust-src
 
       - name: Install cargo-fuzz
@@ -231,8 +236,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install pinned nightly toolchain
-        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-02
           components: rust-src
 
       - name: Install cargo-fuzz
@@ -259,8 +265,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install pinned nightly toolchain
-        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-02
           components: rust-src
 
       - name: Install cargo-fuzz

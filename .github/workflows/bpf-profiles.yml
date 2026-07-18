@@ -1,7 +1,8 @@
 name: BPF Profile Tests
 
-# H-06 / PR #1: pinned every job to dtolnay/rust-toolchain@nightly-2026-07-02
-# (the channel declared in rust-toolchain.toml). Previously this workflow
+# H-06 / PR #1: pinned every job to nightly-2026-07-02 through
+# dtolnay/rust-toolchain@master (the channel declared in rust-toolchain.toml).
+# Previously this workflow
 # installed stable, but stable Cargo cannot parse the root workspace's
 # `artifact = "bin"` (requires nightly -Z bindeps), so every job in this
 # workflow was guaranteed-red. Until that fix this workflow is the audit's
@@ -30,8 +31,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install pinned nightly
-        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-02
           components: rustfmt, clippy, rust-src
 
       - name: Cache cargo registry
@@ -59,8 +61,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install pinned nightly
-        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-02
           components: rustfmt, clippy, rust-src
 
       - name: Cache cargo registry
@@ -88,7 +91,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install pinned nightly
-        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-02
 
       - name: Verify both profiles fail to compile together
         run: |
@@ -116,8 +121,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install pinned nightly
-        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-02
           components: rust-src
 
       - name: Run semantic tests with cloud-profile
@@ -133,8 +139,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install pinned nightly
-        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-02
           components: rustfmt
 
       - name: Check formatting

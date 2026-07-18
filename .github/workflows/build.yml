@@ -1,8 +1,9 @@
 name: Rust
 
 # H-06 / PR #1 fixes in this workflow:
-#   * Toolchain pinning: every job uses dtolnay/rust-toolchain@nightly-2026-07-02,
-#     the same channel declared in rust-toolchain.toml. The previous "nightly"
+#   * Toolchain pinning: every job installs nightly-2026-07-02 through
+#     dtolnay/rust-toolchain@master, the same channel declared in
+#     rust-toolchain.toml. The previous "nightly"
 #     and "stable" pins floated; stable in particular could not parse the
 #     workspace's `artifact = "bin"` (requires nightly -Z bindeps).
 #   * Standalone-workspace coverage: every Cargo workspace not in the root
@@ -52,8 +53,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned nightly
-        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-02
           components: rustfmt, clippy, llvm-tools-preview, rust-src
       - name: Add build target
         run: |
@@ -95,8 +97,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned nightly
-        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-02
           components: rustfmt, clippy
       - name: Add standalone non-host targets
         run: |
@@ -153,7 +156,9 @@ jobs:
       steps:
         - uses: actions/checkout@v4
         - name: Install pinned nightly
-          uses: dtolnay/rust-toolchain@nightly-2026-07-02
+          uses: dtolnay/rust-toolchain@master
+          with:
+            toolchain: nightly-2026-07-02
         - name: Install dependencies
           run: |
             sudo apt update
@@ -184,8 +189,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned nightly
-        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-02
           targets: thumbv6m-none-eabi
       - name: Add RP2040 target
         run: rustup target add thumbv6m-none-eabi
@@ -204,8 +210,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned nightly
-        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-02
           targets: thumbv6m-none-eabi
       - name: Check RP2040 firmware (debug)
         run: |
@@ -236,8 +243,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned nightly
-        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-02
           components: miri, rust-src
       - name: Miri Setup
         run: |
@@ -262,8 +270,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned nightly
-        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-02
           components: miri, rust-src
       - name: Miri Setup
         run: |
@@ -285,8 +294,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned nightly
-        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-02
           targets: x86_64-unknown-none, aarch64-unknown-none
       - name: Add build targets
         run: |
@@ -325,8 +335,9 @@ jobs:
       steps:
         - uses: actions/checkout@v4
         - name: Install pinned nightly
-          uses: dtolnay/rust-toolchain@nightly-2026-07-02
+          uses: dtolnay/rust-toolchain@master
           with:
+            toolchain: nightly-2026-07-02
             targets: x86_64-unknown-none
         - name: Add build target
           run: rustup target add x86_64-unknown-none
