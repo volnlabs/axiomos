@@ -255,9 +255,30 @@ impl<T: AllocationType> LowerHalfAllocation<T> {
                 }
                 return None;
             };
-            let frame = crate::arch::types::PhysFrame::<Size4KiB>::containing_address(phys);
-            PhysicalMemory::retain_frame(frame);
-            shared_frames.push(frame);
+            let source_frame = crate::arch::types::PhysFrame::<Size4KiB>::containing_address(phys);
+            let fork_frame = if T::fork_copies_frames() {
+                let Some(frame) = PhysicalMemory::allocate_frame::<Size4KiB>() else {
+                    for frame in shared_frames {
+                        PhysicalMemory::deallocate_frame(frame);
+                    }
+                    return None;
+                };
+                // SAFETY: Both frames are allocated 4 KiB frames available via
+                // the kernel direct map, and `frame` is exclusively owned here.
+                unsafe {
+                    let src =
+                        crate::mem::phys_to_virt(source_frame.start_address().as_u64() as usize)
+                            as *const u8;
+                    let dst = crate::mem::phys_to_virt(frame.start_address().as_u64() as usize)
+                        as *mut u8;
+                    core::ptr::copy_nonoverlapping(src, dst, Size4KiB::SIZE as usize);
+                }
+                frame
+            } else {
+                PhysicalMemory::retain_frame(source_frame);
+                source_frame
+            };
+            shared_frames.push(fork_frame);
         }
 
         if T::fork_requires_cow() {
@@ -315,6 +336,10 @@ pub trait AllocationFlags {
         false
     }
 
+    fn fork_copies_frames() -> bool {
+        false
+    }
+
     fn fork_mapping_flags() -> PageTableFlags {
         Self::flags() | PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE
     }
@@ -327,6 +352,10 @@ impl AllocationFlags for Writable {
 
     fn fork_requires_cow() -> bool {
         cfg!(target_arch = "aarch64")
+    }
+
+    fn fork_copies_frames() -> bool {
+        cfg!(target_arch = "x86_64")
     }
 
     fn fork_mapping_flags() -> PageTableFlags {

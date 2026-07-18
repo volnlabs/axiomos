@@ -239,7 +239,15 @@ pub extern "C" fn handle_sync_exception(ctx: &mut ExceptionContext) {
             if !INSTR_ABORT_MARKER_SENT.swap(true, Ordering::Relaxed) {
                 dbg_mark(b'I' as u32);
             }
-            panic!("Instruction abort at {:#x}, far: {:#x}", elr, far);
+            if ec == 0x20 {
+                crate::mcore::mtask::exception::UserExceptionResult::Kill {
+                    status: 139,
+                    reason: "AArch64 lower-EL instruction abort",
+                }
+                .apply();
+            } else {
+                panic!("Instruction abort at {:#x}, far: {:#x}", elr, far);
+            }
         }
         0x24 | 0x25 => {
             // Data abort from lower/same EL
@@ -247,9 +255,17 @@ pub extern "C" fn handle_sync_exception(ctx: &mut ExceptionContext) {
             if !DATA_ABORT_MARKER_SENT.swap(true, Ordering::Relaxed) {
                 dbg_mark(b'D' as u32);
             }
-            handle_data_abort(elr, far, iss);
+            handle_data_abort(elr, far, iss, ec == 0x24).apply();
         }
         _ => {
+            if ctx.spsr & 0b1111 == 0 {
+                crate::mcore::mtask::exception::UserExceptionResult::Kill {
+                    status: 132,
+                    reason: "AArch64 unhandled lower-EL synchronous exception",
+                }
+                .apply();
+                return;
+            }
             #[cfg(feature = "rpi5")]
             {
                 // Unhandled sync exception class: emit Y + two hex digits of EC.
@@ -423,7 +439,13 @@ fn try_handle_copy_on_write_fault(far: u64, is_write: bool) -> Result<bool, &'st
     Ok(true)
 }
 
-fn handle_data_abort(elr: u64, far: u64, iss: u64) {
+fn handle_data_abort(
+    elr: u64,
+    far: u64,
+    iss: u64,
+    from_lower_el: bool,
+) -> crate::mcore::mtask::exception::UserExceptionResult {
+    use crate::mcore::mtask::exception::UserExceptionResult;
     let is_write = (iss & (1 << 6)) != 0; // WnR bit
     let _is_cm = (iss & (1 << 8)) != 0; // Cache maintenance
     let _is_s1ptw = (iss & (1 << 7)) != 0; // Stage 1 page table walk
@@ -456,82 +478,72 @@ fn handle_data_abort(elr: u64, far: u64, iss: u64) {
 
     match fault_code {
         Some(code) if code.is_translation_fault() => {
-            // Page not mapped - this is a page fault
-            if is_kernel_addr {
-                // Kernel page fault - this is fatal
-                panic!(
-                    "Kernel page fault at PC={:#x}, address={:#x}, write={}",
-                    elr, far, is_write
-                );
+            if is_kernel_addr || !from_lower_el {
+                UserExceptionResult::KernelBug {
+                    reason: "AArch64 kernel translation fault",
+                }
             } else {
-                // User page fault - could be demand paging
-                // For now, just panic as we don't have userspace yet
-                panic!(
-                    "User page fault at PC={:#x}, address={:#x}, write={}",
-                    elr, far, is_write
-                );
-
-                // TODO: Implement demand paging
-                // 1. Check if address is in valid VMA
-                // 2. Allocate physical page
-                // 3. Map page with appropriate permissions
-                // 4. Return to faulting instruction
+                UserExceptionResult::Kill {
+                    status: 139,
+                    reason: "AArch64 lower-EL translation fault",
+                }
             }
         }
         Some(code) if code.is_permission_fault() => {
-            // Permission denied
-            if is_kernel_addr {
-                panic!(
-                    "Kernel permission fault at PC={:#x}, address={:#x}, write={}",
-                    elr, far, is_write
-                );
+            if is_kernel_addr || !from_lower_el {
+                UserExceptionResult::KernelBug {
+                    reason: "AArch64 kernel permission fault",
+                }
             } else {
                 match try_handle_copy_on_write_fault(far, is_write) {
-                    Ok(true) => return,
+                    Ok(true) => return UserExceptionResult::ResolveAndRetry,
                     Ok(false) => {}
                     Err(err) => {
                         log::error!("copy-on-write fault handling failed: {}", err);
                     }
                 }
 
-                // Could be copy-on-write
-                panic!(
-                    "User permission fault at PC={:#x}, address={:#x}, write={}",
-                    elr, far, is_write
-                );
-
-                // TODO: Implement COW
-                // 1. Check if this is a COW page
-                // 2. If COW and write, copy page and remap as writable
-                // 3. Otherwise, send SIGSEGV to process
+                UserExceptionResult::Kill {
+                    status: 139,
+                    reason: "AArch64 lower-EL permission fault",
+                }
             }
         }
-        Some(DataFaultCode::AlignmentFault) => {
-            panic!("Alignment fault at PC={:#x}, address={:#x}", elr, far);
-        }
-        Some(DataFaultCode::SyncExternalAbort) => {
-            panic!(
-                "Synchronous External Abort at PC={:#x}, address={:#x}",
-                elr, far
-            );
+        Some(DataFaultCode::AlignmentFault | DataFaultCode::SyncExternalAbort) if from_lower_el => {
+            UserExceptionResult::Kill {
+                status: 135,
+                reason: "AArch64 lower-EL bus fault",
+            }
         }
         Some(code) => {
-            // Access flag faults - need to set AF bit
-            log::warn!(
-                "Access flag fault {:?} at PC={:#x}, address={:#x}",
+            log::error!(
+                "unresolved AArch64 data abort {:?} at PC={:#x}, address={:#x}",
                 code,
                 elr,
                 far
             );
-            // For now, panic
-            panic!("Access flag fault not yet handled");
+            UserExceptionResult::KernelBug {
+                reason: "unresolved AArch64 kernel data abort",
+            }
         }
         None => {
             let dfsc = iss & 0x3F;
-            panic!(
-                "Unknown data abort: PC={:#x}, address={:#x}, DFSC={:#x}",
-                elr, far, dfsc
+            log::error!(
+                "unknown AArch64 data abort: PC={:#x}, address={:#x}, DFSC={:#x}",
+                elr,
+                far,
+                dfsc
             );
+            if from_lower_el {
+                UserExceptionResult::Kill {
+                    status: 139,
+                    reason: "unknown AArch64 lower-EL data abort",
+                }
+            } else {
+                UserExceptionResult::KernelBug {
+                    reason: "unknown AArch64 kernel data abort",
+                }
+            }
         }
     }
 }

@@ -84,14 +84,56 @@ pub fn sys_execve(
 
     let path = AbsolutePath::try_new(&path_str).map_err(|_| EINVAL)?;
 
-    let exec_result = execution_context.with_current_task(|current_task| {
-        current_task
-            .process()
-            .execve(current_task, path, &argv, &envp)
+    let process = execution_context.current_process();
+    let file_content = process.prepare_execve(path).map_err(|e| {
+        log::error!("sys_execve preflight failed: {e}");
+        ENOENT
+    })?;
+
+    let (old_ustack, old_tls, old_fx_area) = execution_context.with_current_task(|current_task| {
+        (
+            current_task.ustack().write().take(),
+            current_task.tls().write().take(),
+            current_task.fx_area().write().take(),
+        )
     });
+    // Dropping these allocations can unmap pages and issue TLB shootdowns; do
+    // it after the scheduler borrow has ended.
+    drop((old_ustack, old_tls, old_fx_area));
+
+    let exec_result = process.execve(file_content, &argv, &envp);
     match exec_result {
-        Ok((entry_point, sp)) => {
-            apply_exec_context(ctx, entry_point, sp);
+        Ok(image) => {
+            let crate::mcore::mtask::process::ExecImage {
+                entry_point,
+                stack_pointer,
+                tls,
+                user_stack,
+            } = image;
+            let tls_start = tls.as_ref().map(|allocation| allocation.start());
+            execution_context.with_current_task(|current_task| {
+                assert!(
+                    alloc::sync::Arc::ptr_eq(current_task.process(), &process),
+                    "exec task changed process while image replacement was in progress"
+                );
+                *current_task.tls().write() = tls;
+                *current_task.ustack().write() = Some(user_stack);
+            });
+
+            #[cfg(target_arch = "x86_64")]
+            if let Some(start) = tls_start {
+                x86_64::registers::model_specific::FsBase::write(start);
+            }
+            #[cfg(target_arch = "aarch64")]
+            if let Some(start) = tls_start {
+                // SAFETY: The installed TLS allocation remains owned by the
+                // current task and is valid for userspace access.
+                unsafe {
+                    core::arch::asm!("msr tpidr_el0, {}", in(reg) start.as_u64());
+                }
+            }
+
+            apply_exec_context(ctx, entry_point, stack_pointer);
             Ok(0)
         }
         Err(e) => {

@@ -92,6 +92,20 @@ unsafe impl Linked<Links<Self>> for Task {
 }
 
 impl Task {
+    pub(crate) fn terminate_current(status: i32, reason: &'static str) -> ! {
+        let context = ExecutionContext::load();
+        context.with_current_task(|task| {
+            log::error!(
+                "terminating process '{}' task '{}' after {reason}",
+                task.process().name(),
+                task.name()
+            );
+            *task.process().exit_code().write() = Some(status);
+        });
+        Self::exit();
+        unreachable!("Task::exit must not return")
+    }
+
     /// Creates a new stack in the specified process. Stack will be allocated immediately in the
     /// current address space.
     ///
@@ -153,7 +167,8 @@ impl Task {
     }
 
     pub(crate) extern "C" fn exit() {
-        ExecutionContext::load().with_current_task(|task| {
+        let context = ExecutionContext::load();
+        context.with_current_task(|task| {
             trace!("exiting task {}", task.name());
 
             // Known entry/trampoline call sites do not hold these task-local locks,
@@ -164,15 +179,16 @@ impl Task {
             task.set_should_terminate(true);
         });
 
-        // AArch64 switches away immediately once the task is marked dead.
-        #[cfg(all(target_arch = "aarch64", feature = "aarch64_arch"))]
+        #[cfg(target_arch = "aarch64")]
         {
             use crate::arch::traits::Architecture;
             crate::arch::aarch64::Aarch64::disable_interrupts();
-            unsafe {
-                ExecutionContext::load().reschedule();
-            }
         }
+
+        // SAFETY: The task is marked dead and task-local allocation guards were
+        // dropped before scheduler-owned cleanup takes over.
+        unsafe { context.reschedule() };
+
         loop {
             #[cfg(target_arch = "x86_64")]
             // The timer interrupt performs the eventual scheduler switch.
