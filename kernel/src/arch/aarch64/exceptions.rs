@@ -164,7 +164,7 @@ pub extern "C" fn check_preemption(_frame: *mut ExceptionContext) {
             // SAFETY: We are in the exception return path, interrupts are disabled.
             // It is safe to call reschedule here as we haven't started restoring registers yet.
             unsafe {
-                ctx.scheduler_mut().reschedule();
+                ctx.reschedule();
             }
         }
     }
@@ -271,7 +271,7 @@ pub extern "C" fn handle_sync_exception(ctx: &mut ExceptionContext) {
                 dbg_hex_u64(current_ttbr0_el1());
 
                 if let Some(ctx) = crate::arch::aarch64::cpu::try_current() {
-                    let pid = ctx.current_task().process().pid().as_u64();
+                    let pid = ctx.with_current_task(|task| task.process().pid().as_u64());
                     dbg_mark(b'Q' as u32);
                     dbg_hex_u64(pid);
                 }

@@ -95,7 +95,7 @@ pub fn handle_timer_interrupt() {
         // SAFETY: We are in an interrupt context and need to trigger a reschedule.
         // We verified the context exists.
         unsafe {
-            ctx.scheduler_mut().reschedule();
+            ctx.reschedule();
         }
     }
 }

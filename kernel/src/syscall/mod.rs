@@ -123,15 +123,15 @@ pub fn dispatch_syscall(
         kernel_abi::SYS_EXIT => {
             let status = i32::try_from(arg1).unwrap_or(0);
             let ctx = crate::mcore::context::ExecutionContext::load();
-            let task = ctx.current_task();
-            let process = task.process();
-            *process.exit_code().write() = Some(status);
-            task.set_should_terminate(true);
+            ctx.with_current_task(|task| {
+                *task.process().exit_code().write() = Some(status);
+                task.set_should_terminate(true);
+            });
             // SAFETY: Interrupts are disabled during syscall handling (PSTATE.DAIF masked on
             // exception entry). reschedule() context-switches away; since should_terminate is
             // set, this task will be cleaned up and never re-enqueued.
             unsafe {
-                ctx.scheduler_mut().reschedule();
+                ctx.reschedule();
             }
             loop {
                 hlt();
@@ -161,12 +161,12 @@ pub fn dispatch_syscall(
             // Abort the process (equivalent to exit(134) - SIGABRT)
             let status = 134;
             let ctx = crate::mcore::context::ExecutionContext::load();
-            let task = ctx.current_task();
-            let process = task.process();
-            *process.exit_code().write() = Some(status);
-            task.set_should_terminate(true);
+            ctx.with_current_task(|task| {
+                *task.process().exit_code().write() = Some(status);
+                task.set_should_terminate(true);
+            });
             unsafe {
-                ctx.scheduler_mut().reschedule();
+                ctx.reschedule();
             }
             loop {
                 hlt();
@@ -652,7 +652,7 @@ fn dispatch_sys_spawn(path_ptr: usize, path_len: usize) -> Result<usize, Errno> 
     let parent = crate::mcore::context::ExecutionContext::load().current_process();
 
     // Process::create_from_executable handles task creation and enqueuing
-    let child_proc = match Process::create_from_executable(parent, abs_path) {
+    let child_proc = match Process::create_from_executable(&parent, abs_path) {
         Ok(p) => p,
         Err(CreateProcessError::StackAllocationError(StackAllocationError::OutOfVirtualMemory)) => {
             #[cfg(feature = "rpi5")]

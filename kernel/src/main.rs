@@ -196,7 +196,7 @@ unsafe extern "C" fn main() -> ! {
         // SAFETY: We are in kernel context and intentionally forcing one scheduler pass
         // to validate runnable task handoff.
         unsafe {
-            ctx.scheduler_mut().reschedule();
+            ctx.reschedule();
         }
         kernel::arch::aarch64::Aarch64::enable_interrupts();
         dbg_mark(0x59); // 'Y'

@@ -215,12 +215,13 @@ fn terminate_current_task_on_user_exception(exception: &str, stack_frame: &Inter
     let Some(ctx) = ExecutionContext::try_load() else {
         return;
     };
-    let task = ctx.current_task();
-    error!(
-        "{exception} from user mode in process '{}' task '{}', terminating...\n{stack_frame:#?}",
-        task.process().name(),
-        task.name(),
-    );
+    ctx.with_current_task(|task| {
+        error!(
+            "{exception} from user mode in process '{}' task '{}', terminating...\n{stack_frame:#?}",
+            task.process().name(),
+            task.name(),
+        );
+    });
     Task::exit();
 }
 
@@ -298,7 +299,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     // SAFETY: Rescheduling is safe here as we are in an interrupt handler
     // and the scheduler handles context switching.
     unsafe {
-        ctx.scheduler_mut().reschedule();
+        ctx.reschedule();
     }
 }
 
@@ -351,21 +352,22 @@ extern "x86-interrupt" fn page_fault_handler(
     // kernel-stack guard fault as a kernel panic, never as userspace teardown.
     if let Some(addr) = accessed_address {
         if let Some(ctx) = ExecutionContext::try_load() {
-            let task = ctx.current_task();
-            task.process().telemetry().page_faults.fetch_add(1, Relaxed);
+            ctx.with_current_task(|task| {
+                task.process().telemetry().page_faults.fetch_add(1, Relaxed);
 
-            if !exception_from_user_mode(&stack_frame)
-                && task
-                    .kstack()
-                    .as_ref()
-                    .is_some_and(|stack| stack.guard_page().contains(addr))
-            {
-                panic!(
-                    "KERNEL STACK OVERFLOW DETECTED in process '{}' task '{}':\n{stack_frame:#?}",
-                    task.process().name(),
-                    task.name(),
-                );
-            }
+                if !exception_from_user_mode(&stack_frame)
+                    && task
+                        .kstack()
+                        .as_ref()
+                        .is_some_and(|stack| stack.guard_page().contains(addr))
+                {
+                    panic!(
+                        "KERNEL STACK OVERFLOW DETECTED in process '{}' task '{}':\n{stack_frame:#?}",
+                        task.process().name(),
+                        task.name(),
+                    );
+                }
+            });
         }
     }
 
@@ -411,42 +413,40 @@ extern "x86-interrupt" fn debug_handler(stack_frame: InterruptStackFrame) {
 
 extern "x86-interrupt" fn device_not_available_handler(_stack_frame: InterruptStackFrame) {
     let cx = ExecutionContext::load();
-    let current_task = cx.current_task();
+    cx.with_current_task(|current_task| {
+        let mut guard = current_task.fx_area().write();
+        let (fresh, fx_area) = if let Some(fx_area) = &*guard {
+            (false, fx_area)
+        } else {
+            let mut memapi = LowerHalfMemoryApi::new(current_task.process().clone());
+            let fx_area = memapi
+                .allocate(
+                    Location::Anywhere,
+                    Layout::new::<FxArea>(),
+                    UserAccessible::Yes,
+                    Guarded::No,
+                )
+                .expect("should be able to allocate fx area");
 
-    let mut guard = current_task.fx_area().write();
-    let (fresh, fx_area) = if let Some(fx_area) = &*guard {
-        (false, fx_area)
-    } else {
-        let process = current_task.process();
-        let mut memapi = LowerHalfMemoryApi::new(process.clone());
-        let fx_area = memapi
-            .allocate(
-                Location::Anywhere,
-                Layout::new::<FxArea>(),
-                UserAccessible::Yes,
-                Guarded::No,
-            )
-            .expect("should be able to allocate fx area");
+            (true, guard.insert(fx_area) as &_)
+        };
 
-        (true, guard.insert(fx_area) as &_)
-    };
+        let fx_area_ptr = fx_area.start().as_mut_ptr::<u8>();
+        drop(guard);
 
-    let fx_area_ptr = fx_area.start().as_mut_ptr::<u8>();
-    drop(guard); // _fxrstor could trigger #NM again, so we must drop the guard before calling it
+        // SAFETY: Clearing the Task Switched flag in CR0.
+        unsafe { asm!("clts") };
 
-    // SAFETY: Clearing the Task Switched flag in CR0.
-    unsafe { asm!("clts") };
-
-    // saving is done every time we switch tasks, so we can only restore it here
-    if fresh {
-        // SAFETY: Initializing FPU and saving state.
-        unsafe {
-            asm!("finit");
-            _fxsave(fx_area_ptr);
+        if fresh {
+            // SAFETY: Initializing FPU and saving state.
+            unsafe {
+                asm!("finit");
+                _fxsave(fx_area_ptr);
+            }
         }
-    }
-    // SAFETY: Restoring FPU state.
-    unsafe { _fxrstor(fx_area_ptr) };
+        // SAFETY: Restoring state after the task-local save area is initialized.
+        unsafe { _fxrstor(fx_area_ptr) };
+    });
 }
 
 /// Notifies the LAPIC that the interrupt has been handled.

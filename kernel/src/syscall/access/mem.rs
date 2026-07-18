@@ -13,7 +13,7 @@ use crate::mem::virt::{OwnedSegment, VirtualMemoryAllocator};
 use crate::syscall::access::{KernelAccess, KernelMemoryRegionHandle};
 use crate::UsizeExt;
 
-impl MemoryAccess for KernelAccess<'_> {
+impl MemoryAccess for KernelAccess {
     type Mapping = KernelMapping;
 
     fn create_mapping(

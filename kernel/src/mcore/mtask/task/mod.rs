@@ -153,15 +153,16 @@ impl Task {
     }
 
     pub(crate) extern "C" fn exit() {
-        let task = ExecutionContext::load().current_task();
-        trace!("exiting task {}", task.name());
+        ExecutionContext::load().with_current_task(|task| {
+            trace!("exiting task {}", task.name());
 
-        // Known entry/trampoline call sites do not hold these task-local locks,
-        // so normal lock acquisition is the sound teardown.
-        let _ = task.fx_area.write().take();
-        let _ = task.tls.write().take();
-        let _ = task.ustack.write().take();
-        task.set_should_terminate(true);
+            // Known entry/trampoline call sites do not hold these task-local locks,
+            // so normal lock acquisition is the sound teardown.
+            let _ = task.fx_area.write().take();
+            let _ = task.tls.write().take();
+            let _ = task.ustack.write().take();
+            task.set_should_terminate(true);
+        });
 
         // AArch64 switches away immediately once the task is marked dead.
         #[cfg(all(target_arch = "aarch64", feature = "aarch64_arch"))]
@@ -169,7 +170,7 @@ impl Task {
             use crate::arch::traits::Architecture;
             crate::arch::aarch64::Aarch64::disable_interrupts();
             unsafe {
-                ExecutionContext::load().scheduler_mut().reschedule();
+                ExecutionContext::load().reschedule();
             }
         }
         loop {

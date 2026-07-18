@@ -9,8 +9,6 @@ use crate::syscall::validation::{
 
 pub fn sys_fork(ctx: &UserContext) -> Result<usize, Errno> {
     let execution_context = ExecutionContext::load();
-    let current_task = execution_context.current_task();
-    let current_process = current_task.process();
 
     // We need to create a copy of the UserContext for the child.
     // The child needs to return 0 from fork.
@@ -25,15 +23,50 @@ pub fn sys_fork(ctx: &UserContext) -> Result<usize, Errno> {
         child_ctx.inner.x0 = 0;
     }
 
-    match current_process.fork(current_task, &child_ctx) {
-        Ok(child_process) => {
-            use crate::U64Ext;
-            Ok(child_process.pid().as_u64().into_usize())
+    execution_context.with_current_task(|current_task| {
+        match current_task.process().fork(current_task, &child_ctx) {
+            Ok(child_process) => {
+                use crate::U64Ext;
+                Ok(child_process.pid().as_u64().into_usize())
+            }
+            Err(e) => {
+                log::error!("sys_fork failed: {}", e);
+                Err(ENOMEM)
+            }
         }
-        Err(e) => {
-            log::error!("sys_fork failed: {}", e);
-            Err(ENOMEM)
-        }
+    })
+}
+
+fn apply_exec_context(ctx: &mut UserContext, entry_point: usize, sp: usize) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        ctx.frame.instruction_pointer = crate::arch::VirtAddr::new(entry_point as u64);
+        ctx.frame.stack_pointer = crate::arch::VirtAddr::new(sp as u64);
+        ctx.regs.rdi = 0;
+        ctx.regs.rsi = 0;
+        ctx.regs.rdx = 0;
+        ctx.regs.rax = 0;
+        ctx.regs.rbx = 0;
+        ctx.regs.rcx = 0;
+        ctx.regs.r8 = 0;
+        ctx.regs.r9 = 0;
+        ctx.regs.r10 = 0;
+        ctx.regs.r11 = 0;
+        ctx.regs.r12 = 0;
+        ctx.regs.r13 = 0;
+        ctx.regs.r14 = 0;
+        ctx.regs.r15 = 0;
+        ctx.regs.rbp = 0;
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        ctx.inner.elr = entry_point as u64;
+        ctx.sp = sp as u64;
+        ctx.inner.sp_el0 = sp as u64;
+        ctx.inner.x0 = 0;
+        ctx.inner.x1 = 0;
+        ctx.inner.x2 = 0;
     }
 }
 
@@ -44,8 +77,6 @@ pub fn sys_execve(
     envp_ptr: usize,
 ) -> Result<usize, Errno> {
     let execution_context = ExecutionContext::load();
-    let current_task = execution_context.current_task();
-    let current_process = current_task.process();
 
     let path_str = read_userspace_string(path_ptr, 4096)?;
     let argv = read_userspace_string_array(argv_ptr, 1024, 4096)?;
@@ -53,42 +84,14 @@ pub fn sys_execve(
 
     let path = AbsolutePath::try_new(&path_str).map_err(|_| EINVAL)?;
 
-    match current_process.execve(current_task, path, &argv, &envp) {
+    let exec_result = execution_context.with_current_task(|current_task| {
+        current_task
+            .process()
+            .execve(current_task, path, &argv, &envp)
+    });
+    match exec_result {
         Ok((entry_point, sp)) => {
-            #[cfg(target_arch = "x86_64")]
-            {
-                ctx.frame.instruction_pointer = crate::arch::VirtAddr::new(entry_point as u64);
-                ctx.frame.stack_pointer = crate::arch::VirtAddr::new(sp as u64);
-                // We should ensure RFLAGS is clean (interrupts enabled, etc)
-                // execve clears most registers
-                ctx.regs.rdi = 0; // argc (TODO: pass argc/argv)
-                ctx.regs.rsi = 0; // argv
-                ctx.regs.rdx = 0; // envp
-                ctx.regs.rax = 0;
-                ctx.regs.rbx = 0;
-                ctx.regs.rcx = 0;
-                ctx.regs.r8 = 0;
-                ctx.regs.r9 = 0;
-                ctx.regs.r10 = 0;
-                ctx.regs.r11 = 0;
-                ctx.regs.r12 = 0;
-                ctx.regs.r13 = 0;
-                ctx.regs.r14 = 0;
-                ctx.regs.r15 = 0;
-                ctx.regs.rbp = 0;
-            }
-
-            #[cfg(target_arch = "aarch64")]
-            {
-                ctx.inner.elr = entry_point as u64;
-                ctx.sp = sp as u64;
-                ctx.inner.sp_el0 = sp as u64;
-                ctx.inner.x0 = 0; // argc
-                ctx.inner.x1 = 0; // argv
-                ctx.inner.x2 = 0; // envp
-                                  // Clear other registers...
-            }
-
+            apply_exec_context(ctx, entry_point, sp);
             Ok(0)
         }
         Err(e) => {
@@ -164,9 +167,7 @@ pub fn sys_waitpid(pid: isize, status_ptr: usize, options: usize) -> Result<usiz
         // SAFETY: Interrupts are disabled during syscall handling. Reschedule
         // switches to another task; when we're rescheduled, we re-check the child.
         unsafe {
-            crate::mcore::context::ExecutionContext::load()
-                .scheduler_mut()
-                .reschedule();
+            crate::mcore::context::ExecutionContext::load().reschedule();
         }
     }
 }

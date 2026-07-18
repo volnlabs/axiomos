@@ -13,29 +13,22 @@ use crate::file::{vfs, OpenFileDescription};
 use crate::mcore::context::ExecutionContext;
 use crate::mcore::mtask::process::fd::{FdNum, FileDescriptor, FileDescriptorFlags};
 use crate::mcore::mtask::process::Process;
-use crate::mcore::mtask::task::Task;
 use crate::U64Ext;
 
 mod mem;
 
-pub struct KernelAccess<'a> {
-    _task: &'a Task,
+pub struct KernelAccess {
     process: Arc<Process>,
 }
 
-impl<'a> KernelAccess<'a> {
+impl KernelAccess {
     pub fn new() -> Self {
-        let task = ExecutionContext::load().current_task();
-        let process = task.process().clone(); // TODO: can we remove the clone?
-
-        KernelAccess {
-            _task: task,
-            process,
-        }
+        let process = ExecutionContext::load().current_process();
+        KernelAccess { process }
     }
 }
 
-impl CwdAccess for KernelAccess<'_> {
+impl CwdAccess for KernelAccess {
     fn current_working_directory(&self) -> &RwLock<kernel_vfs::path::AbsoluteOwnedPath> {
         self.process.current_working_directory()
     }
@@ -57,7 +50,7 @@ pub struct FileInfo {
 
 impl kernel_syscall::access::FileInfo for FileInfo {}
 
-impl FileAccess for KernelAccess<'_> {
+impl FileAccess for KernelAccess {
     type FileInfo = FileInfo;
     type Fd = FdNum;
     type OpenError = ();
@@ -324,7 +317,7 @@ impl FileAccess for KernelAccess<'_> {
     }
 }
 
-impl StatAccess for KernelAccess<'_> {
+impl StatAccess for KernelAccess {
     type StatError = ();
 
     fn fstat(&self, fd: Self::Fd) -> Result<UserStat, Self::StatError> {
@@ -352,7 +345,7 @@ impl StatAccess for KernelAccess<'_> {
     }
 }
 
-impl kernel_syscall::access::MemoryRegionAccess for KernelAccess<'_> {
+impl kernel_syscall::access::MemoryRegionAccess for KernelAccess {
     type Region = KernelMemoryRegionHandle;
 
     fn create_and_track_mapping(

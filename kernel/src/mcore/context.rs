@@ -29,6 +29,53 @@ struct BpfCpuStack {
     in_use: AtomicBool,
 }
 
+struct SchedulerSlot {
+    value: UnsafeCell<Scheduler>,
+    borrowed: AtomicBool,
+}
+
+impl SchedulerSlot {
+    fn new(value: Scheduler) -> Self {
+        Self {
+            value: UnsafeCell::new(value),
+            borrowed: AtomicBool::new(false),
+        }
+    }
+
+    fn with<R>(&self, f: impl for<'scheduler> FnOnce(&'scheduler Scheduler) -> R) -> R {
+        self.with_mut(|scheduler| f(scheduler))
+    }
+
+    fn with_mut<R>(&self, f: impl for<'scheduler> FnOnce(&'scheduler mut Scheduler) -> R) -> R {
+        assert!(
+            self.borrowed
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok(),
+            "reentrant scheduler access"
+        );
+
+        struct Reset<'a>(&'a AtomicBool);
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let _reset = Reset(&self.borrowed);
+
+        // SAFETY: the atomic guard permits exactly one scoped borrow. The HRTB
+        // callback cannot return a reference tied to `scheduler` through `R`.
+        f(unsafe { &mut *self.value.get() })
+    }
+}
+
+impl fmt::Debug for SchedulerSlot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SchedulerSlot")
+            .field("borrowed", &self.borrowed.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
 impl BpfCpuStack {
     fn new() -> Self {
         Self {
@@ -90,7 +137,7 @@ pub struct ExecutionContext {
     #[cfg(target_arch = "x86_64")]
     tss: UnsafeCell<&'static mut TaskStateSegment>,
 
-    scheduler: UnsafeCell<Scheduler>,
+    scheduler: SchedulerSlot,
     current_pid: AtomicU64,
     bpf_stack: BpfCpuStack,
     #[cfg(target_arch = "aarch64")]
@@ -115,7 +162,7 @@ impl ExecutionContext {
             sel,
             _idt: idt,
             tss: UnsafeCell::new(tss),
-            scheduler: UnsafeCell::new(Scheduler::new_cpu_local()),
+            scheduler: SchedulerSlot::new(Scheduler::new_cpu_local()),
             current_pid: AtomicU64::new(0),
             bpf_stack: BpfCpuStack::new(),
         }
@@ -125,7 +172,7 @@ impl ExecutionContext {
     pub fn new(cpu_id: usize) -> Self {
         ExecutionContext {
             cpu_id,
-            scheduler: UnsafeCell::new(Scheduler::new_cpu_local()),
+            scheduler: SchedulerSlot::new(Scheduler::new_cpu_local()),
             current_pid: AtomicU64::new(0),
             bpf_stack: BpfCpuStack::new(),
             need_reschedule: core::sync::atomic::AtomicBool::new(false),
@@ -199,32 +246,24 @@ impl ExecutionContext {
         &self.sel
     }
 
-    /// Creates and returns a mutable reference to the scheduler.
+    /// Prepare a scheduler transition under an exclusive borrow, end that
+    /// borrow, and only then transfer control to the incoming task.
     ///
     /// # Safety
-    /// The caller must ensure that only one mutable reference
-    /// to the scheduler exists at any time.
-    #[allow(clippy::mut_from_ref)]
-    // SAFETY: The caller must ensure exclusivity.
-    pub unsafe fn scheduler_mut(&self) -> &mut Scheduler {
-        // SAFETY: The UnsafeCell access is guarded by the caller's guarantee of exclusivity.
-        unsafe { &mut *self.scheduler.get() }
-    }
+    /// The caller must ensure interrupts are disabled for the complete call.
+    pub unsafe fn reschedule(&self) {
+        let context_switch = {
+            self.scheduler.with_mut(|scheduler| {
+                // SAFETY: The caller guarantees interrupts remain disabled and
+                // SchedulerSlot provides the exclusive preparation borrow.
+                unsafe { scheduler.prepare_context_switch() }
+            })
+        };
 
-    pub fn scheduler(&self) -> &Scheduler {
-        // SAFETY: We are accessing the scheduler immutably.
-        // This is safe because everything in the context is cpu-local and we are not
-        // concurrently modifying it from this thread unless via scheduler_mut which requires unsafe.
-        unsafe {
-            // SAFETY: this is safe because either:
-            // * there is a mutable reference that is used for rescheduling, in which case we are
-            //   not currently executing this
-            // * there is no mutable reference, in which case we are safe because we're not modifying
-            // * someone else has a mutable reference, in which case he violates the safety contract
-            //   if this is executed
-            //
-            // The above is true because everything in the context is cpu-local.
-            &*self.scheduler.get()
+        if let Some(context_switch) = context_switch {
+            // SAFETY: The scheduler borrow ended above. Its pinned outgoing and
+            // incoming task storage remains owned by the scheduler.
+            unsafe { context_switch.execute() };
         }
     }
 
@@ -240,12 +279,47 @@ impl ExecutionContext {
         self.bpf_stack.with_mut(f)
     }
 
-    pub fn current_task(&self) -> &Task {
-        self.scheduler().current_task()
+    fn with_interrupts_masked<R>(&self, f: impl FnOnce() -> R) -> R {
+        #[cfg(target_arch = "x86_64")]
+        {
+            return x86_64::instructions::interrupts::without_interrupts(f);
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            let daif: u64;
+            // SAFETY: DAIF is CPU-local interrupt state. The guard restores the
+            // IRQ mask to its entry state after the scoped scheduler access.
+            unsafe {
+                core::arch::asm!("mrs {}, daif", out(reg) daif, options(nostack, preserves_flags));
+                core::arch::asm!("msr daifset, #2", options(nostack, preserves_flags));
+            }
+            struct RestoreIrq(bool);
+            impl Drop for RestoreIrq {
+                fn drop(&mut self) {
+                    if self.0 {
+                        // SAFETY: Restore IRQ delivery only when it was enabled
+                        // at entry; other DAIF mask bits remain unchanged.
+                        unsafe {
+                            core::arch::asm!("msr daifclr, #2", options(nostack, preserves_flags));
+                        }
+                    }
+                }
+            }
+            let _restore = RestoreIrq((daif & (1 << 7)) == 0);
+            return f();
+        }
+
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        f()
     }
 
-    pub fn current_process(&self) -> &Arc<Process> {
-        self.current_task().process()
+    pub fn with_current_task<R>(&self, f: impl for<'task> FnOnce(&'task Task) -> R) -> R {
+        self.with_interrupts_masked(|| self.scheduler.with(|scheduler| f(scheduler.current_task())))
+    }
+
+    pub fn current_process(&self) -> Arc<Process> {
+        self.with_current_task(|task| task.process().clone())
     }
 
     #[cfg(target_arch = "x86_64")]
