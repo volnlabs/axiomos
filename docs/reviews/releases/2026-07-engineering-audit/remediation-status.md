@@ -1,5 +1,27 @@
 # axiomos Engineering Audit
 
+## dev alpha update (2026-07-18)
+
+- **Current release branch:** `dev` at `846a1078e4cef298fcf465a9b110a62ec76162b6`.
+- **New source-level safety evidence:** `fdd5bf0` adds a portable,
+  combinational final-PWM e-stop/duty-limit gate and self-checking Icarus
+  testbench; `92e7bd3` makes that simulation a required full local-gate step
+  and a dedicated GitHub Actions job.
+- **Latest full local gate:** `cargo xtask check all --profile full` completed
+  with **113 passed / 0 failed / 2 skipped**. It includes FPGA simulation,
+  QEMU production/release/SMP-1 smokes, fuzz builds, and BPF Miri. The retained
+  manifest is `artifacts/runs/1784387660-check-all/manifest.txt`; it records
+  `fdd5bf0` with a dirty worktree because `92e7bd3` documentation/CI files were
+  committed immediately after the run.
+- **Release boundary:** v0.3/v0.4 repository-source work is complete enough for
+  `v0.5.0-alpha.1`; this does not close board integration, FPGA timing/bitstream,
+  physical Pi5/RP2040/FPGA HIL, hosted CI, or the v0.5 registry/hot-swap/
+  rollback/recorder feature set.
+
+This update supersedes the branch/ref wording in the remediation phase below.
+The audit findings and score remain historical/current evidence in their stated
+scope; the production decision remains **NO-GO** for safety-relevant deployment.
+
 ## Current branch re-audit (2026-07-17, remediation phase)
 
 - **Branch:** `audit/runtime-architecture-hardening`
@@ -46,6 +68,10 @@ Current release-gate checklist:
 - [x] Confirm H-01 scheduler-owned teardown fully removes force-unlock behavior.
 - [x] Publish and gate the versioned supported ABI and target/feature matrix.
 - [x] Pass the locally reproducible audit gate: the quick profile is 74 PASS / 1 SKIP / 0 FAIL, and the full non-QEMU profile passes its static, model, build, clippy, and Miri checks. QEMU-dependent and hosted evidence remain separately tracked.
+- [x] Add and execute a portable final-PWM FPGA safety-gate simulation in the
+  full local gate (`fdd5bf0`, `92e7bd3`). The gate forces both outputs low on
+  active e-stop or either duty command outside ±800; board integration and HIL
+  remain separate unchecked evidence.
 - [x] Require the Miri-clean cloud-profile BPF interpreter suite in the normal/full and extended local gates (`f5338dc`). At `a409522`, all 427 selected tests pass with zero UB in a default-gate-recorded 1236 seconds; `--quick` remains the explicit iteration-only omission.
 - [x] Bump the OVMF prebuilt to `edk2-stable202511-r2` (`d76a657`) and isolate its writable VARS template with QEMU `snapshot=on` (`abf717e`). The pinned input now remains immutable across repeated SMP smoke runs, enforced by `ovmf-vars-isolation-static`.
 - [x] Add `--no-reboot` to the host QEMU launch path (`37b8e3d`); a kernel panic now exits cleanly instead of looping Limine and clobbering the captured serial buffer.
@@ -80,13 +106,15 @@ the pre-condition for landing it.
    default gate (102 PASS / 0 FAIL / 1 SKIP) and fault-mode gate (103 PASS /
    0 FAIL / 0 SKIP) are the closest reproducible substitutes today.
 
-2. **Physical RPi5 / RP2040 HIL** — Contingent on (a) RP2040 hardware
+2. **Physical RPi5 / RP2040 / FPGA HIL** — Contingent on (a) RP2040 hardware
    availability in CI, and (b) a runner contract that captures UART
    output without the QEMU serial-port redirect. `firmware/shrike/control`
    (commit `1d37351`) and `firmware/shrike/simulation`
    (commit `70406ad`) cover the firmware-domain contract on the host;
    `ci/manifests/build-inputs.env` does not yet provision real RP2040, and there is
-   no equivalent for RPi5 PL011 uart bring-up under load.
+  no equivalent for RPi5 PL011 uart bring-up under load. The portable FPGA RTL
+  is simulated, but there is no board project, pin-constraint set, synthesized
+  bitstream, timing report, or physical e-stop/PWM capture.
 
 3. **Run-queue ownership, stealing, and wakeup refactor** — Explicitly
    deferred per `docs/reviews/architecture/scheduler-runqueues.md`. `RunQueues`
@@ -151,7 +179,7 @@ production, HIL, hosted, or independent-review work.
 | Done | Documentation authority and archival | `docs/current`, ADR owners, audit owner | Documentation | Obsolete plans/audits/specifications move under an explicit archive; current VM, BPF-trust, JIT, scheduler, and platform documents identify their normative source and supported version | The pitch, execution plans, branch-specific review, legacy architecture, and superseded designs are bannered and indexed under `docs/archive`. `docs/current` now owns the architecture, VM, and BPF-trust contracts and links the accepted scheduler, target, error-policy, and JIT ADRs. |
 | Done | Naming, benchmark, documentation-link, and command cleanup | product/docs owners, benchmark owners, release gate | Documentation + release | Remaining Axiom/AxiomOS/axiom-ebpf drift is resolved; benchmark tables include commit, toolchain, raw-log location, and artifact hashes; required links and commands are checked by the gate | Required `documentation-links`, `product-naming-static`, `benchmark-provenance-static`, and `command-smoke` steps validate local links, active naming, attributable campaigns, and eight shell-free documented entrypoints. Unsupported hardware/QEMU/Linux claims are archived rather than published. |
 | External | Hosted H-06 | CI/release owner | External evidence | A hosted run starts real jobs and passes the required workflow; the run URL and exact commit are recorded here | Blocked on GitHub Actions billing/monthly quota. Local success is not a substitute. |
-| External | Physical RPi5/RP2040 HIL and GPIO IRQ stress | platform/firmware owners | Hardware + test | Hardware runner contract plus retained UART/control-link logs proves Pi boot/SMP and RP2040 GPIO/control failure cases | Blocked on hardware and a concrete runner contract. Host simulation proves sampled-state logic, not IRQ-edge behavior. |
+| External | Physical RPi5/RP2040/FPGA HIL and GPIO IRQ stress | platform/firmware owners | Hardware + test | Hardware runner contract plus retained UART/control-link and FPGA e-stop/PWM capture logs proves Pi boot/SMP and control failure cases | The portable FPGA gate is source-simulated, but board constraints, bitstream, timing closure, and hardware evidence remain blocked on hardware and a concrete runner contract. Host simulation proves sampled-state logic, not IRQ-edge behavior. |
 | External | Independent safety/concurrency review | independent reviewer | External review | Reviewer signs off the unsafe ledger, scheduler/VM shootdown, BPF epoch/snapshot, and remediation dispositions with tracked findings | Must be independent of the implementation authors; local gate and model results are inputs, not substitutes. |
 | Conditional | Historical ring-3 page fault | `userspace/core/init`, kernel VM/task owners | Investigation | Only if the symptom reproduces: a pinned, hash-verified OVMF plus capture evidence identifies ownership; a targeted fix then has a failing-before/passing-after regression | Currently non-reproducing, historical cause unresolved, and no reproducible artifact exists. Do not create a pass-either-way watcher or mark it fixed. |
 
@@ -292,4 +320,3 @@ snapshot below.
   audit gate are enforced. Required steps also validate repository-local
   Markdown targets, active product naming, attributable benchmark evidence,
   and eight manifest-declared bounded commands.
-

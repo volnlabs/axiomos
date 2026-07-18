@@ -3,6 +3,9 @@
 This release-review package separates current remediation status from the
 historical audit snapshot and its point-in-time findings.
 
+Current alpha-release scope and verification are tracked separately in the
+[v0.5.0-alpha.1 readiness review](../2026-07-v0.5.0-alpha.1-readiness.md).
+
 - [Remediation status](remediation-status.md): current branch status, deferred
   items, ownership, and closure checklist.
 - [Historical executive summary](executive-summary.md): audited-commit context,
