@@ -67,7 +67,7 @@ pub extern "C" fn _start() -> ! {
             tv_sec: 0,
             tv_nsec: 0,
         };
-        clock_gettime(0, &mut start as *mut timespec); // CLOCK_MONOTONIC = 0
+        clock_gettime(kernel_abi::CLOCK_MONOTONIC, &mut start as *mut timespec);
 
         let load_attr = kernel_abi::BpfAttr {
             prog_type: 1,
@@ -86,7 +86,7 @@ pub extern "C" fn _start() -> ! {
             tv_sec: 0,
             tv_nsec: 0,
         };
-        clock_gettime(0, &mut end as *mut timespec);
+        clock_gettime(kernel_abi::CLOCK_MONOTONIC, &mut end as *mut timespec);
 
         if prog_id < 0 {
             write(1, b"  [ERROR] Load failed\n");

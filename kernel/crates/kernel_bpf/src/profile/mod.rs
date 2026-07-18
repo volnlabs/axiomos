@@ -204,8 +204,18 @@ impl PhysicalProfile for CloudProfile {
     /// 1 million instructions (soft limit)
     const MAX_INSN_COUNT: usize = 1_000_000;
 
-    /// JIT enabled by default
-    const JIT_ALLOWED: bool = true;
+    /// JIT disabled (audit C-06 / PR #8).
+    ///
+    /// The AArch64 cloud JIT had a 256 MiB RWX bump allocator that
+    /// recompiled on every hook fire and never freed (audit C-06).
+    /// Until the compile-on-load RW→RX rewrite (P1 refactor) plus a
+    /// per-image W^X guarantee lands, the cloud profile falls back to
+    /// the interpreter, same as the embedded profile. This is the
+    /// single-line PR #8 fix the audit's "First ten PRs" list calls
+    /// out as separable: "Removes the active RWX/leak path immediately;
+    /// the compile-on-load RW→RX redesign remains a P1 refactor with
+    /// its own acceptance gates."
+    const JIT_ALLOWED: bool = false;
 
     /// Restart is normal recovery
     const RESTART_ACCEPTABLE: bool = true;
@@ -330,8 +340,14 @@ mod tests {
 
     #[cfg(feature = "cloud-profile")]
     #[test]
-    fn cloud_profile_allows_jit() {
-        assert!(CloudProfile::JIT_ALLOWED);
+    fn cloud_profile_forbids_jit_until_audit_c06_redesign() {
+        // Audit C-06 / PR #8: the AArch64 cloud JIT compiled on every hook
+        // fire and leaked RWX memory. Until the compile-on-load RW→RX
+        // rewrite lands, both profiles must use the interpreter.
+        assert!(
+            !CloudProfile::JIT_ALLOWED,
+            "cloud profile JIT_ALLOWED must stay false until C-06 redesign"
+        );
         assert!(CloudProfile::RESTART_ACCEPTABLE);
     }
 

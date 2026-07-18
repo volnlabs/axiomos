@@ -34,17 +34,17 @@ fi
 
 # Step 1: Build disk image with userspace binaries
 echo "Building userspace binaries and disk image..."
-cargo build -p muffinos --target "$TARGET" --no-default-features --features aarch64_deps
+cargo build -p axiomos --target "$TARGET" --no-default-features --features aarch64_deps
 
-# Find the disk.img produced by THIS build. Restrict to muffinos build outputs:
+# Find the disk.img produced by THIS build. Restrict to axiomos build outputs:
 # `find -name disk.img` across the whole target dir also turns up stale copies
 # the kernel build.rs leaves in kernel-*/out/ and disk.img from other feature
 # sets, and picking the newest of those by mtime can select a stale rootfs — you
 # then flash a kernel with an out-of-date embedded filesystem (old init/binaries)
-# while everything reports success. Scope to muffinos/out and take the newest.
-DISK_PATH=$(find "target/$TARGET" -path "*muffinos-*/out/disk.img" -printf "%T@ %p\n" | sort -n | tail -n 1 | awk '{print $2}')
+# while everything reports success. Scope to axiomos/out and take the newest.
+DISK_PATH=$(find "target/$TARGET" -path "*axiomos-*/out/disk.img" -printf "%T@ %p\n" | sort -n | tail -n 1 | awk '{print $2}')
 if [ -z "$DISK_PATH" ]; then
-    echo "Error: disk.img not found in any muffinos build output"
+    echo "Error: disk.img not found in any axiomos build output"
     exit 1
 fi
 echo "Using disk image: $DISK_PATH ($(stat -c%s "$DISK_PATH" 2>/dev/null || stat -f%z "$DISK_PATH") bytes)"

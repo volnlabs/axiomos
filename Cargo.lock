@@ -117,6 +117,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
+name = "axiomos"
+version = "0.1.0"
+dependencies = [
+ "benchmark",
+ "bpf_loader",
+ "clap",
+ "file_io_demo",
+ "file_structure",
+ "fork_test",
+ "gpio_demo",
+ "iio_demo",
+ "init",
+ "kernel",
+ "ovmf-prebuilt",
+ "pwm_demo",
+ "rk_uart_forwarder",
+ "sched_switch_bridge_demo",
+ "sched_switch_demo",
+ "sched_switch_export_demo",
+ "sys_exit_demo",
+ "syscall_demo",
+ "timeseries_demo",
+ "verifier_bench",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -869,6 +895,8 @@ dependencies = [
  "kernel_pci",
  "kernel_physical_memory",
  "kernel_syscall",
+ "kernel_time",
+ "kernel_usermem",
  "kernel_vfs",
  "kernel_virtual_memory",
  "limine",
@@ -897,6 +925,7 @@ name = "kernel_abi"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.10.0",
+ "zerocopy 0.9.0-alpha.0",
 ]
 
 [[package]]
@@ -906,6 +935,7 @@ dependencies = [
  "criterion",
  "proptest",
  "spin",
+ "zerocopy 0.9.0-alpha.0",
 ]
 
 [[package]]
@@ -978,6 +1008,20 @@ dependencies = [
  "spin",
  "thiserror",
  "x86_64",
+ "zerocopy 0.9.0-alpha.0",
+]
+
+[[package]]
+name = "kernel_time"
+version = "0.1.0"
+
+[[package]]
+name = "kernel_usermem"
+version = "0.1.0"
+dependencies = [
+ "kernel_abi",
+ "kernel_virtual_memory",
+ "thiserror",
 ]
 
 [[package]]
@@ -1152,32 +1196,6 @@ dependencies = [
 name = "mkfs-filesystem"
 version = "0.1.0"
 source = "git+https://github.com/tsatke/mkfs#24c1cfba44f360c8d4936f08cee49a34a5e4f916"
-
-[[package]]
-name = "muffinos"
-version = "0.1.0"
-dependencies = [
- "benchmark",
- "bpf_loader",
- "clap",
- "file_io_demo",
- "file_structure",
- "fork_test",
- "gpio_demo",
- "iio_demo",
- "init",
- "kernel",
- "ovmf-prebuilt",
- "pwm_demo",
- "rk_uart_forwarder",
- "sched_switch_bridge_demo",
- "sched_switch_demo",
- "sched_switch_export_demo",
- "sys_exit_demo",
- "syscall_demo",
- "timeseries_demo",
- "verifier_bench",
-]
 
 [[package]]
 name = "nu-ansi-term"

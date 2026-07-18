@@ -187,7 +187,7 @@ pub extern "C" fn handle_sync_exception(ctx: &mut ExceptionContext) {
     let esr: u64;
     let elr: u64;
     let far: u64;
-    #[allow(unused_variables)]
+    #[cfg(feature = "rpi5")]
     let spsr: u64;
 
     // SAFETY: Reading exception registers (ESR, ELR, FAR) is safe in an exception handler.
@@ -195,6 +195,7 @@ pub extern "C" fn handle_sync_exception(ctx: &mut ExceptionContext) {
         asm!("mrs {}, esr_el1", out(reg) esr);
         asm!("mrs {}, elr_el1", out(reg) elr);
         asm!("mrs {}, far_el1", out(reg) far);
+        #[cfg(feature = "rpi5")]
         asm!("mrs {}, spsr_el1", out(reg) spsr);
     }
 

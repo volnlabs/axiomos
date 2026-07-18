@@ -18,6 +18,8 @@ use kernel::limine::BASE_REVISION;
 use kernel::mcore;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use kernel::mcore::mtask::process::Process;
+#[cfg(target_arch = "x86_64")]
+use kernel::serial_println;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use kernel::{
     driver::{block::BlockDevices, KernelDeviceId},
@@ -80,6 +82,14 @@ unsafe extern "C" fn main() -> ! {
         let _ = vfs().read().open(init_path).expect("should have /bin/init");
         let proc = Process::create_from_executable(Process::root(), init_path).unwrap();
         info!("started process pid={}", proc.pid());
+
+        // Boot-success marker for CI smoke tests (H-06 / T-01). Placed
+        // here — after kernel::init() AND root mount AND init creation —
+        // so a panic between any of those steps correctly fails the
+        // gate. The qemu-kernel-smoke job in .github/workflows/build.yml
+        // greps the serial capture for this exact string before
+        // declaring PASS.
+        serial_println!("QEMU_BOOT_OK");
     }
 
     mcore::turn_idle()

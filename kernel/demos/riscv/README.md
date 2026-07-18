@@ -81,7 +81,7 @@ Halting...
 
 ## Integration with Main Kernel
 
-This demo shows the working OpenSBI integration. To integrate into the main Muffin kernel:
+This demo shows the working OpenSBI integration. To integrate into the main axiomos kernel:
 
 1. Add boot assembly compilation to main kernel build
 2. Implement device tree parsing

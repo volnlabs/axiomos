@@ -14,8 +14,3 @@ pub fn config_dir() -> Result<PathBuf> {
 pub fn trusted_keys_dir() -> Result<PathBuf> {
     Ok(config_dir()?.join("trusted_keys"))
 }
-
-/// Get the programs directory.
-pub fn programs_dir() -> Result<PathBuf> {
-    Ok(PathBuf::from("/var/lib/rkbpf/programs"))
-}

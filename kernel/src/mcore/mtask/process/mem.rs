@@ -188,7 +188,7 @@ impl MappedMemoryRegion {
 
         new_process
             .with_address_space(|as_| {
-                as_.map_range(*new_segment, self.physical_frames.into_iter(), flags)
+                as_.map_range_owned(*new_segment, self.physical_frames.into_iter(), flags)
             })
             .map_err(|_| "Failed to map memory in new process")?;
 
@@ -196,9 +196,15 @@ impl MappedMemoryRegion {
         {
             // Writable mapped regions become shared read-only pages in both parent and child.
             let current = crate::mcore::context::ExecutionContext::load().current_process();
-            current
+            if current
                 .with_address_space(|as_| as_.remap_range::<Size4KiB, _>(*self.segment, |_| flags))
-                .map_err(|_| "Failed to remap parent memory as copy-on-write")?;
+                .is_err()
+            {
+                new_process.with_address_space(|as_| {
+                    as_.unmap_range::<Size4KiB>(&*new_segment, PhysicalMemory::deallocate_frame);
+                });
+                return Err("Failed to remap parent memory as copy-on-write");
+            }
         }
 
         Ok(MappedMemoryRegion {

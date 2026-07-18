@@ -1,32 +1,23 @@
 use alloc::borrow::ToOwned;
 use core::ffi::c_int;
-use core::slice::from_raw_parts;
 
 use kernel_abi::{EINVAL, ENAMETOOLONG, ENOENT, Errno, PATH_MAX};
 use kernel_vfs::path::{AbsolutePath, Path};
 use log::debug;
 
 use crate::access::{CwdAccess, FileAccess};
-use crate::ptr::UserspacePtr;
 
 pub fn sys_open<Cx: CwdAccess + FileAccess>(
     cx: &Cx,
-    path: UserspacePtr<u8>,
-    path_len: usize,
+    path_bytes: &[u8],
     _oflag: i32,
     _mode: i32,
 ) -> Result<usize, Errno> {
-    if path_len > PATH_MAX {
+    if path_bytes.len() > PATH_MAX {
         return Err(ENAMETOOLONG);
     }
 
-    path.validate_range(path_len).map_err(|_| EINVAL)?;
-
     let path = {
-        // SAFETY: We verified path_len is within reasonable limits (PATH_MAX).
-        // The pointer comes from a UserspacePtr which we assume points to valid memory
-        // for the specified length.
-        let path_bytes = unsafe { from_raw_parts(path.as_ptr(), path_len) };
         let path = core::str::from_utf8(path_bytes).map_err(|_| EINVAL)?;
         let path = Path::new(path);
         if let Ok(p) = AbsolutePath::try_new(path) {
@@ -57,7 +48,6 @@ mod tests {
     use spin::mutex::Mutex;
     use spin::rwlock::RwLock;
 
-    use crate::UserspacePtr;
     use crate::access::testing::{MemoryFile, MemoryFileAccess};
     use crate::access::{CwdAccess, FileAccess};
     use crate::fcntl::sys_open;
@@ -160,9 +150,7 @@ mod tests {
         let cx = TestOpenCx::new(ROOT.to_owned(), Mutex::new(file_access));
 
         let path = "/foo.txt";
-        let p = UserspacePtr::try_from(path.as_ptr()).unwrap();
-
-        let result = sys_open(&cx, p, path.len(), 0, 0);
+        let result = sys_open(&cx, path.as_bytes(), 0, 0);
         assert_eq!(result, Err(ENOENT));
     }
 
@@ -176,9 +164,7 @@ mod tests {
         let cx = TestOpenCx::new(ROOT.to_owned(), Mutex::new(file_access));
 
         let path = "/foo.txt";
-        let p = UserspacePtr::try_from(path.as_ptr()).unwrap();
-
-        let result = sys_open(&cx, p, path.len(), 0, 0).expect("should be able to open file");
+        let result = sys_open(&cx, path.as_bytes(), 0, 0).expect("should be able to open file");
         assert_eq!(result, 0);
     }
 
@@ -192,10 +178,8 @@ mod tests {
         let cx = TestOpenCx::new(ROOT.to_owned(), Mutex::new(file_access));
 
         let path = "/foo.txt";
-        let p = UserspacePtr::try_from(path.as_ptr()).unwrap();
-
-        let result1 = sys_open(&cx, p, path.len(), 0, 0).expect("should be able to open file");
-        let result2 = sys_open(&cx, p, path.len(), 0, 0).expect("should be able to open file");
+        let result1 = sys_open(&cx, path.as_bytes(), 0, 0).expect("should be able to open file");
+        let result2 = sys_open(&cx, path.as_bytes(), 0, 0).expect("should be able to open file");
         assert_eq!(
             result1,
             result2 - 1,

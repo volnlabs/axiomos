@@ -165,22 +165,19 @@ fn handle_timer_interrupt(ctx: &ExceptionContext) {
     clear_timer_interrupt();
     set_next_timer();
 
-    // Run BPF hooks (AttachType::Timer = 1)
-    //
-    // We clone programs and release the lock BEFORE execution so that BPF
-    // helpers (e.g. bpf_ringbuf_output) can re-acquire the lock for map
-    // operations without deadlocking.
-    if let Some(manager) = crate::BPF_MANAGER.get() {
-        let programs = manager.lock().get_hook_programs(1);
-
+    // Build the timer context, then resolve the bounded hook snapshot without
+    // allocating while the interrupt is active.
+    {
         // Calculate interrupt latency from vector entry to now
         let mut bpf_ctx = kernel_bpf::execution::BpfContext::empty();
 
         // Include kernel metrics if available
         if let Some(metrics) = crate::BOOT_METRICS.get() {
-            bpf_ctx.boot_time_ms = metrics.boot_time_ms;
-            bpf_ctx.kernel_heap_kb = metrics.kernel_heap_kb;
-            bpf_ctx.kernel_image_mb = metrics.kernel_image_mb;
+            bpf_ctx.set_kernel_metrics(
+                metrics.boot_time_ms,
+                metrics.kernel_heap_kb,
+                metrics.kernel_image_mb,
+            );
         }
 
         unsafe {
@@ -191,16 +188,16 @@ fn handle_timer_interrupt(ctx: &ExceptionContext) {
             // Convert ticks to nanoseconds: ns = ticks * 1,000,000,000 / freq
             let freq: u64;
             core::arch::asm!("mrs {}, cntfrq_el0", out(reg) freq);
-            bpf_ctx.interrupt_latency_ns =
-                (latency_ticks as u128 * 1_000_000_000 / freq as u128) as u64;
+            bpf_ctx.set_interrupt_latency_ns(
+                (latency_ticks as u128 * 1_000_000_000 / freq as u128) as u64,
+            );
         }
 
-        for (prog_id, program) in &programs {
-            match crate::bpf::BpfManager::execute_program(program, &bpf_ctx) {
-                Ok(_res) => {}
-                Err(e) => log::error!("BPF Timer Hook [id={}] failed: {:?}", prog_id, e),
-            }
-        }
+        let _ = crate::bpf::BpfManager::run_hook_programs(
+            crate::bpf::ATTACH_TYPE_TIMER,
+            &bpf_ctx,
+            "timer",
+        );
     }
 }
 

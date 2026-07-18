@@ -33,7 +33,6 @@
 
 extern crate alloc;
 
-use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
@@ -66,12 +65,23 @@ struct Bucket {
 }
 
 impl Bucket {
-    fn empty(key_size: usize, value_size: usize) -> Self {
-        Self {
+    fn empty(key_size: usize, value_size: usize) -> MapResult<Self> {
+        let mut key = Vec::new();
+        key.try_reserve_exact(key_size)
+            .map_err(|_| MapError::OutOfMemory)?;
+        key.resize(key_size, 0);
+
+        let mut value = Vec::new();
+        value
+            .try_reserve_exact(value_size)
+            .map_err(|_| MapError::OutOfMemory)?;
+        value.resize(value_size, 0);
+
+        Ok(Self {
             state: BucketState::Empty,
-            key: vec![0u8; key_size],
-            value: vec![0u8; value_size],
-        }
+            key,
+            value,
+        })
     }
 
     fn is_empty(&self) -> bool {
@@ -108,18 +118,22 @@ struct HashStorage {
 }
 
 impl HashStorage {
-    fn new(key_size: usize, value_size: usize, capacity: usize) -> Self {
-        let buckets = (0..capacity)
-            .map(|_| Bucket::empty(key_size, value_size))
-            .collect();
+    fn new(key_size: usize, value_size: usize, capacity: usize) -> MapResult<Self> {
+        let mut buckets = Vec::new();
+        buckets
+            .try_reserve_exact(capacity)
+            .map_err(|_| MapError::OutOfMemory)?;
+        for _ in 0..capacity {
+            buckets.push(Bucket::empty(key_size, value_size)?);
+        }
 
-        Self {
+        Ok(Self {
             buckets,
             key_size,
             value_size,
             count: 0,
             capacity,
-        }
+        })
     }
 
     /// Compute hash of a key.
@@ -241,13 +255,18 @@ impl HashStorage {
 
     /// Resize the hash map (cloud profile only).
     #[cfg(feature = "cloud-profile")]
-    fn resize(&mut self, new_capacity: usize) {
-        let old_buckets = core::mem::replace(
-            &mut self.buckets,
-            (0..new_capacity)
-                .map(|_| Bucket::empty(self.key_size, self.value_size))
-                .collect(),
-        );
+    fn resize(&mut self, new_capacity: usize) -> MapResult<()> {
+        if new_capacity == 0 {
+            return Err(MapError::InvalidValue);
+        }
+        let mut new_buckets = Vec::new();
+        new_buckets
+            .try_reserve_exact(new_capacity)
+            .map_err(|_| MapError::OutOfMemory)?;
+        for _ in 0..new_capacity {
+            new_buckets.push(Bucket::empty(self.key_size, self.value_size)?);
+        }
+        let old_buckets = core::mem::replace(&mut self.buckets, new_buckets);
 
         self.capacity = new_capacity;
         self.count = 0;
@@ -261,6 +280,7 @@ impl HashStorage {
                 self.count += 1;
             }
         }
+        Ok(())
     }
 }
 
@@ -277,6 +297,23 @@ pub struct HashMap<P: PhysicalProfile = ActiveProfile> {
 }
 
 impl<P: PhysicalProfile> HashMap<P> {
+    /// Heap bytes reserved by the bucket table and each key/value allocation.
+    pub const fn allocation_size(
+        key_size: u32,
+        value_size: u32,
+        max_entries: u32,
+    ) -> Option<usize> {
+        let payload = match (key_size as usize).checked_add(value_size as usize) {
+            Some(size) => size,
+            None => return None,
+        };
+        let per_bucket = match payload.checked_add(core::mem::size_of::<Bucket>()) {
+            Some(size) => size,
+            None => return None,
+        };
+        per_bucket.checked_mul(max_entries as usize)
+    }
+
     /// Create a new hash map.
     ///
     /// # Arguments
@@ -308,7 +345,10 @@ impl<P: PhysicalProfile> HashMap<P> {
         {
             use crate::profile::MemoryStrategy;
             let budget = <P::MemoryStrategy as MemoryStrategy>::MEMORY_BUDGET;
-            if budget > 0 && def.total_size() > budget {
+            let allocation_size =
+                Self::allocation_size(def.key_size, def.value_size, def.max_entries)
+                    .ok_or(MapError::OutOfMemory)?;
+            if budget > 0 && allocation_size > budget {
                 return Err(MapError::OutOfMemory);
             }
         }
@@ -317,7 +357,7 @@ impl<P: PhysicalProfile> HashMap<P> {
             def.key_size as usize,
             def.value_size as usize,
             def.max_entries as usize,
-        );
+        )?;
 
         Ok(Self {
             def,
@@ -388,7 +428,7 @@ impl<P: PhysicalProfile> BpfMap<P> for HashMap<P> {
             return Err(MapError::InvalidValue);
         }
 
-        guard.resize(new_max_entries as usize);
+        guard.resize(new_max_entries as usize)?;
         self.def.max_entries = new_max_entries;
 
         Ok(())
@@ -433,6 +473,15 @@ mod tests {
         map.delete(&key).expect("delete");
         assert!(map.lookup(&key).is_none());
         assert_eq!(map.len(), 0);
+    }
+
+    #[test]
+    fn hash_map_allocation_size_includes_bucket_storage() {
+        let payload = (4 + 8 + core::mem::size_of::<Bucket>()) * 100;
+        assert_eq!(
+            HashMap::<ActiveProfile>::allocation_size(4, 8, 100),
+            Some(payload)
+        );
     }
 
     #[test]

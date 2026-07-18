@@ -27,12 +27,22 @@ pub enum LoadElfError {
     AllocationFailed,
     #[error("unsupported file type")]
     UnsupportedFileType(ElfType),
+    #[error("segment file size is larger than memory size")]
+    SegmentFileLargerThanMemory,
+    #[error("writable+executable segments are not supported")]
+    WritableExecutableSegment,
     #[error("size or alignment requirement is invalid")]
     InvalidSizeOrAlign,
     #[error("invalid virtual address 0x{0:016x}")]
     InvalidVirtualAddress(usize),
     #[error("more than one TLS header found")]
     TooManyTlsHeaders,
+    /// The input ELF was structurally malformed in a way the loader relies on
+    /// (e.g. a LOAD or TLS program's `phoff`/`phnum` claimed bytes past the
+    /// end of the input). Propagates the parser's typed [`ElfParseError`]
+    /// instead of panicking (audit H-05).
+    #[error("ELF parse error: {0}")]
+    Parse(ElfParseError),
 }
 
 impl<M> ElfLoader<M>
@@ -45,18 +55,15 @@ where
 
     /// # Errors
     /// Returns an error if the ELF file is not supported or if a required memory allocation fails.
-    ///
-    /// # Panics
-    /// Panics if the ELF file is not of type `ET_EXEC`.
     pub fn load<'a>(&mut self, elf_file: ElfFile<'a>) -> Result<ElfImage<'a, M>, LoadElfError>
     where
         <M as MemoryApi>::WritableAllocation: Debug,
     {
-        assert_eq!(
-            ElfType::Exec,
-            elf_file.header.typ,
-            "only ET_EXEC supported for now"
-        );
+        if elf_file.header.typ != ElfType::Exec {
+            return Err(LoadElfError::UnsupportedFileType(
+                elf_file.header.typ.clone(),
+            ));
+        }
 
         let mut image = ElfImage {
             elf_file,
@@ -77,8 +84,23 @@ where
             .elf_file
             .program_headers_by_type(ProgramHeaderType::LOAD)
         {
+            let hdr = hdr.map_err(LoadElfError::Parse)?;
             trace!("load header {hdr:x?}");
-            let pdata = image.elf_file.program_data(hdr);
+            let pdata = image.elf_file.program_data(hdr).ok_or(LoadElfError::Parse(
+                ElfParseError::SectionDataOutOfBounds {
+                    offset: hdr.offset,
+                    size: hdr.filesz,
+                    source_len: image.elf_file.source.len(),
+                },
+            ))?;
+            if hdr.filesz > hdr.memsz {
+                return Err(LoadElfError::SegmentFileLargerThanMemory);
+            }
+            if hdr.flags.contains(&ProgramHeaderFlags::EXECUTABLE)
+                && hdr.flags.contains(&ProgramHeaderFlags::WRITABLE)
+            {
+                return Err(LoadElfError::WritableExecutableSegment);
+            }
 
             let location = Location::Fixed(hdr.vaddr as u64);
 
@@ -98,12 +120,6 @@ where
             let slice = alloc.as_mut();
             slice[..hdr.filesz].copy_from_slice(pdata);
             slice[hdr.filesz..].fill(0);
-
-            assert!(
-                !(hdr.flags.contains(&ProgramHeaderFlags::EXECUTABLE)
-                    && hdr.flags.contains(&ProgramHeaderFlags::WRITABLE)),
-                "segments that are executable and writable are not supported"
-            );
 
             if hdr.flags.contains(&ProgramHeaderFlags::EXECUTABLE) {
                 let alloc = self
@@ -125,17 +141,27 @@ where
     }
 
     fn load_tls(&mut self, image: &mut ElfImage<'_, M>) -> Result<(), LoadElfError> {
-        let Some(tls) = image
+        let tls = image
             .elf_file
             .program_headers_by_type(ProgramHeaderType::TLS)
             .at_most_one()
-            .map_err(|_| LoadElfError::TooManyTlsHeaders)?
-        else {
+            .map_err(|_| LoadElfError::TooManyTlsHeaders)?;
+        let Some(tls) = tls else {
             return Ok(());
         };
+        let tls = tls.map_err(LoadElfError::Parse)?;
         trace!("tls header {tls:x?}");
 
-        let pdata = image.elf_file.program_data(tls);
+        let pdata = image.elf_file.program_data(tls).ok_or(LoadElfError::Parse(
+            ElfParseError::SectionDataOutOfBounds {
+                offset: tls.offset,
+                size: tls.filesz,
+                source_len: image.elf_file.source.len(),
+            },
+        ))?;
+        if tls.filesz > tls.memsz {
+            return Err(LoadElfError::SegmentFileLargerThanMemory);
+        }
 
         let layout = Layout::from_size_align(tls.memsz, tls.align)
             .map_err(|_| LoadElfError::InvalidSizeOrAlign)?;

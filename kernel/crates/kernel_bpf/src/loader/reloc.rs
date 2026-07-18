@@ -21,6 +21,22 @@ const R_BPF_64_32: u32 = 10;
 const STT_FUNC: u8 = 2;
 const SHN_UNDEF: u16 = 0;
 
+/// Per-section relocation context shared by `apply_relocations` and
+/// `relocate_call`. The three indices are always passed together; collapsing
+/// them keeps call sites readable and lets both methods drop one argument each
+/// (audit H-06 quick-win #2: argument-group refactor).
+#[derive(Clone, Copy)]
+struct SectionContext {
+    /// Index of the section currently being relocated.
+    section_idx: usize,
+    /// Base instruction offset of `section_idx` in the combined instruction
+    /// stream (`0` for the root program).
+    section_base: usize,
+    /// Index of the root program section. Cross-section calls targeting this
+    /// index resolve to `section_base == 0`.
+    root_section_idx: usize,
+}
+
 /// BPF instruction relocation handler.
 pub struct Relocator<'a> {
     /// Map definitions for resolving map references
@@ -95,9 +111,11 @@ impl<'a> Relocator<'a> {
             parser,
             &root_relocs,
             &symbols,
-            section_idx,
-            0,
-            section_idx,
+            SectionContext {
+                section_idx,
+                section_base: 0,
+                root_section_idx: section_idx,
+            },
         )?;
         for (linked_idx, base_idx, relocs) in linked_relocs {
             self.apply_relocations(
@@ -105,9 +123,11 @@ impl<'a> Relocator<'a> {
                 parser,
                 &relocs,
                 &symbols,
-                linked_idx,
-                base_idx,
-                section_idx,
+                SectionContext {
+                    section_idx: linked_idx,
+                    section_base: base_idx,
+                    root_section_idx: section_idx,
+                },
             )?;
         }
 
@@ -167,15 +187,14 @@ impl<'a> Relocator<'a> {
         parser: &ElfParser,
         relocs: &[Relocation],
         symbols: &[Symbol],
-        section_idx: usize,
-        section_base: usize,
-        root_section_idx: usize,
+        ctx: SectionContext,
     ) -> LoadResult<()> {
         for reloc in relocs {
             if !reloc.offset.is_multiple_of(BpfInsn::SIZE as u64) {
                 return Err(LoadError::InvalidRelocation);
             }
-            let insn_idx = section_base
+            let insn_idx = ctx
+                .section_base
                 .checked_add((reloc.offset / BpfInsn::SIZE as u64) as usize)
                 .ok_or(LoadError::InvalidRelocation)?;
             if insn_idx >= insns.len() {
@@ -197,15 +216,7 @@ impl<'a> Relocator<'a> {
                 }
                 R_BPF_64_32 => {
                     // Helper or BPF-to-BPF function call.
-                    self.relocate_call(
-                        insns,
-                        insn_idx,
-                        sym,
-                        &sym_name,
-                        section_idx,
-                        section_base,
-                        root_section_idx,
-                    )?;
+                    self.relocate_call(insns, insn_idx, sym, &sym_name, ctx)?;
                 }
                 R_BPF_64_ABS64 | R_BPF_64_ABS32 => {
                     // Absolute references - typically for data
@@ -259,9 +270,7 @@ impl<'a> Relocator<'a> {
         insn_idx: usize,
         sym: &Symbol,
         sym_name: &str,
-        section_idx: usize,
-        section_base: usize,
-        root_section_idx: usize,
+        ctx: SectionContext,
     ) -> LoadResult<()> {
         // Check if this is a helper function call
         if let Some(helper_id) = Self::helper_name_to_id(sym_name) {
@@ -281,9 +290,9 @@ impl<'a> Relocator<'a> {
         let target_base = self
             .section_base_for(
                 target_section_idx,
-                section_idx,
-                section_base,
-                root_section_idx,
+                ctx.section_idx,
+                ctx.section_base,
+                ctx.root_section_idx,
             )
             .ok_or(LoadError::InvalidRelocation)?;
         let target_idx = target_base
@@ -441,7 +450,17 @@ mod tests {
         };
 
         Relocator::new(&[])
-            .relocate_call(&mut insns, 0, &sym, "leaf", 7, 0, 7)
+            .relocate_call(
+                &mut insns,
+                0,
+                &sym,
+                "leaf",
+                SectionContext {
+                    section_idx: 7,
+                    section_base: 0,
+                    root_section_idx: 7,
+                },
+            )
             .unwrap();
 
         assert_eq!(insns[0].src_reg(), BPF_PSEUDO_CALL);
@@ -467,7 +486,17 @@ mod tests {
 
         Relocator::new(&[])
             .with_linked_sections(alloc::vec![(9, 2)])
-            .relocate_call(&mut insns, 0, &sym, "leaf", 7, 0, 7)
+            .relocate_call(
+                &mut insns,
+                0,
+                &sym,
+                "leaf",
+                SectionContext {
+                    section_idx: 7,
+                    section_base: 0,
+                    root_section_idx: 7,
+                },
+            )
             .unwrap();
 
         assert_eq!(insns[0].src_reg(), BPF_PSEUDO_CALL);

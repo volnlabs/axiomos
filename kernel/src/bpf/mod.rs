@@ -1,5 +1,4 @@
 pub mod helpers;
-pub mod jit_memory;
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -19,31 +18,17 @@ use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
 use kernel_bpf::signing::{SignatureVerifier, TrustedKey};
 use kernel_bpf::verifier::admission::AdmissionLedger;
 use kernel_bpf::verifier::{LoadCaller, MapPerm, Verifier, VerifyConfig};
+use spin::{Mutex, MutexGuard};
 
-/// Reused BPF interpreter stack, so program execution allocates nothing on the
-/// hot path (#181). A heap allocation per hook fire is WCET-unsound (the
-/// admitted cycle bound does not model allocator latency) and, because hooks
-/// run in IRQ context, a deadlock hazard against the global heap lock.
-///
-/// SAFETY / concurrency: this single buffer is shared by all hook executions.
-/// That is sound only because BPF execution is *serialized* on the current
-/// single-core target — every hook path (timer/GPIO IRQ handlers, syscall-hook
-/// dispatch) runs with interrupts masked, helpers do not re-enter the
-/// interpreter, and BPF-to-BPF calls are inlined at load, so no two executions
-/// are ever live at once. The same interrupt masking that serializes access is
-/// what makes a shared buffer safe here.
-///
-/// ponytail: one global scratch stack, correct only while single-core; make it
-/// per-CPU when #59 (SMP audit) lands — a second core executing a hook would
-/// alias this buffer.
-struct BpfInterpStack(
-    core::cell::UnsafeCell<[u8; <ActiveProfile as PhysicalProfile>::MAX_STACK_SIZE]>,
-);
-// SAFETY: access is serialized by single-core interrupt masking (see above).
-unsafe impl Sync for BpfInterpStack {}
-static BPF_INTERP_STACK: BpfInterpStack = BpfInterpStack(core::cell::UnsafeCell::new(
-    [0u8; <ActiveProfile as PhysicalProfile>::MAX_STACK_SIZE],
-));
+/// Serializes BPF execution against userspace map reads/mutations. Map lookup
+/// helpers currently return raw value pointers after dropping the map's inner
+/// lock; keeping one runtime guard live until program return prevents another
+/// CPU from updating, deleting, polling, or destroying that storage meanwhile.
+static BPF_RUNTIME: Mutex<()> = Mutex::new(());
+
+pub(crate) fn lock_runtime() -> MutexGuard<'static, ()> {
+    BPF_RUNTIME.lock()
+}
 
 /// Context size used for load-time verification (#122).
 ///
@@ -58,7 +43,7 @@ static BPF_INTERP_STACK: BpfInterpStack = BpfInterpStack(core::cell::UnsafeCell:
 /// The previous 256 placeholder let a program read past the real context into
 /// adjacent kernel memory (the interpreter's generic-deref arm trusts the
 /// verifier), which is the info-leak this closes.
-const VERIFY_CTX_SIZE: u32 = core::mem::size_of::<BpfContext>() as u32;
+const VERIFY_CTX_SIZE: u32 = core::mem::size_of::<BpfContext<'static>>() as u32;
 
 const VERIFY_CTX_DATA_SIZE_NONE: u32 = 0;
 const VERIFY_CTX_DATA_SIZE_GPIO: u32 = core::mem::size_of::<kernel_bpf::attach::GpioEvent>() as u32;
@@ -129,19 +114,106 @@ pub const RESERVED_MAP_COUNT: u32 = 1;
 /// One resolved GPIO program slot for the zero-alloc dispatch buffer (#65):
 /// `(prog_id, Arc<program>)`. Aliased so the hot-path buffer type stays legible.
 pub type GpioProgramSlot = Option<(u32, Arc<BpfProgram<ActiveProfile>>)>;
+/// One resolved generic hook slot for allocation-free dispatch.
+pub type HookProgramSlot = Option<(u32, Arc<BpfProgram<ActiveProfile>>)>;
 /// Maximum GPIO programs resolved for one IRQ edge. Must match the stack buffer
 /// used by the Pi 5 GPIO IRQ handler.
 pub const GPIO_IRQ_FANOUT_LIMIT: usize = 8;
+/// Maximum programs on any single hook. Attach enforces this so dispatch never
+/// truncates a configured hook when resolving into its stack buffer.
+pub const HOOK_FANOUT_LIMIT: usize = 16;
+/// Maximum byte length (including the trailing NUL supplied by userspace) for
+/// a pinned-object path.
+pub const BPF_PIN_PATH_MAX: usize = 256;
+
+#[derive(Debug, Clone, Copy)]
+struct BpfLimits {
+    max_live_programs: usize,
+    max_program_slots: usize,
+    max_program_bytes: usize,
+    max_single_program_bytes: usize,
+    max_elf_bytes: usize,
+    max_live_maps: usize,
+    max_map_slots: usize,
+    max_map_bytes: usize,
+    max_single_map_bytes: usize,
+    max_pinned_maps: usize,
+    max_key_size: u32,
+    max_value_size: u32,
+    max_entries: u32,
+}
+
+impl BpfLimits {
+    #[cfg(feature = "cloud-profile")]
+    const fn for_active_profile() -> Self {
+        Self {
+            max_live_programs: 128,
+            max_program_slots: 1024,
+            max_program_bytes: 16 * 1024 * 1024,
+            max_single_program_bytes: 1024 * 1024,
+            max_elf_bytes: 1024 * 1024,
+            max_live_maps: 64,
+            max_map_slots: 512,
+            max_map_bytes: 64 * 1024 * 1024,
+            max_single_map_bytes: 16 * 1024 * 1024,
+            max_pinned_maps: 128,
+            max_key_size: 512,
+            max_value_size: 64 * 1024,
+            max_entries: 1024 * 1024,
+        }
+    }
+
+    #[cfg(all(feature = "embedded-profile", not(feature = "cloud-profile")))]
+    const fn for_active_profile() -> Self {
+        Self {
+            max_live_programs: 32,
+            max_program_slots: 128,
+            max_program_bytes: 2 * 1024 * 1024,
+            max_single_program_bytes: 800 * 1024,
+            max_elf_bytes: 1024 * 1024,
+            max_live_maps: 16,
+            max_map_slots: 64,
+            max_map_bytes: 64 * 1024,
+            max_single_map_bytes: 64 * 1024,
+            max_pinned_maps: 32,
+            max_key_size: 256,
+            max_value_size: 4 * 1024,
+            max_entries: 4 * 1024,
+        }
+    }
+}
+
+struct ProgramEntry {
+    program: Arc<BpfProgram<ActiveProfile>>,
+    wcet_cycles: u64,
+    charged_bytes: usize,
+}
+
+struct MapEntry {
+    map: Box<dyn BpfMap<ActiveProfile>>,
+    perm: MapPerm,
+    charged_bytes: usize,
+}
+
+/// Global BPF resource usage. Per-process accounting requires a real owned
+/// descriptor table and remains separate from this manager-wide hard ceiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BpfResourceUsage {
+    pub live_programs: usize,
+    pub program_bytes: usize,
+    pub live_maps: usize,
+    pub map_bytes: usize,
+    pub pinned_maps: usize,
+}
 
 pub struct BpfManager {
     // Arc so the hot dispatch path (gpio_programs_into/get_hook_programs) clones
     // a refcount, not the whole instruction Vec — the IRQ handler runs this per
     // edge at up to ~200k/s (#65), where a deep BpfProgram::clone drops edges.
-    programs: Vec<Arc<BpfProgram<ActiveProfile>>>,
+    programs: Vec<Option<ProgramEntry>>,
     attachments: BTreeMap<u32, Vec<u32>>,
-    maps: Vec<Box<dyn BpfMap<ActiveProfile>>>,
-    map_perms: Vec<MapPerm>,
-    pinned_maps: BTreeMap<String, u32>,
+    maps: Vec<Option<MapEntry>>,
+    pinned_maps: Vec<(String, u32)>,
     /// Trust store for program provenance (#20). A program is authentic if it
     /// is an RBPF [`SignedProgram`] signed by a key in here.
     signature_verifier: SignatureVerifier,
@@ -151,7 +223,6 @@ pub struct BpfManager {
     allow_unsigned: bool,
     /// Static WCET cycle bound per loaded program, indexed by prog id —
     /// `VerifyStats::wcet_cycles` captured at load (#43).
-    prog_wcet: Vec<u64>,
     /// Utilization-form admission ledger: an attach is refused when the summed
     /// `Σ WCETᵢ·freqᵢ` of all admitted programs would exceed the profile's CPU
     /// utilization budget (#43).
@@ -160,6 +231,11 @@ pub struct BpfManager {
     /// map drives non-GPIO hooks; GPIO dispatch uses this so each program runs
     /// only for its own pin and edge.
     gpio_routes: GpioRouteTable,
+    limits: BpfLimits,
+    live_programs: usize,
+    program_bytes: usize,
+    live_maps: usize,
+    map_bytes: usize,
 }
 
 /// Default fire frequency assumed for a hook, in Hz. Every hook is assumed to
@@ -189,6 +265,19 @@ const fn attach_ctx_data_size(attach_type: u32) -> u32 {
     }
 }
 
+const fn is_supported_attach_type(attach_type: u32) -> bool {
+    matches!(
+        attach_type,
+        ATTACH_TYPE_TIMER
+            | ATTACH_TYPE_GPIO
+            | ATTACH_TYPE_PWM
+            | ATTACH_TYPE_IIO
+            | ATTACH_TYPE_SYS_ENTER
+            | ATTACH_TYPE_SYS_EXIT
+            | ATTACH_TYPE_SCHED_SWITCH
+    )
+}
+
 impl Default for BpfManager {
     fn default() -> Self {
         Self::new()
@@ -197,26 +286,33 @@ impl Default for BpfManager {
 
 impl BpfManager {
     pub fn new() -> Self {
+        Self::new_with_limits(BpfLimits::for_active_profile())
+    }
+
+    fn new_with_limits(limits: BpfLimits) -> Self {
         let mut manager = Self {
             programs: Vec::new(),
             attachments: BTreeMap::new(),
             maps: Vec::new(),
-            map_perms: Vec::new(),
-            pinned_maps: BTreeMap::new(),
+            pinned_maps: Vec::new(),
             signature_verifier: SignatureVerifier::new(),
             allow_unsigned: true,
-            prog_wcet: Vec::new(),
             admission: AdmissionLedger::new(
                 <ActiveProfile as PhysicalProfile>::UTILIZATION_BUDGET_NS_PER_S,
                 <ActiveProfile as PhysicalProfile>::CYCLE_UNIT_NS,
             ),
             gpio_routes: GpioRouteTable::new(),
+            limits,
+            live_programs: 0,
+            program_bytes: 0,
+            live_maps: 0,
+            map_bytes: 0,
         };
         let envelope = EnvelopeMap::<ActiveProfile>::init_from_profile();
         crate::actuation::ACTUATION_MONITOR
             .lock()
             .init_envelope_cache(&envelope);
-        let envelope_id = manager.register_map(Box::new(envelope), MapPerm::ReadOnly);
+        let envelope_id = manager.register_reserved_map(Box::new(envelope), MapPerm::ReadOnly);
         debug_assert_eq!(envelope_id, ENVELOPE_MAP_ID);
         debug_assert_eq!(manager.maps.len() as u32, RESERVED_MAP_COUNT);
         manager
@@ -237,12 +333,39 @@ impl BpfManager {
         self.allow_unsigned = allow;
     }
 
-    fn register_map(&mut self, map: Box<dyn BpfMap<ActiveProfile>>, perm: MapPerm) -> u32 {
-        debug_assert_eq!(self.maps.len(), self.map_perms.len());
+    fn register_reserved_map(&mut self, map: Box<dyn BpfMap<ActiveProfile>>, perm: MapPerm) -> u32 {
         let id = self.maps.len() as u32;
-        self.maps.push(map);
-        self.map_perms.push(perm);
+        self.maps.push(Some(MapEntry {
+            map,
+            perm,
+            charged_bytes: 0,
+        }));
         id
+    }
+
+    fn register_user_map(
+        &mut self,
+        map: Box<dyn BpfMap<ActiveProfile>>,
+        charge: usize,
+    ) -> Result<u32, BpfError> {
+        self.maps
+            .try_reserve(1)
+            .map_err(|_| BpfError::OutOfMemory)?;
+        let id = u32::try_from(self.maps.len()).map_err(|_| BpfError::ResourceLimit)?;
+        self.maps.push(Some(MapEntry {
+            map,
+            perm: MapPerm::ReadWrite,
+            charged_bytes: charge,
+        }));
+        self.live_maps = self
+            .live_maps
+            .checked_add(1)
+            .ok_or(BpfError::ResourceLimit)?;
+        self.map_bytes = self
+            .map_bytes
+            .checked_add(charge)
+            .ok_or(BpfError::ResourceLimit)?;
+        Ok(id)
     }
 
     /// Per-map value sizes indexed by map id (#123). A map's id is its index in
@@ -250,15 +373,83 @@ impl BpfManager {
     /// by the constant map id a `bpf_map_lookup_elem` loads, gives that map's
     /// exact value size for the verifier to bound dereferences with.
     fn map_value_sizes(&self) -> Vec<u32> {
-        debug_assert_eq!(self.maps.len(), self.map_perms.len());
-        self.maps.iter().map(|m| m.def().value_size).collect()
+        self.maps
+            .iter()
+            .map(|entry| {
+                entry
+                    .as_ref()
+                    .map(|entry| entry.map.def().value_size)
+                    .unwrap_or(0)
+            })
+            .collect()
     }
 
     /// Per-map write permissions indexed by map id. This is the single source
     /// used by both load-time verification and runtime mutation guards.
     pub fn map_perms(&self) -> Vec<MapPerm> {
-        debug_assert_eq!(self.maps.len(), self.map_perms.len());
-        self.map_perms.clone()
+        self.maps
+            .iter()
+            .map(|entry| {
+                entry
+                    .as_ref()
+                    .map(|entry| entry.perm)
+                    .unwrap_or(MapPerm::ReadOnly)
+            })
+            .collect()
+    }
+
+    pub const fn resource_usage(&self) -> BpfResourceUsage {
+        BpfResourceUsage {
+            live_programs: self.live_programs,
+            program_bytes: self.program_bytes,
+            live_maps: self.live_maps,
+            map_bytes: self.map_bytes,
+            pinned_maps: self.pinned_maps.len(),
+        }
+    }
+
+    fn ensure_program_quota(&self, charge: usize) -> Result<(), BpfError> {
+        if self.live_programs >= self.limits.max_live_programs
+            || self.programs.len() >= self.limits.max_program_slots
+            || charge > self.limits.max_single_program_bytes
+        {
+            return Err(BpfError::ResourceLimit);
+        }
+        let total = self
+            .program_bytes
+            .checked_add(charge)
+            .ok_or(BpfError::ResourceLimit)?;
+        if total > self.limits.max_program_bytes {
+            return Err(BpfError::ResourceLimit);
+        }
+        Ok(())
+    }
+
+    fn register_program(
+        &mut self,
+        program: BpfProgram<ActiveProfile>,
+        wcet_cycles: u64,
+        charge: usize,
+    ) -> Result<u32, BpfError> {
+        self.ensure_program_quota(charge)?;
+        self.programs
+            .try_reserve(1)
+            .map_err(|_| BpfError::OutOfMemory)?;
+        let id = u32::try_from(self.programs.len()).map_err(|_| BpfError::ResourceLimit)?;
+        self.programs.push(Some(ProgramEntry {
+            program: Arc::new(program),
+            wcet_cycles,
+            charged_bytes: charge,
+        }));
+        self.live_programs = self
+            .live_programs
+            .checked_add(1)
+            .ok_or(BpfError::ResourceLimit)?;
+        self.program_bytes = self
+            .program_bytes
+            .checked_add(charge)
+            .ok_or(BpfError::ResourceLimit)?;
+        Ok(id)
     }
 
     /// Build the verifier config for a load. Borrows `sizes` (built by
@@ -287,6 +478,12 @@ impl BpfManager {
     }
 
     pub fn load_program(&mut self, elf_bytes: &[u8]) -> Result<u32, BpfError> {
+        if elf_bytes.len() > self.limits.max_elf_bytes {
+            return Err(BpfError::ResourceLimit);
+        }
+        // Fail before parsing when the object table is already exhausted.
+        self.ensure_program_quota(0)?;
+
         // Authenticate provenance before parsing (#20): a signed RBPF container
         // is verified against the trust store and unwrapped to its inner ELF; a
         // plain ELF is accepted only when unsigned loads are permitted.
@@ -302,6 +499,13 @@ impl BpfManager {
         let obj = loader.load(elf_bytes).map_err(|_| BpfError::NotLoaded)?;
 
         if let Some(loaded_prog) = obj.programs().first() {
+            let charge = loaded_prog
+                .insns()
+                .len()
+                .checked_mul(core::mem::size_of::<BpfInsn>())
+                .ok_or(BpfError::ResourceLimit)?;
+            self.ensure_program_quota(charge)?;
+
             // Verify before accepting: rejects unsafe bytecode and computes the
             // real stack usage (no longer the hardcoded 0). #48.
             let map_value_sizes = self.map_value_sizes();
@@ -322,7 +526,8 @@ impl BpfManager {
             #[cfg(feature = "verifier-cost")]
             let verify_cycles = read_cycles().wrapping_sub(start_cycles);
 
-            let id = self.programs.len() as u32;
+            #[cfg(feature = "verifier-cost")]
+            let id = u32::try_from(self.programs.len()).map_err(|_| BpfError::ResourceLimit)?;
             #[cfg(feature = "verifier-cost")]
             crate::serial_println!(
                 "{}",
@@ -334,9 +539,7 @@ impl BpfManager {
                     wcet_cycles: stats.wcet_cycles,
                 }
             );
-            self.programs.push(Arc::new(bpf_prog));
-            self.prog_wcet.push(stats.wcet_cycles);
-            Ok(id)
+            self.register_program(bpf_prog, stats.wcet_cycles, charge)
         } else {
             Err(BpfError::NotLoaded)
         }
@@ -349,6 +552,12 @@ impl BpfManager {
             log::error!("BpfManager: raw program rejected (signature enforcement enabled)");
             return Err(BpfError::SignatureRejected);
         }
+
+        let charge = insns
+            .len()
+            .checked_mul(core::mem::size_of::<BpfInsn>())
+            .ok_or(BpfError::ResourceLimit)?;
+        self.ensure_program_quota(charge)?;
 
         // Verify before accepting: this is the gate that makes the verifier
         // load-bearing — unsafe bytecode is rejected and the real stack usage is
@@ -371,7 +580,8 @@ impl BpfManager {
         #[cfg(feature = "verifier-cost")]
         let verify_cycles = read_cycles().wrapping_sub(start_cycles);
 
-        let id = self.programs.len() as u32;
+        #[cfg(feature = "verifier-cost")]
+        let id = u32::try_from(self.programs.len()).map_err(|_| BpfError::ResourceLimit)?;
         #[cfg(feature = "verifier-cost")]
         crate::serial_println!(
             "{}",
@@ -383,36 +593,39 @@ impl BpfManager {
                 wcet_cycles: stats.wcet_cycles,
             }
         );
-        self.programs.push(Arc::new(bpf_prog));
-        self.prog_wcet.push(stats.wcet_cycles);
+        let id = self.register_program(bpf_prog, stats.wcet_cycles, charge)?;
         log::info!(
             "BpfManager: Loaded raw program. Assigned id={}. Total programs={}",
             id,
-            self.programs.len()
+            self.live_programs
         );
         Ok(id)
     }
 
     pub fn attach(&mut self, attach_type: u32, prog_id: u32) -> Result<(), BpfError> {
+        if !is_supported_attach_type(attach_type) {
+            return Err(BpfError::InvalidInstruction);
+        }
         log::info!(
             "BpfManager: Attaching prog_id={} to type={}. Total programs={}",
             prog_id,
             attach_type,
             self.programs.len()
         );
-        if prog_id as usize >= self.programs.len() {
+        let Some(program_entry) = self.programs.get(prog_id as usize).and_then(Option::as_ref)
+        else {
             log::error!(
-                "BpfManager: Attach failed. prog_id={} >= programs.len()={}",
+                "BpfManager: Attach failed. prog_id={} is not loaded (slots={})",
                 prog_id,
                 self.programs.len()
             );
             return Err(BpfError::NotLoaded);
-        }
+        };
 
         let map_value_sizes = self.map_value_sizes();
         let map_perms = self.map_perms();
         let ctx_data_size = attach_ctx_data_size(attach_type);
-        let program = &self.programs[prog_id as usize];
+        let program = &program_entry.program;
         Verifier::<ActiveProfile>::verify_with_stats(
             program.prog_type(),
             program.instructions(),
@@ -437,16 +650,25 @@ impl BpfManager {
             .get(&attach_type)
             .is_some_and(|list| list.contains(&prog_id));
         if !already_attached {
-            let wcet = self.prog_wcet.get(prog_id as usize).copied().unwrap_or(0);
+            if self
+                .attachments
+                .get(&attach_type)
+                .is_some_and(|programs| programs.len() >= HOOK_FANOUT_LIMIT)
+            {
+                return Err(BpfError::ResourceLimit);
+            }
+            let wcet = program_entry.wcet_cycles;
             let freq = hook_frequency_hz(attach_type);
             if let Err(e) = self.admission.admit(attach_type, prog_id, wcet, freq) {
                 log::error!("BpfManager: {}", e);
                 return Err(BpfError::AdmissionRejected);
             }
-            self.attachments
-                .entry(attach_type)
-                .or_default()
-                .push(prog_id);
+            let programs = self.attachments.entry(attach_type).or_default();
+            if programs.try_reserve(1).is_err() {
+                self.admission.release(attach_type, prog_id);
+                return Err(BpfError::OutOfMemory);
+            }
+            programs.push(prog_id);
         }
         Ok(())
     }
@@ -464,13 +686,46 @@ impl BpfManager {
         Err(BpfError::NotLoaded)
     }
 
-    pub fn execute(&self, program_id: u32, ctx: &BpfContext) -> Result<u64, BpfError> {
+    /// Remove an unattached program and reclaim its verified bytecode.
+    ///
+    /// The operation is synchronous: if a hook snapshot still owns an `Arc`,
+    /// it returns `ObjectBusy` instead of releasing the quota before the bytes
+    /// have actually been freed. Program IDs are tombstoned, not reused, so an
+    /// old raw ID can never silently name a different program.
+    pub fn unload_program(&mut self, prog_id: u32) -> Result<(), BpfError> {
+        if self
+            .attachments
+            .values()
+            .any(|programs| programs.contains(&prog_id))
+        {
+            return Err(BpfError::ObjectBusy);
+        }
+
+        let entry = self
+            .programs
+            .get_mut(prog_id as usize)
+            .and_then(Option::as_mut)
+            .ok_or(BpfError::NotLoaded)?;
+        if Arc::strong_count(&entry.program) != 1 {
+            return Err(BpfError::ObjectBusy);
+        }
+
+        let charge = entry.charged_bytes;
+        self.programs[prog_id as usize] = None;
+        self.live_programs = self.live_programs.saturating_sub(1);
+        self.program_bytes = self.program_bytes.saturating_sub(charge);
+        self.gpio_routes.remove(prog_id);
+        Ok(())
+    }
+
+    pub fn execute(&self, program_id: u32, ctx: &BpfContext<'_>) -> Result<u64, BpfError> {
         let program = self
             .programs
             .get(program_id as usize)
+            .and_then(Option::as_ref)
             .ok_or(BpfError::NotLoaded)?;
 
-        Self::execute_program(program, ctx)
+        Self::execute_program(&program.program, ctx)
     }
 
     /// Execute a BPF program directly (without needing &self).
@@ -480,30 +735,16 @@ impl BpfManager {
     /// re-acquire the lock for map operations.
     pub fn execute_program(
         program: &BpfProgram<ActiveProfile>,
-        ctx: &BpfContext,
+        ctx: &BpfContext<'_>,
     ) -> Result<u64, BpfError> {
-        // SAFETY: BPF execution is serialized on the single-core target (all
-        // hook paths run interrupt-masked, no re-entrancy), so the shared
-        // scratch stack has no concurrent accessor. See BPF_INTERP_STACK.
-        let stack = unsafe { &mut *BPF_INTERP_STACK.0.get() };
-
-        #[cfg(target_arch = "aarch64")]
-        {
-            if !<ActiveProfile as PhysicalProfile>::JIT_ALLOWED {
-                let interpreter = Interpreter::<ActiveProfile>::new();
-                return interpreter.execute_with_stack(program, ctx, stack);
-            }
-
-            use kernel_bpf::execution::{Arm64JitExecutor, BpfExecutor};
-            let executor = Arm64JitExecutor::<ActiveProfile>::new();
-            executor.execute(program, ctx)
-        }
-
-        #[cfg(not(target_arch = "aarch64"))]
-        {
+        let _runtime = lock_runtime();
+        let cpu = crate::mcore::context::ExecutionContext::try_load()
+            .ok_or(BpfError::ReentrantExecution)?;
+        cpu.with_bpf_stack(|stack| {
             let interpreter = Interpreter::<ActiveProfile>::new();
             interpreter.execute_with_stack(program, ctx, stack)
-        }
+        })
+        .ok_or(BpfError::ReentrantExecution)?
     }
 
     /// Clone a loaded program by id (verifier-cost instrumentation only).
@@ -513,7 +754,10 @@ impl BpfManager {
     /// re-acquire the lock and would deadlock if it were held during runs.
     #[cfg(feature = "verifier-cost")]
     pub fn get_program(&self, prog_id: u32) -> Option<Arc<BpfProgram<ActiveProfile>>> {
-        self.programs.get(prog_id as usize).cloned()
+        self.programs
+            .get(prog_id as usize)
+            .and_then(Option::as_ref)
+            .map(|entry| entry.program.clone())
     }
 
     /// Execute `program` `runs` times back-to-back against an empty context
@@ -546,25 +790,22 @@ impl BpfManager {
         Ok(())
     }
 
-    /// Collect cloned programs for a given attach type.
-    ///
-    /// Returns a Vec of (prog_id, cloned_program) pairs. This allows callers
-    /// to release the BpfManager lock before executing programs, preventing
-    /// deadlocks when BPF helpers (like bpf_ringbuf_output) need to re-acquire
-    /// the lock to access maps.
-    pub fn get_hook_programs(
-        &self,
-        attach_type: u32,
-    ) -> Vec<(u32, Arc<BpfProgram<ActiveProfile>>)> {
-        let mut result = Vec::new();
+    /// Resolve one hook into caller-owned slots without touching the heap.
+    pub fn hook_programs_into(&self, attach_type: u32, out: &mut [HookProgramSlot]) -> usize {
+        let mut count = 0;
         if let Some(progs) = self.attachments.get(&attach_type) {
             for &prog_id in progs {
-                if let Some(program) = self.programs.get(prog_id as usize) {
-                    result.push((prog_id, program.clone()));
+                if count >= out.len() {
+                    break;
+                }
+                if let Some(program) = self.programs.get(prog_id as usize).and_then(Option::as_ref)
+                {
+                    out[count] = Some((prog_id, program.program.clone()));
+                    count += 1;
                 }
             }
         }
-        result
+        count
     }
 
     /// Return true if a GPIO route can be admitted without overflowing the
@@ -643,8 +884,9 @@ impl BpfManager {
                 if n >= out.len() {
                     return;
                 }
-                if let Some(program) = self.programs.get(prog_id as usize) {
-                    out[n] = Some((prog_id, program.clone()));
+                if let Some(program) = self.programs.get(prog_id as usize).and_then(Option::as_ref)
+                {
+                    out[n] = Some((prog_id, program.program.clone()));
                     n += 1;
                 }
             });
@@ -653,19 +895,23 @@ impl BpfManager {
 
     pub fn run_hook_programs(
         attach_type: u32,
-        ctx: &BpfContext,
+        ctx: &BpfContext<'_>,
         hook_name: &str,
     ) -> Result<usize, BpfError> {
         let Some(manager) = crate::BPF_MANAGER.get() else {
             return Ok(0);
         };
 
-        let programs = manager.lock().get_hook_programs(attach_type);
-        for (prog_id, program) in &programs {
-            match Self::execute_program(program, ctx) {
+        let mut programs: [HookProgramSlot; HOOK_FANOUT_LIMIT] = core::array::from_fn(|_| None);
+        let count = manager
+            .lock()
+            .hook_programs_into(attach_type, &mut programs);
+        for slot in programs.iter_mut().take(count) {
+            let (prog_id, program) = slot.take().expect("resolved hook slot must be populated");
+            match Self::execute_program(&program, ctx) {
                 Ok(res) => {
                     if res != 0 {
-                        log::info!("{hook_name} BPF Hook [id={prog_id}] returned: {res}");
+                        log::trace!("{hook_name} BPF Hook [id={prog_id}] returned: {res}");
                     }
                 }
                 Err(e) => {
@@ -675,33 +921,59 @@ impl BpfManager {
             }
         }
 
-        Ok(programs.len())
-    }
-
-    pub fn execute_hooks(&self, attach_type: u32, ctx: &BpfContext) {
-        if let Some(progs) = self.attachments.get(&attach_type) {
-            for prog_id in progs {
-                match self.execute(*prog_id, ctx) {
-                    Ok(res) => {
-                        if attach_type == ATTACH_TYPE_IIO {
-                            log::info!("IIO BPF Hook [id={}] returned: {}", prog_id, res);
-                        } else if attach_type == ATTACH_TYPE_PWM {
-                            log::info!("PWM BPF Hook [id={}] returned: {}", prog_id, res);
-                        } else if attach_type == ATTACH_TYPE_SYSCALL {
-                            // Log only interesting syscalls or just debug info
-                            // For demo purposes, we log everything if it returns non-zero
-                            if res != 0 {
-                                log::info!("Syscall Trace [id={}] syscall_nr: {}", prog_id, res);
-                            }
-                        }
-                    }
-                    Err(e) => log::error!("BPF Hook [id={}] failed: {:?}", prog_id, e),
-                }
-            }
-        }
+        Ok(count)
     }
 
     // --- Map operations ---
+
+    fn map_allocation_charge(
+        &self,
+        map_type: u32,
+        key_size: u32,
+        value_size: u32,
+        max_entries: u32,
+    ) -> Result<usize, BpfError> {
+        if max_entries == 0
+            || key_size > self.limits.max_key_size
+            || value_size > self.limits.max_value_size
+            || max_entries > self.limits.max_entries
+        {
+            return Err(BpfError::ResourceLimit);
+        }
+
+        let charge = match map_type {
+            1 if key_size != 0 && value_size != 0 => {
+                BpfHashMap::<ActiveProfile>::allocation_size(key_size, value_size, max_entries)
+            }
+            2 if key_size == 4 && value_size != 0 => {
+                ArrayMap::<ActiveProfile>::allocation_size(value_size, max_entries)
+            }
+            27 if key_size == 0 && value_size == 0 && max_entries.is_power_of_two() => {
+                Some(max_entries as usize)
+            }
+            100 if key_size == 8 && value_size != 0 => {
+                TimeSeriesMap::<ActiveProfile>::allocation_size(value_size, max_entries)
+            }
+            1 | 2 | 27 | 100 => return Err(BpfError::InvalidInstruction),
+            _ => return Err(BpfError::InvalidInstruction),
+        }
+        .ok_or(BpfError::ResourceLimit)?;
+
+        if self.live_maps >= self.limits.max_live_maps
+            || self.maps.len() >= self.limits.max_map_slots
+            || charge > self.limits.max_single_map_bytes
+        {
+            return Err(BpfError::ResourceLimit);
+        }
+        let total = self
+            .map_bytes
+            .checked_add(charge)
+            .ok_or(BpfError::ResourceLimit)?;
+        if total > self.limits.max_map_bytes {
+            return Err(BpfError::ResourceLimit);
+        }
+        Ok(charge)
+    }
 
     pub fn create_map(
         &mut self,
@@ -710,6 +982,7 @@ impl BpfManager {
         value_size: u32,
         max_entries: u32,
     ) -> Result<u32, BpfError> {
+        let charge = self.map_allocation_charge(map_type, key_size, value_size, max_entries)?;
         let map: Box<dyn BpfMap<ActiveProfile>> = match map_type {
             1 => {
                 // Hash map
@@ -745,7 +1018,7 @@ impl BpfManager {
             }
         };
 
-        let id = self.register_map(map, MapPerm::ReadWrite);
+        let id = self.register_user_map(map, charge)?;
         log::info!(
             "Created map id={} type={} key_size={} value_size={} max_entries={}",
             id,
@@ -758,7 +1031,7 @@ impl BpfManager {
     }
 
     pub fn map_lookup(&self, map_id: u32, key: &[u8]) -> Option<Vec<u8>> {
-        self.maps.get(map_id as usize)?.lookup(key)
+        self.maps.get(map_id as usize)?.as_ref()?.map.lookup(key)
     }
 
     /// Look up a value by key and return a raw pointer.
@@ -769,14 +1042,21 @@ impl BpfManager {
     /// is held by the caller.
     pub unsafe fn map_lookup_ptr(&self, map_id: u32, key: &[u8]) -> Option<*mut u8> {
         // SAFETY: caller ensures map will not be resized or deleted while pointer is in use
-        unsafe { self.maps.get(map_id as usize)?.lookup_ptr(key) }
+        unsafe {
+            self.maps
+                .get(map_id as usize)?
+                .as_ref()?
+                .map
+                .lookup_ptr(key)
+        }
     }
 
     fn ensure_map_writable(&self, map_id: u32) -> Result<(), BpfError> {
         match self
-            .map_perms
+            .maps
             .get(map_id as usize)
-            .copied()
+            .and_then(Option::as_ref)
+            .map(|entry| entry.perm)
             .ok_or(BpfError::NotLoaded)?
         {
             MapPerm::ReadWrite => Ok(()),
@@ -792,32 +1072,111 @@ impl BpfManager {
         flags: u64,
     ) -> Result<(), BpfError> {
         self.ensure_map_writable(map_id)?;
-        let map = self.maps.get(map_id as usize).ok_or(BpfError::NotLoaded)?;
-        map.update(key, value, flags)
+        let map = self
+            .maps
+            .get(map_id as usize)
+            .and_then(Option::as_ref)
+            .ok_or(BpfError::NotLoaded)?;
+        map.map
+            .update(key, value, flags)
             .map_err(|_| BpfError::OutOfMemory)
     }
 
     pub fn map_delete(&self, map_id: u32, key: &[u8]) -> Result<(), BpfError> {
         self.ensure_map_writable(map_id)?;
-        let map = self.maps.get(map_id as usize).ok_or(BpfError::NotLoaded)?;
-        map.delete(key).map_err(|_| BpfError::NotLoaded)
+        let map = self
+            .maps
+            .get(map_id as usize)
+            .and_then(Option::as_ref)
+            .ok_or(BpfError::NotLoaded)?;
+        map.map.delete(key).map_err(|_| BpfError::NotLoaded)
     }
 
     pub fn get_map_def(&self, map_id: u32) -> Option<&kernel_bpf::maps::MapDef> {
-        self.maps.get(map_id as usize).map(|m| m.def())
+        self.maps
+            .get(map_id as usize)?
+            .as_ref()
+            .map(|entry| entry.map.def())
     }
 
     pub fn pin_map(&mut self, path: String, map_id: u32) -> Result<(), BpfError> {
-        if self.maps.get(map_id as usize).is_none() {
+        if path.is_empty() || path.len() >= BPF_PIN_PATH_MAX {
+            return Err(BpfError::ResourceLimit);
+        }
+        if self
+            .maps
+            .get(map_id as usize)
+            .and_then(Option::as_ref)
+            .is_none()
+        {
             return Err(BpfError::NotLoaded);
         }
 
-        self.pinned_maps.insert(path, map_id);
+        if let Some((_, existing_id)) = self
+            .pinned_maps
+            .iter()
+            .find(|(existing_path, _)| existing_path == &path)
+        {
+            return if *existing_id == map_id {
+                Ok(())
+            } else {
+                Err(BpfError::ObjectBusy)
+            };
+        }
+        if self.pinned_maps.len() >= self.limits.max_pinned_maps {
+            return Err(BpfError::ResourceLimit);
+        }
+        self.pinned_maps
+            .try_reserve(1)
+            .map_err(|_| BpfError::OutOfMemory)?;
+        self.pinned_maps.push((path, map_id));
         Ok(())
     }
 
     pub fn get_pinned_map(&self, path: &str) -> Option<u32> {
-        self.pinned_maps.get(path).copied()
+        self.pinned_maps
+            .iter()
+            .find(|(pinned_path, _)| pinned_path == path)
+            .map(|(_, map_id)| *map_id)
+    }
+
+    pub fn unpin_map(&mut self, path: &str) -> Result<(), BpfError> {
+        let index = self
+            .pinned_maps
+            .iter()
+            .position(|(pinned_path, _)| pinned_path == path)
+            .ok_or(BpfError::NotLoaded)?;
+        self.pinned_maps.remove(index);
+        Ok(())
+    }
+
+    /// Destroy an unpinned user map and reclaim its backing allocation.
+    ///
+    /// Until verified programs record their referenced map IDs, destruction is
+    /// conservatively refused while any program is loaded. This prevents a map
+    /// from disappearing under a helper's escaped raw value pointer.
+    pub fn destroy_map(&mut self, map_id: u32) -> Result<(), BpfError> {
+        if map_id < RESERVED_MAP_COUNT {
+            return Err(BpfError::ReadOnlyMap);
+        }
+        if self
+            .pinned_maps
+            .iter()
+            .any(|(_, pinned_map_id)| *pinned_map_id == map_id)
+            || self.live_programs != 0
+        {
+            return Err(BpfError::ObjectBusy);
+        }
+
+        let entry = self
+            .maps
+            .get_mut(map_id as usize)
+            .and_then(Option::take)
+            .ok_or(BpfError::NotLoaded)?;
+        self.live_maps = self.live_maps.saturating_sub(1);
+        self.map_bytes = self.map_bytes.saturating_sub(entry.charged_bytes);
+        drop(entry);
+        Ok(())
     }
 
     pub fn get_map_info(&self, map_id: u32) -> Option<BpfObjectInfo> {
@@ -837,9 +1196,9 @@ impl BpfManager {
     /// Returns the event data if available, or None if the ringbuf is empty.
     /// This is used by the BPF_RINGBUF_POLL syscall command.
     pub fn ringbuf_poll(&self, map_id: u32) -> Option<Vec<u8>> {
-        let map = self.maps.get(map_id as usize)?;
+        let map = self.maps.get(map_id as usize)?.as_ref()?;
         // RingBufMap::lookup() delegates to poll(), which reads and advances the tail
-        map.lookup(&[])
+        map.map.lookup(&[])
     }
 
     /// Output data to a ring buffer map.
@@ -848,20 +1207,42 @@ impl BpfManager {
     /// the key is ignored and value is the event data.
     pub fn ringbuf_output(&self, map_id: u32, data: &[u8], flags: u64) -> Result<(), BpfError> {
         self.ensure_map_writable(map_id)?;
-        let map = self.maps.get(map_id as usize).ok_or(BpfError::NotLoaded)?;
+        let map = self
+            .maps
+            .get(map_id as usize)
+            .and_then(Option::as_ref)
+            .ok_or(BpfError::NotLoaded)?;
 
         // Ring buffer maps use update() with empty key to output data
-        map.update(&[], data, flags)
+        map.map
+            .update(&[], data, flags)
             .map_err(|_| BpfError::OutOfMemory)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
+    use kernel_bpf::bytecode::insn::BpfInsn;
     use kernel_bpf::maps::MapType;
     use kernel_bpf::verifier::MapPerm;
 
     use super::*;
+
+    fn tiny_limits() -> BpfLimits {
+        let mut limits = BpfLimits::for_active_profile();
+        limits.max_live_programs = 1;
+        limits.max_program_slots = 4;
+        limits.max_program_bytes = 16;
+        limits.max_single_program_bytes = 16;
+        limits.max_live_maps = 1;
+        limits.max_map_slots = 4;
+        limits.max_map_bytes = 32;
+        limits.max_single_map_bytes = 32;
+        limits.max_pinned_maps = 1;
+        limits
+    }
 
     #[test]
     fn reserves_envelope_map_id_before_user_maps() {
@@ -930,5 +1311,129 @@ mod tests {
             manager.register_gpio_route(0, 17, GpioEdge::Rising, GPIO_IRQ_FANOUT_LIMIT as u32),
             Err(BpfError::GpioFanoutExceeded)
         );
+    }
+
+    #[test]
+    fn map_quota_is_charged_and_reclaimed_without_id_reuse() {
+        let mut manager = BpfManager::new_with_limits(tiny_limits());
+        let first = manager
+            .create_map(MapType::Array as u32, 4, 8, 1)
+            .expect("first map within quota");
+        assert_eq!(
+            manager.resource_usage(),
+            BpfResourceUsage {
+                live_programs: 0,
+                program_bytes: 0,
+                live_maps: 1,
+                map_bytes: 8,
+                pinned_maps: 0,
+            }
+        );
+        assert_eq!(
+            manager.create_map(MapType::Array as u32, 4, 8, 1),
+            Err(BpfError::ResourceLimit)
+        );
+
+        manager
+            .pin_map("/map".into(), first)
+            .expect("pin first map");
+        assert_eq!(manager.destroy_map(first), Err(BpfError::ObjectBusy));
+        manager.unpin_map("/map").expect("unpin first map");
+        manager.destroy_map(first).expect("destroy first map");
+        assert_eq!(manager.resource_usage().map_bytes, 0);
+
+        let second = manager
+            .create_map(MapType::Array as u32, 4, 8, 1)
+            .expect("quota reclaimed");
+        assert!(second > first, "raw tombstone IDs must not be reused");
+        assert!(manager.get_map_def(first).is_none());
+    }
+
+    #[test]
+    fn map_dimensions_and_accounting_overflow_fail_before_allocation() {
+        let mut manager = BpfManager::new_with_limits(tiny_limits());
+        assert_eq!(
+            manager.create_map(MapType::Hash as u32, u32::MAX, u32::MAX, u32::MAX),
+            Err(BpfError::ResourceLimit)
+        );
+        assert_eq!(manager.resource_usage().map_bytes, 0);
+        assert_eq!(manager.resource_usage().live_maps, 0);
+    }
+
+    #[test]
+    fn program_quota_unload_and_inflight_reclamation_are_synchronous() {
+        let mut manager = BpfManager::new_with_limits(tiny_limits());
+        let insns = vec![BpfInsn::mov64_imm(0, 0), BpfInsn::exit()];
+        let first = manager
+            .load_raw_program(insns.clone())
+            .expect("first program within quota");
+        assert_eq!(manager.resource_usage().program_bytes, 16);
+        assert_eq!(
+            manager.load_raw_program(insns.clone()),
+            Err(BpfError::ResourceLimit)
+        );
+
+        let in_flight = manager.programs[first as usize]
+            .as_ref()
+            .expect("loaded entry")
+            .program
+            .clone();
+        assert_eq!(manager.unload_program(first), Err(BpfError::ObjectBusy));
+        drop(in_flight);
+        manager.unload_program(first).expect("quiescent unload");
+        assert_eq!(manager.resource_usage().program_bytes, 0);
+
+        let second = manager
+            .load_raw_program(insns)
+            .expect("program quota reclaimed");
+        assert!(second > first, "raw tombstone IDs must not be reused");
+    }
+
+    #[test]
+    fn attached_program_must_be_detached_before_unload() {
+        let mut manager = BpfManager::new_with_limits(tiny_limits());
+        let id = manager
+            .load_raw_program(vec![BpfInsn::mov64_imm(0, 0), BpfInsn::exit()])
+            .expect("load program");
+        manager
+            .attach(ATTACH_TYPE_TIMER, id)
+            .expect("attach program");
+        assert_eq!(manager.unload_program(id), Err(BpfError::ObjectBusy));
+        manager
+            .detach(ATTACH_TYPE_TIMER, id)
+            .expect("detach program");
+        manager.unload_program(id).expect("unload program");
+    }
+
+    #[test]
+    fn generic_hook_fanout_is_bounded_and_snapshot_does_not_truncate() {
+        let mut limits = BpfLimits::for_active_profile();
+        limits.max_live_programs = HOOK_FANOUT_LIMIT + 1;
+        limits.max_program_slots = HOOK_FANOUT_LIMIT + 1;
+        limits.max_program_bytes = (HOOK_FANOUT_LIMIT + 1) * 16;
+        limits.max_single_program_bytes = 16;
+        let mut manager = BpfManager::new_with_limits(limits);
+        let insns = vec![BpfInsn::mov64_imm(0, 0), BpfInsn::exit()];
+        let mut ids = Vec::new();
+        for _ in 0..=HOOK_FANOUT_LIMIT {
+            ids.push(
+                manager
+                    .load_raw_program(insns.clone())
+                    .expect("program within test quota"),
+            );
+        }
+        manager
+            .attachments
+            .insert(ATTACH_TYPE_TIMER, ids[..HOOK_FANOUT_LIMIT].to_vec());
+
+        assert_eq!(
+            manager.attach(ATTACH_TYPE_TIMER, ids[HOOK_FANOUT_LIMIT]),
+            Err(BpfError::ResourceLimit)
+        );
+
+        let mut slots: [HookProgramSlot; HOOK_FANOUT_LIMIT] = core::array::from_fn(|_| None);
+        let count = manager.hook_programs_into(ATTACH_TYPE_TIMER, &mut slots);
+        assert_eq!(count, HOOK_FANOUT_LIMIT);
+        assert!(slots.iter().all(Option::is_some));
     }
 }

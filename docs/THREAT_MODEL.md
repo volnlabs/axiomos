@@ -6,6 +6,30 @@ trust the named function over the line number.
 
 **Resolves:** #39 (RFC: Threat Model & Formal Assurance Gap vs seL4).
 
+> **⚠ Audit-time erratum (2026-07-11, ENGINEERING_AUDIT.md):** This
+> document claims certain controls are operative that the audit shows
+> are not. Concretely:
+>
+> - **C-01:** user-pointer validation performs only numeric address-class
+>   checks; unmapped canonical addresses still ring-0 panic. The
+>   "every user pointer is validated" mitigation in §3 is **not** true
+>   on `origin/dev` at the audited commit. PR #2 of the audit's "First
+>   ten PRs" list (fault-safe `UserMemory`) is in progress; until it
+>   lands, treat all syscalls as potentially panic-on-bad-input.
+> - **C-06:** JIT pages were mapped RWX and recompiled on every hook
+>   fire. The "W^X for JIT" mitigation in §3 is **not** true on the
+>   audited commit. PR #8 (disable AArch64 JIT in shipped profile) has
+>   landed on `audit/dev-remediation` as of `9c6937d`; the
+>   compile-on-load RW→RX redesign (P1 follow-up) is still pending.
+> - **H-02:** the x86 clock treats HPET ticks as nanoseconds. The
+>   "monotonic clock" mitigation in §3 is **not** correct on x86_64
+>   until the H-02 clocksource rewrite lands. Until then, every
+>   timestamp printed by `timekeeping` is in the wrong units.
+>
+> Do not rely on the §3 mitigation table for the three findings above
+> without verifying the relevant PR has landed on the branch you are
+> reviewing.
+
 ## 1. Summary
 
 Axiom is a research kernel for robotics workloads. Untrusted logic runs as

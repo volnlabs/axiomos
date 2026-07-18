@@ -89,7 +89,7 @@ impl MemoryApi for LowerHalfMemoryApi {
 
         self.process
             .with_address_space(|as_| {
-                as_.map_range::<Size4KiB>(
+                as_.map_range_owned::<Size4KiB>(
                     &mapped_segment,
                     PhysicalMemory::allocate_frames_non_contiguous(),
                     PageTableFlags::PRESENT
@@ -246,9 +246,15 @@ impl<T: AllocationType> LowerHalfAllocation<T> {
         let mut shared_frames = alloc::vec::Vec::with_capacity(page_count);
         for i in 0..page_count {
             let page_vaddr = self.inner.mapped_segment.start + (i as u64 * Size4KiB::SIZE);
-            let (phys, _) = self
+            let Some((phys, _)) = self
                 .process
-                .with_address_space(|as_| as_.translate_page_flags(page_vaddr))?;
+                .with_address_space(|as_| as_.translate_page_flags(page_vaddr))
+            else {
+                for frame in shared_frames {
+                    PhysicalMemory::deallocate_frame(frame);
+                }
+                return None;
+            };
             let frame = crate::arch::types::PhysFrame::<Size4KiB>::containing_address(phys);
             PhysicalMemory::retain_frame(frame);
             shared_frames.push(frame);
@@ -256,22 +262,39 @@ impl<T: AllocationType> LowerHalfAllocation<T> {
 
         if T::fork_requires_cow() {
             let cow_flags = T::fork_mapping_flags();
-            self.process
+            if self
+                .process
                 .with_address_space(|as_| {
                     as_.remap_range::<Size4KiB, _>(&self.inner.mapped_segment, |_| cow_flags)
                 })
-                .ok()?;
+                .is_err()
+            {
+                for frame in shared_frames {
+                    PhysicalMemory::deallocate_frame(frame);
+                }
+                return None;
+            }
         }
 
-        new_process
+        if new_process
             .with_address_space(|as_| {
-                as_.map_range(
+                as_.map_range_owned(
                     &self.inner.mapped_segment,
                     shared_frames.into_iter(),
                     T::fork_mapping_flags(),
                 )
             })
-            .ok()?;
+            .is_err()
+        {
+            if T::fork_requires_cow() {
+                let original_flags =
+                    T::flags() | PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+                let _ = self.process.with_address_space(|as_| {
+                    as_.remap_range::<Size4KiB, _>(&self.inner.mapped_segment, |_| original_flags)
+                });
+            }
+            return None;
+        }
 
         Some(LowerHalfAllocation {
             start: self.start,

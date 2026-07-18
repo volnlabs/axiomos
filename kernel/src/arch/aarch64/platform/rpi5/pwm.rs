@@ -229,7 +229,7 @@ impl Rp1Pwm {
 
     // Trigger BPF event
     fn trigger_event(&self, channel: u8, enabled: bool) {
-        if let Some(manager) = BPF_MANAGER.get() {
+        if BPF_MANAGER.get().is_some() {
             let event = PwmEvent {
                 timestamp: crate::time::get_kernel_time_ns(),
                 chip_id: if self.base == RP1_PWM0_BASE { 0 } else { 1 },
@@ -240,27 +240,8 @@ impl Rp1Pwm {
                 enabled: if enabled { 1 } else { 0 },
             };
 
-            // Serialize event to byte slice for context
-            // SAFETY: We are creating a slice from a local struct reference. The pointer is valid
-            // and the size is correct. The lifetime is bound to the scope of this function.
-            let data = unsafe {
-                core::slice::from_raw_parts(
-                    &event as *const _ as *const u8,
-                    core::mem::size_of::<PwmEvent>(),
-                )
-            };
-
-            let ctx = BpfContext::from_slice(data);
-
-            // Lock-free pattern: clone programs and release lock BEFORE execution
-            // so that BPF helpers can re-acquire the lock without deadlocking.
-            let programs = manager.lock().get_hook_programs(ATTACH_TYPE_PWM);
-            for (prog_id, program) in &programs {
-                match crate::bpf::BpfManager::execute_program(program, &ctx) {
-                    Ok(res) => log::info!("PWM BPF Hook [id={}] returned: {}", prog_id, res),
-                    Err(e) => log::error!("PWM BPF Hook [id={}] failed: {:?}", prog_id, e),
-                }
-            }
+            let ctx = BpfContext::from_struct(&event);
+            let _ = crate::bpf::BpfManager::run_hook_programs(ATTACH_TYPE_PWM, &ctx, "pwm");
         }
     }
 

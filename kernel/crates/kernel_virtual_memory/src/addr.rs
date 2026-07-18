@@ -65,6 +65,12 @@ impl fmt::Display for VirtAddr {
     }
 }
 
+impl fmt::LowerHex for VirtAddr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::LowerHex::fmt(&self.0, f)
+    }
+}
+
 impl Add<u64> for VirtAddr {
     type Output = Self;
     fn add(self, rhs: u64) -> Self::Output {

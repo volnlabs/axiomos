@@ -131,7 +131,7 @@ impl Scheduler {
                 dbg_mark(dbg_hex_nibble(pid));
             }
 
-            log::info!("reschedule: switching to task {}", next_task.id());
+            log::trace!("reschedule: switching to task {}", next_task.id());
 
             #[cfg(target_arch = "x86_64")]
             let cr3_value = next_task
@@ -204,6 +204,8 @@ impl Scheduler {
 
         assert!(self.zombie_task.is_none());
         self.zombie_task = Some(old_task);
+
+        ExecutionContext::load().set_current_pid(self.current_task.process().pid().as_u64());
 
         // log::trace!("reschedule: calling switch_impl (old_sp_ptr={:p}, new_sp={:#x}, ttbr0={:#x})",
         //     old_stack_ptr, *self.current_task.last_stack_ptr(), cr3_value);

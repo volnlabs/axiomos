@@ -6,13 +6,13 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::ffi::c_void;
-use core::fmt::{Debug, Formatter};
+use core::fmt::{Debug, Display, Formatter};
 use core::ptr;
 #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use conquer_once::spin::OnceCell;
-use kernel_elfloader::{ElfFile, ElfLoader};
+use kernel_elfloader::{ElfFile, ElfLoader, LoadElfError};
 use kernel_memapi::{Allocation, Guarded, Location, MemoryApi, UserAccessible};
 use kernel_vfs::node::VfsNode;
 use kernel_vfs::path::{AbsoluteOwnedPath, AbsolutePath, ROOT};
@@ -53,6 +53,20 @@ use crate::mcore::mtask::scheduler::global::GlobalTaskQueue;
 use crate::mem::virt::VirtualMemoryAllocator;
 
 pub mod tree;
+
+enum TrampolineLoadError {
+    Parse(kernel_elfloader::ElfParseError),
+    Load(LoadElfError),
+}
+
+impl Display for TrampolineLoadError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Parse(err) => write!(f, "ELF parse error: {err}"),
+            Self::Load(err) => write!(f, "ELF load error: {err}"),
+        }
+    }
+}
 
 struct ElfSegments {
     executable: Vec<LowerHalfAllocation<Executable>>,
@@ -470,12 +484,19 @@ impl Process {
         // We use the same self reference, but now it points to the new AS/VMM
         let mut memapi = LowerHalfMemoryApi::new(self.clone());
 
-        // Need to verify it's a valid ELF first
-        let elf_file = ElfFile::try_parse(&file_content).map_err(|_| "Invalid ELF file")?;
+        // Need to verify it's a valid ELF first. Surface the typed
+        // ElfParseError so a malformed binary (audit H-05) is
+        // diagnosable from logs instead of a generic "Invalid ELF
+        // file" line.
+        let elf_file = ElfFile::try_parse(&file_content).map_err(|e| {
+            log::error!("execve: ELF parse error: {e}");
+            "Invalid ELF file"
+        })?;
 
-        let elf_image = ElfLoader::new(memapi.clone())
-            .load(elf_file)
-            .map_err(|_| "Failed to load ELF")?;
+        let elf_image = ElfLoader::new(memapi.clone()).load(elf_file).map_err(|e| {
+            log::error!("execve: ELF load error: {e}");
+            "Failed to load ELF"
+        })?;
 
         let entry_point = elf_image.entry_point() as usize;
         let (exec_allocs, mut ro_allocs, wr_allocs, tls_master) = elf_image.into_inner();
@@ -671,6 +692,18 @@ fn read_executable_file_into(
     Ok(())
 }
 
+fn trampoline_load_elf<'a>(
+    bytes: &'a [u8],
+    memapi: LowerHalfMemoryApi,
+) -> Result<(usize, kernel_elfloader::ElfImageParts<LowerHalfMemoryApi>), TrampolineLoadError> {
+    let elf_file = ElfFile::try_parse(bytes).map_err(TrampolineLoadError::Parse)?;
+    let code_ptr = elf_file.entry();
+    let elf_image = ElfLoader::new(memapi)
+        .load(elf_file)
+        .map_err(TrampolineLoadError::Load)?;
+    Ok((code_ptr, elf_image.into_inner()))
+}
+
 extern "C" fn trampoline(_arg: *mut c_void) {
     #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
     if !TRAMPOLINE_MARKER_SENT.swap(true, Ordering::Relaxed) {
@@ -753,36 +786,37 @@ extern "C" fn trampoline(_arg: *mut c_void) {
 
     #[cfg(target_arch = "aarch64")]
     let (code_ptr, exec_allocs, mut ro_allocs, wr_allocs, tls_master) =
-        with_process_address_space_active(&current_process, || {
+        match with_process_address_space_active(&current_process, || {
             // Keep all borrowed ELF reads in the active process address space.
-            let elf_file = ElfFile::try_parse(executable_file_allocation.as_ref())
-                .expect("should be able to parse elf binary");
-            let code_ptr = elf_file.entry();
-            log::info!("Trampoline: ELF parsed, loading...");
-            #[cfg(feature = "rpi5")]
-            dbg_mark(b'E' as u32);
-            let elf_image = ElfLoader::new(memapi.clone())
-                .load(elf_file)
-                .expect("should be able to load elf file");
-            let (exec_allocs, ro_allocs, wr_allocs, tls_master) = elf_image.into_inner();
-            (code_ptr, exec_allocs, ro_allocs, wr_allocs, tls_master)
-        });
+            trampoline_load_elf(executable_file_allocation.as_ref(), memapi.clone())
+        }) {
+            Ok((code_ptr, (exec_allocs, ro_allocs, wr_allocs, tls_master))) => {
+                log::info!("Trampoline: ELF loaded");
+                (code_ptr, exec_allocs, ro_allocs, wr_allocs, tls_master)
+            }
+            Err(err) => {
+                log::error!("Trampoline: {err}");
+                current_task.set_should_terminate(true);
+                Task::exit();
+                unreachable!("Task::exit never returns");
+            }
+        };
     #[cfg(not(target_arch = "aarch64"))]
-    let elf_file = ElfFile::try_parse(executable_file_allocation.as_ref())
-        .expect("should be able to parse elf binary");
-    #[cfg(not(target_arch = "aarch64"))]
-    let code_ptr = elf_file.entry();
-    #[cfg(not(target_arch = "aarch64"))]
-    log::info!("Trampoline: ELF parsed, loading...");
+    let (code_ptr, exec_allocs, mut ro_allocs, wr_allocs, tls_master) =
+        match trampoline_load_elf(executable_file_allocation.as_ref(), memapi.clone()) {
+            Ok((code_ptr, (exec_allocs, ro_allocs, wr_allocs, tls_master))) => {
+                log::info!("Trampoline: ELF loaded");
+                (code_ptr, exec_allocs, ro_allocs, wr_allocs, tls_master)
+            }
+            Err(err) => {
+                log::error!("Trampoline: {err}");
+                current_task.set_should_terminate(true);
+                Task::exit();
+                unreachable!("Task::exit never returns");
+            }
+        };
     #[cfg(all(not(target_arch = "aarch64"), feature = "rpi5"))]
     dbg_mark(b'E' as u32);
-    #[cfg(not(target_arch = "aarch64"))]
-    let elf_image = ElfLoader::new(memapi.clone())
-        .load(elf_file)
-        .expect("should be able to load elf file");
-    #[cfg(not(target_arch = "aarch64"))]
-    let (exec_allocs, mut ro_allocs, wr_allocs, tls_master) = elf_image.into_inner();
-    log::info!("Trampoline: ELF loaded");
     #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
     if !TRAMPOLINE_ELF_STAGE_SENT.swap(true, Ordering::Relaxed) {
         dbg_mark(b's' as u32);

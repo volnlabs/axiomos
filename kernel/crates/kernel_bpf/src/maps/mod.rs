@@ -104,9 +104,16 @@ impl MapDef {
         }
     }
 
-    /// Total memory required for this map.
-    pub const fn total_size(&self) -> usize {
-        (self.key_size + self.value_size) as usize * self.max_entries as usize
+    /// Checked payload size for key/value maps.
+    ///
+    /// Callers must not use wrapping arithmetic for allocation decisions: all
+    /// three fields can originate in an untrusted `BPF_MAP_CREATE` request.
+    pub const fn checked_total_size(&self) -> Option<usize> {
+        let entry_size = match (self.key_size as usize).checked_add(self.value_size as usize) {
+            Some(size) => size,
+            None => return None,
+        };
+        entry_size.checked_mul(self.max_entries as usize)
     }
 }
 
@@ -258,8 +265,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn map_def_total_size() {
+    fn map_def_checked_total_size() {
         let def = MapDef::new(MapType::Array, 4, 8, 100);
-        assert_eq!(def.total_size(), (4 + 8) * 100);
+        assert_eq!(def.checked_total_size(), Some((4 + 8) * 100));
+    }
+
+    #[test]
+    fn map_def_size_never_wraps() {
+        let def = MapDef::new(MapType::Hash, u32::MAX, u32::MAX, u32::MAX);
+        let expected = (u32::MAX as usize)
+            .checked_add(u32::MAX as usize)
+            .and_then(|size| size.checked_mul(u32::MAX as usize));
+        assert_eq!(def.checked_total_size(), expected);
     }
 }

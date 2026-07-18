@@ -30,7 +30,7 @@ pub struct QueuedProgram<P: PhysicalProfile = ActiveProfile> {
     /// The program to execute
     pub program: Arc<BpfProgram<P>>,
     /// Execution context
-    pub context: BpfContext,
+    pub context: BpfContext<'static>,
     /// Priority level
     pub priority: ExecPriority,
     /// Submission timestamp (monotonic counter)

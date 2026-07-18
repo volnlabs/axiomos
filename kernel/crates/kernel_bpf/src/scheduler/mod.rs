@@ -56,7 +56,7 @@ pub struct BpfExecRequest<P: PhysicalProfile = ActiveProfile> {
     /// The program to execute
     pub program: Arc<BpfProgram<P>>,
     /// Execution context
-    pub context: BpfContext,
+    pub context: BpfContext<'static>,
     /// Priority level
     pub priority: ExecPriority,
     /// Deadline (embedded profile only)
@@ -67,7 +67,7 @@ pub struct BpfExecRequest<P: PhysicalProfile = ActiveProfile> {
 impl<P: PhysicalProfile> BpfExecRequest<P> {
     /// Create a new execution request.
     #[cfg(feature = "cloud-profile")]
-    pub fn new(id: ProgId, program: Arc<BpfProgram<P>>, context: BpfContext) -> Self {
+    pub fn new(id: ProgId, program: Arc<BpfProgram<P>>, context: BpfContext<'static>) -> Self {
         Self {
             id,
             program,
@@ -78,7 +78,7 @@ impl<P: PhysicalProfile> BpfExecRequest<P> {
 
     /// Create a new execution request.
     #[cfg(all(feature = "embedded-profile", not(feature = "cloud-profile")))]
-    pub fn new(id: ProgId, program: Arc<BpfProgram<P>>, context: BpfContext) -> Self {
+    pub fn new(id: ProgId, program: Arc<BpfProgram<P>>, context: BpfContext<'static>) -> Self {
         Self {
             id,
             program,

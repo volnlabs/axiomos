@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'kernel/crates/kernel_bpf/**'
+      - 'kernel/crates/kernel_elfloader/**'
       - '.github/workflows/fuzz.yml'
   schedule:
     # 02:30 UTC weekly (Sun). Was nightly with two 8h targets ≈ 960 billed
@@ -27,10 +28,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install nightly toolchain
-        uses: actions-rs/toolchain@v1
+      - name: Install pinned nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
         with:
-          toolchain: nightly
           components: rust-src
 
       - name: Install cargo-fuzz
@@ -48,6 +48,34 @@ jobs:
           path: kernel/crates/kernel_bpf/fuzz/artifacts/
           retention-days: 14
 
+  elfloader-pr-smoke:
+    if: github.event_name == 'pull_request'
+    name: "Fuzz smoke (ELF parse/load, 60s)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        with:
+          components: rust-src
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version "^0.13"
+
+      - name: Fuzz malformed ELF parse and load
+        working-directory: kernel/crates/kernel_elfloader
+        run: cargo fuzz run parse_and_load -- -max_total_time=60
+
+      - name: Upload crash artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-elf-parse-and-load
+          path: kernel/crates/kernel_elfloader/fuzz/artifacts/
+          retention-days: 14
+
   nightly:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     name: "Fuzz weekly (${{ matrix.target }}, 2h)"
@@ -62,10 +90,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install nightly toolchain
-        uses: actions-rs/toolchain@v1
+      - name: Install pinned nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
         with:
-          toolchain: nightly
           components: rust-src
 
       - name: Install cargo-fuzz
@@ -97,4 +124,48 @@ jobs:
         with:
           name: fuzz-crash-${{ matrix.target }}-${{ github.run_id }}
           path: kernel/crates/kernel_bpf/fuzz/artifacts/${{ matrix.target }}
+          retention-days: 30
+
+  elfloader-weekly:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: "Fuzz weekly (ELF parse/load, 10m)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        with:
+          components: rust-src
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version "^0.13"
+
+      - name: Restore ELF corpus
+        uses: actions/cache@v4
+        with:
+          path: kernel/crates/kernel_elfloader/fuzz/corpus/parse_and_load
+          key: fuzz-corpus-elf-parse-and-load-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-elf-parse-and-load-
+
+      - name: Fuzz malformed ELF parse and load
+        working-directory: kernel/crates/kernel_elfloader
+        run: cargo fuzz run parse_and_load -- -max_total_time=600
+
+      - name: Upload ELF corpus
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-elf-parse-and-load-${{ github.run_id }}
+          path: kernel/crates/kernel_elfloader/fuzz/corpus/parse_and_load
+          retention-days: 30
+
+      - name: Upload ELF crash artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-elf-parse-and-load-${{ github.run_id }}
+          path: kernel/crates/kernel_elfloader/fuzz/artifacts/parse_and_load
           retention-days: 30

@@ -108,7 +108,7 @@ pub(in crate::mem) fn init(address_space: &AddressSpace, usable_physical_memory_
         };
 
         address_space
-            .map_range(
+            .map_range_owned(
                 page_range,
                 PhysicalMemory::allocate_frames_non_contiguous(),
                 PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
@@ -129,7 +129,7 @@ pub(in crate::mem) fn init(address_space: &AddressSpace, usable_physical_memory_
         };
 
         address_space
-            .map_range(
+            .map_range_owned(
                 page_range,
                 frames,
                 PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
@@ -171,7 +171,7 @@ pub(in crate::mem) fn init_stage2() {
 
         let address_space = AddressSpace::kernel();
         address_space
-            .map_range(
+            .map_range_owned(
                 page_range,
                 PhysicalMemory::allocate_frames_non_contiguous(),
                 PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
@@ -194,7 +194,7 @@ pub(in crate::mem) fn init_stage2() {
 
         let address_space = AddressSpace::kernel();
         address_space
-            .map_range(
+            .map_range_owned(
                 page_range,
                 frames,
                 PageTableFlags::PRESENT | PageTableFlags::WRITABLE,

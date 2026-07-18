@@ -5,10 +5,23 @@ use minilib::write;
 
 const PHASE4_EXPORT_DEMO: &str = "/bin/sched_switch_export_demo";
 const PHASE4_BRIDGE_DEMO: &str = "/bin/sched_switch_bridge_demo";
+const UNMAPPED_USER_ADDRESS: usize = 0x0000_7000_0000_0000;
 
 // SAFETY: Entry point for the init process, called by the kernel/loader.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    if usercopy_fault_probe() {
+        write(1, b"USERCOPY_EFAULT_OK\n");
+    } else {
+        write(1, b"USERCOPY_EFAULT_FAIL\n");
+    }
+
+    if expect_errno(minilib::syscall0(usize::MAX), kernel_abi::ENOSYS) {
+        write(1, b"UNKNOWN_SYSCALL_ENOSYS_OK\n");
+    } else {
+        write(1, b"UNKNOWN_SYSCALL_ENOSYS_FAIL\n");
+    }
+
     write(1, b"=== Axiom eBPF Init ===\n");
     write(1, b"Phase 4 demo boot: ");
     write(1, PHASE4_EXPORT_DEMO.as_bytes());
@@ -252,6 +265,34 @@ pub extern "C" fn _start() -> ! {
             minilib::pause();
         }
     */
+}
+
+fn usercopy_fault_probe() -> bool {
+    let bad = UNMAPPED_USER_ADDRESS;
+
+    [
+        minilib::syscall3(kernel_abi::SYS_WRITE, 1, bad, 1),
+        minilib::syscall3(kernel_abi::SYS_WRITEV, 1, bad, 1),
+        minilib::syscall4(
+            kernel_abi::SYS_OPEN,
+            bad,
+            1,
+            kernel_abi::O_RDONLY as usize,
+            0,
+        ),
+        minilib::syscall2(
+            kernel_abi::SYS_CLOCK_GETTIME,
+            kernel_abi::CLOCK_MONOTONIC as usize,
+            bad,
+        ),
+        minilib::syscall2(kernel_abi::SYS_NANOSLEEP, bad, 0),
+    ]
+    .into_iter()
+    .all(|result| expect_errno(result, kernel_abi::EFAULT))
+}
+
+fn expect_errno(result: usize, errno: kernel_abi::Errno) -> bool {
+    result as isize == -isize::from(errno)
 }
 
 fn spawn_demo(path: &str) {

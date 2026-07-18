@@ -311,6 +311,7 @@ fn dispatch_ultrasonic(now: u64, echo_us: u16) {
             value: echo_us as i32,
             scale: 1_000_000, // 1.0 (raw µs); behavior converts to range
             offset: 0,
+            reserved: 0,
         };
         mgr.lock().dispatch_event(event);
     }

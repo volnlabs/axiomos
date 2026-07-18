@@ -29,10 +29,10 @@ use crate::verifier::HelperId;
 // In host-based tests, these symbols are provided by the `helpers_stub` module in `mod.rs`.
 unsafe extern "C" {
     fn bpf_ktime_get_ns() -> u64;
-    fn bpf_get_interrupt_latency_ns(ctx: *const BpfContext) -> u64;
-    fn bpf_get_boot_time_ms(ctx: *const BpfContext) -> u64;
-    fn bpf_get_kernel_heap_kb(ctx: *const BpfContext) -> u64;
-    fn bpf_get_kernel_image_mb(ctx: *const BpfContext) -> u64;
+    fn bpf_get_interrupt_latency_ns(ctx: *const BpfContext<'_>) -> u64;
+    fn bpf_get_boot_time_ms(ctx: *const BpfContext<'_>) -> u64;
+    fn bpf_get_kernel_heap_kb(ctx: *const BpfContext<'_>) -> u64;
+    fn bpf_get_kernel_image_mb(ctx: *const BpfContext<'_>) -> u64;
     fn bpf_trace_printk(fmt: *const u8, size: u32) -> i32;
     fn bpf_map_lookup_elem(map_id: u32, key: *const u8) -> *mut u8;
     fn bpf_map_update_elem(map_id: u32, key: *const u8, value: *const u8, flags: u64) -> i32;
@@ -67,7 +67,7 @@ impl<P: PhysicalProfile> Interpreter<P> {
         insn: &BpfInsn,
         regs: &mut RegisterFile,
         stack: &mut [u8],
-        ctx: &BpfContext,
+        ctx: &BpfContext<'_>,
     ) -> Result<InsnResult, BpfError> {
         // Exit instruction
         if insn.is_exit() {
@@ -175,7 +175,7 @@ impl<P: PhysicalProfile> Interpreter<P> {
         insn: &BpfInsn,
         regs: &mut RegisterFile,
         is_64bit: bool,
-        ctx: &BpfContext,
+        ctx: &BpfContext<'_>,
     ) -> Result<InsnResult, BpfError> {
         let jmp_op = JmpOp::from_opcode(insn.opcode).ok_or(BpfError::InvalidInstruction)?;
 
@@ -238,7 +238,7 @@ impl<P: PhysicalProfile> Interpreter<P> {
         &self,
         insn: &BpfInsn,
         regs: &mut RegisterFile,
-        ctx: &BpfContext,
+        ctx: &BpfContext<'_>,
     ) -> Result<InsnResult, BpfError> {
         let helper_id = insn.imm;
 
@@ -265,7 +265,7 @@ impl<P: PhysicalProfile> Interpreter<P> {
         &self,
         helper_id: i32,
         args: [u64; 5],
-        ctx: &BpfContext,
+        ctx: &BpfContext<'_>,
     ) -> Result<u64, BpfError> {
         // SAFETY: Calling BPF helpers is inherently unsafe as they are extern "C" functions.
         // We rely on the BPF verifier (in a full implementation) to ensure arguments are valid.
@@ -278,17 +278,19 @@ impl<P: PhysicalProfile> Interpreter<P> {
                 Some(HelperId::KtimeGetNs) => Ok(bpf_ktime_get_ns()),
 
                 Some(HelperId::GetInterruptLatencyNs) => {
-                    Ok(bpf_get_interrupt_latency_ns(ctx as *const BpfContext))
+                    Ok(bpf_get_interrupt_latency_ns(ctx as *const BpfContext<'_>))
                 }
 
-                Some(HelperId::GetBootTimeMs) => Ok(bpf_get_boot_time_ms(ctx as *const BpfContext)),
+                Some(HelperId::GetBootTimeMs) => {
+                    Ok(bpf_get_boot_time_ms(ctx as *const BpfContext<'_>))
+                }
 
                 Some(HelperId::GetKernelHeapKb) => {
-                    Ok(bpf_get_kernel_heap_kb(ctx as *const BpfContext))
+                    Ok(bpf_get_kernel_heap_kb(ctx as *const BpfContext<'_>))
                 }
 
                 Some(HelperId::GetKernelImageMb) => {
-                    Ok(bpf_get_kernel_image_mb(ctx as *const BpfContext))
+                    Ok(bpf_get_kernel_image_mb(ctx as *const BpfContext<'_>))
                 }
 
                 Some(HelperId::TracePrintk) => {
@@ -348,7 +350,7 @@ impl<P: PhysicalProfile> Interpreter<P> {
         insn: &BpfInsn,
         regs: &mut RegisterFile,
         stack: &[u8],
-        ctx: &BpfContext,
+        ctx: &BpfContext<'_>,
     ) -> Result<(), BpfError> {
         let dst = Register::from_raw(insn.dst_reg()).ok_or(BpfError::InvalidInstruction)?;
         let src = Register::from_raw(insn.src_reg()).ok_or(BpfError::InvalidInstruction)?;
@@ -400,7 +402,7 @@ impl<P: PhysicalProfile> Interpreter<P> {
         // 2. Context access
         // Check if address is within the BpfContext struct
         let ctx_addr = ctx as *const _ as u64;
-        let ctx_size = core::mem::size_of::<BpfContext>() as u64;
+        let ctx_size = core::mem::size_of::<BpfContext<'_>>() as u64;
 
         if addr >= ctx_addr && addr + size.size_bytes() as u64 <= ctx_addr + ctx_size {
             // SAFETY: We verified the address and size are within the bounds of the context struct.
@@ -419,10 +421,12 @@ impl<P: PhysicalProfile> Interpreter<P> {
 
         // 3. Data access
         // Check if address is within [ctx.data, ctx.data_end)
-        let data_start = ctx.data as u64;
-        let data_end = ctx.data_end as u64;
+        let data_start = ctx.data_ptr() as u64;
+        let data_end = ctx.data_end_ptr() as u64;
 
-        if !ctx.data.is_null() && addr >= data_start && addr + size.size_bytes() as u64 <= data_end
+        if !ctx.data_ptr().is_null()
+            && addr >= data_start
+            && addr + size.size_bytes() as u64 <= data_end
         {
             // SAFETY: We verified the address and size are within the valid data range [data, data_end).
             // read_unaligned is used because packet data may be unaligned.
@@ -560,7 +564,7 @@ impl<P: PhysicalProfile> Interpreter<P> {
     pub fn execute_with_stack(
         &self,
         program: &BpfProgram<P>,
-        ctx: &BpfContext,
+        ctx: &BpfContext<'_>,
         stack: &mut [u8],
     ) -> BpfResult {
         let insns = program.instructions();
@@ -649,7 +653,7 @@ impl<P: PhysicalProfile> BpfExecutor<P> for Interpreter<P> {
     /// Suitable for tests, benchmarks, and any cold path. The kernel's hot
     /// execution path calls [`Interpreter::execute_with_stack`] with a reused
     /// buffer instead — see #181.
-    fn execute(&self, program: &BpfProgram<P>, ctx: &BpfContext) -> BpfResult {
+    fn execute(&self, program: &BpfProgram<P>, ctx: &BpfContext<'_>) -> BpfResult {
         let mut stack = vec![0u8; P::MAX_STACK_SIZE];
         self.execute_with_stack(program, ctx, &mut stack)
     }
@@ -772,31 +776,38 @@ mod tests {
             .insn(BpfInsn::mov64_imm(0, 0)) // r0 = 0
             .insn(BpfInsn::ja(-1)) // infinite loop
             .exit()
-            .build()
-            .expect("valid program");
+            .build();
 
+        #[cfg(feature = "embedded-profile")]
+        {
+            assert!(program.is_err());
+            return;
+        }
+
+        #[cfg(feature = "cloud-profile")]
+        let program = program.expect("cloud profile permits loops with a runtime limit");
+
+        #[cfg(feature = "cloud-profile")]
         let interpreter = Interpreter::<ActiveProfile>::new();
+        #[cfg(feature = "cloud-profile")]
         let ctx = BpfContext::empty();
 
+        #[cfg(feature = "cloud-profile")]
         let result = interpreter.execute(&program, &ctx);
+        #[cfg(feature = "cloud-profile")]
         assert_eq!(result, Err(BpfError::Timeout));
     }
 
     #[test]
-    fn execute_division_by_zero() {
-        let program = ProgramBuilder::<ActiveProfile>::new(BpfProgType::SocketFilter)
+    fn verifier_rejects_division_by_zero_before_execution() {
+        let result = ProgramBuilder::<ActiveProfile>::new(BpfProgType::SocketFilter)
             .insn(BpfInsn::mov64_imm(0, 10)) // r0 = 10
             .insn(BpfInsn::mov64_imm(1, 0)) // r1 = 0
             .insn(BpfInsn::new(0x3f, 0, 1, 0, 0)) // r0 /= r1
             .exit()
-            .build()
-            .expect("valid program");
+            .build();
 
-        let interpreter = Interpreter::<ActiveProfile>::new();
-        let ctx = BpfContext::empty();
-
-        let result = interpreter.execute(&program, &ctx);
-        assert_eq!(result, Err(BpfError::DivisionByZero));
+        assert!(result.is_err());
     }
 
     #[test]
@@ -806,8 +817,10 @@ mod tests {
         helpers_stub::reset_test_map();
 
         let program = ProgramBuilder::<ActiveProfile>::new(BpfProgType::SocketFilter)
+            .insn(BpfInsn::new(0x7a, 10, 0, -8, 0)) // *(u64 *)(r10 - 8) = key
             .insn(BpfInsn::mov64_imm(1, 0)) // r1 = map_id (0)
-            .insn(BpfInsn::mov64_imm(2, 0)) // r2 = key_ptr (dummy)
+            .insn(BpfInsn::mov64_reg(2, 10))
+            .insn(BpfInsn::add64_imm(2, -8)) // r2 = &key
             .insn(BpfInsn::call(5)) // r0 = bpf_map_lookup_elem(r1, r2)
             .exit()
             .build()
@@ -832,9 +845,13 @@ mod tests {
         // We need to put a value on the stack and pass its pointer
         // For this test, we'll just verify the helper is called and returns 0
         let program = ProgramBuilder::<ActiveProfile>::new(BpfProgType::SocketFilter)
+            .insn(BpfInsn::new(0x7a, 10, 0, -8, 0)) // key
+            .insn(BpfInsn::new(0x7a, 10, 0, -16, 42)) // value
             .insn(BpfInsn::mov64_imm(1, 0)) // r1 = map_id (0)
-            .insn(BpfInsn::mov64_imm(2, 0)) // r2 = key_ptr (dummy)
-            .insn(BpfInsn::mov64_imm(3, 0)) // r3 = value_ptr (dummy)
+            .insn(BpfInsn::mov64_reg(2, 10))
+            .insn(BpfInsn::add64_imm(2, -8)) // r2 = &key
+            .insn(BpfInsn::mov64_reg(3, 10))
+            .insn(BpfInsn::add64_imm(3, -16)) // r3 = &value
             .insn(BpfInsn::mov64_imm(4, 0)) // r4 = flags (0)
             .insn(BpfInsn::call(6)) // r0 = bpf_map_update_elem(r1, r2, r3, r4)
             .exit()
@@ -856,8 +873,10 @@ mod tests {
         helpers_stub::reset_test_map();
 
         let program = ProgramBuilder::<ActiveProfile>::new(BpfProgType::SocketFilter)
+            .insn(BpfInsn::new(0x7a, 10, 0, -8, 0)) // key
             .insn(BpfInsn::mov64_imm(1, 0)) // r1 = map_id (0)
-            .insn(BpfInsn::mov64_imm(2, 0)) // r2 = key_ptr (dummy)
+            .insn(BpfInsn::mov64_reg(2, 10))
+            .insn(BpfInsn::add64_imm(2, -8)) // r2 = &key
             .insn(BpfInsn::call(7)) // r0 = bpf_map_delete_elem(r1, r2)
             .exit()
             .build()
@@ -902,7 +921,7 @@ mod tests {
 
         let interpreter = Interpreter::<ActiveProfile>::new();
         let mut ctx = BpfContext::empty();
-        ctx.interrupt_latency_ns = 12345;
+        ctx.set_interrupt_latency_ns(12345);
 
         let result = interpreter.execute(&program, &ctx);
         assert_eq!(result, Ok(12345));

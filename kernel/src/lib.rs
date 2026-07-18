@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 #![cfg_attr(target_arch = "x86_64", feature(abi_x86_interrupt))]
-#![feature(negative_impls, vec_push_within_capacity)]
+#![feature(negative_impls)]
 extern crate alloc;
 
 use ::log::info;
@@ -222,6 +222,14 @@ fn print_benchmark_metrics() {
         serial_println!("Kernel heap: {} KB", heap_used_kb);
         serial_println!("Kernel image: {} MB", kernel_image_mb);
         serial_println!("");
+
+        // The deterministic boot-success marker for CI smoke tests is
+        // emitted from src/main.rs after root mount + init creation —
+        // see the call site that prints `QEMU_BOOT_OK`. Emitting it here
+        // (inside kernel::init) would fire *before* the root filesystem
+        // is mounted and the first user process exists, which the
+        // audit's review round-1 flagged as "proves kernel
+        // initialization only".
     }
 }
 

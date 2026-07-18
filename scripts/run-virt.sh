@@ -3,7 +3,7 @@ set -e
 
 # Generate disk.img by building the root package for aarch64
 echo "Building root package for aarch64 to generate disk.img..."
-cargo build -p muffinos --target aarch64-unknown-none --no-default-features --features aarch64_deps
+cargo build -p axiomos --target aarch64-unknown-none --no-default-features --features aarch64_deps
 
 # The build.rs generates the image in the target directory.
 # We find it and copy it to the root.

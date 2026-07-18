@@ -1187,7 +1187,7 @@ impl<P: PhysicalProfile> Default for Arm64JitExecutor<P> {
 }
 
 impl<P: PhysicalProfile> BpfExecutor<P> for Arm64JitExecutor<P> {
-    fn execute(&self, program: &BpfProgram<P>, ctx: &BpfContext) -> BpfResult {
+    fn execute(&self, program: &BpfProgram<P>, ctx: &BpfContext<'_>) -> BpfResult {
         // Try to compile
         match self.compile(program) {
             Ok(jit_prog) => {
@@ -1217,7 +1217,7 @@ impl<P: PhysicalProfile> BpfExecutor<P> for Arm64JitExecutor<P> {
                 // 4. Cast to function pointer and execute
                 // BPF JIT function signature: fn(ctx: *const BpfContext) -> u64
                 // The JIT ensures R1 (ctx) is in X0, and R0 (ret) is moved to X0 before return.
-                let func: unsafe extern "C" fn(*const BpfContext) -> u64 =
+                let func: unsafe extern "C" fn(*const BpfContext<'_>) -> u64 =
                     unsafe { core::mem::transmute(ptr) };
 
                 let result = unsafe { func(ctx) };

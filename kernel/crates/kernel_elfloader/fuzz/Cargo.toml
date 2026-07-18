@@ -1,0 +1,29 @@
+[package]
+name = "kernel-elfloader-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+kernel_elfloader = { path = ".." }
+kernel_memapi = { path = "../../kernel_memapi" }
+libfuzzer-sys = "0.4"
+
+# Keep this isolated workspace aligned with the root workspace lock. Without
+# the exact pin this fuzz workspace resolves the compatible 0.15.5 release.
+x86_64 = "=0.15.4"
+
+[profile.release]
+debug = true
+
+[[bin]]
+name = "parse_and_load"
+path = "fuzz_targets/parse_and_load.rs"
+test = false
+doc = false
+bench = false

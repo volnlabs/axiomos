@@ -70,7 +70,7 @@ cargo build --release
 
 This creates:
 - Kernel binary
-- Bootable ISO image (`target/release/build/**/out/muffin.iso`)
+- Bootable ISO image (`target/release/build/**/out/axiomos.iso`)
 - Disk image (`disk.img`)
 
 The build process automatically:

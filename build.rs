@@ -188,7 +188,7 @@ fn build_iso(limine_checkout: impl AsRef<Path>, kernel_binary: impl AsRef<Path>)
         copy(from, to).expect("should be able to copy EFI boot files");
     }
 
-    let output_iso = out_dir.join("muffin.iso");
+    let output_iso = out_dir.join("axiomos.iso");
 
     let status = std::process::Command::new("xorriso")
         .arg("-as")

@@ -69,7 +69,7 @@ unsafe impl Hal for HalImpl {
             let frames = PhysicalMemory::allocate_frames(pages).unwrap();
             let segment = VirtualMemoryHigherHalf.reserve(pages).unwrap();
             AddressSpace::kernel()
-                .map_range::<Size4KiB>(
+                .map_range_owned::<Size4KiB>(
                     &*segment,
                     frames,
                     PageTableFlags::PRESENT | PageTableFlags::WRITABLE,

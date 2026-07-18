@@ -1,3 +1,4 @@
+use kernel_abi::ProtFlags;
 use kernel_syscall::access::{
     AllocationStrategy, CreateMappingError, Location, Mapping, MemoryAccess,
 };
@@ -20,6 +21,7 @@ impl MemoryAccess for KernelAccess<'_> {
         location: Location,
         size: usize,
         allocation_strategy: AllocationStrategy,
+        protection: ProtFlags,
     ) -> Result<Self::Mapping, CreateMappingError> {
         // For now, we only support eager allocation
         assert!(
@@ -62,16 +64,17 @@ impl MemoryAccess for KernelAccess<'_> {
             }
         }
 
+        let mut page_flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+        if protection.contains(ProtFlags::WRITE) {
+            page_flags.insert(PageTableFlags::WRITABLE);
+        }
+        if !protection.contains(ProtFlags::EXEC) {
+            page_flags.insert(PageTableFlags::NO_EXECUTE);
+        }
+
         self.process
             .with_address_space(|as_| {
-                as_.map_range::<Size4KiB>(
-                    &*segment,
-                    frames.into_iter(),
-                    PageTableFlags::PRESENT
-                        | PageTableFlags::WRITABLE
-                        | PageTableFlags::USER_ACCESSIBLE
-                        | PageTableFlags::NO_EXECUTE,
-                )
+                as_.map_range_owned::<Size4KiB>(&*segment, frames.into_iter(), page_flags)
             })
             .map_err(|_| CreateMappingError::OutOfMemory)?;
 

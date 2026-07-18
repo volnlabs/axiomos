@@ -1,90 +1,98 @@
 use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
-use core::mem::{align_of, size_of};
+use core::mem::size_of;
 
 use kernel_abi::{Errno, EFAULT, EINVAL};
-use kernel_syscall::UserspacePtr;
+use kernel_usermem::{UserMemError, UserMemory, MAX_USER_COPY};
+use kernel_virtual_memory::VirtAddr;
+use zerocopy::{FromBytes, Immutable, KnownLayout};
 
-/// Copy a struct from userspace to kernel.
-/// Validates: non-null, canonical address, alignment, within userspace range.
-pub fn copy_from_userspace<T: Copy>(ptr: usize) -> Result<T, Errno> {
-    if ptr == 0 {
-        return Err(EFAULT);
+use crate::mcore::context::ExecutionContext;
+use crate::mcore::mtask::process::Process;
+
+struct CurrentUserMemory {
+    process: Arc<Process>,
+}
+
+impl CurrentUserMemory {
+    fn new() -> Self {
+        Self {
+            process: ExecutionContext::load().current_process().clone(),
+        }
     }
 
-    // SAFETY: We validate that ptr is in the userspace address range (canonical lower half)
-    // via try_from_usize, which rejects kernel addresses. This prevents userspace from
-    // tricking the kernel into reading kernel memory.
-    let user_ptr = unsafe { UserspacePtr::<T>::try_from_usize(ptr)? };
-    user_ptr.validate_range(size_of::<T>())?;
+    fn map_error(error: UserMemError) -> Errno {
+        log::debug!("userspace copy rejected: {error}");
+        error.into()
+    }
+}
 
-    // Validate alignment
-    if !ptr.is_multiple_of(align_of::<T>()) {
+impl UserMemory for CurrentUserMemory {
+    fn copy_from_user(&mut self, dst: &mut [u8], src_addr: VirtAddr) -> Result<(), UserMemError> {
+        self.process
+            .with_address_space(|address_space| address_space.copy_from_user(dst, src_addr))
+    }
+
+    fn copy_to_user(&mut self, dst_addr: VirtAddr, src: &[u8]) -> Result<(), UserMemError> {
+        self.process
+            .with_address_space(|address_space| address_space.copy_to_user(dst_addr, src))
+    }
+
+    fn copy_cstr_from_user(
+        &mut self,
+        dst: &mut [u8],
+        src_addr: VirtAddr,
+    ) -> Result<usize, UserMemError> {
+        self.process
+            .with_address_space(|address_space| address_space.copy_cstr_from_user(dst, src_addr))
+    }
+}
+
+/// Copy a byte-valid plain-data value from the current process.
+pub fn copy_from_userspace<T>(ptr: usize) -> Result<T, Errno>
+where
+    T: FromBytes + KnownLayout + Immutable,
+{
+    let mut bytes = vec![0u8; size_of::<T>()];
+    CurrentUserMemory::new()
+        .copy_from_user(&mut bytes, VirtAddr::new(ptr as u64))
+        .map_err(CurrentUserMemory::map_error)?;
+    T::read_from_bytes(&bytes).map_err(|_| EFAULT)
+}
+
+/// Read an owned byte slice from the current process.
+pub fn read_userspace_slice(ptr: usize, len: usize) -> Result<Vec<u8>, Errno> {
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    if len > MAX_USER_COPY {
         return Err(EINVAL);
     }
 
-    // SAFETY: Address has been validated to be:
-    // 1. Non-null (checked above)
-    // 2. In userspace address range (validated by try_from_usize)
-    // 3. Properly aligned for type T (checked above)
-    // 4. Within valid address bounds (validated by validate_range)
-    // The read is a Copy type, so we produce an owned value.
-    Ok(unsafe { *(ptr as *const T) })
+    let mut bytes = vec![0u8; len];
+    CurrentUserMemory::new()
+        .copy_from_user(&mut bytes, VirtAddr::new(ptr as u64))
+        .map_err(CurrentUserMemory::map_error)?;
+    Ok(bytes)
 }
 
-/// Read a slice from userspace. Returns owned Vec.
-pub fn read_userspace_slice(ptr: usize, len: usize) -> Result<Vec<u8>, Errno> {
-    if ptr == 0 || len == 0 {
-        return Err(EFAULT);
-    }
-
-    // SAFETY: We validate that ptr is in the userspace address range (canonical lower half)
-    // via try_from_usize, which rejects kernel addresses.
-    let user_ptr = unsafe { UserspacePtr::<u8>::try_from_usize(ptr)? };
-    user_ptr.validate_range(len)?;
-
-    // SAFETY: Address has been validated to be:
-    // 1. Non-null (checked above)
-    // 2. In userspace address range (validated by try_from_usize)
-    // 3. Within valid bounds for len bytes (validated by validate_range)
-    // u8 has no alignment requirements. We immediately copy to an owned Vec.
-    let slice = unsafe { core::slice::from_raw_parts(ptr as *const u8, len) };
-    Ok(slice.to_vec())
-}
-
-/// Read a null-terminated string from userspace.
-/// Returns a String.
-/// Validates that the string is within userspace bounds and does not exceed max_len.
+/// Read a NUL-terminated UTF-8 string from the current process.
 pub fn read_userspace_string(ptr: usize, max_len: usize) -> Result<String, Errno> {
-    if ptr == 0 {
-        return Err(EFAULT);
+    if max_len == 0 || max_len > MAX_USER_COPY {
+        return Err(EINVAL);
     }
 
-    let mut bytes = Vec::new();
-
-    for offset in 0..max_len {
-        let current_addr = ptr.checked_add(offset).ok_or(EINVAL)?;
-
-        // Validate address
-        // SAFETY: We are checking the address before reading.
-        // We use try_from_usize to ensure it's in userspace range.
-        let uptr = unsafe { UserspacePtr::<u8>::try_from_usize(current_addr)? };
-
-        // Read one byte
-        // SAFETY: Address is validated (canonical userspace).
-        let b = unsafe { *uptr.as_ptr() };
-
-        if b == 0 {
-            return String::from_utf8(bytes).map_err(|_| EINVAL);
-        }
-
-        bytes.push(b);
-    }
-
-    Err(EINVAL) // String too long or no null terminator found
+    let mut bytes = vec![0u8; max_len];
+    let len = CurrentUserMemory::new()
+        .copy_cstr_from_user(&mut bytes, VirtAddr::new(ptr as u64))
+        .map_err(CurrentUserMemory::map_error)?;
+    bytes.truncate(len);
+    String::from_utf8(bytes).map_err(|_| EINVAL)
 }
 
-/// Read a null-terminated array of pointers to strings (argv/envp).
+/// Read a NUL-terminated array of userspace pointers to UTF-8 strings.
 pub fn read_userspace_string_array(
     ptr: usize,
     max_count: usize,
@@ -93,50 +101,30 @@ pub fn read_userspace_string_array(
     if ptr == 0 {
         return Ok(Vec::new());
     }
+    if max_count > MAX_USER_COPY / size_of::<usize>() || max_string_len > MAX_USER_COPY {
+        return Err(EINVAL);
+    }
 
     let mut strings = Vec::new();
-    let mut current_addr = ptr;
-
-    for _ in 0..max_count {
-        // Validate pointer to the pointer
-        // SAFETY: Checking userspace bounds for the pointer array entry.
-        let uptr = unsafe { UserspacePtr::<usize>::try_from_usize(current_addr)? };
-        uptr.validate_range(size_of::<usize>())?;
-
-        // Read the pointer
-        // SAFETY: Validated above.
-        let str_ptr = unsafe { *uptr.as_ptr() };
-
-        if str_ptr == 0 {
+    for index in 0..max_count {
+        let offset = index.checked_mul(size_of::<usize>()).ok_or(EINVAL)?;
+        let current_addr = ptr.checked_add(offset).ok_or(EINVAL)?;
+        let string_ptr = copy_from_userspace::<usize>(current_addr)?;
+        if string_ptr == 0 {
             return Ok(strings);
         }
-
-        let s = read_userspace_string(str_ptr, max_string_len)?;
-        strings.push(s);
-
-        current_addr += size_of::<usize>();
+        strings.push(read_userspace_string(string_ptr, max_string_len)?);
     }
 
-    Err(EINVAL) // Too many arguments or no null terminator found for array
+    Err(EINVAL)
 }
 
-/// Copy data to userspace buffer.
+/// Copy kernel bytes to a writable range in the current process.
 pub fn copy_to_userspace(ptr: usize, data: &[u8]) -> Result<(), Errno> {
-    if ptr == 0 {
-        return Err(EFAULT);
+    if data.is_empty() {
+        return Ok(());
     }
-
-    // SAFETY: We validate that ptr is in the userspace address range (canonical lower half)
-    // via try_from_usize, which rejects kernel addresses.
-    let user_ptr = unsafe { UserspacePtr::<u8>::try_from_usize(ptr)? };
-    user_ptr.validate_range(data.len())?;
-
-    // SAFETY: Address has been validated to be:
-    // 1. Non-null (checked above)
-    // 2. In userspace address range (validated by try_from_usize)
-    // 3. Within valid bounds for data.len() bytes (validated by validate_range)
-    // u8 has no alignment requirements. copy_nonoverlapping requires non-overlapping
-    // src/dst, which is guaranteed since data is kernel memory and ptr is userspace.
-    unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len()) }
-    Ok(())
+    CurrentUserMemory::new()
+        .copy_to_user(VirtAddr::new(ptr as u64), data)
+        .map_err(CurrentUserMemory::map_error)
 }

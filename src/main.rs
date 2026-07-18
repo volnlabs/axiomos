@@ -128,8 +128,6 @@ continue"
         cmd.arg("kvm");
     }
 
-    cmd.arg("-device");
-    cmd.arg("virtio-gpu,id=virtio-gpu0");
     cmd.arg("-vga");
     cmd.arg("none");
 

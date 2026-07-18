@@ -1,4 +1,19 @@
 name: Rust
+
+# H-06 / PR #1 fixes in this workflow:
+#   * Toolchain pinning: every job uses dtolnay/rust-toolchain@nightly-2026-07-02,
+#     the same channel declared in rust-toolchain.toml. The previous "nightly"
+#     and "stable" pins floated; stable in particular could not parse the
+#     workspace's `artifact = "bin"` (requires nightly -Z bindeps).
+#   * Standalone-workspace coverage: every Cargo workspace not in the root
+#     default-members gets an explicit lint + test job
+#     (`lint-standalone-workspaces`, `test-standalone-workspaces`).
+#   * QEMU kernel-test protocol: a new `qemu-kernel-smoke` job builds the
+#     release ISO, boots it under `qemu-system-x86_64` with a hard timeout, and
+#     asserts a serial-line PASS marker before declaring success. The kernel
+#     emits `QEMU_BOOT_OK` once user-mode init has mounted the ext2 rootfs and
+#     reached the BPF manager idle state.
+
 permissions:
   contents: read
 
@@ -8,9 +23,10 @@ on:
     paths-ignore:
       - '**.md'
       - 'docs/**'
+      - 'website/**'
       - 'LICENSE*'
       - '.gitignore'
-  #  pull_request:   # kept off: push already covers branches; PR would double runs
+  pull_request:
   workflow_dispatch:
   schedule:
     # Weekly drift check (Mon 05:00 UTC). Was twice-daily; at ~145 billed
@@ -26,16 +42,17 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN_DATE: '2026-07-02'
 
 jobs:
 
   lint:
-    name: "Lint"
+    name: "Lint (root workspace)"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install latest nightly
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Install pinned nightly
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
         with:
           components: rustfmt, clippy, llvm-tools-preview, rust-src
       - name: Add build target
@@ -48,44 +65,137 @@ jobs:
           sudo apt install -y xorriso
       - name: Rustfmt
         run: |
-          cargo fmt -- --check
-      - name: Clippy
+          cargo fmt --all -- --check
+      - name: Unsafe-code ledger
+        run: python3 -B scripts/unsafe-ledger.py --check
+      - name: Clippy (per-crate, matches local CI recipe)
+        # Per the axiom-kernel skill: per-crate clippy avoids the
+        # profile-typed kernel_bpf "no default profile" failures that bare
+        # `cargo clippy --workspace --lib` triggers on a host build.
         run: |
-          cargo clippy -- -D clippy::all
+          cargo clippy -p kernel_abi --lib -- -D clippy::all
+          cargo clippy -p kernel_elfloader --all-targets -- -D clippy::all
+          cargo clippy -p kernel_syscall --all-targets -- -D clippy::all
+          cargo clippy -p kernel_time --all-targets -- -D clippy::all
+          cargo clippy -p kernel_usermem --all-targets -- -D clippy::all
+          cargo clippy -p kernel_virtual_memory --all-targets -- -D clippy::all
+          cargo clippy -p kernel_vfs --lib -- -D clippy::all
+          cargo clippy -p kernel_physical_memory --lib -- -D clippy::all
+          cargo clippy -p kernel_bpf --no-default-features --features cloud-profile --lib -- -D clippy::all
+          cargo clippy -p kernel_bpf --no-default-features --features embedded-profile --lib -- -D clippy::all
 
-  test:
-    name: "Test"
+  lint-standalone-workspaces:
+    name: "Lint (standalone workspaces)"
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        strategy: [ debug, release ]
     steps:
       - uses: actions/checkout@v4
-      - name: Install latest nightly
-        uses: dtolnay/rust-toolchain@nightly
-      - name: Install dependencies
+      - name: Install pinned nightly
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        with:
+          components: rustfmt, clippy
+      - name: Add standalone non-host targets
         run: |
-          sudo apt update
-          sudo apt install -y xorriso
-      - name: Test
+          rustup target add thumbv6m-none-eabi
+          rustup target add riscv64gc-unknown-none-elf
+      - name: Clippy (rk_bridge)
+        run: cargo clippy --manifest-path userspace/rk_bridge/Cargo.toml --lib -- -D clippy::all
+      - name: Clippy (rk_cli)
+        run: cargo clippy --manifest-path userspace/rk_cli/Cargo.toml -- -D clippy::all
+      - name: Clippy (RP2040 firmware, debug)
+        run: cargo clippy --manifest-path firmware/shrike_rp2040/Cargo.toml --target thumbv6m-none-eabi -- -D clippy::all
+      - name: Clippy (RP2040 firmware, release)
+        run: cargo clippy --manifest-path firmware/shrike_rp2040/Cargo.toml --target thumbv6m-none-eabi --release -- -D clippy::all
+      - name: Clippy (RISC-V demo)
+        # Audit fix R5: `--manifest-path` from the repository root does not
+        # load kernel/demos/riscv/.cargo/config.toml, so the previous command
+        # compiled the demo build script for the host target and invoked host
+        # `cc` with RISC-V flags. Pass the target explicitly.
+        run: cargo clippy --manifest-path kernel/demos/riscv/Cargo.toml --target riscv64gc-unknown-none-elf -- -D clippy::all
+      - name: Clippy (Lean check, formal proofs)
+        working-directory: formal
         run: |
-          cargo test $(if [[ "${{ matrix.strategy }}" == "release" ]]; then echo "--release"; fi)
+          # Audit fix R1: install elan instead of silently skipping the
+          # Lean check. The previous step's "skip if not installed" path
+          # meant a CI run could pass without exercising the formal/
+          # workspace at all.
+          if ! command -v elan >/dev/null 2>&1; then
+            curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+            echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          fi
+          # GITHUB_PATH is applied only to later steps; export PATH here too
+          # so a fresh runner can invoke `lake` in this same shell.
+          export PATH="$HOME/.elan/bin:$PATH"
+          lake build
+
+  test:
+      name: "Test (root workspace)"
+      runs-on: ubuntu-latest
+      strategy:
+        matrix:
+          strategy: [ debug, release ]
+      steps:
+        - uses: actions/checkout@v4
+        - name: Install pinned nightly
+          uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        - name: Install dependencies
+          run: |
+            sudo apt update
+            sudo apt install -y xorriso
+        - name: Test (per-crate, host-testable)
+          # Audit fix R1: matrix now includes kernel_usermem (PR #2.1) and
+          # kernel_elfloader (PR #10) plus its audit-h05 regression suite.
+          run: |
+            PROFILE_FLAG=""
+            if [[ "${{ matrix.strategy }}" == "release" ]]; then PROFILE_FLAG="--release"; fi
+            set -e
+            cargo test -p kernel_abi $PROFILE_FLAG
+            cargo test -p kernel_vfs $PROFILE_FLAG
+            cargo test -p kernel_physical_memory $PROFILE_FLAG
+            cargo test -p kernel_syscall $PROFILE_FLAG
+            cargo test -p kernel_time $PROFILE_FLAG
+            cargo test -p kernel_virtual_memory $PROFILE_FLAG
+            cargo test -p kernel_usermem $PROFILE_FLAG
+            cargo test --manifest-path kernel/crates/kernel_elfloader/Cargo.toml $PROFILE_FLAG
+            cargo test --manifest-path kernel/crates/kernel_elfloader/Cargo.toml --test audit_h05_malformed $PROFILE_FLAG
+            cargo test -p kernel_bpf --no-default-features --features cloud-profile $PROFILE_FLAG
+            cargo test -p kernel_bpf --no-default-features --features cloud-profile --test profile_contracts $PROFILE_FLAG
+            cargo test -p kernel_bpf --no-default-features --features embedded-profile $PROFILE_FLAG
+            cargo test -p shrike_link $PROFILE_FLAG
+  test-standalone-workspaces:
+    name: "Test (standalone workspaces)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned nightly
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
+        with:
+          targets: thumbv6m-none-eabi
+      - name: Add RP2040 target
+        run: rustup target add thumbv6m-none-eabi
+      - name: Test rk_bridge
+        run: cargo test --manifest-path userspace/rk_bridge/Cargo.toml
+      - name: Test rk_cli
+        run: cargo test --manifest-path userspace/rk_cli/Cargo.toml
+      - name: Test RP2040 firmware (debug)
+        run: cargo test --manifest-path firmware/shrike_rp2040/Cargo.toml --target thumbv6m-none-eabi --no-run
+      - name: Test RP2040 firmware (release)
+        run: cargo test --manifest-path firmware/shrike_rp2040/Cargo.toml --target thumbv6m-none-eabi --release --no-run
 
   firmware-rp2040:
     name: "Firmware (RP2040)"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install latest nightly
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Install pinned nightly
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
         with:
           targets: thumbv6m-none-eabi
       - name: Check RP2040 firmware (debug)
         run: |
-          cargo check --manifest-path firmware/shrike_rp2040/Cargo.toml
+          cargo check --manifest-path firmware/shrike_rp2040/Cargo.toml --target thumbv6m-none-eabi
       - name: Check RP2040 firmware (release)
         run: |
-          cargo check --manifest-path firmware/shrike_rp2040/Cargo.toml --release
+          cargo check --manifest-path firmware/shrike_rp2040/Cargo.toml --target thumbv6m-none-eabi --release
 
   prepare-miri:
     name: "Prepare Miri"
@@ -108,8 +218,8 @@ jobs:
       matrix: ${{fromJson(needs.prepare-miri.outputs.matrix)}}
     steps:
       - uses: actions/checkout@v4
-      - name: Install latest nightly
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Install pinned nightly
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
         with:
           components: miri, rust-src
       - name: Miri Setup
@@ -134,8 +244,8 @@ jobs:
         profile: [cloud-profile]
     steps:
       - uses: actions/checkout@v4
-      - name: Install latest nightly
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Install pinned nightly
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
         with:
           components: miri, rust-src
       - name: Miri Setup
@@ -146,19 +256,19 @@ jobs:
           cargo miri test -p kernel_bpf --no-default-features --features ${{ matrix.profile }}
 
 
-
   build:
     name: "Build and upload artifacts"
     runs-on: ubuntu-latest
     needs:
       - test
+      - test-standalone-workspaces
       - firmware-rp2040
       - miri
       - miri-kernel-bpf
     steps:
       - uses: actions/checkout@v4
-      - name: Install latest nightly
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Install pinned nightly
+        uses: dtolnay/rust-toolchain@nightly-2026-07-02
         with:
           targets: x86_64-unknown-none, aarch64-unknown-none
       - name: Add build targets
@@ -177,6 +287,152 @@ jobs:
           cargo build --release --target aarch64-unknown-none --no-default-features --features aarch64_deps
       - uses: actions/upload-artifact@v4
         with:
-          name: muffin-boot-images
+          name: axiomos-boot-images
           path: |
-            target/release/build/**/out/muffin.iso
+            target/release/build/**/out/axiomos.iso
+
+  qemu-kernel-smoke:
+      name: "QEMU kernel smoke (x86_64)"
+      # T-01 / H-06: a deterministic serial-line smoke test that boots the
+      # release ISO under QEMU and asserts the kernel reaches init (rootfs
+      # mounted, ext2 mounted, init started) — *not* just kernel init. The
+      # marker `QEMU_BOOT_OK` is emitted from kernel/src/main.rs right after
+      # Process::create_from_executable returns for /bin/init (R1 moved it
+      # out of print_benchmark_metrics); init execution itself is
+      # observed via the `started process pid=` log line the kernel
+      # prints at the same point. Boot must complete ACPI/RSDP walk
+      # before either marker — a kernel panic during ACPI is treated as a
+      # gate failure (audit review round-1 finding).
+      runs-on: ubuntu-latest
+      timeout-minutes: 15
+      steps:
+        - uses: actions/checkout@v4
+        - name: Install pinned nightly
+          uses: dtolnay/rust-toolchain@nightly-2026-07-02
+          with:
+            targets: x86_64-unknown-none
+        - name: Add build target
+          run: rustup target add x86_64-unknown-none
+        - name: Install QEMU + ISO/disk build deps
+          run: |
+            sudo apt update
+            # ovmf explicitly: /usr/share/OVMF/*.fd is required by the pflash
+            # drives below and only ships in the ovmf package (relying on
+            # qemu-system-x86's Recommends is not guaranteed on the runner).
+            sudo apt install -y qemu-system-x86 xorriso mtools e2fsprogs ovmf
+        - name: Build release (produces axiomos.iso + disk image)
+          env:
+            AXIOMOS_BOOT_TIMEOUT_SECS: "60"
+          run: cargo build --release
+        - name: Locate ISO and disk image
+          id: artifacts
+          run: |
+            set -e
+            ISO_PATH=$(find target/release/build -name axiomos.iso -type f | head -n 1)
+            if [[ -z "$ISO_PATH" ]]; then
+              echo "::error::axiomos.iso not produced by release build"
+              exit 1
+            fi
+            DISK_PATH="$(dirname "$ISO_PATH")/disk.img"
+            if [[ ! -f "$DISK_PATH" ]]; then
+              # Fallback for future build.rs layout changes: prefer any disk.img
+              # in the same Cargo target tree, but do not look for retired
+              # artifact names.
+              DISK_PATH=$(find target/release/build -path '*/out/disk.img' -type f | head -n 1)
+            fi
+            if [[ -z "$DISK_PATH" || ! -f "$DISK_PATH" ]]; then
+              echo "::error::disk image not produced next to $ISO_PATH (expected build.rs out/disk.img)"
+              exit 1
+            fi
+            echo "iso-path=$ISO_PATH" >> "$GITHUB_OUTPUT"
+            echo "disk-path=$DISK_PATH" >> "$GITHUB_OUTPUT"
+        - name: Boot ISO under QEMU (OVMF + disk)
+          env:
+            ISO_PATH: ${{ steps.artifacts.outputs.iso-path }}
+            DISK_PATH: ${{ steps.artifacts.outputs.disk-path }}
+          run: |
+            set -e
+            SERIAL_LOG=$(mktemp)
+            # Pre-flight: locate OVMF pflash blobs explicitly. The
+            # `ovmf` package on Ubuntu ships them under
+            # /usr/share/OVMF/x64/, but file naming varies across
+            # distributions (.fd vs .4m.fd). Fail loudly if neither
+            # naming pattern matches so the gate reports the real
+            # problem instead of "QEMU_BOOT_OK missing" downstream.
+            OVMF_CODE=$(find /usr/share/OVMF \( -name 'OVMF_CODE.fd' -o -name 'OVMF_CODE_4M.fd' -o -name 'OVMF_CODE.4m.fd' \) -type f 2>/dev/null | head -n1)
+            OVMF_VARS=$(find /usr/share/OVMF \( -name 'OVMF_VARS.fd' -o -name 'OVMF_VARS_4M.fd' -o -name 'OVMF_VARS.4m.fd' \) -type f 2>/dev/null | head -n1)
+            if [[ -z "$OVMF_CODE" || -z "$OVMF_VARS" ]]; then
+              echo "::error::OVMF pflash blobs not found under /usr/share/OVMF"
+              echo "Expected one of: OVMF_CODE.fd / OVMF_CODE_4M.fd / OVMF_CODE.4m.fd"
+              echo "Audit fix R4 explicit apt install should have provided these; investigate the runner image."
+              exit 1
+            fi
+            echo "OVMF_CODE=$OVMF_CODE"
+            echo "OVMF_VARS=$OVMF_VARS"
+            # Mirror src/main.rs QEMU arguments: OVMF pflash, virtio-blk disk,
+            # cdrom ISO, 1 GiB RAM, 2 vCPUs (matches the audit's reproducing run).
+            # -no-reboot: panic/halt exits QEMU cleanly rather than spinning.
+            # -monitor none / -display none: headless serial-only output.
+            # -nographic keeps a graphics device attached (matches the runner).
+            timeout 90s qemu-system-x86_64 \
+              -drive "if=pflash,unit=0,format=raw,file=$OVMF_CODE,readonly=on" \
+              -drive "if=pflash,unit=1,format=raw,file=$OVMF_VARS" \
+              -cdrom "$ISO_PATH" \
+              -drive "id=virtio-disk0,file=$DISK_PATH,format=raw,if=none" \
+              -device virtio-blk-pci,drive=virtio-disk0 \
+              -m 1G -smp 2 \
+              -cpu max \
+              -vga none \
+              -display none -monitor none \
+              -serial file:"$SERIAL_LOG" \
+              -no-reboot || true
+            echo "----- serial capture (last 200 lines) -----"
+            tail -n 200 "$SERIAL_LOG" || true
+            echo "----- marker check -----"
+                      # Audit fix R1: marker must follow root mount + init creation.
+            # The qemu-kernel-smoke gate requires ALL of:
+            #   1. QEMU_BOOT_OK printed after "started process pid=1"
+            #      (i.e. after the root mount and init creation in
+            #      src/main.rs, not from kernel::init)
+            #   2. no RsdpIncorrectSignature / acpi.rs:28 panic before
+            #      init (the audit's known boot-time failure mode)
+            #   3. at least one userspace process actually ran — evidence
+            #      that init reached user mode without dying immediately
+            #
+            #   4. /bin/init receives EFAULT, without a CPU page fault, for
+            #      copy-in and copy-out syscalls aimed at an unmapped canonical
+            #      user address
+            #   5. unknown syscalls return ENOSYS instead of panicking
+            ACPI_FAIL=$(grep -c -E 'RsdpIncorrectSignature|RSDP|panicked at kernel/src/acpi' "$SERIAL_LOG" || true)
+            BOOT_OK=$(grep -c 'QEMU_BOOT_OK' "$SERIAL_LOG" || true)
+            INIT_RAN=$(grep -c 'started process pid=' "$SERIAL_LOG" || true)
+            USERCOPY_OK=$(grep -c 'USERCOPY_EFAULT_OK' "$SERIAL_LOG" || true)
+            ENOSYS_OK=$(grep -c 'UNKNOWN_SYSCALL_ENOSYS_OK' "$SERIAL_LOG" || true)
+            EXCEPTION_PANIC=$(grep -c -E 'panicked at kernel/src/arch/idt|KERNEL_MODE.*PAGE FAULT' "$SERIAL_LOG" || true)
+
+            if [[ "$ACPI_FAIL" -gt 0 ]]; then
+              echo "::error::ACPI/RSDP failure before QEMU_BOOT_OK — kernel panicked during boot"
+              echo "Audit round-1 finding: kernel/src/acpi.rs:28 panics on RSDP mismatch."
+              exit 1
+            fi
+            if [[ "$BOOT_OK" -lt 1 ]]; then
+              echo "::error::QEMU_BOOT_OK marker missing from serial capture"
+              exit 1
+            fi
+            if [[ "$INIT_RAN" -lt 1 ]]; then
+              echo "::error::no 'started process pid=' line — kernel reached QEMU_BOOT_OK but init did not run"
+              exit 1
+            fi
+            if [[ "$USERCOPY_OK" -lt 1 ]]; then
+              echo "::error::USERCOPY_EFAULT_OK missing — unmapped user pointers were not contained as EFAULT"
+              exit 1
+            fi
+            if [[ "$ENOSYS_OK" -lt 1 ]]; then
+              echo "::error::UNKNOWN_SYSCALL_ENOSYS_OK missing — unknown syscall contract regressed"
+              exit 1
+            fi
+            if [[ "$EXCEPTION_PANIC" -gt 0 ]]; then
+              echo "::error::kernel exception path panicked during userspace smoke test"
+              exit 1
+            fi
+            echo "PASS: kernel reached init; user-copy EFAULT and ENOSYS containment probes passed"

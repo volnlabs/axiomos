@@ -21,7 +21,7 @@ fn interpreter() -> Interpreter<ActiveProfile> {
 
 /// Helper to create a context with a data buffer.
 #[allow(dead_code)]
-fn context_with_data(data: &[u8]) -> BpfContext {
+fn context_with_data(data: &[u8]) -> BpfContext<'_> {
     BpfContext::from_slice(data)
 }
 
@@ -405,10 +405,8 @@ fn semantic_complex_expression() {
 }
 
 #[test]
-fn semantic_loop_counter() {
-    // Program: count from 0 to 42 using a loop
-    // r0 = counter, r1 = limit
-    let program = ProgramBuilder::<ActiveProfile>::new(BpfProgType::SocketFilter)
+fn verifier_rejects_loop_that_exhausts_state_budget() {
+    let result = ProgramBuilder::<ActiveProfile>::new(BpfProgType::SocketFilter)
         .insn(BpfInsn::mov64_imm(0, 0)) // r0 = 0 (counter)
         .insn(BpfInsn::mov64_imm(1, 42)) // r1 = 42 (limit)
         // Loop start (insn 2)
@@ -417,11 +415,7 @@ fn semantic_loop_counter() {
         .insn(BpfInsn::ja(-3)) // jump back to loop start
         // Exit
         .insn(BpfInsn::exit())
-        .build()
-        .expect("valid program");
+        .build();
 
-    let interp = interpreter();
-    let result = interp.execute(&program, &BpfContext::empty());
-
-    assert_eq!(result, Ok(42));
+    assert!(result.is_err());
 }

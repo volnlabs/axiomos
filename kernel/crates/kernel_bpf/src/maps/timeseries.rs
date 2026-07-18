@@ -48,7 +48,6 @@
 
 extern crate alloc;
 
-use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
@@ -98,17 +97,26 @@ struct TimeSeriesStorage {
 }
 
 impl TimeSeriesStorage {
-    fn new(value_size: usize, capacity: usize) -> Self {
-        let entry_size = TimeSeriesEntry::SIZE + value_size;
-        let buffer = vec![0u8; entry_size * capacity];
-        Self {
+    fn new(value_size: usize, capacity: usize) -> MapResult<Self> {
+        let entry_size = TimeSeriesEntry::SIZE
+            .checked_add(value_size)
+            .ok_or(MapError::OutOfMemory)?;
+        let len = entry_size
+            .checked_mul(capacity)
+            .ok_or(MapError::OutOfMemory)?;
+        let mut buffer = Vec::new();
+        buffer
+            .try_reserve_exact(len)
+            .map_err(|_| MapError::OutOfMemory)?;
+        buffer.resize(len, 0);
+        Ok(Self {
             buffer,
             entry_size,
             value_size,
             capacity,
             count: 0,
             head_idx: 0,
-        }
+        })
     }
 
     /// Push a new entry, overwriting oldest if full.
@@ -217,13 +225,23 @@ impl TimeSeriesStorage {
 
     /// Resize storage (cloud profile only).
     #[cfg(feature = "cloud-profile")]
-    fn resize(&mut self, new_capacity: usize) {
+    fn resize(&mut self, new_capacity: usize) -> MapResult<()> {
+        if new_capacity == 0 {
+            return Err(MapError::InvalidValue);
+        }
         if new_capacity == self.capacity {
-            return;
+            return Ok(());
         }
 
         let new_entry_size = self.entry_size;
-        let mut new_buffer = vec![0u8; new_entry_size * new_capacity];
+        let new_len = new_entry_size
+            .checked_mul(new_capacity)
+            .ok_or(MapError::OutOfMemory)?;
+        let mut new_buffer = Vec::new();
+        new_buffer
+            .try_reserve_exact(new_len)
+            .map_err(|_| MapError::OutOfMemory)?;
+        new_buffer.resize(new_len, 0);
 
         // Copy existing entries in order (oldest to newest)
         let copy_count = self.count.min(new_capacity);
@@ -242,6 +260,7 @@ impl TimeSeriesStorage {
         self.capacity = new_capacity;
         self.count = copy_count;
         self.head_idx = 0;
+        Ok(())
     }
 }
 
@@ -273,6 +292,15 @@ impl<P: PhysicalProfile> TimeSeriesMap<P> {
     #[cfg(feature = "cloud-profile")]
     const MAX_ENTRIES: usize = 1024 * 1024; // 1M entries
 
+    /// Heap bytes reserved by the circular entry buffer.
+    pub const fn allocation_size(value_size: u32, max_entries: u32) -> Option<usize> {
+        let entry_size = match TimeSeriesEntry::SIZE.checked_add(value_size as usize) {
+            Some(size) => size,
+            None => return None,
+        };
+        entry_size.checked_mul(max_entries as usize)
+    }
+
     /// Create a new time-series map.
     ///
     /// # Arguments
@@ -300,8 +328,8 @@ impl<P: PhysicalProfile> TimeSeriesMap<P> {
         #[cfg(feature = "embedded-profile")]
         {
             use crate::profile::MemoryStrategy;
-            let entry_size = TimeSeriesEntry::SIZE + value_size as usize;
-            let total_size = entry_size * max_entries as usize;
+            let total_size =
+                Self::allocation_size(value_size, max_entries).ok_or(MapError::OutOfMemory)?;
             let budget = <P::MemoryStrategy as MemoryStrategy>::MEMORY_BUDGET;
             if budget > 0 && total_size > budget {
                 return Err(MapError::OutOfMemory);
@@ -316,7 +344,7 @@ impl<P: PhysicalProfile> TimeSeriesMap<P> {
             flags: 0,
         };
 
-        let storage = TimeSeriesStorage::new(value_size as usize, max_entries as usize);
+        let storage = TimeSeriesStorage::new(value_size as usize, max_entries as usize)?;
 
         Ok(Self {
             def,
@@ -503,7 +531,7 @@ impl<P: PhysicalProfile> BpfMap<P> for TimeSeriesMap<P> {
         if new_max_entries as usize > Self::MAX_ENTRIES {
             return Err(MapError::OutOfMemory);
         }
-        self.storage.write().resize(new_max_entries as usize);
+        self.storage.write().resize(new_max_entries as usize)?;
         self.def.max_entries = new_max_entries;
         Ok(())
     }

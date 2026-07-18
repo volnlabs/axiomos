@@ -117,7 +117,7 @@ not C1's lock. Verify interrupt state, don't infer it from lock-call sites.
 - **Description:** The artifact-dependency that assembles the aarch64 disk image
   hardcodes `features = ["cloud-profile"]` (`Cargo.toml:49`), while
   `scripts/build-rpi5.sh` defaults to `embedded-rpi5`. Two contradictory Pi5
-  build paths: the `muffinos`-assembled image gets JIT-allowed, 1M-insn,
+  build paths: the `axiomos`-assembled image gets JIT-allowed, 1M-insn,
   elastic-heap semantics — the opposite of the embedded profile the robot needs.
 - **Reason:** Whoever runs the documented `cargo run`/image path on aarch64 gets
   the wrong kernel. Silent, and exactly the kind of thing that invalidates a

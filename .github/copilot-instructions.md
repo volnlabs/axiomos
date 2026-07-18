@@ -35,15 +35,15 @@ cargo build --workspace --lib
 cargo build --workspace --lib --release
 ```
 
-**Note:** The `kernel`, `init`, and `muffinos` binaries are bare-metal targets that require special build process via the root build.rs. Building these directly will fail. Use `--lib` to build only the library crates which can be built normally.
+**Note:** The `kernel`, `init`, and `axiomos` binaries are bare-metal targets that require special build process via the root build.rs. Building these directly will fail. Use `--lib` to build only the library crates which can be built normally.
 
 **Build time:** Expect 1-3 minutes for a clean library build, 2-5 minutes if binaries are included.
 
-The main `muffinos` binary is a runner that builds the kernel, creates a bootable ISO, and launches QEMU. It's primarily used for running the OS, not for code validation.
+The main `axiomos` binary is a runner that builds the kernel, creates a bootable ISO, and launches QEMU. It's primarily used for running the OS, not for code validation.
 
 ### Build Artifacts
 
-Key artifacts in `target/`: Limine bootloader, OVMF firmware, `muffin.iso` (bootable), `disk.img` (ext2 filesystem), kernel binary.
+Key artifacts in `target/`: Limine bootloader, OVMF firmware, `axiomos.iso` (bootable), `disk.img` (ext2 filesystem), kernel binary.
 
 ## Testing
 
@@ -116,7 +116,7 @@ cargo clippy --workspace --lib -- -D clippy::all
 
 You can also exclude the main binary explicitly:
 ```bash
-cargo clippy --workspace --exclude muffinos -- -D clippy::all
+cargo clippy --workspace --exclude axiomos -- -D clippy::all
 ```
 
 **DO NOT run `cargo clippy` without filters** - it will try to build bare-metal binaries and fail.
@@ -152,7 +152,7 @@ The kernel has intentional dead code warnings for unused fields (`physical_frame
 
 - **build.rs (root)** - Clones Limine, downloads OVMF (SSL errors occur here), creates ISO with xorriso, creates disk with mke2fs
 - **kernel/linker-x86_64.ld** - Custom linker script (causes test failures)
-- **Cargo.toml** - Workspace with muffinos runner, kernel, 10 kernel crates, 2 userspace crates
+- **Cargo.toml** - Workspace with axiomos runner, kernel, 10 kernel crates, 2 userspace crates
 
 ## CI/CD Pipeline
 
@@ -160,7 +160,7 @@ The GitHub Actions workflow runs on push and twice daily with 4 jobs:
 1. **Lint:** fmt check, clippy with `-D clippy::all` (CI runs clippy without `--lib` - may have different SSL handling)
 2. **Test:** Matrix for debug/release - `cargo test`
 3. **Miri:** Matrix for each kernel crate - `cargo miri test -p <crate>`
-4. **Build:** `cargo build --release`, uploads muffin.iso
+4. **Build:** `cargo build --release`, uploads axiomos.iso
 
 ### Validating Changes Before PR
 
