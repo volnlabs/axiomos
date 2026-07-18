@@ -310,7 +310,7 @@ impl ExecutionContext {
         self.bpf_stack.with_mut(f)
     }
 
-    fn with_interrupts_masked<R>(&self, f: impl FnOnce() -> R) -> R {
+    pub(crate) fn with_interrupts_masked<R>(&self, f: impl FnOnce() -> R) -> R {
         #[cfg(target_arch = "x86_64")]
         {
             return x86_64::instructions::interrupts::without_interrupts(f);
