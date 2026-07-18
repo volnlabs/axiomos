@@ -28,6 +28,8 @@ pub enum InterruptIndex {
     Timer = 0x20,
     /// 49
     LapicErr = 0x31,
+    /// 50
+    TlbShootdown = 0x32,
     Syscall = 0x80,
     /// 255
     Spurious = 0xff,
@@ -72,6 +74,7 @@ pub fn create_idt() -> InterruptDescriptorTable {
 
     idt[InterruptIndex::Timer.as_u8()].set_handler_fn(timer_interrupt_handler);
     idt[InterruptIndex::LapicErr.as_u8()].set_handler_fn(lapic_err_interrupt_handler);
+    idt[InterruptIndex::TlbShootdown.as_u8()].set_handler_fn(tlb_shootdown_interrupt_handler);
     idt[InterruptIndex::Spurious.as_u8()].set_handler_fn(spurious_interrupt_handler);
 
     // SAFETY: Setting up the syscall handler with the correct privilege level and interrupt handling.
@@ -305,6 +308,12 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
 
 extern "x86-interrupt" fn lapic_err_interrupt_handler(stack_frame: InterruptStackFrame) {
     panic!("EXCEPTION: LAPIC ERROR\n{:#?}", stack_frame);
+}
+
+extern "x86-interrupt" fn tlb_shootdown_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    crate::arch::handle_tlb_shootdown_ipi();
+    // SAFETY: This handler is running for a LAPIC-delivered interrupt.
+    unsafe { end_of_interrupt() };
 }
 
 extern "x86-interrupt" fn spurious_interrupt_handler(stack_frame: InterruptStackFrame) {

@@ -34,6 +34,8 @@ pub fn init_current_cpu(cpu_id: usize) {
         );
     }
 
+    ctx_ptr.mark_online();
+
     log::info!("CPU {} context initialized at {:p}", cpu_id, ctx_ptr);
 }
 

@@ -120,12 +120,13 @@ impl AddressSpaceMapper {
         pages: PageRangeInclusive<S>,
         frames: impl Iterator<Item = PhysFrame<S>>,
         flags: PageTableFlags,
+        release: impl FnMut(PhysFrame<S>),
     ) -> Result<(), MapToError<S>>
     where
         for<'a> RecursivePageTable<'a>: Mapper<S>,
         PhysicalMemoryManager: PhysicalFrameAllocator<S>,
     {
-        self.map_range_transaction(pages, frames, flags, true, PhysicalMemory::deallocate_frame)
+        self.map_range_transaction(pages, frames, flags, true, release)
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -135,7 +136,7 @@ impl AddressSpaceMapper {
         frames: impl Iterator<Item = PhysFrame<S>>,
         flags: PageTableFlags,
         owns_frames: bool,
-        release: impl Fn(PhysFrame<S>),
+        mut release: impl FnMut(PhysFrame<S>),
     ) -> Result<(), MapToError<S>>
     where
         for<'a> RecursivePageTable<'a>: Mapper<S>,
@@ -212,14 +213,16 @@ impl AddressSpaceMapper {
     pub fn unmap_range<S: PageSize>(
         &mut self,
         pages: PageRangeInclusive<S>,
-        callback: impl Fn(PhysFrame<S>),
+        mut callback: impl FnMut(PhysFrame<S>),
     ) where
         for<'a> RecursivePageTable<'a>: Mapper<S>,
     {
         assert!(self.is_active());
 
         for page in pages {
-            self.unmap(page).map(&callback);
+            if let Some(frame) = self.unmap(page) {
+                callback(frame);
+            }
         }
     }
 
@@ -386,7 +389,7 @@ impl AddressSpaceMapper {
     pub fn unmap_range<S: PageSize>(
         &mut self,
         pages: PageRangeInclusive<S>,
-        callback: impl Fn(PhysFrame<S>),
+        mut callback: impl FnMut(PhysFrame<S>),
     ) {
         for page in pages {
             if let Some(frame) = self.unmap(page) {

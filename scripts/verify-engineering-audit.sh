@@ -249,7 +249,7 @@ qemu_smoke() {
     fi
 
     local failed=0 marker
-    for marker in QEMU_BOOT_OK USERCOPY_EFAULT_OK UNKNOWN_SYSCALL_ENOSYS_OK; do
+    for marker in QEMU_BOOT_OK USERCOPY_EFAULT_OK UNKNOWN_SYSCALL_ENOSYS_OK TLB_SHOOTDOWN_OK; do
         if ! grep -qF "$marker" "$log"; then
             echo "missing required marker: $marker" >>"$log"
             failed=1
