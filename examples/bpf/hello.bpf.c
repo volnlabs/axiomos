@@ -1,11 +1,11 @@
 /* SPDX-License-Identifier: MIT OR Apache-2.0 */
 /* 
- * hello.bpf.c - Simple Hello World BPF program for Axiom
+ * hello.bpf.c - Simple Hello World BPF program for axiomos
  *
  * This is a minimal BPF program that demonstrates the basic structure
  * of a BPF program. It simply returns 0 (success).
  *
- * NOTE: This file is for documentation purposes. Axiom currently loads
+ * NOTE: This file is for documentation purposes. axiomos currently loads
  * raw BPF bytecode directly. To compile this to BPF bytecode:
  *
  *   clang -target bpf -O2 -c hello.bpf.c -o hello.bpf.o

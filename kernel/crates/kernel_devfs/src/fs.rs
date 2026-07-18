@@ -146,9 +146,7 @@ impl DevFs {
 impl FileSystem for DevFs {
     fn open(&mut self, path: &AbsolutePath) -> Result<FsHandle, OpenError> {
         let node = self.resolve_node(path)?;
-        let file_node = node
-            .file()
-            .expect("should be regular file, opening directories is not yet supported");
+        let file_node = node.file().ok_or(OpenError::IsDirectory)?;
         let file = file_node.open_fn()()?;
         let handle = Self::new_fs_handle();
         self.open_files.insert(handle, file);
@@ -186,7 +184,9 @@ impl FileSystem for DevFs {
         let parent_node = self
             .resolve_node_mut(parent)
             .map_err(|_| MkdirError::NotFound)?;
-        let parent_dir = parent_node.directory_mut().ok_or(MkdirError::NotFound)?; // Should be NotDirectory but generic error for now
+        let parent_dir = parent_node
+            .directory_mut()
+            .ok_or(MkdirError::NotADirectory)?;
 
         if parent_dir.lookup_child(filename).is_some() {
             return Err(MkdirError::AlreadyExists);
@@ -246,6 +246,28 @@ mod tests {
         let path = AbsolutePath::try_new("/nonexistent").unwrap();
         let result = devfs.open(path);
         assert_eq!(result, Err(OpenError::NotFound));
+    }
+
+    #[test]
+    fn opening_directory_returns_typed_error() {
+        let mut devfs = DevFs::new();
+        let directory = AbsolutePath::try_new("/directory").expect("absolute path");
+        devfs.mkdir(directory).expect("create directory");
+
+        assert_eq!(devfs.open(directory), Err(OpenError::IsDirectory));
+    }
+
+    #[test]
+    fn directory_operations_preserve_failure_semantics() {
+        let mut devfs = DevFs::new();
+        let under_file = AbsolutePath::try_new("/null/child").expect("absolute path");
+        assert_eq!(devfs.mkdir(under_file), Err(MkdirError::NotADirectory));
+
+        let parent = AbsolutePath::try_new("/parent").expect("absolute path");
+        let child = AbsolutePath::try_new("/parent/child").expect("absolute path");
+        devfs.mkdir(parent).expect("create parent");
+        devfs.mkdir(child).expect("create child");
+        assert_eq!(devfs.rmdir(parent), Err(RmdirError::NotEmpty));
     }
 
     #[derive(Debug, Eq, PartialEq)]

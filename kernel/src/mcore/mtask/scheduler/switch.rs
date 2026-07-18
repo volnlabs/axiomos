@@ -120,7 +120,4 @@ pub unsafe extern "C" fn switch_impl(
         "b {switch_impl}",
         switch_impl = sym crate::arch::aarch64::context::switch_impl
     );
-
-    #[cfg(target_arch = "riscv64")]
-    naked_asm!("unimp");
 }

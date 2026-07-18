@@ -75,6 +75,9 @@ n! {
     SYS_WAITPID = 59,
     SYS_DEBUG = 60,
     SYS_ESTOP = 61,
+    SYS_SPAWN_RESTRICTED = 62,
+    SYS_RESTRICT_BPF_CAPABILITIES = 63,
+    SYS_INTERRUPT_SLEEP = 64,
 }
 
 #[cfg(test)]
@@ -87,5 +90,14 @@ mod tests {
         assert_eq!(ESTOP_TRIGGER, 1);
         assert_eq!(ESTOP_RELEASE, 2);
         assert_eq!(syscall_name(SYS_ESTOP), "SYS_ESTOP");
+        assert_eq!(SYS_SPAWN_RESTRICTED, 62);
+        assert_eq!(syscall_name(SYS_SPAWN_RESTRICTED), "SYS_SPAWN_RESTRICTED");
+        assert_eq!(SYS_RESTRICT_BPF_CAPABILITIES, 63);
+        assert_eq!(
+            syscall_name(SYS_RESTRICT_BPF_CAPABILITIES),
+            "SYS_RESTRICT_BPF_CAPABILITIES"
+        );
+        assert_eq!(SYS_INTERRUPT_SLEEP, 64);
+        assert_eq!(syscall_name(SYS_INTERRUPT_SLEEP), "SYS_INTERRUPT_SLEEP");
     }
 }

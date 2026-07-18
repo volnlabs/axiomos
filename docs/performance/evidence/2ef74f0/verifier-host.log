@@ -1,0 +1,133 @@
+    Finished `bench` profile [optimized] target(s) in 0.07s
+     Running benches/verifier.rs (target/release/deps/verifier-22a049a537802bff)
+Benchmarking verifier/small/minimal
+Benchmarking verifier/small/minimal: Warming up for 3.0000 s
+Benchmarking verifier/small/minimal: Collecting 100 samples in estimated 5.0040 s (5.7M iterations)
+Benchmarking verifier/small/minimal: Analyzing
+verifier/small/minimal  time:   [943.28 ns 944.30 ns 945.39 ns]
+                        change: [+14.018% +14.329% +14.618%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 10 outliers among 100 measurements (10.00%)
+  5 (5.00%) low mild
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking verifier/small/arithmetic
+Benchmarking verifier/small/arithmetic: Warming up for 3.0000 s
+Benchmarking verifier/small/arithmetic: Collecting 100 samples in estimated 5.0060 s (2.9M iterations)
+Benchmarking verifier/small/arithmetic: Analyzing
+verifier/small/arithmetic
+                        time:   [1.6903 µs 1.6917 µs 1.6936 µs]
+                        change: [+5.4335% +5.7310% +6.0011%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 8 outliers among 100 measurements (8.00%)
+  3 (3.00%) low mild
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+
+Benchmarking verifier/scaling/instructions/10
+Benchmarking verifier/scaling/instructions/10: Warming up for 3.0000 s
+Benchmarking verifier/scaling/instructions/10: Collecting 100 samples in estimated 5.0095 s (1.6M iterations)
+Benchmarking verifier/scaling/instructions/10: Analyzing
+verifier/scaling/instructions/10
+                        time:   [3.1151 µs 3.1184 µs 3.1216 µs]
+                        thrpt:  [3.2035 Melem/s 3.2067 Melem/s 3.2102 Melem/s]
+                 change:
+                        time:   [+5.6883% +5.9777% +6.2607%] (p = 0.00 < 0.05)
+                        thrpt:  [-5.8918% -5.6405% -5.3821%]
+                        Performance has regressed.
+Found 4 outliers among 100 measurements (4.00%)
+  1 (1.00%) high mild
+  3 (3.00%) high severe
+Benchmarking verifier/scaling/instructions/50
+Benchmarking verifier/scaling/instructions/50: Warming up for 3.0000 s
+Benchmarking verifier/scaling/instructions/50: Collecting 100 samples in estimated 5.0315 s (333k iterations)
+Benchmarking verifier/scaling/instructions/50: Analyzing
+verifier/scaling/instructions/50
+                        time:   [15.257 µs 15.274 µs 15.293 µs]
+                        thrpt:  [3.2695 Melem/s 3.2736 Melem/s 3.2772 Melem/s]
+                 change:
+                        time:   [+11.067% +11.370% +11.638%] (p = 0.00 < 0.05)
+                        thrpt:  [-10.425% -10.209% -9.9639%]
+                        Performance has regressed.
+Found 8 outliers among 100 measurements (8.00%)
+  3 (3.00%) high mild
+  5 (5.00%) high severe
+Benchmarking verifier/scaling/instructions/100
+Benchmarking verifier/scaling/instructions/100: Warming up for 3.0000 s
+Benchmarking verifier/scaling/instructions/100: Collecting 100 samples in estimated 5.1210 s (167k iterations)
+Benchmarking verifier/scaling/instructions/100: Analyzing
+verifier/scaling/instructions/100
+                        time:   [31.437 µs 31.451 µs 31.465 µs]
+                        thrpt:  [3.1782 Melem/s 3.1796 Melem/s 3.1810 Melem/s]
+                 change:
+                        time:   [+3.7376% +4.1325% +4.5374%] (p = 0.00 < 0.05)
+                        thrpt:  [-4.3404% -3.9685% -3.6029%]
+                        Performance has regressed.
+Found 11 outliers among 100 measurements (11.00%)
+  1 (1.00%) low severe
+  2 (2.00%) low mild
+  6 (6.00%) high mild
+  2 (2.00%) high severe
+Benchmarking verifier/scaling/instructions/500
+Benchmarking verifier/scaling/instructions/500: Warming up for 3.0000 s
+Benchmarking verifier/scaling/instructions/500: Collecting 100 samples in estimated 5.5841 s (30k iterations)
+Benchmarking verifier/scaling/instructions/500: Analyzing
+verifier/scaling/instructions/500
+                        time:   [180.98 µs 182.04 µs 183.22 µs]
+                        thrpt:  [2.7289 Melem/s 2.7467 Melem/s 2.7627 Melem/s]
+                 change:
+                        time:   [-0.1841% +0.3799% +0.9005%] (p = 0.18 > 0.05)
+                        thrpt:  [-0.8925% -0.3784% +0.1844%]
+                        No change in performance detected.
+Found 21 outliers among 100 measurements (21.00%)
+  16 (16.00%) low severe
+  4 (4.00%) high mild
+  1 (1.00%) high severe
+Benchmarking verifier/scaling/instructions/1000
+Benchmarking verifier/scaling/instructions/1000: Warming up for 3.0000 s
+Benchmarking verifier/scaling/instructions/1000: Collecting 100 samples in estimated 5.6687 s (15k iterations)
+Benchmarking verifier/scaling/instructions/1000: Analyzing
+verifier/scaling/instructions/1000
+                        time:   [376.43 µs 377.80 µs 379.28 µs]
+                        thrpt:  [2.6366 Melem/s 2.6469 Melem/s 2.6565 Melem/s]
+                 change:
+                        time:   [-3.3347% -2.7531% -2.1684%] (p = 0.00 < 0.05)
+                        thrpt:  [+2.2165% +2.8310% +3.4497%]
+                        Performance has improved.
+Found 9 outliers among 100 measurements (9.00%)
+  7 (7.00%) high mild
+  2 (2.00%) high severe
+
+Benchmarking verifier/control_flow/linear
+Benchmarking verifier/control_flow/linear: Warming up for 3.0000 s
+Benchmarking verifier/control_flow/linear: Collecting 100 samples in estimated 5.0073 s (2.5M iterations)
+Benchmarking verifier/control_flow/linear: Analyzing
+verifier/control_flow/linear
+                        time:   [1.9926 µs 1.9959 µs 1.9994 µs]
+                        change: [-0.8147% -0.6318% -0.4408%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking verifier/control_flow/single_branch
+Benchmarking verifier/control_flow/single_branch: Warming up for 3.0000 s
+Benchmarking verifier/control_flow/single_branch: Collecting 100 samples in estimated 5.0041 s (2.1M iterations)
+Benchmarking verifier/control_flow/single_branch: Analyzing
+verifier/control_flow/single_branch
+                        time:   [2.3288 µs 2.3346 µs 2.3420 µs]
+                        change: [-1.6940% -1.5106% -1.2987%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high severe
+Benchmarking verifier/control_flow/multi_branch
+Benchmarking verifier/control_flow/multi_branch: Warming up for 3.0000 s
+Benchmarking verifier/control_flow/multi_branch: Collecting 100 samples in estimated 5.0028 s (1.5M iterations)
+Benchmarking verifier/control_flow/multi_branch: Analyzing
+verifier/control_flow/multi_branch
+                        time:   [3.3792 µs 3.3813 µs 3.3837 µs]
+                        change: [-3.1056% -2.9846% -2.8596%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 9 outliers among 100 measurements (9.00%)
+  2 (2.00%) low mild
+  6 (6.00%) high mild
+  1 (1.00%) high severe

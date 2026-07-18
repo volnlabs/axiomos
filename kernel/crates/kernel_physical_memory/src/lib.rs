@@ -26,6 +26,9 @@ pub enum FrameState {
     Free,
 }
 
+#[cfg(feature = "fault-injection")]
+pub mod fault;
+
 impl FrameState {
     #[must_use]
     pub fn is_usable(self) -> bool {
@@ -135,6 +138,15 @@ impl PhysicalMemoryManager {
 
         let ff = self.first_free()?;
 
+        // FAULT-INJECTION: entry checkpoint. Returns None before any search
+        // happens; proves "no state mutation when allocation is denied
+        // before search". Production callers see no-op under default
+        // features.
+        #[cfg(feature = "fault-injection")]
+        if crate::fault::checkpoint() {
+            return None;
+        }
+
         // TODO: Support searching across region boundaries for better memory utilization
         // Search for contiguous free frames within regions
         for region_idx in ff.region_idx..self.regions.len() {
@@ -183,15 +195,24 @@ impl PhysicalMemoryManager {
 
                     // Get the physical addresses before mutating
                     let start_addr = self.regions[region_idx]
-                        .frame_address(frame_start_idx)
-                        .expect("frame_address(frame_start_idx) should succeed: frame exists and is free");
+                    .frame_address(frame_start_idx)
+                    .expect("frame_address(frame_start_idx) should succeed: frame exists and is free");
                     // For PhysFrameRangeInclusive, end points to the start of the last page in the range
                     // Since frame_start_idx is already aligned, it's the start of the first page
                     // The last page starts at: first_page_start + (n-1) * frames_per_page
                     let last_page_start_idx = frame_start_idx + (n - 1) * small_frames_per_frame;
                     let end_addr = self.regions[region_idx]
-                        .frame_address(last_page_start_idx)
-                        .expect("frame_address(last_page_start_idx) should succeed: frame exists and is free");
+                    .frame_address(last_page_start_idx)
+                    .expect("frame_address(last_page_start_idx) should succeed: frame exists and is free");
+
+                    // FAULT-INJECTION: pre-mark checkpoint. Returns None after a
+                    // candidate is found but before `frames_mut().fill(...)`
+                    // mutates state. Proves "no state mutation after candidate
+                    // discovery but before allocation state changes".
+                    #[cfg(feature = "fault-injection")]
+                    if crate::fault::checkpoint() {
+                        return None;
+                    }
 
                     // Mark frames as allocated
                     self.regions[region_idx].frames_mut()[frame_start_idx..=frame_end_idx]
@@ -675,5 +696,166 @@ mod tests {
         // Should allocate immediately at the start since it's already aligned
         let large_frame: PhysFrame<Size2MiB> = pmm.allocate_frame().unwrap();
         assert_eq!(0x200000, large_frame.start_address().as_u64());
+    }
+}
+
+#[cfg(all(test, feature = "fault-injection"))]
+mod fault_injection_tests {
+    // The crate is `#![no_std]`, but the test binary still links against
+    // `std` so we can use `catch_unwind` for the panic-restoration test.
+    extern crate alloc;
+    extern crate std;
+
+    use alloc::vec;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use super::*;
+    use crate::fault;
+
+    fn empty_pmm(frames: usize) -> PhysicalMemoryManager {
+        let region = MemoryRegion::new(0, frames, FrameState::Free);
+        PhysicalMemoryManager::new(vec![region])
+    }
+
+    fn allocated_count(pmm: &PhysicalMemoryManager) -> usize {
+        pmm.regions[0]
+            .frames()
+            .iter()
+            .filter(|&&s| s == FrameState::Allocated)
+            .count()
+    }
+
+    /// Documents the counter semantics: armed(N) allows N total false
+    /// returns; the (N+1)-th call returns true.
+    #[test]
+    fn checkpoint_counter_semantics() {
+        fault::armed(2, || {
+            assert!(!fault::checkpoint(), "first call: budget 2 -> 1");
+            assert!(!fault::checkpoint(), "second call: budget 1 -> 0");
+            assert!(fault::checkpoint(), "third call: budget == 0 fires");
+            assert!(fault::checkpoint(), "fourth call: still firing");
+        });
+    }
+
+    /// `disarm()` overrides the budget. Allocations succeed despite the
+    /// high-armed budget because disarmed checkpoints always return false.
+    #[test]
+    fn disarm_suppresses_checkpoints() {
+        let mut pmm = empty_pmm(8);
+        fault::armed(2, || {
+            fault::disarm();
+            let r1: Option<PhysFrame<Size4KiB>> = PhysicalFrameAllocator::allocate_frame(&mut pmm);
+            let r2: Option<PhysFrame<Size4KiB>> = PhysicalFrameAllocator::allocate_frame(&mut pmm);
+            let r3: Option<PhysFrame<Size4KiB>> = PhysicalFrameAllocator::allocate_frame(&mut pmm);
+            assert!(r1.is_some());
+            assert!(r2.is_some());
+            assert!(r3.is_some());
+        });
+        assert_eq!(3, allocated_count(&pmm));
+    }
+
+    /// A panic inside an `armed` scope must restore the controller to its
+    /// pre-armed state and release the serial mutex. Verified by calling
+    /// `is_disarmed()` outside any armed scope after `catch_unwind`
+    /// returns: a leaked armed state would leave DISARMED=false and this
+    /// assertion would fail.
+    ///
+    /// Note: `is_disarmed()` does not recurse into `SERIAL` because
+    /// `spin::Mutex` is non-reentrant and `SERIAL` is already held by the
+    /// `ArmGuard` of the panic-stack-unwinding `armed` scope. The test
+    /// therefore calls `is_disarmed()` only on the way out.
+    #[test]
+    fn arm_guard_restores_state_on_panic() {
+        assert!(
+            fault::is_disarmed(),
+            "controller must start disarmed before any armed scope"
+        );
+
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            fault::armed(0, || {
+                // Inside the panic scope, checkpoint would fire (BUDGET=0).
+                // Verified directly by observing a true return (drop the
+                // result; we only need to prove we are armed here, not the
+                // checkpoint outcome).
+                let _ = fault::checkpoint();
+                panic!("boom");
+            });
+        }));
+        assert!(r.is_err(), "the inner closure must panic");
+
+        // Outside any armed scope. A leaked armed state would leave
+        // DISARMED=false and cause this to fail.
+        assert!(
+            fault::is_disarmed(),
+            "DISARMED must be restored after panic"
+        );
+        assert!(
+            fault::is_disarmed(),
+            "second is_disarmed() also true: state truly restored to default"
+        );
+    }
+
+    /// Demonstrative failure: the entry checkpoint exists in front of the
+    /// search loop. With armed(0), the first call into `allocate_frame`
+    /// hits the entry checkpoint and is denied. No frames are mutated.
+    ///
+    /// This test fails if the entry checkpoint is missing or misplaced
+    /// behind `frames_mut().fill(...)`, because then `allocate_frame`
+    /// would return `Some(frame)` and break the assertion below.
+    #[test]
+    fn entry_checkpoint_denies_first_allocation() {
+        let mut pmm = empty_pmm(8);
+        fault::armed(0, || {
+            let r: Option<PhysFrame<Size4KiB>> = PhysicalFrameAllocator::allocate_frame(&mut pmm);
+            assert!(r.is_none(), "first allocate must be denied at entry");
+        });
+        assert_eq!(
+            0,
+            allocated_count(&pmm),
+            "no partial mutation: entry checkpoint fired before search"
+        );
+    }
+
+    /// Demonstrative failure: the pre-mark checkpoint exists between
+    /// candidate discovery and `frames_mut().fill(...)`. With armed(1),
+    /// the first allocation's entry checkpoint passes (1 -> 0) and the
+    /// pre-mark checkpoint fires (budget == 0). No frames are mutated.
+    ///
+    /// This test fails if the pre-mark checkpoint is missing or misplaced,
+    /// because then `allocate_frame` would return `Some(frame)` and the
+    /// assertion below would break.
+    #[test]
+    fn pre_mark_checkpoint_denies_after_search() {
+        let mut pmm = empty_pmm(8);
+        fault::armed(1, || {
+            let r: Option<PhysFrame<Size4KiB>> = PhysicalFrameAllocator::allocate_frame(&mut pmm);
+            assert!(r.is_none(), "first allocate must be denied at pre-mark");
+        });
+        assert_eq!(
+            0,
+            allocated_count(&pmm),
+            "no partial mutation: pre-mark fired before fill"
+        );
+    }
+
+    /// Documents the per-allocate budget cost and proves no leak after
+    /// the second allocation's entry checkpoint fires.
+    #[test]
+    fn armed_budget_two_consumes_two_checkpoints_per_allocate() {
+        let mut pmm = empty_pmm(8);
+        fault::armed(2, || {
+            let r1: Option<PhysFrame<Size4KiB>> = PhysicalFrameAllocator::allocate_frame(&mut pmm);
+            assert!(
+                r1.is_some(),
+                "1st allocate: entry 2->1, pre-mark 1->0, fill runs"
+            );
+            let r2: Option<PhysFrame<Size4KiB>> = PhysicalFrameAllocator::allocate_frame(&mut pmm);
+            assert!(r2.is_none(), "2nd allocate's entry checkpoint fires");
+        });
+        assert_eq!(
+            1,
+            allocated_count(&pmm),
+            "exactly one frame allocated, no leak"
+        );
     }
 }

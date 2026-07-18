@@ -1,0 +1,3 @@
+name = "full"
+description = "The required local audit profile, including release and model checks."
+checks = ["inventory", "boundary", "docs", "quality", "host-tests", "models", "release"]

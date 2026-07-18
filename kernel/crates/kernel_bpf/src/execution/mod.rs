@@ -110,7 +110,24 @@ pub mod helpers_stub {
         _flags: u64,
     ) -> i32 {
         if !value.is_null() {
-            let val = unsafe { *(value as *const u64) };
+            // SAFETY: `value` arrives over the BPF helper ABI as
+            // `args[2] as *const u8`, where `args[2]` is the integer-encoded
+            // address the BPF program computed in register R3. The
+            // interpreter forwards it through this `as *const u8` cast at
+            // `interpreter.rs:313`, which produces a provenance-less wild
+            // pointer in Miri's model. The test stub therefore reuses the
+            // integer as the stored payload (after `value as usize`) rather
+            // than dereferencing it; `read_unaligned` would still be UB
+            // because it cannot confer provenance on an integer-derived
+            // pointer. The single consumer of this stub is
+            // `execute_map_update_helper`, which only asserts Ok(0) and
+            // does not check the stored value, so this approximation is
+            // faithful to the test's contract.
+            //
+            // Production-side helper kernels dereference this buffer in the
+            // kernel address space where integer-to-pointer provenance is
+            // supplied by the loader; that path is not exercised under Miri.
+            let val = value as usize as u64;
             TEST_MAP_VALUE.store(val, Ordering::SeqCst);
         }
         0

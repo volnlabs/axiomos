@@ -4,10 +4,10 @@
 //! worst-case execution cost as the longest path through its (loop-free) CFG.
 //! This turns the verifier from one that bounds *how many* instructions run
 //! into one that bounds *how long* they take — the basis for schedulability
-//! admission (`docs/verifier-fragment.md`, RTSS track).
+//! admission (`docs/security/verifier-assurance.md`, RTSS track).
 //!
 //! Costs are in *relative cycle units*. Calibrated against measured Cortex-A76
-//! (Pi5) JIT cycles on 2026-06-11 (`docs/benchmarks.md §12`): the per-helper and
+//! (Pi5) JIT cycles on 2026-06-11 (`docs/performance/current-results.md §12`): the per-helper and
 //! memory weights are conservative upper bounds on the measured ratios, `div`
 //! was retuned 4→2 (measured ~1.1× a default op, not 4×), and a per-invocation
 //! `COST_INVOCATION_BASE` was added to cover the fixed ~0.55 µs JIT entry cost
@@ -33,7 +33,7 @@ const COST_ALU_EXPENSIVE: u32 = 2;
 const COST_DEFAULT: u32 = 1;
 /// Fixed per-invocation cost (JIT trampoline entry + dispatch), charged once per
 /// program. Calibrated from the straight-line series' intercept: ~0.55 µs ≈ 95
-/// cycle units on the Pi5 (`docs/benchmarks.md §12`). Without it a pure
+/// cycle units on the Pi5 (`docs/performance/current-results.md §12`). Without it a pure
 /// longest-path sum under-predicts measured per-run cost by the entry overhead.
 const COST_INVOCATION_BASE: u64 = 95;
 
@@ -44,7 +44,7 @@ const COST_INVOCATION_BASE: u64 = 95;
 const COST_HELPER_READ: u32 = 4;
 /// A bounded copy or single device-register access (probe_read, comm, GPIO/PWM/IIO/CAN).
 /// Pi5 `bpf_gpio_get` shape measured 2.54 cyc/op ≈ 8.2× a default op
-/// (`docs/benchmarks.md §12`); 10 is the conservative bound kept.
+/// (`docs/performance/current-results.md §12`); 10 is the conservative bound kept.
 const COST_HELPER_COPY: u32 = 10;
 /// A ring-buffer reserve/commit/output (bookkeeping + memcpy under the manager
 /// lock). Pi5 `bpf_ringbuf_output` shape measured 3.24 cyc/op ≈ 10.5× a default
@@ -57,7 +57,9 @@ const COST_HELPER_MAP: u32 = 16;
 ///
 /// Unlike the others this class is **serial-I/O-bound, not CPU-bound**, and so
 /// is *not* exec-calibrated: at 115200 8N1 one byte costs ~86.8 µs ≈ 15_000
-/// cycle units (1 unit ≈ 5.8 ns, `docs/benchmarks.md §12`), so even a short line
+/// configured cycle units (6 ns/unit). The calibration rationale is retained in
+/// the historical benchmark record, not claimed as current artifact-backed
+/// measurement, so even a short line
 /// is hundreds of thousands of units — and the write would flood the same serial
 /// channel that carries the measurement. The weight stays a nominal "most
 /// expensive helper" ordering value; the real lever for keeping printk out of a
@@ -196,7 +198,7 @@ mod tests {
     fn wcet_includes_a_fixed_per_invocation_base() {
         // A single-instruction program is dominated by the entry cost, not the
         // one-cycle body — the base is what makes wcet track measured per-run
-        // cost on small programs (docs/benchmarks.md §12).
+        // cost on small programs (docs/performance/current-results.md §12).
         let insns = [BpfInsn::exit()];
         let cfg = ControlFlowGraph::build(&insns);
         assert_eq!(wcet_cycles(&insns, &cfg), COST_INVOCATION_BASE + 1);

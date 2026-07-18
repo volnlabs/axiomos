@@ -1,4 +1,4 @@
-name = "axiom-formal"
+name = "axiomos-formal"
 defaultTargets = ["AxiomFormal"]
 
 [[lean_lib]]

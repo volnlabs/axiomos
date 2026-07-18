@@ -658,14 +658,22 @@ impl StackState {
 
     /// Check if access at offset with size is valid.
     pub fn is_valid_access(&self, offset: i64, size: usize) -> bool {
-        // Stack access must be negative offset from FP
-        if offset >= 0 {
+        // The instruction address is `fp + offset`; a multi-byte access grows
+        // toward the frame pointer, just like the interpreter's byte slice.
+        if offset >= 0 || size == 0 {
             return false;
         }
 
-        // Check bounds
-        let end_offset = offset - (size as i64) + 1;
-        if end_offset < -(self.capacity as i64) {
+        let Ok(size) = i64::try_from(size) else {
+            return false;
+        };
+        let Ok(capacity) = i64::try_from(self.capacity) else {
+            return false;
+        };
+        let Some(end_exclusive) = offset.checked_add(size) else {
+            return false;
+        };
+        if offset < -capacity || end_exclusive > 0 {
             return false;
         }
 
@@ -810,6 +818,13 @@ mod tests {
         // Invalid positive offset
         assert!(!stack.set(0, StackSlot::Scalar));
         assert!(!stack.set(1, StackSlot::Scalar));
+
+        // An access begins at `fp + offset` and extends toward FP.
+        assert!(stack.is_valid_access(-8, 8));
+        assert!(stack.is_valid_access(-256, 8));
+        assert!(!stack.is_valid_access(-1, 8));
+        assert!(!stack.is_valid_access(-257, 1));
+        assert!(!stack.is_valid_access(-8, 0));
     }
 
     #[test]

@@ -1,0 +1,49 @@
+[package]
+name = "rk-cli"
+version = "0.1.0"
+edition = "2021"
+description = "rkBPF deployment and management CLI"
+license = "MIT"
+
+# Standalone package, not part of the kernel workspace
+[workspace]
+
+[[bin]]
+name = "rk"
+path = "src/main.rs"
+
+[dependencies]
+# CLI parsing
+clap = { version = "4.0", features = ["derive"] }
+
+# Serialization for config files
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# File operations
+walkdir = "2.4"
+
+# Crypto for signing (ring is well-audited)
+ring = "0.17"
+
+# Base64 encoding for keys
+base64 = "0.21"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Colored output
+colored = "2.0"
+
+# Hash for program integrity
+sha3 = "0.10"
+
+[dev-dependencies]
+kernel_bpf = { path = "../../../kernel/crates/kernel_bpf", default-features = false, features = ["cloud-profile"] }
+tempfile = "3.20"

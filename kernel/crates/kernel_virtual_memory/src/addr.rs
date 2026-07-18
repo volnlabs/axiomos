@@ -2,8 +2,22 @@ use core::fmt;
 use core::ops::{Add, AddAssign, Sub, SubAssign};
 
 use kernel_physical_memory::{PageSize, Size4KiB};
+use thiserror::Error;
 
 use crate::Segment;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("virtual address {address:#x} is invalid for this architecture")]
+pub struct InvalidVirtAddrError {
+    pub address: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("virtual address {address:#x} is not aligned to {alignment:#x}")]
+pub struct PageNotAlignedError {
+    pub address: u64,
+    pub alignment: u64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
@@ -16,8 +30,7 @@ impl VirtAddr {
     }
 
     #[inline]
-    #[allow(clippy::result_unit_err)]
-    pub fn try_new(addr: u64) -> Result<Self, ()> {
+    pub fn try_new(addr: u64) -> Result<Self, InvalidVirtAddrError> {
         // For now, we don't implement strict canonicality checks on AArch64
         // as they depend on the specific configuration (T0SZ, etc.)
         Ok(Self::new(addr))
@@ -119,10 +132,12 @@ impl<S: PageSize> Page<S> {
         }
     }
 
-    #[allow(clippy::result_unit_err)]
-    pub const fn from_start_address(address: VirtAddr) -> Result<Self, ()> {
+    pub const fn from_start_address(address: VirtAddr) -> Result<Self, PageNotAlignedError> {
         if address.0 & (S::SIZE - 1) != 0 {
-            return Err(());
+            return Err(PageNotAlignedError {
+                address: address.0,
+                alignment: S::SIZE,
+            });
         }
         Ok(Self {
             start_address: address,

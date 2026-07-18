@@ -5,8 +5,8 @@ use alloc::sync::Arc;
 use core::ffi::c_void;
 use core::pin::Pin;
 use core::ptr::NonNull;
-use core::sync::atomic::AtomicBool;
-use core::sync::atomic::Ordering::Relaxed;
+use core::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize};
 
 use cordyceps::mpsc_queue::Links;
 use cordyceps::Linked;
@@ -16,6 +16,7 @@ use spin::RwLock;
 use crate::arch::UserContext;
 use crate::mcore::context::ExecutionContext;
 use crate::mcore::mtask::process::Process;
+use crate::mcore::mtask::scheduler::wait::WaitRegistration;
 use crate::mem::memapi::{LowerHalfAllocation, Writable};
 use crate::U64Ext;
 
@@ -44,7 +45,12 @@ pub struct Task {
     /// If this task is currently running, then this value is not the current stack pointer.
     /// This must be set during the context switch.
     last_stack_ptr: Pin<Box<usize>>,
-    state: State,
+    state: AtomicU8,
+    sleep_deadline_ns: AtomicU64,
+    sleep_generation: AtomicU64,
+    sleep_wake_reason: AtomicU8,
+    wait_registration: Option<WaitRegistration>,
+    last_cpu: AtomicUsize,
     /// The kernel stack of the task. Every task starts with a stack in the higher half.
     /// Userspace tasks will then allocate a stack in the lower half, which will be stored in
     /// `ustack`.
@@ -94,14 +100,15 @@ unsafe impl Linked<Links<Self>> for Task {
 impl Task {
     pub(crate) fn terminate_current(status: i32, reason: &'static str) -> ! {
         let context = ExecutionContext::load();
-        context.with_current_task(|task| {
+        let process = context.with_current_task(|task| {
             log::error!(
                 "terminating process '{}' task '{}' after {reason}",
                 task.process().name(),
                 task.name()
             );
-            *task.process().exit_code().write() = Some(status);
+            task.process().clone()
         });
+        process.mark_exited(status);
         Self::exit();
         unreachable!("Task::exit must not return")
     }
@@ -125,7 +132,7 @@ impl Task {
         let name = format!("task-{tid}");
         let process = process.clone();
         let should_terminate = AtomicBool::new(false);
-        let state = State::Ready;
+        let state = AtomicU8::new(State::Ready as u8);
         let last_stack_ptr = Box::pin(stack.initial_rsp().as_u64().into_usize());
         let links = Links::default();
         Self {
@@ -135,6 +142,13 @@ impl Task {
             should_terminate,
             last_stack_ptr,
             state,
+            sleep_deadline_ns: AtomicU64::new(0),
+            sleep_generation: AtomicU64::new(0),
+            sleep_wake_reason: AtomicU8::new(SleepWakeReason::Pending as u8),
+            wait_registration: None,
+            last_cpu: AtomicUsize::new(
+                ExecutionContext::try_load().map_or(0, ExecutionContext::cpu_id),
+            ),
             kstack: Some(stack),
             ustack: RwLock::new(None),
             tls: RwLock::new(None),
@@ -149,7 +163,7 @@ impl Task {
         let process = Process::root().clone();
         let should_terminate = AtomicBool::new(false);
         let last_stack_ptr = Box::pin(0);
-        let state = State::Finished;
+        let state = AtomicU8::new(State::Finished as u8);
         let links = Links::new_stub();
         Self {
             tid,
@@ -158,6 +172,11 @@ impl Task {
             should_terminate,
             last_stack_ptr,
             state,
+            sleep_deadline_ns: AtomicU64::new(0),
+            sleep_generation: AtomicU64::new(0),
+            sleep_wake_reason: AtomicU8::new(SleepWakeReason::Pending as u8),
+            wait_registration: None,
+            last_cpu: AtomicUsize::new(0),
             kstack: None,
             ustack: RwLock::new(None),
             tls: RwLock::new(None),
@@ -168,7 +187,7 @@ impl Task {
 
     pub(crate) extern "C" fn exit() {
         let context = ExecutionContext::load();
-        context.with_current_task(|task| {
+        let process = context.with_current_task(|task| {
             trace!("exiting task {}", task.name());
 
             // Known entry/trampoline call sites do not hold these task-local locks,
@@ -177,7 +196,11 @@ impl Task {
             let _ = task.tls.write().take();
             let _ = task.ustack.write().take();
             task.set_should_terminate(true);
+            task.process().clone()
         });
+        if process.pid() != Process::root().pid() {
+            process.mark_exited(0);
+        }
 
         #[cfg(target_arch = "aarch64")]
         {
@@ -210,7 +233,7 @@ impl Task {
     /// The caller must ensure that this is only called once per core.
     #[must_use]
     // SAFETY: Creates a fake task representing the current execution context.
-    pub unsafe fn create_current() -> Self {
+    pub unsafe fn create_current(cpu_id: usize) -> Self {
         let tid = TaskId::new();
         let name = format!("task-{tid}");
         let process = Process::root().clone();
@@ -227,7 +250,7 @@ impl Task {
         let current_sp = 0;
 
         let last_stack_ptr = Box::pin(current_sp);
-        let state = State::Running;
+        let state = AtomicU8::new(State::Running as u8);
         Self {
             tid,
             name,
@@ -235,6 +258,11 @@ impl Task {
             should_terminate,
             last_stack_ptr,
             state,
+            sleep_deadline_ns: AtomicU64::new(0),
+            sleep_generation: AtomicU64::new(0),
+            sleep_wake_reason: AtomicU8::new(SleepWakeReason::Pending as u8),
+            wait_registration: None,
+            last_cpu: AtomicUsize::new(cpu_id),
             kstack: None,
             ustack: RwLock::new(None),
             tls: RwLock::new(None),
@@ -261,10 +289,105 @@ impl Task {
 
     pub fn set_should_terminate(&self, should_terminate: bool) {
         self.should_terminate.store(should_terminate, Relaxed);
+        if should_terminate {
+            self.state.store(State::Finished as u8, Release);
+        }
     }
 
     pub fn state(&self) -> State {
-        self.state
+        State::from_u8(self.state.load(Acquire))
+    }
+
+    pub(crate) fn mark_ready(&self) {
+        self.state.store(State::Ready as u8, Release);
+    }
+
+    pub(crate) fn mark_running(&self) {
+        self.state.store(State::Running as u8, Release);
+    }
+
+    #[must_use]
+    pub(crate) fn last_cpu(&self) -> usize {
+        self.last_cpu.load(Acquire)
+    }
+
+    pub(crate) fn set_last_cpu(&self, cpu_id: usize) {
+        self.last_cpu.store(cpu_id, Release);
+    }
+
+    pub(crate) fn begin_sleep(&self, deadline_ns: u64) {
+        let generation = self.process.begin_interruptible_sleep();
+        self.sleep_deadline_ns.store(deadline_ns, Relaxed);
+        self.sleep_generation.store(generation, Relaxed);
+        self.sleep_wake_reason
+            .store(SleepWakeReason::Pending as u8, Relaxed);
+        self.state.store(State::Sleeping as u8, Release);
+    }
+
+    #[must_use]
+    pub(crate) fn sleep_deadline_ns(&self) -> u64 {
+        self.sleep_deadline_ns.load(Acquire)
+    }
+
+    #[must_use]
+    pub(crate) fn sleep_interrupt_requested(&self) -> bool {
+        let generation = self.sleep_generation.load(Acquire);
+        self.process.sleep_interrupt_requested(generation)
+    }
+
+    /// Complete the process-level sleep generation. Returns true when an
+    /// interrupt request won over deadline expiry.
+    pub(crate) fn finish_sleep(&self) -> bool {
+        let generation = self.sleep_generation.load(Acquire);
+        self.process.finish_interruptible_sleep(generation)
+    }
+
+    pub(crate) fn wake_from_sleep(&self, reason: SleepWakeReason) {
+        debug_assert_ne!(reason, SleepWakeReason::Pending);
+        self.sleep_wake_reason.store(reason as u8, Relaxed);
+        self.state.store(State::Ready as u8, Release);
+    }
+
+    pub(crate) fn abort_sleep_before_switch(&self) {
+        debug_assert_eq!(self.state(), State::Sleeping);
+        self.sleep_wake_reason
+            .store(SleepWakeReason::Interrupted as u8, Relaxed);
+        let _ = self.finish_sleep();
+        self.state.store(State::Running as u8, Release);
+    }
+
+    pub(crate) fn begin_wait(&mut self, registration: WaitRegistration) {
+        assert!(
+            self.wait_registration.is_none(),
+            "task already has a wait registration"
+        );
+        self.wait_registration = Some(registration);
+        self.state.store(State::Waiting as u8, Release);
+    }
+
+    pub(crate) fn take_wait_registration(&mut self) -> WaitRegistration {
+        self.wait_registration
+            .take()
+            .expect("waiting task must own a wait registration")
+    }
+
+    pub(crate) fn wake_from_wait(&self) {
+        debug_assert_eq!(self.state(), State::Waiting);
+        self.state.store(State::Ready as u8, Release);
+    }
+
+    pub(crate) fn abort_wait_before_switch(&mut self) {
+        debug_assert_eq!(self.state(), State::Waiting);
+        self.wait_registration = None;
+        self.state.store(State::Running as u8, Release);
+    }
+
+    #[must_use]
+    pub(crate) fn take_sleep_wake_reason(&self) -> SleepWakeReason {
+        SleepWakeReason::from_u8(
+            self.sleep_wake_reason
+                .swap(SleepWakeReason::Pending as u8, AcqRel),
+        )
     }
 
     pub fn kstack(&self) -> &Option<HigherHalfStack> {
@@ -287,7 +410,7 @@ impl Task {
         let tid = TaskId::new();
         let name = format!("task-{tid}");
         let should_terminate = AtomicBool::new(false);
-        let state = State::Ready;
+        let state = AtomicU8::new(State::Ready as u8);
         let last_stack_ptr = Box::pin(stack.initial_rsp().as_u64().into_usize());
         let links = Links::default();
 
@@ -348,6 +471,11 @@ impl Task {
             should_terminate,
             last_stack_ptr,
             state,
+            sleep_deadline_ns: AtomicU64::new(0),
+            sleep_generation: AtomicU64::new(0),
+            sleep_wake_reason: AtomicU8::new(SleepWakeReason::Pending as u8),
+            wait_registration: None,
+            last_cpu: AtomicUsize::new(parent_task.last_cpu()),
             kstack: Some(stack),
             ustack: RwLock::new(ustack),
             tls: RwLock::new(tls),

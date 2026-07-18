@@ -403,31 +403,10 @@ pub fn handle_interrupt() {
 
             let ctx = kernel_bpf::execution::BpfContext::from_slice(slice);
 
-            // 3. Invoke only the BPF programs routed to this (chip, pin, edge).
-            //
-            // Clone programs and release the lock BEFORE execution so BPF
-            // helpers (e.g. bpf_gpio_write, bpf_ringbuf_output) can re-acquire
-            // the manager lock without deadlocking.
-            if let Some(manager) = crate::BPF_MANAGER.get() {
-                // Resolve into a stack buffer so the IRQ handler never touches
-                // the spin-locked global heap on the edge path (#65, ~200k/s).
-                // 8 programs/pin is far above any real wiring; route admission
-                // enforces the same cap before the IRQ path can see it.
-                let fired = kernel_bpf::attach::GpioEdge::from_flags(edge);
-                let mut buf: [crate::bpf::GpioProgramSlot; crate::bpf::GPIO_IRQ_FANOUT_LIMIT] =
-                    core::array::from_fn(|_| None);
-                let n = manager.lock().gpio_programs_into(0, pin, fired, &mut buf);
-                // Manager lock dropped above; helpers may re-acquire it.
-                for (prog_id, program) in buf[..n].iter().flatten() {
-                    {
-                        // No per-edge success log: at 200k edges/s the logger
-                        // lock alone would drop edges. Errors are rare; kept.
-                        if let Err(e) = crate::bpf::BpfManager::execute_program(program, &ctx) {
-                            log::error!("GPIO BPF Hook [id={}] failed: {:?}", prog_id, e);
-                        }
-                    }
-                }
-            }
+            // 3. Execute the immutable route snapshot. Readers take no manager,
+            // allocator, logger, or refcount path in this IRQ context.
+            let fired = kernel_bpf::attach::GpioEdge::from_flags(edge);
+            let _ = crate::bpf::BpfManager::run_gpio_programs(0, pin, fired, &ctx);
         }
     }
 

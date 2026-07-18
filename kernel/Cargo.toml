@@ -12,11 +12,13 @@ kernel_elfloader = { path = "crates/kernel_elfloader" }
 kernel_memapi = { path = "crates/kernel_memapi" }
 kernel_pci = { path = "crates/kernel_pci" }
 kernel_physical_memory = { path = "crates/kernel_physical_memory" }
+kernel_run_queue = { path = "crates/kernel_run_queue" }
 kernel_syscall = { path = "crates/kernel_syscall" }
 kernel_time = { path = "crates/kernel_time" }
 kernel_usermem = { path = "crates/kernel_usermem" }
 kernel_vfs = { path = "crates/kernel_vfs" }
 kernel_virtual_memory = { path = "crates/kernel_virtual_memory" }
+kernel_map_transaction = { path = "crates/kernel_map_transaction" }
 shrike_link = { path = "crates/shrike_link" }
 
 addr2line.workspace = true
@@ -45,9 +47,6 @@ zerocopy.workspace = true
 aarch64-cpu.workspace = true
 fdt.workspace = true
 
-[target.'cfg(target_arch = "riscv64")'.dependencies]
-riscv.workspace = true
-
 [build-dependencies]
 cc = "1.0"
 
@@ -62,7 +61,6 @@ limine.workspace = true
 default = []
 backtrace = []
 x86_64_arch = []
-riscv64_arch = []
 aarch64_arch = []
 rpi5 = ["aarch64_arch"]
 virt = ["aarch64_arch"]
@@ -81,6 +79,26 @@ embedded-rpi5 = ["embedded-profile"]
 # production images. Enable alongside a profile to capture the verifier-cost
 # curve, e.g. `--features embedded-rpi5,verifier-cost`.
 verifier-cost = []
+
+# Compatibility marker for callers that previously selected signed mode. Signed
+# loading is now the fail-closed default.
+bpf-production-signed = []
+# Explicit escape hatch for local demo images that load unsigned BPF objects.
+# Production artifacts must never enable this feature.
+bpf-unsigned-development = []
+
+# One-shot serial markers consumed by the local audit gate. Production images
+# do not enable this feature and compile all `log` macros out in release mode.
+audit-diagnostics = []
+
+# Raw AArch64 register/UART probes used only during hardware bring-up.
+bringup-diagnostics = []
+
+# Forward the kernel_physical_memory fault-injection controller into a
+# controlled boot probe (kernel/src/audit_fault_probe.rs). Off by default;
+# opt in for fault-path QEMU scenarios only. The QEMU scenario lives
+# behind `RUN_AUDIT_FAULT=1` in scripts/verify/engineering-audit.sh.
+audit-fault-injection = ["kernel_physical_memory/fault-injection"]
 
 # v0.3 HW bench (Task 11): on-chip latency instrumentation (M-A/M-B/M-C),
 # the physical e-stop button IRQ path, and an auto-loaded GPIO->stop reflex.

@@ -1,4 +1,4 @@
-# Raspberry Pi 5 Boot Configuration for axiom-ebpf
+# Raspberry Pi 5 Boot Configuration for axiomos
 # Copy this file to the root of your SD card's boot partition
 
 # Use 64-bit kernel (required for AArch64)

@@ -485,7 +485,7 @@ impl ProgramHeaderFlags {
 impl ProgramHeaderFlags {
     #[must_use]
     pub fn contains(&self, other: &Self) -> bool {
-        self.0 & other.0 > 0
+        self.0 & other.0 == other.0
     }
 }
 
@@ -587,7 +587,7 @@ impl SectionHeaderFlags {
 
     #[must_use]
     pub fn contains(&self, other: &Self) -> bool {
-        self.0 & other.0 > 0
+        self.0 & other.0 == other.0
     }
 }
 

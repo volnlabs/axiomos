@@ -1,8 +1,0 @@
-[package]
-name = "timeseries_demo"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-minilib = { path = "../minilib" }
-kernel_abi = { path = "../../kernel/crates/kernel_abi" }

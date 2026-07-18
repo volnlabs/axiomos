@@ -1,6 +1,4 @@
-use kernel_abi::{
-    EBADF, EINVAL, EMFILE, ENAMETOOLONG, ENOENT, ERANGE, ESPIPE, Errno, PATH_MAX, UIO_MAXIOV,
-};
+use kernel_abi::{EINVAL, ENAMETOOLONG, ERANGE, Errno, PATH_MAX, UIO_MAXIOV};
 use kernel_vfs::path::{AbsolutePath, Path};
 
 use crate::access::{CwdAccess, FileAccess};
@@ -30,11 +28,11 @@ pub fn sys_getcwd<Cx: CwdAccess>(cx: &Cx, buf: &mut [u8]) -> Result<usize, Errno
 }
 
 pub fn sys_read<Cx: FileAccess>(cx: &Cx, fildes: Cx::Fd, buf: &mut [u8]) -> Result<usize, Errno> {
-    cx.read(fildes, buf).map_err(|_| EINVAL)
+    cx.read(fildes, buf).map_err(|error| error.errno())
 }
 
 pub fn sys_write<Cx: FileAccess>(cx: &Cx, fildes: Cx::Fd, buf: &[u8]) -> Result<usize, Errno> {
-    cx.write(fildes, buf).map_err(|_| EINVAL)
+    cx.write(fildes, buf).map_err(|error| error.errno())
 }
 
 pub fn sys_writev<Cx: FileAccess>(
@@ -55,7 +53,9 @@ pub fn sys_writev<Cx: FileAccess>(
         }
 
         let current_fd = Cx::Fd::from(fd_int);
-        let written = cx.write(current_fd, buffer).map_err(|_| EINVAL)?;
+        let written = cx
+            .write(current_fd, buffer)
+            .map_err(|error| error.errno())?;
         total_written = total_written.checked_add(written).ok_or(EINVAL)?;
 
         if written < buffer.len() {
@@ -68,7 +68,7 @@ pub fn sys_writev<Cx: FileAccess>(
 
 /// Close a file descriptor.
 pub fn sys_close<Cx: FileAccess>(cx: &Cx, fildes: Cx::Fd) -> Result<usize, Errno> {
-    cx.close(fildes).map_err(|_| EBADF)?;
+    cx.close(fildes).map_err(|error| error.errno())?;
     Ok(0)
 }
 
@@ -79,24 +79,25 @@ pub fn sys_lseek<Cx: FileAccess>(
     offset: i64,
     whence: i32,
 ) -> Result<usize, Errno> {
-    cx.lseek(fildes, offset, whence).map_err(|_| ESPIPE)
+    cx.lseek(fildes, offset, whence)
+        .map_err(|error| error.errno())
 }
 
 /// Create a pipe and return its read and write descriptors.
 pub fn sys_pipe<Cx: FileAccess>(cx: &Cx) -> Result<(Cx::Fd, Cx::Fd), Errno> {
-    let (read_fd, write_fd) = cx.pipe().map_err(|_| EMFILE)?;
+    let (read_fd, write_fd) = cx.pipe().map_err(|error| error.errno())?;
     Ok((read_fd, write_fd))
 }
 
 /// Duplicate a file descriptor.
 pub fn sys_dup<Cx: FileAccess>(cx: &Cx, oldfd: Cx::Fd) -> Result<usize, Errno> {
-    let newfd = cx.dup(oldfd).map_err(|_| EBADF)?;
+    let newfd = cx.dup(oldfd).map_err(|error| error.errno())?;
     Ok(newfd.into() as usize)
 }
 
 /// Duplicate a file descriptor to a specific value.
 pub fn sys_dup2<Cx: FileAccess>(cx: &Cx, oldfd: Cx::Fd, newfd: Cx::Fd) -> Result<usize, Errno> {
-    let res = cx.dup2(oldfd, newfd).map_err(|_| EBADF)?;
+    let res = cx.dup2(oldfd, newfd).map_err(|error| error.errno())?;
     Ok(res.into() as usize)
 }
 
@@ -134,13 +135,13 @@ pub fn sys_mkdir<Cx: CwdAccess + FileAccess>(
     _mode: usize,
 ) -> Result<usize, Errno> {
     let path = resolve_path(cx, path_bytes)?;
-    cx.mkdir(&path).map_err(|_| ENOENT)?; // TODO: Better error mapping from MkdirError
+    cx.mkdir(&path).map_err(|error| error.errno())?;
     Ok(0)
 }
 
 pub fn sys_rmdir<Cx: CwdAccess + FileAccess>(cx: &Cx, path_bytes: &[u8]) -> Result<usize, Errno> {
     let path = resolve_path(cx, path_bytes)?;
-    cx.rmdir(&path).map_err(|_| ENOENT)?; // TODO: Better error mapping from RmdirError
+    cx.rmdir(&path).map_err(|error| error.errno())?;
     Ok(0)
 }
 

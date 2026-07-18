@@ -3,7 +3,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use conquer_once::spin::OnceCell;
-use spin::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use spin::{RwLock, RwLockReadGuard};
 
 use crate::mcore::mtask::process::{Process, ProcessId};
 static PROCESS_TREE: OnceCell<RwLock<ProcessTree>> = OnceCell::uninit();
@@ -34,26 +34,16 @@ impl Children<'_> {
     }
 }
 
-pub struct ChildrenMut<'a> {
-    guard: RwLockWriteGuard<'a, ProcessTree>,
-    pid: ProcessId,
-}
-
-impl ChildrenMut<'_> {
-    pub fn get_mut(&mut self) -> Option<impl Iterator<Item = &mut Arc<Process>>> {
-        self.guard.children.get_mut(&self.pid).map(|x| x.iter_mut())
-    }
-
-    pub fn insert(&mut self, process: Arc<Process>) {
-        self.guard
-            .children
-            .entry(self.pid)
-            .or_default()
-            .push(process);
-    }
-}
-
 impl Process {
+    pub(crate) fn publish_child(&self, child: Arc<Process>) {
+        let mut tree = process_tree().write();
+        assert!(
+            tree.processes.insert(child.pid(), child.clone()).is_none(),
+            "child process published twice"
+        );
+        tree.children.entry(self.pid()).or_default().push(child);
+    }
+
     #[allow(clippy::missing_panics_doc)] // this panic must not happen, so the caller shouldn't have to care about it
     pub fn parent(&self) -> Arc<Process> {
         process_tree()
@@ -67,14 +57,6 @@ impl Process {
     pub fn children(&self) -> Children<'_> {
         let guard = process_tree().read();
         Children {
-            guard,
-            pid: self.pid,
-        }
-    }
-
-    pub fn children_mut(&self) -> ChildrenMut<'_> {
-        let guard = process_tree().write();
-        ChildrenMut {
             guard,
             pid: self.pid,
         }

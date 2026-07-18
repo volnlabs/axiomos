@@ -1,0 +1,696 @@
+{
+  "baseline_commit": "2cd870d8f5087ee17adba86f073559cc9a1414fe",
+  "campaign": "shrike-link-protocol",
+  "cargo_mutants_exit_code": 3,
+  "cargo_mutants_version": "27.1.0",
+  "command": [
+    "cargo",
+    "mutants",
+    "-p",
+    "shrike_link",
+    "--gitignore",
+    "true",
+    "--jobs",
+    "4",
+    "--timeout",
+    "60",
+    "--no-times",
+    "--output",
+    "/tmp/axiomos-shrike-link-mutants-2cd870d",
+    "-f",
+    "kernel/crates/shrike_link/src/*.rs"
+  ],
+  "counts": {
+    "caught": 143,
+    "missed": 10,
+    "timeout": 2,
+    "unviable": 8
+  },
+  "format_version": 1,
+  "inputs": {
+    "Cargo.lock": "e1890c77d0bd209b1c16e81456a9cd9282a0988390edde42c794ebb88d66eedd",
+    "kernel/crates/shrike_link/src/lib.rs": "db64f01c63fd6db35fd227f9dc9e09fabff1fe59529033dbe5f64bf29ea230fc",
+    "kernel/crates/shrike_link/src/motor.rs": "c21600f85425e8448db39f77e4f16678c7bf29774b021561c0734a7ba954052d",
+    "kernel/crates/shrike_link/src/ring.rs": "ff15ace250dd00ea811f82f33be009e0ec77fa81887e22f2ae1467172c50a772",
+    "kernel/crates/shrike_link/src/session.rs": "522c0186bf7b75b9a26ec9673c044fb844fec8a6c89c31bf355080b0c8e0c003",
+    "kernel/crates/shrike_link/src/watchdog.rs": "aaaee9fc2add64391b3ec1d8938703d9d03ed0e76f0afac17397f34607b8064f",
+    "rust-toolchain.toml": "e74988a8e96ded737122c116b6f5f45c7eda70065cc966888f35b5bfcd76185b"
+  },
+  "outcomes": [
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:124:19: replace + with * in encode",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:124:19: replace + with - in encode",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:124:25: replace + with * in encode",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:124:25: replace + with - in encode",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:125:18: replace < with <= in encode",
+      "summary": "MissedMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:125:18: replace < with == in encode",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:125:18: replace < with > in encode",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:132:14: replace + with * in encode",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:132:14: replace + with - in encode",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:134:31: replace + with * in encode",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:134:31: replace + with - in encode",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:135:11: replace + with * in encode",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:135:11: replace + with - in encode",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:135:25: replace & with ^ in encode",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:135:25: replace & with | in encode",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:136:11: replace + with * in encode",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:136:11: replace + with - in encode",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:136:25: replace >> with << in encode",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:183:9: replace Decoder::reset with ()",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:188:9: replace Decoder::push -> Option<Result<Msg, LinkError>> with None",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:188:9: replace Decoder::push -> Option<Result<Msg, LinkError>> with Some(Ok(Default::default()))",
+      "summary": "Unviable"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:190:22: replace == with != in Decoder::push",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:196:22: replace == with != in Decoder::push",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:210:31: replace > with < in Decoder::push",
+      "summary": "Unviable"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:210:31: replace > with == in Decoder::push",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:210:31: replace > with >= in Decoder::push",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:216:42: replace == with != in Decoder::push",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:226:26: replace += with *= in Decoder::push",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:226:26: replace += with -= in Decoder::push",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:227:29: replace == with != in Decoder::push",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:238:48: replace | with & in Decoder::push",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:238:48: replace | with ^ in Decoder::push",
+      "summary": "MissedMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:238:62: replace << with >> in Decoder::push",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:242:37: replace != with == in Decoder::push",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:256:5: replace crc16_split -> u16 with 0",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:256:5: replace crc16_split -> u16 with 1",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:258:14: replace ^= with &= in crc16_split",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:258:14: replace ^= with |= in crc16_split",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:258:28: replace << with >> in crc16_split",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:260:17: replace < with <= in crc16_split",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:260:17: replace < with == in crc16_split",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:260:17: replace < with > in crc16_split",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:261:28: replace & with ^ in crc16_split",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:261:28: replace & with | in crc16_split",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:261:37: replace != with == in crc16_split",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:262:23: replace << with >> in crc16_split",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:262:29: replace ^ with & in crc16_split",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:262:29: replace ^ with | in crc16_split",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:264:22: replace << with >> in crc16_split",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:266:15: replace += with *= in crc16_split",
+      "summary": "Timeout"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:266:15: replace += with -= in crc16_split",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:26:32: replace + with *",
+      "summary": "MissedMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:26:32: replace + with -",
+      "summary": "Unviable"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:26:46: replace + with *",
+      "summary": "MissedMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:26:46: replace + with -",
+      "summary": "MissedMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:280:5: replace decode_msg -> Result<Msg, LinkError> with Ok(Default::default())",
+      "summary": "Unviable"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:281:16: replace == with != in decode_msg",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:288:9: delete match arm T_MOTOR in decode_msg",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:296:9: delete match arm T_ESTOP in decode_msg",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:298:42: replace != with == in decode_msg",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:300:9: delete match arm T_HB_TO_SHRIKE in decode_msg",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:306:9: delete match arm T_SENSOR in decode_msg",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:310:34: replace != with == in decode_msg",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:314:9: delete match arm T_HB_TO_PI in decode_msg",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:73:5: replace crc16 -> u16 with 0",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:73:5: replace crc16 -> u16 with 1",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:75:13: replace ^= with &= in crc16",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:75:13: replace ^= with |= in crc16",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:75:27: replace << with >> in crc16",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:77:17: replace < with <= in crc16",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:77:17: replace < with == in crc16",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:77:17: replace < with > in crc16",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:78:26: replace & with ^ in crc16",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:78:26: replace & with | in crc16",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:78:35: replace != with == in crc16",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:79:22: replace << with >> in crc16",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:79:28: replace ^ with & in crc16",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:79:28: replace ^ with | in crc16",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:81:21: replace << with >> in crc16",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:83:15: replace += with *= in crc16",
+      "summary": "Timeout"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:83:15: replace += with -= in crc16",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:92:5: replace encode -> Result<usize, LinkError> with Ok(0)",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/lib.rs:92:5: replace encode -> Result<usize, LinkError> with Ok(1)",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/motor.rs:35:17: replace == with != in duty_to_permille",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/motor.rs:35:5: replace duty_to_permille -> i16 with -1",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/motor.rs:35:5: replace duty_to_permille -> i16 with 0",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/motor.rs:35:5: replace duty_to_permille -> i16 with 1",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/motor.rs:39:35: replace / with % in duty_to_permille",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/motor.rs:39:35: replace / with * in duty_to_permille",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/motor.rs:39:9: replace * with + in duty_to_permille",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/motor.rs:39:9: replace * with / in duty_to_permille",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/motor.rs:51:30: delete - in split_duty",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/motor.rs:51:5: replace split_duty -> (Direction, u16) with (Default::default(), 0)",
+      "summary": "Unviable"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/motor.rs:51:5: replace split_duty -> (Direction, u16) with (Default::default(), 1)",
+      "summary": "Unviable"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/motor.rs:52:16: replace == with != in split_duty",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/motor.rs:56:47: replace * with + in split_duty",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/motor.rs:56:47: replace * with / in split_duty",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/motor.rs:56:65: replace / with % in split_duty",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/motor.rs:56:65: replace / with * in split_duty",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/motor.rs:57:26: replace > with < in split_duty",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/motor.rs:57:26: replace > with == in split_duty",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/motor.rs:57:26: replace > with >= in split_duty",
+      "summary": "MissedMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:34:9: replace RingBuf<N>::len -> usize with 0",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:34:9: replace RingBuf<N>::len -> usize with 1",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:39:18: replace == with != in RingBuf<N>::is_empty",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:39:9: replace RingBuf<N>::is_empty -> bool with false",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:39:9: replace RingBuf<N>::is_empty -> bool with true",
+      "summary": "MissedMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:44:18: replace == with != in RingBuf<N>::is_full",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:44:9: replace RingBuf<N>::is_full -> bool with false",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:44:9: replace RingBuf<N>::is_full -> bool with true",
+      "summary": "MissedMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:49:21: replace == with != in RingBuf<N>::push",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:49:9: replace RingBuf<N>::push -> bool with false",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:49:9: replace RingBuf<N>::push -> bool with true",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:53:32: replace + with * in RingBuf<N>::push",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:53:32: replace + with - in RingBuf<N>::push",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:53:37: replace % with + in RingBuf<N>::push",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:53:37: replace % with / in RingBuf<N>::push",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:54:18: replace += with *= in RingBuf<N>::push",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:54:18: replace += with -= in RingBuf<N>::push",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:60:21: replace == with != in RingBuf<N>::pop",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:60:9: replace RingBuf<N>::pop -> Option<u8> with None",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:60:9: replace RingBuf<N>::pop -> Option<u8> with Some(0)",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:60:9: replace RingBuf<N>::pop -> Option<u8> with Some(1)",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:64:32: replace + with * in RingBuf<N>::pop",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:64:32: replace + with - in RingBuf<N>::pop",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:64:37: replace % with + in RingBuf<N>::pop",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:64:37: replace % with / in RingBuf<N>::pop",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:65:18: replace -= with += in RingBuf<N>::pop",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/ring.rs:65:18: replace -= with /= in RingBuf<N>::pop",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/session.rs:52:9: replace LinkSession::on_inbound with ()",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/session.rs:58:9: replace LinkSession::alive -> bool with false",
+      "summary": "MissedMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/session.rs:58:9: replace LinkSession::alive -> bool with true",
+      "summary": "MissedMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/session.rs:63:9: replace LinkSession::tick -> LinkAction with Default::default()",
+      "summary": "Unviable"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/session.rs:66:47: replace >= with < in LinkSession::tick",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/session.rs:79:12: delete ! in LinkSession::tick",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/session.rs:90:9: replace LinkSession::estop_sent with ()",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:115:31: replace || with && in Watchdog::output",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:115:34: delete ! in Watchdog::output",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:115:55: replace || with && in Watchdog::output",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:115:9: replace Watchdog::output -> Output with Default::default()",
+      "summary": "Unviable"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:128:13: replace >= with < in Watchdog::expired",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:128:9: replace Watchdog::expired -> bool with false",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:128:9: replace Watchdog::expired -> bool with true",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:133:9: replace Watchdog::refresh with ()",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:165:9: replace LinkLiveness::on_inbound with ()",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:173:19: replace && with || in LinkLiveness::alive",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:173:26: replace < with <= in LinkLiveness::alive",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:173:26: replace < with == in LinkLiveness::alive",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:173:26: replace < with > in LinkLiveness::alive",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:173:9: replace LinkLiveness::alive -> bool with false",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:173:9: replace LinkLiveness::alive -> bool with true",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:180:5: replace seq_newer -> bool with false",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:180:5: replace seq_newer -> bool with true",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:181:12: replace && with || in seq_newer",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:181:17: replace < with <= in seq_newer",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:181:17: replace < with == in seq_newer",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:181:17: replace < with > in seq_newer",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:181:7: replace != with == in seq_newer",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:76:9: replace Watchdog::on_msg -> bool with false",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:76:9: replace Watchdog::on_msg -> bool with true",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:78:35: replace && with || in Watchdog::on_msg",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:78:38: delete ! in Watchdog::on_msg",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/shrike_link/src/watchdog.rs:88:39: delete ! in Watchdog::on_msg",
+      "summary": "CaughtMutant"
+    }
+  ],
+  "raw_outcomes_sha256": "0b4c087ccdd15af7349cfd07c17ecf732d5abdd6c04fa05bffb2b35c1df88e79",
+  "score": 92.25806451612904,
+  "total_mutants": 163
+}

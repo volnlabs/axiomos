@@ -4,8 +4,18 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+kernel_abi = { path = "../kernel_abi" }
+ed25519-dalek = { version = "2.2", default-features = false }
+# Bare-metal release builds on the pinned nightly cannot codegen SHA-NI/AVX
+# target-feature shims. Feature unification keeps dalek's SHA-512 portable.
+sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
 spin.workspace = true
 zerocopy.workspace = true
+# Optional regular dep behind `loom-model`. Behind the feature, `concurrency/
+# epoch_snapshot.rs` cfg-swaps the atomic imports to loom's instrumented types
+# so the same algorithm runs under loom's permutation checker. Off by default
+# for every shipped profile.
+loom = { version = "0.7", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
@@ -18,6 +28,10 @@ embedded-profile = []
 # Excluded from every shipped profile until code images have an owned,
 # compile-on-load RW-to-RX lifecycle.
 experimental-aarch64-jit = []
+# Host-only Loom model for the EpochSnapshot reclamation algorithm. Off by
+# default; enabled for `tests/concurrency_model.rs` and the audit-gate
+# `loom-model-*` steps.
+loom-model = ["dep:loom"]
 
 [[bench]]
 name = "interpreter"

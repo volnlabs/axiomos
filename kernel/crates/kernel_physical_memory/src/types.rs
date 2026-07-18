@@ -1,6 +1,15 @@
 use core::fmt;
 use core::ops::{Add, AddAssign, Sub, SubAssign};
 
+use thiserror::Error;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("physical address {address:#x} is not aligned to {alignment:#x}")]
+pub struct PhysFrameNotAlignedError {
+    pub address: u64,
+    pub alignment: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct PhysAddr(pub u64);
@@ -77,10 +86,12 @@ impl<S: PageSize> PhysFrame<S> {
         }
     }
 
-    #[allow(clippy::result_unit_err)]
-    pub const fn from_start_address(address: PhysAddr) -> Result<Self, ()> {
+    pub const fn from_start_address(address: PhysAddr) -> Result<Self, PhysFrameNotAlignedError> {
         if address.0 & (S::SIZE - 1) != 0 {
-            return Err(());
+            return Err(PhysFrameNotAlignedError {
+                address: address.0,
+                alignment: S::SIZE,
+            });
         }
         Ok(Self {
             start_address: address,

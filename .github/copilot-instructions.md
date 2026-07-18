@@ -1,8 +1,8 @@
-# axiom-ebpf - Copilot Coding Agent Instructions
+# axiomos - Copilot Coding Agent Instructions
 
 ## Project Overview
 
-**axiom-ebpf** is a hobby x86-64 operating system kernel written in Rust. This is a bare-metal OS project that boots using the Limine bootloader and runs on QEMU. The project consists of ~124 Rust source files organized into a kernel and userspace components.
+**axiomos** is a hobby bare-metal operating system kernel written in Rust. It boots using Limine on x86_64 and is organized into kernel and userspace components.
 
 **Project Type:** Operating System Kernel (Bare Metal)
 **Primary Language:** Rust (Nightly)

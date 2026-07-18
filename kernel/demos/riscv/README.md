@@ -14,7 +14,7 @@ This is a minimal demonstration kernel showing OpenSBI bootloader integration fo
 ## Building
 
 ```bash
-cd kernel/riscv-demo
+cd kernel/demos/riscv
 cargo build
 ```
 
@@ -33,7 +33,7 @@ qemu-system-riscv64 \
 ```
 OpenSBI v0.9
 ...
-axiom-ebpf RISC-V Kernel
+axiomos RISC-V demo
 =======================
 Hart ID: 0
 DTB Address: 0x87000000

@@ -68,8 +68,12 @@ jobs:
           cargo fmt --all -- --check
       - name: Unsafe-code ledger
         run: python3 -B scripts/unsafe-ledger.py --check
+      - name: Component inventory and generated documentation
+        run: |
+          cargo xtask inventory --check
+          cargo xtask docs --check
       - name: Clippy (per-crate, matches local CI recipe)
-        # Per the axiom-kernel skill: per-crate clippy avoids the
+        # Per the kernel build guidance: per-crate clippy avoids the
         # profile-typed kernel_bpf "no default profile" failures that bare
         # `cargo clippy --workspace --lib` triggers on a host build.
         run: |
@@ -81,6 +85,7 @@ jobs:
           cargo clippy -p kernel_virtual_memory --all-targets -- -D clippy::all
           cargo clippy -p kernel_vfs --lib -- -D clippy::all
           cargo clippy -p kernel_physical_memory --lib -- -D clippy::all
+          cargo clippy -p xtask --all-targets -- -D clippy::all
           cargo clippy -p kernel_bpf --no-default-features --features cloud-profile --lib -- -D clippy::all
           cargo clippy -p kernel_bpf --no-default-features --features embedded-profile --lib -- -D clippy::all
 
@@ -297,10 +302,10 @@ jobs:
       # release ISO under QEMU and asserts the kernel reaches init (rootfs
       # mounted, ext2 mounted, init started) — *not* just kernel init. The
       # marker `QEMU_BOOT_OK` is emitted from kernel/src/main.rs right after
-      # Process::create_from_executable returns for /bin/init (R1 moved it
-      # out of print_benchmark_metrics); init execution itself is
-      # observed via the `started process pid=` log line the kernel
-      # prints at the same point. Boot must complete ACPI/RSDP walk
+      # Process::create_userspace_init returns for /bin/init (R1 moved it
+      # out of print_benchmark_metrics); init creation is observed via the
+      # explicit `INIT_PROCESS_STARTED` audit marker at the same point.
+      # Boot must complete ACPI/RSDP walk
       # before either marker — a kernel panic during ACPI is treated as a
       # gate failure (audit review round-1 finding).
       runs-on: ubuntu-latest
@@ -323,7 +328,7 @@ jobs:
         - name: Build release (produces axiomos.iso + disk image)
           env:
             AXIOMOS_BOOT_TIMEOUT_SECS: "60"
-          run: cargo build --release
+          run: cargo build --release --features audit-diagnostics
         - name: Locate ISO and disk image
           id: artifacts
           run: |
@@ -391,7 +396,7 @@ jobs:
             echo "----- marker check -----"
                       # Audit fix R1: marker must follow root mount + init creation.
             # The qemu-kernel-smoke gate requires ALL of:
-            #   1. QEMU_BOOT_OK printed after "started process pid=1"
+            #   1. QEMU_BOOT_OK printed after "INIT_PROCESS_STARTED pid=1"
             #      (i.e. after the root mount and init creation in
             #      src/main.rs, not from kernel::init)
             #   2. no RsdpIncorrectSignature / acpi.rs:28 panic before
@@ -405,7 +410,7 @@ jobs:
             #   5. unknown syscalls return ENOSYS instead of panicking
             ACPI_FAIL=$(grep -c -E 'RsdpIncorrectSignature|RSDP|panicked at kernel/src/acpi' "$SERIAL_LOG" || true)
             BOOT_OK=$(grep -c 'QEMU_BOOT_OK' "$SERIAL_LOG" || true)
-            INIT_RAN=$(grep -c 'started process pid=' "$SERIAL_LOG" || true)
+            INIT_RAN=$(grep -c 'INIT_PROCESS_STARTED pid=' "$SERIAL_LOG" || true)
             USERCOPY_OK=$(grep -c 'USERCOPY_EFAULT_OK' "$SERIAL_LOG" || true)
             ENOSYS_OK=$(grep -c 'UNKNOWN_SYSCALL_ENOSYS_OK' "$SERIAL_LOG" || true)
             EXCEPTION_PANIC=$(grep -c -E 'panicked at kernel/src/arch/idt|KERNEL_MODE.*PAGE FAULT' "$SERIAL_LOG" || true)
@@ -420,7 +425,7 @@ jobs:
               exit 1
             fi
             if [[ "$INIT_RAN" -lt 1 ]]; then
-              echo "::error::no 'started process pid=' line — kernel reached QEMU_BOOT_OK but init did not run"
+              echo "::error::INIT_PROCESS_STARTED missing — kernel reached QEMU_BOOT_OK but init was not created"
               exit 1
             fi
             if [[ "$USERCOPY_OK" -lt 1 ]]; then

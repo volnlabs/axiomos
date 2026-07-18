@@ -57,7 +57,7 @@ fn virtio_probe(addr: PciAddress, cam: &dyn ConfigurationAccess) -> bool {
 #[cfg(target_arch = "x86_64")]
 #[allow(clippy::needless_pass_by_value)] // signature is required like this
 fn virtio_init(addr: PciAddress, cam: Box<dyn ConfigurationAccess>) -> Result<(), Box<dyn Error>> {
-    let transport = transport(addr, cam);
+    let transport = transport(addr, cam)?;
 
     let blk = VirtIOBlk::<HalImpl, _>::new(transport)?;
 
@@ -126,6 +126,15 @@ impl VirtioBlkInner {
             Self::Mmio(blk) => blk.write_blocks(block_num, buf),
         }
     }
+
+    fn flush(&mut self) -> virtio_drivers::Result {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            Self::Pci(blk) => blk.flush(),
+            #[cfg(target_arch = "aarch64")]
+            Self::Mmio(blk) => blk.flush(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -169,12 +178,13 @@ impl BlockDevice<KernelDeviceId, 512> for VirtioBlockDevice {
     }
 
     fn flush(&mut self) -> Result<(), Box<dyn Error>> {
-        todo!()
+        self.inner.lock().flush()?;
+        Ok(())
     }
 }
 
 impl filesystem::BlockDevice for VirtioBlockDevice {
-    type Error = ();
+    type Error = virtio_drivers::Error;
 
     fn sector_size(&self) -> usize {
         512
@@ -200,13 +210,14 @@ impl filesystem::BlockDevice for VirtioBlockDevice {
             .inner
             .lock()
             .read_blocks(sector_index, buf)
-            .map(|()| buf.len())
-            .map_err(|_| ());
+            .map(|()| buf.len());
 
         if log_probe {
             match &result {
                 Ok(read) => log::info!("virtio-blk read_sector exit seq={} read={}", seq, read),
-                Err(()) => log::warn!("virtio-blk read_sector error seq={}", seq),
+                Err(error) => {
+                    log::warn!("virtio-blk read_sector error seq={} error={error:?}", seq);
+                }
             }
         }
 
@@ -218,6 +229,5 @@ impl filesystem::BlockDevice for VirtioBlockDevice {
             .lock()
             .write_blocks(sector_index, buf)
             .map(|()| buf.len())
-            .map_err(|_| ())
     }
 }

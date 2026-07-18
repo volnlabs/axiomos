@@ -1,4 +1,11 @@
 /target
+**/target/
+**/fuzz/artifacts/
+**/fuzz/corpus/
+artifacts/*
+!artifacts/.gitkeep
+__pycache__/
+*.py[cod]
 /.idea
 
 # RISC-V demo kernel build artifacts
@@ -15,6 +22,7 @@ kernel/crates/kernel_bpf/target/
 #/target
 *.txt
 *.log
+!docs/performance/evidence/**/*.log
 .planning/
 disk.img
 

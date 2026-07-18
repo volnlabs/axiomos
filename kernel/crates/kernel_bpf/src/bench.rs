@@ -39,12 +39,19 @@ mod tests {
     use super::*;
     use crate::bytecode::program::BpfProgType;
     use crate::profile::ActiveProfile;
-    use crate::verifier::Verifier;
+    use crate::verifier::{Verifier, VerifyConfig};
 
     #[test]
     fn reflex_pwm_program_verifies() {
         let insns = reflex_pwm_program(0, 1, 0);
-        let result = Verifier::<ActiveProfile>::verify(BpfProgType::Unspec, &insns);
+        let result = Verifier::<ActiveProfile>::verify_with_config(
+            BpfProgType::Unspec,
+            &insns,
+            VerifyConfig {
+                allow_actuation: true,
+                ..VerifyConfig::default()
+            },
+        );
         assert!(result.is_ok(), "reflex program must pass the verifier");
     }
 

@@ -22,22 +22,9 @@
 //! ```rust,ignore
 //! use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
 //!
-//! // Stack size is determined at compile time by the active profile
 //! const STACK_SIZE: usize = ActiveProfile::MAX_STACK_SIZE;
-//!
-//! // JIT availability is a compile-time constant
-//! if ActiveProfile::JIT_ALLOWED {
-//!     // This code is erased in embedded profile
-//! }
+//! const MAP_BUDGET: usize = ActiveProfile::MEMORY_BUDGET;
 //! ```
-
-mod failure;
-mod memory;
-mod scheduler;
-
-pub use failure::{FailureSemantic, RecoveryRequired, RestartAcceptable};
-pub use memory::{ElasticMemory, MemoryStrategy, StaticMemory};
-pub use scheduler::{DeadlineAware, SchedulerPolicy, ThroughputOptimized};
 
 /// Sealed trait module to prevent external implementations of profile traits.
 mod sealed {
@@ -58,30 +45,14 @@ mod sealed {
 /// This trait is sealed and cannot be implemented outside this crate.
 /// Only `CloudProfile` and `EmbeddedProfile` are valid implementations.
 ///
-/// # Associated Types
-///
-/// Each profile has associated types that encode its capabilities:
-/// - `MemoryStrategy`: How memory is allocated (elastic vs static)
-/// - `SchedulerPolicy`: How programs are scheduled (throughput vs deadline)
-/// - `FailureSemantic`: How failures are handled (restart vs recovery)
-///
 /// # Associated Constants
 ///
 /// Constants define hard limits enforced at compile time:
 /// - `MAX_STACK_SIZE`: Maximum BPF stack in bytes
 /// - `MAX_INSN_COUNT`: Maximum instructions (for WCET in embedded)
 /// - `JIT_ALLOWED`: Whether JIT compilation is permitted
-/// - `RESTART_ACCEPTABLE`: Whether restart is a valid failure recovery
+/// - `MEMORY_BUDGET`: Maximum bytes allowed for one map allocation
 pub trait PhysicalProfile: sealed::Sealed + 'static {
-    /// Memory allocation strategy for this profile.
-    type MemoryStrategy: MemoryStrategy;
-
-    /// Scheduler policy for this profile.
-    type SchedulerPolicy: SchedulerPolicy;
-
-    /// Failure handling semantics for this profile.
-    type FailureSemantic: FailureSemantic;
-
     /// Maximum BPF stack size in bytes.
     ///
     /// - Cloud: 512KB (elastic, can grow)
@@ -97,15 +68,14 @@ pub trait PhysicalProfile: sealed::Sealed + 'static {
 
     /// Whether JIT compilation is allowed.
     ///
-    /// - Cloud: true (JIT is default execution mode)
-    /// - Embedded: false (interpreter or AOT only)
+    /// Both shipped profiles currently require the interpreter. The cloud JIT
+    /// remains disabled until an owned compile-on-load RW-to-RX design exists.
     const JIT_ALLOWED: bool;
 
-    /// Whether restart is an acceptable failure recovery mechanism.
-    ///
-    /// - Cloud: true (restart is normal recovery)
-    /// - Embedded: false (restart may be catastrophic, recovery required)
-    const RESTART_ACCEPTABLE: bool;
+    /// Maximum bytes accepted by one map allocation. Zero means that the map
+    /// implementation defers to the kernel manager's checked global/per-owner
+    /// quotas rather than imposing a smaller profile-local cap.
+    const MEMORY_BUDGET: usize;
 
     /// Per-program WCET budget in cycle units (#43).
     ///
@@ -124,7 +94,7 @@ pub trait PhysicalProfile: sealed::Sealed + 'static {
     const WCET_CYCLE_BUDGET: u64;
 
     /// Calibrated cost of one WCET cycle unit, in nanoseconds, on this profile's
-    /// target. The Pi5 A76 JIT measured ~5.74 ns/unit (`docs/benchmarks.md §12`,
+    /// target. The Pi5 A76 JIT measured ~5.74 ns/unit (`docs/performance/current-results.md §12`,
     /// straight-line baseline); rounded up to 6 for a conservative bound. Used
     /// to convert a program's `wcet_cycles` into wall-clock time for the
     /// utilization admission test.
@@ -169,7 +139,7 @@ pub trait PhysicalProfile: sealed::Sealed + 'static {
     const ACT_RATE_WINDOW_NS: u64;
 }
 
-/// Cloud profile: elastic resources, soft bounds, restart acceptable.
+/// Cloud profile: elastic resources with manager-enforced quotas.
 ///
 /// # Assumptions
 ///
@@ -180,9 +150,9 @@ pub trait PhysicalProfile: sealed::Sealed + 'static {
 ///
 /// # Guarantees
 ///
-/// - High throughput via JIT compilation
-/// - Fair scheduling across programs
-/// - Dynamic resource allocation
+/// - Checked, quota-bounded map allocation
+/// - Interpreter execution through immutable hook snapshots
+/// - Soft timing bounds
 ///
 /// # Build-Time Selection
 ///
@@ -194,10 +164,6 @@ pub struct CloudProfile;
 impl sealed::Sealed for CloudProfile {}
 
 impl PhysicalProfile for CloudProfile {
-    type MemoryStrategy = ElasticMemory;
-    type SchedulerPolicy = ThroughputOptimized;
-    type FailureSemantic = RestartAcceptable;
-
     /// 512KB stack for cloud workloads
     const MAX_STACK_SIZE: usize = 512 * 1024;
 
@@ -217,8 +183,8 @@ impl PhysicalProfile for CloudProfile {
     /// its own acceptance gates."
     const JIT_ALLOWED: bool = false;
 
-    /// Restart is normal recovery
-    const RESTART_ACCEPTABLE: bool = true;
+    /// The kernel BPF manager owns the effective cloud quotas.
+    const MEMORY_BUDGET: usize = 0;
 
     /// Timing is not a cloud contract; effectively unlimited.
     const WCET_CYCLE_BUDGET: u64 = u64::MAX;
@@ -238,7 +204,7 @@ impl PhysicalProfile for CloudProfile {
     const ACT_RATE_WINDOW_NS: u64 = 0;
 }
 
-/// Embedded profile: static resources, hard bounds, recovery required.
+/// Embedded profile: bounded resources and hard verifier/admission limits.
 ///
 /// # Assumptions
 ///
@@ -250,9 +216,9 @@ impl PhysicalProfile for CloudProfile {
 /// # Guarantees
 ///
 /// - Predictable execution time (WCET bounded)
-/// - Deadline-aware scheduling
-/// - Energy-aware execution
-/// - Recovery partition for failures
+/// - Profile-bounded map allocations
+/// - Synchronous interpreter execution through immutable hook snapshots
+/// - Aggregate WCET utilization admission
 ///
 /// # Build-Time Selection
 ///
@@ -264,10 +230,6 @@ pub struct EmbeddedProfile;
 impl sealed::Sealed for EmbeddedProfile {}
 
 impl PhysicalProfile for EmbeddedProfile {
-    type MemoryStrategy = StaticMemory;
-    type SchedulerPolicy = DeadlineAware;
-    type FailureSemantic = RecoveryRequired;
-
     /// 8KB stack for embedded constraints
     const MAX_STACK_SIZE: usize = 8 * 1024;
 
@@ -277,15 +239,15 @@ impl PhysicalProfile for EmbeddedProfile {
     /// No JIT - interpreter or AOT only
     const JIT_ALLOWED: bool = false;
 
-    /// Restart is forbidden - must use recovery partition
-    const RESTART_ACCEPTABLE: bool = false;
+    /// Profile-local ceiling applied before the kernel manager's quotas.
+    const MEMORY_BUDGET: usize = 64 * 1024;
 
     /// One control-loop period's worth of cycle units
     /// (`RT_PERIOD_NS / CYCLE_UNIT_NS` = 1_000_000 / 6 ≈ 166_666): a single hook
     /// invocation that cannot fit one period is unschedulable at any frequency.
     const WCET_CYCLE_BUDGET: u64 = Self::RT_PERIOD_NS / Self::CYCLE_UNIT_NS;
 
-    /// Pi5 A76 JIT: ~5.74 ns/unit measured, rounded up to 6 (docs/benchmarks.md §12).
+    /// Pi5 A76 JIT: ~5.74 ns/unit measured, rounded up to 6 (docs/performance/current-results.md §12).
     const CYCLE_UNIT_NS: u64 = 6;
 
     /// 1 kHz control loop.
@@ -348,14 +310,14 @@ mod tests {
             !CloudProfile::JIT_ALLOWED,
             "cloud profile JIT_ALLOWED must stay false until C-06 redesign"
         );
-        assert!(CloudProfile::RESTART_ACCEPTABLE);
+        assert_eq!(CloudProfile::MEMORY_BUDGET, 0);
     }
 
     #[cfg(feature = "embedded-profile")]
     #[test]
     fn embedded_profile_forbids_jit() {
         assert!(!EmbeddedProfile::JIT_ALLOWED);
-        assert!(!EmbeddedProfile::RESTART_ACCEPTABLE);
+        assert_eq!(EmbeddedProfile::MEMORY_BUDGET, 64 * 1024);
     }
 
     #[test]

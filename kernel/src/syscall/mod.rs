@@ -1,11 +1,13 @@
 use core::ops::Neg;
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use access::KernelAccess;
-use kernel_abi::{syscall_name, Errno, EINVAL, ENOSYS};
+#[cfg(feature = "rpi5")]
+use kernel_abi::EPERM;
+use kernel_abi::{syscall_name, Errno, EAGAIN, EINVAL, ENOSYS, ESRCH};
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use kernel_syscall::{
     access::FileAccess,
@@ -30,17 +32,11 @@ use zerocopy::IntoBytes;
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::mcore::mtask::process::Process;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use crate::mcore::mtask::task::Task;
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(target_arch = "aarch64")]
 fn hlt() {
-    #[cfg(target_arch = "riscv64")]
-    // SAFETY: wfi (wait for interrupt) is a privileged instruction that halts the CPU
-    // until an interrupt occurs. We are in kernel context with interrupts properly
-    // configured, so this is safe to execute.
-    unsafe {
-        riscv::asm::wfi();
-    }
-    #[cfg(all(target_arch = "aarch64", feature = "aarch64_arch"))]
     // SAFETY: wfi (wait for interrupt) is a privileged instruction that halts the CPU
     // until an interrupt occurs. We are in kernel context with interrupts properly
     // configured, so this is safe to execute.
@@ -61,16 +57,32 @@ mod validation;
 
 use crate::arch::UserContext;
 
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 static WRITE_MARKER_SENT: AtomicBool = AtomicBool::new(false);
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 static BPF_MARKER_SENT: AtomicBool = AtomicBool::new(false);
 static EXPORTED_RINGBUF_MAP_ID: AtomicU32 = AtomicU32::new(u32::MAX);
 
 const DEBUG_OP_SET_EXPORTED_RINGBUF_MAP_ID: usize = 1;
 const DEBUG_OP_GET_EXPORTED_RINGBUF_MAP_ID: usize = 2;
+#[cfg(feature = "audit-diagnostics")]
+const DEBUG_OP_GET_PIPE_READ_BLOCKS: usize = 3;
+#[cfg(feature = "audit-diagnostics")]
+const DEBUG_OP_GET_CHILD_WAIT_BLOCKS: usize = 4;
 
 #[cfg(feature = "rpi5")]
+fn require_current_bpf_capability(
+    required: crate::mcore::mtask::process::BpfCapabilities,
+) -> Result<(), Errno> {
+    let process = crate::mcore::context::ExecutionContext::load().current_process();
+    if process.bpf_capabilities().contains(required) {
+        Ok(())
+    } else {
+        Err(EPERM)
+    }
+}
+
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 #[inline(always)]
 fn dbg_mark(_ch: u32) {
     // SAFETY: Write to Pi 5 debug UART10 data register through the
@@ -123,10 +135,11 @@ pub fn dispatch_syscall(
         kernel_abi::SYS_EXIT => {
             let status = i32::try_from(arg1).unwrap_or(0);
             let ctx = crate::mcore::context::ExecutionContext::load();
-            ctx.with_current_task(|task| {
-                *task.process().exit_code().write() = Some(status);
+            let process = ctx.with_current_task(|task| {
                 task.set_should_terminate(true);
+                task.process().clone()
             });
+            process.mark_exited(status);
             // SAFETY: Interrupts are disabled during syscall handling (PSTATE.DAIF masked on
             // exception entry). reschedule() context-switches away; since should_terminate is
             // set, this task will be cleaned up and never re-enqueued.
@@ -161,10 +174,11 @@ pub fn dispatch_syscall(
             // Abort the process (equivalent to exit(134) - SIGABRT)
             let status = 134;
             let ctx = crate::mcore::context::ExecutionContext::load();
-            ctx.with_current_task(|task| {
-                *task.process().exit_code().write() = Some(status);
+            let process = ctx.with_current_task(|task| {
                 task.set_should_terminate(true);
+                task.process().clone()
             });
+            process.mark_exited(status);
             unsafe {
                 ctx.reschedule();
             }
@@ -175,14 +189,35 @@ pub fn dispatch_syscall(
         kernel_abi::SYS_MALLOC => dispatch_sys_malloc(arg1),
         kernel_abi::SYS_FREE => dispatch_sys_free(arg1),
         #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
-        kernel_abi::SYS_PWM_CONFIG => dispatch_sys_pwm_config(arg1, arg2),
+        kernel_abi::SYS_PWM_CONFIG => {
+            require_current_bpf_capability(crate::mcore::mtask::process::BpfCapabilities::ACTUATE)
+                .and_then(|()| dispatch_sys_pwm_config(arg1, arg2))
+        }
         #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
-        kernel_abi::SYS_PWM_WRITE => dispatch_sys_pwm_write(arg1, arg2, arg3),
+        kernel_abi::SYS_PWM_WRITE => {
+            require_current_bpf_capability(crate::mcore::mtask::process::BpfCapabilities::ACTUATE)
+                .and_then(|()| dispatch_sys_pwm_write(arg1, arg2, arg3))
+        }
         #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
-        kernel_abi::SYS_PWM_ENABLE => dispatch_sys_pwm_enable(arg1, arg2, arg3),
+        kernel_abi::SYS_PWM_ENABLE => {
+            require_current_bpf_capability(crate::mcore::mtask::process::BpfCapabilities::ACTUATE)
+                .and_then(|()| dispatch_sys_pwm_enable(arg1, arg2, arg3))
+        }
         kernel_abi::SYS_CLOCK_GETTIME => dispatch_sys_clock_gettime(arg1, arg2),
         kernel_abi::SYS_NANOSLEEP => dispatch_sys_nanosleep(arg1, arg2),
+        kernel_abi::SYS_INTERRUPT_SLEEP => dispatch_sys_interrupt_sleep(arg1),
         kernel_abi::SYS_SPAWN => dispatch_sys_spawn(arg1, arg2),
+        kernel_abi::SYS_SPAWN_RESTRICTED => dispatch_sys_spawn_restricted(arg1, arg2, arg3),
+        kernel_abi::SYS_RESTRICT_BPF_CAPABILITIES => match u32::try_from(arg1)
+            .ok()
+            .and_then(crate::mcore::mtask::process::BpfCapabilities::from_bits)
+        {
+            Some(allowed) => {
+                let process = crate::mcore::context::ExecutionContext::load().current_process();
+                Ok(process.restrict_bpf_capabilities(allowed).bits() as usize)
+            }
+            None => Err(EINVAL),
+        },
         kernel_abi::SYS_FORK => dispatch_sys_fork(ctx),
         kernel_abi::SYS_EXECVE => dispatch_sys_execve(ctx, arg1, arg2, arg3),
         kernel_abi::SYS_WAITPID => dispatch_sys_waitpid(arg1, arg2, arg3),
@@ -243,6 +278,18 @@ fn dispatch_sys_debug(op: usize, value: usize) -> Result<usize, Errno> {
                 Ok(map_id as usize)
             }
         }
+        #[cfg(feature = "audit-diagnostics")]
+        DEBUG_OP_GET_PIPE_READ_BLOCKS => Ok(crate::mcore::context::ExecutionContext::load()
+            .current_process()
+            .telemetry()
+            .pipe_read_blocks
+            .load(AtomicOrdering::Relaxed)),
+        #[cfg(feature = "audit-diagnostics")]
+        DEBUG_OP_GET_CHILD_WAIT_BLOCKS => Ok(crate::mcore::context::ExecutionContext::load()
+            .current_process()
+            .telemetry()
+            .child_wait_blocks
+            .load(AtomicOrdering::Relaxed)),
         _ => Err(EINVAL),
     }
 }
@@ -330,7 +377,7 @@ fn dispatch_sys_read(fd: usize, buf: usize, nbyte: usize) -> Result<usize, Errno
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn dispatch_sys_write(fd: usize, buf: usize, nbyte: usize) -> Result<usize, Errno> {
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     if !WRITE_MARKER_SENT.swap(true, Ordering::Relaxed) {
         dbg_mark(b'w' as u32);
     }
@@ -386,7 +433,7 @@ fn dispatch_sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> Result<usize
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn dispatch_sys_bpf(cmd: usize, attr: usize, size: usize) -> Result<usize, Errno> {
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     if !BPF_MARKER_SENT.swap(true, Ordering::Relaxed) {
         dbg_mark(b'p' as u32);
     }
@@ -595,45 +642,115 @@ fn dispatch_sys_clock_gettime(clock_id: usize, tp: usize) -> Result<usize, Errno
     Ok(0)
 }
 
-fn dispatch_sys_nanosleep(req: usize, _rem: usize) -> Result<usize, Errno> {
+fn dispatch_sys_nanosleep(req: usize, rem: usize) -> Result<usize, Errno> {
     let ts: kernel_abi::timespec = validation::copy_from_userspace(req)?;
 
     let duration_ns =
         kernel_time::timespec_to_duration_nanoseconds(ts.tv_sec, ts.tv_nsec).ok_or(EINVAL)?;
-
-    let start = crate::time::get_monotonic_time_ns();
-
-    // Busy wait loop
-    // TODO: Use proper scheduler sleep/wait queue
-    loop {
-        let now = crate::time::get_monotonic_time_ns();
-        if now.wrapping_sub(start) >= duration_ns {
-            break;
-        }
-
-        // On x86_64, enable interrupts and halt to save power
-        #[cfg(target_arch = "x86_64")]
-        x86_64::instructions::interrupts::enable_and_hlt();
-
-        #[cfg(not(target_arch = "x86_64"))]
-        core::hint::spin_loop();
+    if duration_ns == 0 {
+        return Ok(0);
     }
 
-    Ok(0)
+    let deadline_ns = crate::time::get_monotonic_time_ns().saturating_add(duration_ns);
+    let context = crate::mcore::context::ExecutionContext::load();
+    context.with_interrupts_masked(|| {
+        context.with_current_task(|task| task.begin_sleep(deadline_ns));
+        // SAFETY: interrupts remain masked for the complete scheduler transition.
+        if !unsafe { context.reschedule() } {
+            context.with_current_task(Task::abort_sleep_before_switch);
+        }
+    });
+
+    // A globally queued task may resume on a different CPU.
+    let resumed_context = crate::mcore::context::ExecutionContext::load();
+    let reason = resumed_context.with_current_task(|task| task.take_sleep_wake_reason());
+    if reason == crate::mcore::mtask::task::SleepWakeReason::Deadline {
+        return Ok(0);
+    }
+
+    if rem != 0 {
+        let remaining_ns = deadline_ns.saturating_sub(crate::time::get_monotonic_time_ns());
+        let remaining = kernel_abi::timespec {
+            tv_sec: (remaining_ns / kernel_time::NANOSECONDS_PER_SECOND) as i64,
+            tv_nsec: (remaining_ns % kernel_time::NANOSECONDS_PER_SECOND) as i64,
+        };
+        validation::copy_to_userspace(rem, remaining.as_bytes())?;
+    }
+    Err(kernel_abi::EINTR)
+}
+
+fn dispatch_sys_interrupt_sleep(pid: usize) -> Result<usize, Errno> {
+    let pid = u64::try_from(pid).map_err(|_| ESRCH)?;
+    let parent = crate::mcore::context::ExecutionContext::load().current_process();
+    let child = parent
+        .children()
+        .get()
+        .and_then(|mut children| children.find(|child| child.pid() == pid).cloned())
+        .ok_or(ESRCH)?;
+
+    // If the task is still scheduler-owned as a zombie, enqueue observes the
+    // process request under the same queue lock and wakes it instead of parking.
+    if crate::mcore::mtask::scheduler::sleep::TaskSleep::interrupt_process(&child) {
+        Ok(0)
+    } else {
+        Err(EAGAIN)
+    }
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn dispatch_sys_spawn(path_ptr: usize, path_len: usize) -> Result<usize, Errno> {
+    dispatch_sys_spawn_with_bpf_capabilities(path_ptr, path_len, None)
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn child_bpf_capabilities(
+    parent: crate::mcore::mtask::process::BpfCapabilities,
+    delegated: Option<crate::mcore::mtask::process::BpfCapabilities>,
+) -> Result<crate::mcore::mtask::process::BpfCapabilities, Errno> {
+    use crate::mcore::mtask::process::BpfCapabilities;
+
+    let child = delegated.unwrap_or(BpfCapabilities::NONE);
+    if parent.contains(child) {
+        Ok(child)
+    } else {
+        Err(kernel_abi::EPERM)
+    }
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn dispatch_sys_spawn_restricted(
+    path_ptr: usize,
+    path_len: usize,
+    bpf_capabilities: usize,
+) -> Result<usize, Errno> {
+    use crate::mcore::mtask::process::BpfCapabilities;
+
+    let bits = u32::try_from(bpf_capabilities).map_err(|_| EINVAL)?;
+    let capabilities = BpfCapabilities::from_bits(bits).ok_or(EINVAL)?;
+    dispatch_sys_spawn_with_bpf_capabilities(path_ptr, path_len, Some(capabilities))
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn dispatch_sys_spawn_with_bpf_capabilities(
+    path_ptr: usize,
+    path_len: usize,
+    delegated_capabilities: Option<crate::mcore::mtask::process::BpfCapabilities>,
+) -> Result<usize, Errno> {
     use kernel_abi::{ENAMETOOLONG, ENOMEM};
 
     use crate::mcore::mtask::process::CreateProcessError;
     use crate::mcore::mtask::task::StackAllocationError;
 
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     dbg_mark(b's' as u32);
 
-    // 1. Read path from userspace
-    // We reuse logic similar to sys_open
+    let parent = crate::mcore::context::ExecutionContext::load().current_process();
+    let parent_capabilities = parent.bpf_capabilities();
+    // Plain spawn is intentionally capability-free. Authority crosses a spawn
+    // boundary only through SYS_SPAWN_RESTRICTED's explicit subset mask.
+    let child_capabilities = child_bpf_capabilities(parent_capabilities, delegated_capabilities)?;
+
+    // Validate delegation before reading the userspace path or allocating the child.
     if path_len > kernel_abi::PATH_MAX {
         return Err(ENAMETOOLONG);
     }
@@ -648,21 +765,22 @@ fn dispatch_sys_spawn(path_ptr: usize, path_len: usize) -> Result<usize, Errno> 
         Err(_) => return Err(EINVAL),
     };
 
-    // 3. Create Process
-    let parent = crate::mcore::context::ExecutionContext::load().current_process();
-
-    // Process::create_from_executable handles task creation and enqueuing
-    let child_proc = match Process::create_from_executable(&parent, abs_path) {
+    // Restriction occurs inside process construction before its task is enqueued.
+    let child_proc = match Process::create_from_executable_with_bpf_capabilities(
+        &parent,
+        abs_path,
+        child_capabilities,
+    ) {
         Ok(p) => p,
         Err(CreateProcessError::StackAllocationError(StackAllocationError::OutOfVirtualMemory)) => {
-            #[cfg(feature = "rpi5")]
+            #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
             dbg_mark(b'v' as u32);
             return Err(ENOMEM);
         }
         Err(CreateProcessError::StackAllocationError(
             StackAllocationError::OutOfPhysicalMemory,
         )) => {
-            #[cfg(feature = "rpi5")]
+            #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
             dbg_mark(b'f' as u32);
             return Err(ENOMEM);
         }
@@ -671,7 +789,7 @@ fn dispatch_sys_spawn(path_ptr: usize, path_len: usize) -> Result<usize, Errno> 
     // Use .as_u64() and then cast/convert to usize
     // We defined U64Ext for u64, so we can use into_usize() on the u64 value.
     use crate::U64Ext;
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     dbg_mark(b'g' as u32);
     #[cfg(target_arch = "aarch64")]
     crate::mcore::context::ExecutionContext::load().set_need_reschedule();
@@ -680,6 +798,15 @@ fn dispatch_sys_spawn(path_ptr: usize, path_len: usize) -> Result<usize, Errno> 
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 fn dispatch_sys_spawn(_path: usize, _len: usize) -> Result<usize, Errno> {
+    Err(EINVAL)
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn dispatch_sys_spawn_restricted(
+    _path: usize,
+    _len: usize,
+    _bpf_capabilities: usize,
+) -> Result<usize, Errno> {
     Err(EINVAL)
 }
 
@@ -721,4 +848,28 @@ fn dispatch_sys_execve(
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 fn dispatch_sys_waitpid(_pid: usize, _status: usize, _options: usize) -> Result<usize, Errno> {
     Err(EINVAL)
+}
+
+#[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
+mod tests {
+    use super::*;
+    use crate::mcore::mtask::process::BpfCapabilities;
+
+    #[test]
+    fn plain_spawn_is_unprivileged_and_explicit_delegation_is_monotonic() {
+        let parent = BpfCapabilities::MAP_READ | BpfCapabilities::OBJECT_PIN;
+
+        assert_eq!(
+            child_bpf_capabilities(parent, None),
+            Ok(BpfCapabilities::NONE)
+        );
+        assert_eq!(
+            child_bpf_capabilities(parent, Some(BpfCapabilities::MAP_READ)),
+            Ok(BpfCapabilities::MAP_READ)
+        );
+        assert_eq!(
+            child_bpf_capabilities(parent, Some(BpfCapabilities::PROGRAM_LOAD)),
+            Err(kernel_abi::EPERM)
+        );
+    }
 }

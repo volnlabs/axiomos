@@ -6,12 +6,41 @@
 use core::ptr;
 
 use bitflags::bitflags;
+use thiserror::Error;
 
 use super::mem::{
     mair, phys_to_virt, pte_flags, ENTRIES_PER_TABLE, L0_SHIFT, L1_BLOCK_SIZE, L1_SHIFT,
     L2_BLOCK_SIZE, L2_SHIFT, L3_SHIFT, PAGE_SIZE,
 };
 use super::phys::{self};
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Error)]
+pub enum PageTableError {
+    #[error("page is already mapped")]
+    PageAlreadyMapped,
+    #[error("address is not aligned for an L1 block")]
+    L1BlockNotAligned,
+    #[error("address is not aligned for an L2 block")]
+    L2BlockNotAligned,
+    #[error("L1 entry is already mapped")]
+    L1EntryAlreadyMapped,
+    #[error("L2 entry is already mapped")]
+    L2EntryAlreadyMapped,
+    #[error("L1 table is not present")]
+    L1TableMissing,
+    #[error("L2 table is not present")]
+    L2TableMissing,
+    #[error("L3 table is not present")]
+    L3TableMissing,
+    #[error("page is not mapped")]
+    PageNotMapped,
+    #[error("page-table walk encountered a block where a table was required")]
+    BlockWhereTableRequired,
+    #[error("out of physical memory for an intermediate page table")]
+    OutOfMemory,
+    #[error("not enough physical frames were supplied for the virtual range")]
+    InsufficientFrames,
+}
 
 bitflags! {
     /// Page table entry flags for AArch64.
@@ -226,7 +255,7 @@ impl PageTableWalker {
     /// Map a single 4KB page
     ///
     /// Creates intermediate tables as needed.
-    pub fn map_page(&mut self, virt: usize, phys: usize, flags: u64) -> Result<(), &'static str> {
+    pub fn map_page(&mut self, virt: usize, phys: usize, flags: u64) -> Result<(), PageTableError> {
         let indices = va_to_indices(virt);
 
         let l1_ptr = Self::get_or_create_table_ptr(self.root, indices[0])?;
@@ -241,7 +270,7 @@ impl PageTableWalker {
                 virt,
                 entry.raw()
             );
-            return Err("Page already mapped");
+            return Err(PageTableError::PageAlreadyMapped);
         }
 
         *entry = PageTableEntry::page(phys, flags);
@@ -260,9 +289,9 @@ impl PageTableWalker {
         virt: usize,
         phys: usize,
         flags: u64,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PageTableError> {
         if virt & (L1_BLOCK_SIZE - 1) != 0 || phys & (L1_BLOCK_SIZE - 1) != 0 {
-            return Err("Address not aligned to 1GB boundary");
+            return Err(PageTableError::L1BlockNotAligned);
         }
 
         let indices = va_to_indices(virt);
@@ -272,7 +301,7 @@ impl PageTableWalker {
 
         let entry = l1.entry_mut(indices[1]);
         if entry.is_valid() {
-            return Err("L1 entry already mapped");
+            return Err(PageTableError::L1EntryAlreadyMapped);
         }
 
         *entry = PageTableEntry::block(phys, flags);
@@ -290,9 +319,9 @@ impl PageTableWalker {
         virt: usize,
         phys: usize,
         flags: u64,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PageTableError> {
         if virt & (L2_BLOCK_SIZE - 1) != 0 || phys & (L2_BLOCK_SIZE - 1) != 0 {
-            return Err("Address not aligned to 2MB boundary");
+            return Err(PageTableError::L2BlockNotAligned);
         }
 
         let indices = va_to_indices(virt);
@@ -302,7 +331,7 @@ impl PageTableWalker {
 
         let entry = l2.entry_mut(indices[2]);
         if entry.is_valid() {
-            return Err("L2 entry already mapped");
+            return Err(PageTableError::L2EntryAlreadyMapped);
         }
 
         *entry = PageTableEntry::block(phys, flags);
@@ -321,7 +350,7 @@ impl PageTableWalker {
         phys_start: usize,
         size: usize,
         flags: u64,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PageTableError> {
         let pages = size.div_ceil(PAGE_SIZE);
 
         for i in 0..pages {
@@ -334,23 +363,23 @@ impl PageTableWalker {
     }
 
     /// Unmap a page and return its physical address
-    pub fn unmap_page(&mut self, virt: usize) -> Result<usize, &'static str> {
+    pub fn unmap_page(&mut self, virt: usize) -> Result<usize, PageTableError> {
         let indices = va_to_indices(virt);
 
         let l0 = unsafe { &mut *self.root };
         let l1 = self
             .get_table(l0, indices[0])
-            .ok_or("L1 table not present")?;
+            .ok_or(PageTableError::L1TableMissing)?;
         let l2 = self
             .get_table(l1, indices[1])
-            .ok_or("L2 table not present")?;
+            .ok_or(PageTableError::L2TableMissing)?;
         let l3 = self
             .get_table(l2, indices[2])
-            .ok_or("L3 table not present")?;
+            .ok_or(PageTableError::L3TableMissing)?;
 
         let entry = l3.entry_mut(indices[3]);
         if !entry.is_valid() {
-            return Err("Page not mapped");
+            return Err(PageTableError::PageNotMapped);
         }
 
         let phys = entry.addr();
@@ -362,23 +391,23 @@ impl PageTableWalker {
     }
 
     /// Update an existing leaf PTE without creating an unmapped interval.
-    pub fn update_page_flags(&mut self, virt: usize, flags: u64) -> Result<(), &'static str> {
+    pub fn update_page_flags(&mut self, virt: usize, flags: u64) -> Result<(), PageTableError> {
         let indices = va_to_indices(virt);
 
         let l0 = unsafe { &mut *self.root };
         let l1 = self
             .get_table(l0, indices[0])
-            .ok_or("L1 table not present")?;
+            .ok_or(PageTableError::L1TableMissing)?;
         let l2 = self
             .get_table(l1, indices[1])
-            .ok_or("L2 table not present")?;
+            .ok_or(PageTableError::L2TableMissing)?;
         let l3 = self
             .get_table(l2, indices[2])
-            .ok_or("L3 table not present")?;
+            .ok_or(PageTableError::L3TableMissing)?;
 
         let entry = l3.entry_mut(indices[3]);
         if !entry.is_valid() {
-            return Err("Page not mapped");
+            return Err(PageTableError::PageNotMapped);
         }
 
         let phys = entry.addr();
@@ -440,7 +469,7 @@ impl PageTableWalker {
     fn get_or_create_table_ptr(
         table: *mut PageTable,
         index: usize,
-    ) -> Result<*mut PageTable, &'static str> {
+    ) -> Result<*mut PageTable, PageTableError> {
         let entry = unsafe { (*table).entry_mut(index) };
 
         if entry.is_valid() {
@@ -450,7 +479,7 @@ impl PageTableWalker {
                     index,
                     entry.raw()
                 );
-                return Err("Entry is block, not table");
+                return Err(PageTableError::BlockWhereTableRequired);
             }
             Ok(phys_to_virt(entry.addr()) as *mut PageTable)
         } else {
@@ -460,7 +489,7 @@ impl PageTableWalker {
                         "Failed to allocate physical frame for page table at index {}",
                         index
                     );
-                    "Out of memory for page table"
+                    PageTableError::OutOfMemory
                 })?;
             let phys_addr = frame.addr() as usize;
             let virt_addr = phys_to_virt(phys_addr);

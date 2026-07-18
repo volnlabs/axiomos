@@ -138,6 +138,14 @@ mod tests {
             ctx_size: core::mem::size_of::<crate::execution::BpfContext<'static>>() as u32,
             ctx_data_size: core::mem::size_of::<crate::attach::IioEvent>() as u32,
             map_perms: &[MapPerm::ReadWrite],
+            allow_actuation: true,
+            ..VerifyConfig::default()
+        }
+    }
+
+    fn actuation_config() -> VerifyConfig<'static> {
+        VerifyConfig {
+            allow_actuation: true,
             ..VerifyConfig::default()
         }
     }
@@ -149,7 +157,7 @@ mod tests {
 
     #[test]
     fn forward_drive_verifies() {
-        verify(&forward_drive(60), VerifyConfig::default());
+        verify(&forward_drive(60), actuation_config());
     }
 
     #[test]

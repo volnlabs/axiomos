@@ -38,6 +38,51 @@ struct Args {
 }
 
 #[cfg(not(target_os = "none"))]
+fn qemu_command(args: &Args) -> std::process::Command {
+    let mut cmd = std::process::Command::new("qemu-system-x86_64");
+    cmd.current_dir(env!("CARGO_MANIFEST_DIR"));
+
+    cmd.arg("-serial").arg("stdio");
+    cmd.arg("-monitor").arg("telnet::45454,server,nowait");
+    cmd.arg("-s");
+
+    if args.debug {
+        cmd.arg("-S");
+    }
+    if args.headless {
+        cmd.arg("-nographic");
+    }
+
+    cmd.arg("-m").arg(&args.mem);
+    cmd.arg("-drive").arg(format!(
+        "if=pflash,unit=0,format=raw,file={OVMF_CODE},readonly=on"
+    ));
+    cmd.arg("-drive").arg(format!(
+        "if=pflash,unit=1,format=raw,file={OVMF_VARS},snapshot=on"
+    ));
+    cmd.arg("-cdrom").arg(BOOTABLE_ISO);
+    cmd.arg("-cpu").arg("max");
+    cmd.arg("-smp").arg(args.smp.to_string());
+    cmd.arg("-drive").arg(format!(
+        "id=virtio-disk0,file={DISK_IMAGE},format=raw,if=none"
+    ));
+    cmd.arg("-device").arg("virtio-blk-pci,drive=virtio-disk0");
+
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    cmd.arg("-accel").arg("kvm");
+
+    cmd.arg("-vga").arg("none");
+    // Exit cleanly on kernel-initiated CPU reset instead of restarting
+    // the guest and erasing the captured serial buffer with Limine
+    // VT100 escape sequences. Without this flag, a kernel panic or
+    // triple-fault loops the boot and the boot-success markers
+    // (QEMU_BOOT_OK, AUDIT_FAULT_PROBE:*) emitted before the reset
+    // are clobbered in CI logs.
+    cmd.arg("--no-reboot");
+    cmd
+}
+
+#[cfg(not(target_os = "none"))]
 fn main() {
     println!("KERNEL_BINARY: {KERNEL_BINARY}");
     println!("BOOTABLE_ISO: {BOOTABLE_ISO}");
@@ -70,69 +115,118 @@ continue"
         println!("debug file is ready, run `lldb -s debug.lldb` to start debugging");
     }
 
-    let mut cmd = std::process::Command::new("qemu-system-x86_64");
-    cmd.current_dir(env!("CARGO_MANIFEST_DIR"));
-
-    // serial comms via console - needed for log output of the kernel
-    cmd.arg("-serial");
-    cmd.arg("stdio");
-
-    // QEMU monitor via telnet
-    cmd.arg("-monitor");
-    cmd.arg("telnet::45454,server,nowait");
-
-    // start GDB server
-    cmd.arg("-s");
-
-    if args.debug {
-        // wait for client to connect
-        cmd.arg("-S");
-    }
-
-    if args.headless {
-        // run without a window, but with graphics devices attached
-        cmd.arg("-nographic");
-    }
-
-    cmd.arg("-m");
-    cmd.arg(args.mem);
-
-    // OVMF firmware
-    cmd.arg("-drive");
-    cmd.arg(format!(
-        "if=pflash,unit=0,format=raw,file={OVMF_CODE},readonly=on"
-    ));
-    cmd.arg("-drive");
-    cmd.arg(format!("if=pflash,unit=1,format=raw,file={OVMF_VARS}"));
-
-    // kernel binary
-    cmd.arg("-cdrom");
-    cmd.arg(BOOTABLE_ISO);
-
-    cmd.arg("-cpu");
-    cmd.arg("max");
-
-    cmd.arg("-smp");
-    cmd.arg(args.smp.to_string());
-
-    cmd.arg("-drive");
-    cmd.arg(format!(
-        "id=virtio-disk0,file={DISK_IMAGE},format=raw,if=none"
-    ));
-    cmd.arg("-device");
-    cmd.arg("virtio-blk-pci,drive=virtio-disk0");
-
-    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
-    {
-        cmd.arg("-accel");
-        cmd.arg("kvm");
-    }
-
-    cmd.arg("-vga");
-    cmd.arg("none");
-
+    let mut cmd = qemu_command(&args);
     let status = cmd.status().unwrap();
     assert!(status.success());
+}
+
+#[cfg(all(test, not(target_os = "none")))]
+mod tests {
+    use std::ffi::OsStr;
+
+    use super::*;
+
+    fn command_args(args: &Args) -> Vec<String> {
+        qemu_command(args)
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn contains_pair(args: &[String], first: &str, second: &str) -> bool {
+        args.windows(2)
+            .any(|pair| pair[0] == first && pair[1] == second)
+    }
+
+    #[test]
+    fn cli_defaults_match_the_supported_runner_contract() {
+        let args = Args::try_parse_from(["axiomos"]).expect("default CLI should parse");
+        assert!(!args.debug);
+        assert!(!args.headless);
+        assert!(!args.no_run);
+        assert_eq!(args.smp, 4);
+        assert_eq!(args.mem, "4G");
+    }
+
+    #[test]
+    fn cli_accepts_debug_headless_and_resource_overrides() {
+        let args = Args::try_parse_from([
+            "axiomos",
+            "--debug",
+            "--headless",
+            "--no-run",
+            "--smp",
+            "2",
+            "--mem",
+            "768M",
+        ])
+        .expect("explicit runner options should parse");
+        assert!(args.debug);
+        assert!(args.headless);
+        assert!(args.no_run);
+        assert_eq!(args.smp, 2);
+        assert_eq!(args.mem, "768M");
+    }
+
+    #[test]
+    fn qemu_command_uses_resolved_artifacts_and_writable_vars_snapshot() {
+        let args = Args::try_parse_from([
+            "axiomos",
+            "--debug",
+            "--headless",
+            "--smp",
+            "3",
+            "--mem",
+            "1G",
+        ])
+        .expect("runner options should parse");
+        let command = qemu_command(&args);
+        let actual = command_args(&args);
+
+        assert_eq!(command.get_program(), OsStr::new("qemu-system-x86_64"));
+        assert_eq!(
+            command.get_current_dir(),
+            Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+        );
+        assert!(contains_pair(&actual, "-serial", "stdio"));
+        assert!(contains_pair(
+            &actual,
+            "-monitor",
+            "telnet::45454,server,nowait"
+        ));
+        assert!(actual.iter().any(|arg| arg == "-s"));
+        assert!(actual.iter().any(|arg| arg == "-S"));
+        assert!(actual.iter().any(|arg| arg == "-nographic"));
+        assert!(contains_pair(&actual, "-m", "1G"));
+        assert!(contains_pair(&actual, "-smp", "3"));
+        assert!(contains_pair(&actual, "-cdrom", BOOTABLE_ISO));
+        assert!(actual.iter().any(|arg| {
+            arg == &format!("if=pflash,unit=0,format=raw,file={OVMF_CODE},readonly=on")
+        }));
+        assert!(actual.iter().any(|arg| {
+            arg == &format!("if=pflash,unit=1,format=raw,file={OVMF_VARS},snapshot=on")
+        }));
+        assert!(actual.iter().any(|arg| {
+            arg == &format!("id=virtio-disk0,file={DISK_IMAGE},format=raw,if=none")
+        }));
+        assert!(contains_pair(
+            &actual,
+            "-device",
+            "virtio-blk-pci,drive=virtio-disk0"
+        ));
+        assert!(contains_pair(&actual, "-vga", "none"));
+        assert!(actual.iter().any(|arg| arg == "--no-reboot"));
+        #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+        assert!(contains_pair(&actual, "-accel", "kvm"));
+    }
+
+    #[test]
+    fn qemu_command_does_not_freeze_or_hide_graphics_without_flags() {
+        let args = Args::try_parse_from(["axiomos"]).expect("default CLI should parse");
+        let actual = command_args(&args);
+        assert!(!actual.iter().any(|arg| arg == "-S"));
+        assert!(!actual.iter().any(|arg| arg == "-nographic"));
+    }
 }
 
 #[cfg(target_os = "none")]

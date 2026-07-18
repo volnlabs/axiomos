@@ -26,10 +26,6 @@ pub struct PciDriverDescriptor {
     pub init: fn(PciAddress, Box<dyn ConfigurationAccess>) -> Result<(), Box<dyn Error>>,
 }
 
-/// # Panics
-///
-/// Panics if there are multiple specific or multiple generic drivers that would match
-/// the same device.
 pub fn init() {
     if log_enabled!(Level::Trace) {
         PCI_DRIVERS
@@ -43,32 +39,32 @@ pub fn init() {
 
     // SAFETY: iterate_all probes the PCI bus. It is safe to do this during initialization.
     unsafe { iterate_all(&cam) }.for_each(|addr| {
-        let driver = PCI_DRIVERS
+        let mut driver: Option<&PciDriverDescriptor> = None;
+        let mut conflict = None;
+        for candidate in PCI_DRIVERS
             .iter()
-            .fold(None, |res: Option<&PciDriverDescriptor>, driver| {
-                if !(driver.probe)(addr, &cam) {
-                    return res;
+            .filter(|driver| (driver.probe)(addr, &cam))
+        {
+            let Some(selected) = driver else {
+                driver = Some(candidate);
+                continue;
+            };
+            match (selected.typ, candidate.typ) {
+                (PciDriverType::Generic, PciDriverType::Specific) => driver = Some(candidate),
+                (PciDriverType::Specific, PciDriverType::Generic) => {}
+                _ => {
+                    conflict = Some((selected.name, candidate.name));
+                    break;
                 }
-
-                if let Some(other_driver) = res {
-                    if other_driver.typ == PciDriverType::Generic
-                        && driver.typ == PciDriverType::Specific
-                    {
-                        return Some(driver);
-                    } else if other_driver.typ == PciDriverType::Specific
-                        && driver.typ == PciDriverType::Generic
-                    {
-                        return Some(other_driver);
-                    }
-
-                    panic!(
-                        "found two drivers for the same device: {} and {}",
-                        other_driver.name, driver.name
-                    );
-                } else {
-                    Some(driver)
-                }
-            });
+            }
+        }
+        if let Some((first, second)) = conflict {
+            error!(
+                "ambiguous PCI driver match for device {}: {} and {}; skipping device",
+                addr, first, second
+            );
+            return;
+        }
         if let Some(driver) = driver {
             debug!("found driver {} for device {}", driver.name, addr);
             let device_string = addr.to_string();
@@ -115,24 +111,30 @@ impl VirtIoCam {
 
 impl virtio_drivers::transport::pci::bus::ConfigurationAccess for VirtIoCam {
     fn read_word(&self, device_function: DeviceFunction, register_offset: u8) -> u32 {
+        let Ok(key) = ConfigKey::<u32>::try_from(register_offset as usize) else {
+            return u32::MAX;
+        };
         self.0.read_config(
             PciAddress::new(
                 device_function.bus,
                 device_function.device,
                 device_function.function,
             ),
-            ConfigKey::<u32>::try_from(register_offset as usize).unwrap(),
+            key,
         )
     }
 
     fn write_word(&mut self, device_function: DeviceFunction, register_offset: u8, data: u32) {
+        let Ok(key) = ConfigKey::<u32>::try_from(register_offset as usize) else {
+            return;
+        };
         self.0.write_config(
             PciAddress::new(
                 device_function.bus,
                 device_function.device,
                 device_function.function,
             ),
-            ConfigKey::<u32>::try_from(register_offset as usize).unwrap(),
+            key,
             data,
         )
     }

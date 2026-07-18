@@ -28,7 +28,7 @@ pub struct ControlFlowGraph {
     /// whole edge list, making each of its per-instruction users — liveness
     /// fixpoint, reachability BFS, WCET longest-path — quadratic in program
     /// size, which breaks the verifier's own linear cost bound
-    /// (`docs/verifier-fragment.md`).
+    /// (`docs/security/verifier-assurance.md`).
     succ_offsets: Vec<u32>,
     succ_targets: Vec<u32>,
 

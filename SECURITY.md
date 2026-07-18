@@ -1,13 +1,13 @@
 # Security Policy
 
-Axiom is a research kernel for robotics workloads. It is pre-1.0: the safety
+axiomos is a research kernel for robotics workloads. It is pre-1.0: the safety
 architecture is real and load-bearing, but it has not had an external audit
-and makes no formal assurance claims. See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)
+and makes no formal assurance claims. See [docs/security/threat-model.md](docs/security/threat-model.md)
 for what is and is not defended.
 
 ## Reporting a vulnerability
 
-Email **projects.utkarshmaurya@gmail.com** with subject `[axiom-security]`,
+Email **projects.utkarshmaurya@gmail.com** with subject `[axiomos-security]`,
 or use GitHub's private vulnerability reporting on this repository.
 
 Please include:
@@ -16,7 +16,7 @@ Please include:
 - A reproducer where possible. For verifier soundness bugs, the ideal report
   is a BPF program (bytes or assembly) that **passes verification but
   performs an unsafe action** — see the target list in
-  [docs/security/verifier-review-call.md](docs/security/verifier-review-call.md).
+  [docs/reviews/implementation/verifier-review-call.md](docs/reviews/implementation/verifier-review-call.md).
 - The commit hash you tested against.
 
 ## What counts as a security bug
@@ -47,6 +47,6 @@ ask otherwise.
 
 ## Safe harbor
 
-Good-faith security research against your own builds of Axiom is welcome.
+Good-faith security research against your own builds of axiomos is welcome.
 This project will not pursue legal action for research conducted under this
 policy.

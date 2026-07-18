@@ -1,10 +1,14 @@
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::slice;
 
+use kernel_abi::ProtFlags;
 use kernel_vfs::node::VfsNode;
 use spin::mutex::Mutex;
+use thiserror::Error;
 
-use crate::arch::{PhysFrame, PhysFrameRange as PhysFrameRangeInclusive, VirtAddr};
+use crate::arch::{PhysFrame, VirtAddr};
+use crate::mem::address_space::AddressSpace;
 use crate::mem::phys::PhysicalMemory;
 use crate::mem::virt::OwnedSegment;
 use crate::UsizeExt;
@@ -13,19 +17,44 @@ pub struct MemoryRegions {
     regions: Mutex<Vec<MemoryRegion>>,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Error)]
+pub enum MemoryCloneError {
+    #[error("failed to reserve the region in the child process")]
+    ReserveChildRegion,
+    #[error("the source mapping owner no longer exists")]
+    SourceOwnerGone,
+    #[error("the source region contains an unmapped page")]
+    SourcePageUnmapped,
+    #[error("failed to map the region in the child process")]
+    MapChildRegion,
+    #[error("failed to remap the parent region as copy-on-write")]
+    RemapParentCopyOnWrite,
+    #[error("forking a lazy memory region is not supported")]
+    LazyRegionUnsupported,
+    #[error("forking a file-backed memory region is not supported")]
+    FileBackedRegionUnsupported,
+}
+
 impl Default for MemoryRegions {
     fn default() -> Self {
         Self::new()
     }
 }
 
-use alloc::sync::Arc;
-
-use crate::arch::types::PageTableFlags;
-#[cfg(target_arch = "aarch64")]
-use crate::arch::types::Size4KiB;
+use crate::arch::types::{PageSize, PageTableFlags, Size4KiB};
 use crate::mcore::mtask::process::Process;
 use crate::mem::virt::VirtualMemoryAllocator;
+
+pub(crate) fn user_page_flags(protection: ProtFlags) -> PageTableFlags {
+    let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+    if protection.contains(ProtFlags::WRITE) {
+        flags.insert(PageTableFlags::WRITABLE);
+    }
+    if !protection.contains(ProtFlags::EXEC) {
+        flags.insert(PageTableFlags::NO_EXECUTE);
+    }
+    flags
+}
 
 impl MemoryRegions {
     pub fn new() -> Self {
@@ -34,7 +63,7 @@ impl MemoryRegions {
         }
     }
 
-    pub fn clone_to_process(&self, new_process: &Arc<Process>) -> Result<Self, &'static str> {
+    pub fn clone_to_process(&self, new_process: &Arc<Process>) -> Result<Self, MemoryCloneError> {
         let mut new_regions = Vec::new();
         let guard = self.regions.lock();
 
@@ -95,6 +124,14 @@ impl MemoryRegions {
     pub fn clear(&self) {
         self.regions.lock().clear();
     }
+
+    pub(crate) fn release_all_in(&mut self, address_space: &AddressSpace) {
+        let regions = self.regions.get_mut();
+        for region in regions.iter_mut() {
+            region.release_in(address_space);
+        }
+        regions.clear();
+    }
 }
 
 #[derive(Debug)]
@@ -129,7 +166,7 @@ impl MemoryRegion {
         }
     }
 
-    pub fn clone_to_process(&self, new_process: &Arc<Process>) -> Result<Self, &'static str> {
+    pub fn clone_to_process(&self, new_process: &Arc<Process>) -> Result<Self, MemoryCloneError> {
         match self {
             MemoryRegion::Mapped(r) => Ok(MemoryRegion::Mapped(r.clone_to_process(new_process)?)),
             MemoryRegion::Lazy(r) => Ok(MemoryRegion::Lazy(r.clone_to_process(new_process)?)),
@@ -149,6 +186,22 @@ impl MemoryRegion {
         }
     }
 
+    pub fn protection(&self) -> ProtFlags {
+        match self {
+            MemoryRegion::Lazy(region) => region.protection,
+            MemoryRegion::Mapped(region) => region.protection,
+            MemoryRegion::FileBacked(region) => region.region.protection,
+        }
+    }
+
+    fn release_in(&mut self, address_space: &AddressSpace) {
+        match self {
+            MemoryRegion::Lazy(region) => region.release_in(address_space),
+            MemoryRegion::Mapped(region) => region.release_in(address_space),
+            MemoryRegion::FileBacked(region) => region.region.release_in(address_space),
+        }
+    }
+
     pub fn as_slice(&self) -> &[u8] {
         // SAFETY: The memory region represents valid memory with the tracked size.
         // We assume the caller ensures the memory is accessible.
@@ -163,37 +216,54 @@ impl MemoryRegion {
 }
 
 impl MappedMemoryRegion {
-    pub fn clone_to_process(&self, new_process: &Arc<Process>) -> Result<Self, &'static str> {
+    pub fn clone_to_process(&self, new_process: &Arc<Process>) -> Result<Self, MemoryCloneError> {
         let new_segment_inner =
             kernel_virtual_memory::Segment::new(self.segment.start, self.segment.len);
 
         let new_segment = new_process
             .vmm()
             .mark_as_reserved(new_segment_inner)
-            .map_err(|_| "Failed to reserve segment in new process")?;
+            .map_err(|_| MemoryCloneError::ReserveChildRegion)?;
 
-        PhysicalMemory::retain_frames(self.physical_frames);
+        let owner = self
+            .owner
+            .upgrade()
+            .ok_or(MemoryCloneError::SourceOwnerGone)?;
+        let page_count = self.segment.len / Size4KiB::SIZE;
+        let frames = owner.with_address_space(|address_space| {
+            (0..page_count)
+                .map(|page_index| {
+                    let virtual_address = self.segment.start + page_index * Size4KiB::SIZE;
+                    let (physical_address, _) = address_space
+                        .translate_page_flags(virtual_address)
+                        .ok_or(MemoryCloneError::SourcePageUnmapped)?;
+                    Ok(PhysFrame::<Size4KiB>::containing_address(physical_address))
+                })
+                .collect::<Result<Vec<_>, MemoryCloneError>>()
+        })?;
+        for frame in frames.iter().copied() {
+            PhysicalMemory::retain_frame(frame);
+        }
 
+        let flags = user_page_flags(self.protection);
         #[cfg(target_arch = "aarch64")]
-        let flags = PageTableFlags::PRESENT
-            | PageTableFlags::USER_ACCESSIBLE
-            | PageTableFlags::NO_EXECUTE
-            | PageTableFlags::COPY_ON_WRITE;
-
-        #[cfg(not(target_arch = "aarch64"))]
-        let flags = PageTableFlags::PRESENT
-            | PageTableFlags::WRITABLE
-            | PageTableFlags::USER_ACCESSIBLE
-            | PageTableFlags::NO_EXECUTE;
+        let flags = if self.protection.contains(ProtFlags::WRITE) {
+            let mut copy_on_write = flags;
+            copy_on_write.remove(PageTableFlags::WRITABLE);
+            copy_on_write.insert(PageTableFlags::COPY_ON_WRITE);
+            copy_on_write
+        } else {
+            flags
+        };
 
         new_process
             .with_address_space(|as_| {
-                as_.map_range_owned(*new_segment, self.physical_frames.into_iter(), flags)
+                as_.map_range_owned(*new_segment, frames.iter().copied(), flags)
             })
-            .map_err(|_| "Failed to map memory in new process")?;
+            .map_err(|_| MemoryCloneError::MapChildRegion)?;
 
         #[cfg(target_arch = "aarch64")]
-        {
+        if self.protection.contains(ProtFlags::WRITE) {
             // Writable mapped regions become shared read-only pages in both parent and child.
             let current = crate::mcore::context::ExecutionContext::load().current_process();
             if current
@@ -203,36 +273,39 @@ impl MappedMemoryRegion {
                 new_process.with_address_space(|as_| {
                     as_.unmap_range::<Size4KiB>(&*new_segment, PhysicalMemory::deallocate_frame);
                 });
-                return Err("Failed to remap parent memory as copy-on-write");
+                return Err(MemoryCloneError::RemapParentCopyOnWrite);
             }
         }
 
         Ok(MappedMemoryRegion {
+            owner: Arc::downgrade(new_process),
             segment: new_segment,
             size: self.size,
-            physical_frames: self.physical_frames,
+            protection: self.protection,
+            released: false,
         })
     }
 }
 
 impl LazyMemoryRegion {
-    pub fn clone_to_process(&self, _new_process: &Arc<Process>) -> Result<Self, &'static str> {
+    pub fn clone_to_process(&self, _new_process: &Arc<Process>) -> Result<Self, MemoryCloneError> {
         // TODO: Implement proper deep copy for Lazy regions.
         // For now, since we only use Eager allocation (Mapped), this is less critical.
         // But if we encounter one, we shouldn't fail silently or panic?
         // Let's return error for now as it's not supported.
-        Err("Forking LazyMemoryRegion not implemented")
+        Err(MemoryCloneError::LazyRegionUnsupported)
     }
 }
 
 impl FileBackedMemoryRegion {
-    pub fn clone_to_process(&self, _new_process: &Arc<Process>) -> Result<Self, &'static str> {
-        Err("Forking FileBackedMemoryRegion not implemented")
+    pub fn clone_to_process(&self, _new_process: &Arc<Process>) -> Result<Self, MemoryCloneError> {
+        Err(MemoryCloneError::FileBackedRegionUnsupported)
     }
 }
 
 #[derive(Debug)]
 pub struct LazyMemoryRegion {
+    owner: Weak<Process>,
     segment: OwnedSegment<'static>,
     /// The size of the region. This may differ from the
     /// size of the segment in that the size of the segment
@@ -241,45 +314,69 @@ pub struct LazyMemoryRegion {
     /// For example, the segment of a memory region whose
     /// size is 5 bytes is actually 4096 bytes.
     size: usize,
-    /// The physical frames that were mapped for this lazy
-    /// memory region.
-    #[allow(dead_code)]
-    physical_frames: Mutex<Vec<PhysFrame>>,
+    protection: ProtFlags,
+    released: bool,
 }
 
 impl Drop for LazyMemoryRegion {
     fn drop(&mut self) {
-        for frame in self.physical_frames.lock().iter() {
-            PhysicalMemory::deallocate_frame(*frame);
+        if let Some(owner) = self.owner.upgrade() {
+            owner.with_address_space(|address_space| {
+                self.release_in(address_space);
+            });
+        }
+    }
+}
+
+impl LazyMemoryRegion {
+    fn release_in(&mut self, address_space: &AddressSpace) {
+        if !self.released {
+            address_space.unmap_range::<Size4KiB>(&*self.segment, PhysicalMemory::deallocate_frame);
+            self.released = true;
         }
     }
 }
 
 #[derive(Debug)]
 pub struct MappedMemoryRegion {
+    owner: Weak<Process>,
     segment: OwnedSegment<'static>,
     size: usize,
-    #[allow(dead_code)]
-    physical_frames: PhysFrameRangeInclusive,
+    protection: ProtFlags,
+    released: bool,
 }
 
 impl MappedMemoryRegion {
     pub fn new(
+        owner: &Arc<Process>,
         segment: OwnedSegment<'static>,
         size: usize,
-        physical_frames: PhysFrameRangeInclusive,
+        protection: ProtFlags,
     ) -> Self {
         Self {
+            owner: Arc::downgrade(owner),
             segment,
             size,
-            physical_frames,
+            protection,
+            released: false,
+        }
+    }
+
+    fn release_in(&mut self, address_space: &AddressSpace) {
+        if !self.released {
+            address_space.unmap_range::<Size4KiB>(&*self.segment, PhysicalMemory::deallocate_frame);
+            self.released = true;
         }
     }
 }
 
 impl Drop for MappedMemoryRegion {
     fn drop(&mut self) {
-        PhysicalMemory::deallocate_frames(self.physical_frames);
+        if let Some(owner) = self.owner.upgrade() {
+            owner.with_address_space(|address_space| {
+                self.release_in(address_space);
+            });
+        }
     }
 }
 

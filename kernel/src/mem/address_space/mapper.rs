@@ -1,5 +1,6 @@
 use alloc::vec::Vec;
 
+use kernel_map_transaction::MapRangeTransaction;
 use kernel_physical_memory::{PhysicalFrameAllocator, PhysicalMemoryManager};
 #[cfg(target_arch = "x86_64")]
 use x86_64::registers::control::Cr3;
@@ -9,11 +10,26 @@ use x86_64::structures::paging::mapper::{FlagUpdateError, MapToError, TranslateR
 use x86_64::structures::paging::{Mapper, PageTable, RecursivePageTable, Translate};
 
 #[cfg(target_arch = "aarch64")]
-use crate::arch::aarch64::paging::PageTableWalker;
+use crate::arch::aarch64::paging::{PageTableError, PageTableWalker};
 use crate::arch::types::{
     Page, PageRangeInclusive, PageSize, PageTableFlags, PhysAddr, PhysFrame, VirtAddr,
 };
 use crate::mem::phys::PhysicalMemory;
+
+#[path = "map_range_policy.rs"]
+mod policy;
+
+/// Maximum number of pages recorded by one stack-backed map transaction.
+pub(crate) const MAP_RANGE_TRANSACTION_CAPACITY: usize = policy::TRANSACTION_CAPACITY;
+
+fn page_range_len<S: PageSize>(pages: &PageRangeInclusive<S>) -> usize {
+    let start = pages.start.start_address().as_u64();
+    let end = pages.end.start_address().as_u64();
+    if end < start {
+        return 0;
+    }
+    usize::try_from((end - start) / S::SIZE + 1).expect("page range length must fit in usize")
+}
 
 #[derive(Debug)]
 pub struct AddressSpaceMapper {
@@ -143,55 +159,67 @@ impl AddressSpaceMapper {
     {
         assert!(self.is_active());
 
+        let page_count = page_range_len(&pages);
+        let plan = policy::MapRangePlan::new(page_count);
+
+        // Rollback bookkeeping is owned by `MapRangeTransaction`; see
+        // `kernel/crates/kernel_map_transaction`. The helper tracks
+        // (a) the pages that have been installed in the page table
+        // and (b) the frames that were taken from the iterator but
+        // never mapped. On failure we drive its `rollback` once.
+        //
+        // The bootstrap heap may exceed this cap as RAM grows, so
+        // `heap::init` explicitly partitions it into bounded ranges.
+        // Other callers (mmap and exec) are substantially smaller.
+        //
+        // The 8 KiB total inline storage fits in the kernel's
+        // 16-page (64 KiB) per-task kernel stack and in the BSP's
+        // 256 KiB privilege stack.
+        const MAPPED_CAP: usize = MAP_RANGE_TRANSACTION_CAPACITY;
+        const PENDING_CAP: usize = MAP_RANGE_TRANSACTION_CAPACITY;
+        let mut tx = MapRangeTransaction::<S, MAPPED_CAP, PENDING_CAP>::new();
         let mut pages = pages.into_iter();
         let mut frames = frames.into_iter();
-        let mut first_mapped = None;
-        let mut last_mapped = None;
 
-        while let Some(page) = pages.next() {
-            let Some(frame) = frames.next() else {
-                if let (Some(start), Some(end)) = (first_mapped, last_mapped) {
-                    for mapped_page in (PageRangeInclusive { start, end }) {
-                        if let Some(frame) = self.unmap(mapped_page) {
-                            if owns_frames {
-                                release(frame);
-                            }
+        let result: Result<(), MapToError<S>> = (|| {
+            while let Some(page) = pages.next() {
+                let Some(frame) = frames.next() else {
+                    return Err(MapToError::FrameAllocationFailed);
+                };
+
+                if let Err(error) = self.map(page, frame, flags) {
+                    if owns_frames {
+                        tx.record_pending_frame(frame);
+                        let remaining_page_count =
+                            plan.frames_after_failed_mapping(tx.mapped_len());
+                        for pending in frames.by_ref().take(remaining_page_count) {
+                            tx.record_pending_frame(pending);
                         }
                     }
+                    return Err(error);
                 }
-                return Err(MapToError::FrameAllocationFailed);
-            };
-
-            if let Err(error) = self.map(page, frame, flags) {
-                if owns_frames {
-                    release(frame);
-                }
-                if let (Some(start), Some(end)) = (first_mapped, last_mapped) {
-                    for mapped_page in (PageRangeInclusive { start, end }) {
-                        if let Some(frame) = self.unmap(mapped_page) {
-                            if owns_frames {
-                                release(frame);
-                            }
-                        }
-                    }
-                }
-                // The iterator transfers one frame reference per requested page.
-                // Release references that were supplied but never mapped.
-                if owns_frames {
-                    for _ in pages {
-                        let Some(frame) = frames.next() else {
-                            break;
-                        };
-                        release(frame);
-                    }
-                }
-                return Err(error);
+                tx.record_mapping(page);
             }
-            first_mapped.get_or_insert(page);
-            last_mapped = Some(page);
+            Ok(())
+        })();
+
+        if result.is_err() {
+            if owns_frames {
+                tx.rollback(|page| self.unmap(page), |frame| release(frame));
+            } else {
+                tx.rollback(
+                    |page| {
+                        self.unmap(page);
+                        None::<PhysFrame<S>>
+                    },
+                    |_| {},
+                );
+            }
+        } else {
+            tx.commit();
         }
 
-        Ok(())
+        result
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -287,7 +315,12 @@ impl AddressSpaceMapper {
         page: Page<S>,
         frame: PhysFrame<S>,
         flags: PageTableFlags,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PageTableError> {
+        assert_eq!(
+            S::SIZE,
+            crate::arch::types::Size4KiB::SIZE,
+            "AArch64 mapper supports only 4 KiB pages until block mappings are implemented",
+        );
         let mut walker = unsafe { PageTableWalker::new(self.level0_vaddr.as_mut_ptr()) };
         walker.map_page(
             page.start_address().as_usize(),
@@ -302,7 +335,7 @@ impl AddressSpaceMapper {
         pages: PageRangeInclusive<S>,
         frames: impl Iterator<Item = PhysFrame<S>>,
         flags: PageTableFlags,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PageTableError> {
         self.map_range_transaction(pages, frames, flags, false, |_| {})
     }
 
@@ -312,7 +345,7 @@ impl AddressSpaceMapper {
         pages: PageRangeInclusive<S>,
         frames: impl Iterator<Item = PhysFrame<S>>,
         flags: PageTableFlags,
-    ) -> Result<(), &'static str>
+    ) -> Result<(), PageTableError>
     where
         PhysicalMemoryManager: PhysicalFrameAllocator<S>,
     {
@@ -327,53 +360,66 @@ impl AddressSpaceMapper {
         flags: PageTableFlags,
         owns_frames: bool,
         release: impl Fn(PhysFrame<S>),
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PageTableError> {
+        assert_eq!(
+            S::SIZE,
+            crate::arch::types::Size4KiB::SIZE,
+            "AArch64 mapper supports only 4 KiB pages until block mappings are implemented",
+        );
+        let page_count = page_range_len(&pages);
+        let plan = policy::MapRangePlan::new(page_count);
+
+        // See the x86_64 `map_range_transaction` for the design
+        // note on `MapRangeTransaction` ownership of rollback
+        // bookkeeping. The aarch64 and x86_64 paths share the
+        // same helper and the same release semantics; only the
+        // unmap closure differs (aarch64's `unmap` returns
+        // `Option<PhysFrame<S>>` with the same convention).
+        const MAPPED_CAP: usize = MAP_RANGE_TRANSACTION_CAPACITY;
+        const PENDING_CAP: usize = MAP_RANGE_TRANSACTION_CAPACITY;
+        let mut tx = MapRangeTransaction::<S, MAPPED_CAP, PENDING_CAP>::new();
         let mut pages = pages.into_iter();
         let mut frames = frames.into_iter();
-        let mut first_mapped = None;
-        let mut last_mapped = None;
 
-        while let Some(page) = pages.next() {
-            let Some(frame) = frames.next() else {
-                if let (Some(start), Some(end)) = (first_mapped, last_mapped) {
-                    for mapped_page in (PageRangeInclusive { start, end }) {
-                        if let Some(frame) = self.unmap(mapped_page) {
-                            if owns_frames {
-                                release(frame);
-                            }
+        let result: Result<(), PageTableError> = (|| {
+            while let Some(page) = pages.next() {
+                let Some(frame) = frames.next() else {
+                    return Err(PageTableError::InsufficientFrames);
+                };
+
+                if let Err(error) = self.map(page, frame, flags) {
+                    if owns_frames {
+                        tx.record_pending_frame(frame);
+                        let remaining_page_count =
+                            plan.frames_after_failed_mapping(tx.mapped_len());
+                        for pending in frames.by_ref().take(remaining_page_count) {
+                            tx.record_pending_frame(pending);
                         }
                     }
+                    return Err(error);
                 }
-                return Err("Not enough frames for range");
-            };
-
-            if let Err(error) = self.map(page, frame, flags) {
-                if owns_frames {
-                    release(frame);
-                }
-                if let (Some(start), Some(end)) = (first_mapped, last_mapped) {
-                    for mapped_page in (PageRangeInclusive { start, end }) {
-                        if let Some(frame) = self.unmap(mapped_page) {
-                            if owns_frames {
-                                release(frame);
-                            }
-                        }
-                    }
-                }
-                if owns_frames {
-                    for _ in pages {
-                        let Some(frame) = frames.next() else {
-                            break;
-                        };
-                        release(frame);
-                    }
-                }
-                return Err(error);
+                tx.record_mapping(page);
             }
-            first_mapped.get_or_insert(page);
-            last_mapped = Some(page);
+            Ok(())
+        })();
+
+        if result.is_err() {
+            if owns_frames {
+                tx.rollback(|page| self.unmap(page), release);
+            } else {
+                tx.rollback(
+                    |page| {
+                        self.unmap(page);
+                        None::<PhysFrame<S>>
+                    },
+                    |_| {},
+                );
+            }
+        } else {
+            tx.commit();
         }
-        Ok(())
+
+        result
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -403,10 +449,12 @@ impl AddressSpaceMapper {
         &mut self,
         page: Page<S>,
         f: &F,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PageTableError> {
         let mut walker = unsafe { PageTableWalker::new(self.level0_vaddr.as_mut_ptr()) };
         let vaddr = page.start_address().as_usize();
-        let (_phys, raw_flags) = walker.translate_full(vaddr).ok_or("Page not mapped")?;
+        let (_phys, raw_flags) = walker
+            .translate_full(vaddr)
+            .ok_or(PageTableError::PageNotMapped)?;
 
         let old_flags = PageTableFlags::from_pte_bits(raw_flags);
         let new_flags = f(old_flags);
@@ -419,11 +467,11 @@ impl AddressSpaceMapper {
         &mut self,
         pages: PageRangeInclusive<S>,
         f: &F,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PageTableError> {
         let mut originals = Vec::new();
         for page in pages {
             let Some((_frame, flags)) = self.translate_page_flags(page.start_address()) else {
-                return Err("Page not mapped");
+                return Err(PageTableError::PageNotMapped);
             };
             originals.push((page, flags));
         }

@@ -49,25 +49,6 @@ pub struct ArchState {
     pub r15: u64,
 }
 
-#[cfg(target_arch = "riscv64")]
-#[derive(Debug, Clone)]
-pub struct ArchState {
-    pub ra: usize, // return address
-    pub s0: usize, // saved registers
-    pub s1: usize,
-    pub s2: usize,
-    pub s3: usize,
-    pub s4: usize,
-    pub s5: usize,
-    pub s6: usize,
-    pub s7: usize,
-    pub s8: usize,
-    pub s9: usize,
-    pub s10: usize,
-    pub s11: usize,
-    pub satp: usize, // page table base
-}
-
 #[cfg(all(target_arch = "aarch64", feature = "aarch64_arch"))]
 #[derive(Debug, Clone)]
 pub struct ArchState {
@@ -101,7 +82,6 @@ impl Default for ArchState {
 
 #[cfg(any(
     target_arch = "x86_64",
-    target_arch = "riscv64",
     all(target_arch = "aarch64", feature = "aarch64_arch")
 ))]
 #[allow(clippy::derivable_impls)]
@@ -117,26 +97,6 @@ impl Default for ArchState {
                 r13: 0,
                 r14: 0,
                 r15: 0,
-            }
-        }
-
-        #[cfg(target_arch = "riscv64")]
-        {
-            Self {
-                ra: 0,
-                s0: 0,
-                s1: 0,
-                s2: 0,
-                s3: 0,
-                s4: 0,
-                s5: 0,
-                s6: 0,
-                s7: 0,
-                s8: 0,
-                s9: 0,
-                s10: 0,
-                s11: 0,
-                satp: 0,
             }
         }
 

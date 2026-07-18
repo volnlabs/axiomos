@@ -18,6 +18,8 @@
 //! - Cloud: All helpers available
 //! - Embedded: Restricted set (no dynamic allocation helpers)
 
+use kernel_abi as abi;
+
 use super::state::{RegState, RegType};
 
 /// Helper function identifier.
@@ -35,98 +37,98 @@ pub enum HelperId {
     // against the wrong helper (the #121 unsoundness). Guarded by
     // `helper_ids_match_runtime_abi`.
     /// Get current time in nanoseconds
-    KtimeGetNs = 1,
+    KtimeGetNs = abi::BPF_HELPER_KTIME_GET_NS,
     /// Print debug message (debug builds only)
-    TracePrintk = 2,
+    TracePrintk = abi::BPF_HELPER_TRACE_PRINTK,
     /// Get pseudo-random u32
-    GetPrandomU32 = 3,
+    GetPrandomU32 = abi::BPF_HELPER_GET_PRANDOM_U32,
     /// Get current CPU ID
-    GetSmpProcessorId = 4,
+    GetSmpProcessorId = abi::BPF_HELPER_GET_SMP_PROCESSOR_ID,
     /// Look up element in map
-    MapLookupElem = 5,
+    MapLookupElem = abi::BPF_HELPER_MAP_LOOKUP_ELEM,
     /// Update element in map
-    MapUpdateElem = 6,
+    MapUpdateElem = abi::BPF_HELPER_MAP_UPDATE_ELEM,
     /// Delete element from map
-    MapDeleteElem = 7,
+    MapDeleteElem = abi::BPF_HELPER_MAP_DELETE_ELEM,
     /// Output to ring buffer (reserve + submit)
-    RingbufOutput = 8,
+    RingbufOutput = abi::BPF_HELPER_RINGBUF_OUTPUT,
     /// Push value to time-series map
-    TimeseriesPush = 9,
+    TimeseriesPush = abi::BPF_HELPER_TIMESERIES_PUSH,
 
     // ===== Process Helpers =====
     /// Get current PID and TGID
-    GetCurrentPidTgid = 10,
+    GetCurrentPidTgid = abi::BPF_HELPER_GET_CURRENT_PID_TGID,
     /// Get current UID and GID
-    GetCurrentUidGid = 11,
+    GetCurrentUidGid = abi::BPF_HELPER_GET_CURRENT_UID_GID,
     /// Get current process command name
-    GetCurrentComm = 12,
+    GetCurrentComm = abi::BPF_HELPER_GET_CURRENT_COMM,
 
     // ===== Kernel Introspection Helpers =====
     /// Get interrupt latency in nanoseconds
-    GetInterruptLatencyNs = 13,
+    GetInterruptLatencyNs = abi::BPF_HELPER_GET_INTERRUPT_LATENCY_NS,
     /// Read from arbitrary memory (with safety checks)
-    ProbeRead = 14,
+    ProbeRead = abi::BPF_HELPER_PROBE_READ,
     /// Get boot time in milliseconds
-    GetBootTimeMs = 15,
+    GetBootTimeMs = abi::BPF_HELPER_GET_BOOT_TIME_MS,
     /// Get kernel heap usage in KB
-    GetKernelHeapKb = 16,
+    GetKernelHeapKb = abi::BPF_HELPER_GET_KERNEL_HEAP_KB,
     /// Get kernel image size in MB
-    GetKernelImageMb = 17,
+    GetKernelImageMb = abi::BPF_HELPER_GET_KERNEL_IMAGE_MB,
 
     // ===== Ring Buffer Helpers (Advanced) =====
     // Verifier-known but not yet dispatched by the interpreter; numbers reserved.
     /// Reserve space in ring buffer
-    RingbufReserve = 40,
+    RingbufReserve = abi::BPF_HELPER_RINGBUF_RESERVE,
     /// Submit reserved ring buffer entry
-    RingbufSubmit = 41,
+    RingbufSubmit = abi::BPF_HELPER_RINGBUF_SUBMIT,
     /// Discard reserved ring buffer entry
-    RingbufDiscard = 42,
+    RingbufDiscard = abi::BPF_HELPER_RINGBUF_DISCARD,
 
     // ===== rkBPF Robotics Helpers (1000+) =====
     /// Get last timestamp from sensor
-    SensorLastTimestamp = 1002,
+    SensorLastTimestamp = abi::BPF_HELPER_SENSOR_LAST_TIMESTAMP,
     /// Set GPIO pin state
-    GpioSet = 1003,
+    GpioSet = abi::BPF_HELPER_GPIO_SET,
     /// Read GPIO pin state
-    GpioGet = 1004,
+    GpioGet = abi::BPF_HELPER_GPIO_GET,
     /// Write to PWM channel
-    PwmWrite = 1005,
+    PwmWrite = abi::BPF_HELPER_PWM_WRITE,
     /// Read IIO sensor value
-    IioRead = 1006,
+    IioRead = abi::BPF_HELPER_IIO_READ,
     /// Send CAN message
-    CanSend = 1007,
+    CanSend = abi::BPF_HELPER_CAN_SEND,
 }
 
 impl HelperId {
     /// Try to convert from raw helper ID.
     pub fn from_raw(id: i32) -> Option<Self> {
         match id {
-            1 => Some(Self::KtimeGetNs),
-            2 => Some(Self::TracePrintk),
-            3 => Some(Self::GetPrandomU32),
-            4 => Some(Self::GetSmpProcessorId),
-            5 => Some(Self::MapLookupElem),
-            6 => Some(Self::MapUpdateElem),
-            7 => Some(Self::MapDeleteElem),
-            8 => Some(Self::RingbufOutput),
-            9 => Some(Self::TimeseriesPush),
-            10 => Some(Self::GetCurrentPidTgid),
-            11 => Some(Self::GetCurrentUidGid),
-            12 => Some(Self::GetCurrentComm),
-            13 => Some(Self::GetInterruptLatencyNs),
-            14 => Some(Self::ProbeRead),
-            15 => Some(Self::GetBootTimeMs),
-            16 => Some(Self::GetKernelHeapKb),
-            17 => Some(Self::GetKernelImageMb),
-            40 => Some(Self::RingbufReserve),
-            41 => Some(Self::RingbufSubmit),
-            42 => Some(Self::RingbufDiscard),
-            1002 => Some(Self::SensorLastTimestamp),
-            1003 => Some(Self::GpioSet),
-            1004 => Some(Self::GpioGet),
-            1005 => Some(Self::PwmWrite),
-            1006 => Some(Self::IioRead),
-            1007 => Some(Self::CanSend),
+            abi::BPF_HELPER_KTIME_GET_NS => Some(Self::KtimeGetNs),
+            abi::BPF_HELPER_TRACE_PRINTK => Some(Self::TracePrintk),
+            abi::BPF_HELPER_GET_PRANDOM_U32 => Some(Self::GetPrandomU32),
+            abi::BPF_HELPER_GET_SMP_PROCESSOR_ID => Some(Self::GetSmpProcessorId),
+            abi::BPF_HELPER_MAP_LOOKUP_ELEM => Some(Self::MapLookupElem),
+            abi::BPF_HELPER_MAP_UPDATE_ELEM => Some(Self::MapUpdateElem),
+            abi::BPF_HELPER_MAP_DELETE_ELEM => Some(Self::MapDeleteElem),
+            abi::BPF_HELPER_RINGBUF_OUTPUT => Some(Self::RingbufOutput),
+            abi::BPF_HELPER_TIMESERIES_PUSH => Some(Self::TimeseriesPush),
+            abi::BPF_HELPER_GET_CURRENT_PID_TGID => Some(Self::GetCurrentPidTgid),
+            abi::BPF_HELPER_GET_CURRENT_UID_GID => Some(Self::GetCurrentUidGid),
+            abi::BPF_HELPER_GET_CURRENT_COMM => Some(Self::GetCurrentComm),
+            abi::BPF_HELPER_GET_INTERRUPT_LATENCY_NS => Some(Self::GetInterruptLatencyNs),
+            abi::BPF_HELPER_PROBE_READ => Some(Self::ProbeRead),
+            abi::BPF_HELPER_GET_BOOT_TIME_MS => Some(Self::GetBootTimeMs),
+            abi::BPF_HELPER_GET_KERNEL_HEAP_KB => Some(Self::GetKernelHeapKb),
+            abi::BPF_HELPER_GET_KERNEL_IMAGE_MB => Some(Self::GetKernelImageMb),
+            abi::BPF_HELPER_RINGBUF_RESERVE => Some(Self::RingbufReserve),
+            abi::BPF_HELPER_RINGBUF_SUBMIT => Some(Self::RingbufSubmit),
+            abi::BPF_HELPER_RINGBUF_DISCARD => Some(Self::RingbufDiscard),
+            abi::BPF_HELPER_SENSOR_LAST_TIMESTAMP => Some(Self::SensorLastTimestamp),
+            abi::BPF_HELPER_GPIO_SET => Some(Self::GpioSet),
+            abi::BPF_HELPER_GPIO_GET => Some(Self::GpioGet),
+            abi::BPF_HELPER_PWM_WRITE => Some(Self::PwmWrite),
+            abi::BPF_HELPER_IIO_READ => Some(Self::IioRead),
+            abi::BPF_HELPER_CAN_SEND => Some(Self::CanSend),
             _ => None,
         }
     }
@@ -358,7 +360,7 @@ impl ReturnType {
 }
 
 /// Helper function signature.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct HelperSignature {
     /// Helper ID
     pub id: HelperId,
@@ -369,6 +371,11 @@ pub struct HelperSignature {
     /// Minimum caller tier permitted to call this helper (#88). Defaults to
     /// `Unprivileged` (callable by all); privileged-only helpers raise it.
     pub min_tier: super::LoadCaller,
+    /// Whether the helper can change physical device state. Caller trust and
+    /// program authenticity do not imply authority to actuate hardware.
+    pub requires_actuation: bool,
+    /// Whether the helper emits output to a logging or tracing sink.
+    pub may_log: bool,
 }
 
 impl HelperSignature {
@@ -379,6 +386,8 @@ impl HelperSignature {
             args,
             ret,
             min_tier: super::LoadCaller::Unprivileged,
+            requires_actuation: false,
+            may_log: false,
         }
     }
 
@@ -388,14 +397,94 @@ impl HelperSignature {
         self
     }
 
+    /// Mark this helper as requiring explicit hardware-actuation authority.
+    const fn requiring_actuation(mut self) -> Self {
+        self.requires_actuation = true;
+        self
+    }
+
+    /// Mark this helper as potentially emitting log output.
+    const fn with_logging_effect(mut self) -> Self {
+        self.may_log = true;
+        self
+    }
+
     /// Number of arguments.
     pub fn arg_count(&self) -> usize {
         self.args.len()
     }
 }
 
+/// Runtime operation paired with a verified helper signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeHelper {
+    KtimeGetNs,
+    TracePrintk,
+    MapLookupElem,
+    MapUpdateElem,
+    MapDeleteElem,
+    GetInterruptLatencyNs,
+    GetBootTimeMs,
+    GetKernelHeapKb,
+    GetKernelImageMb,
+    RingbufOutput,
+    TimeseriesPush,
+    GpioSet,
+    GpioGet,
+    PwmWrite,
+}
+
+/// Shared verifier/runtime contract for one helper.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct HelperDescriptor {
+    signature: HelperSignature,
+    runtime: Option<RuntimeHelper>,
+}
+
+impl HelperDescriptor {
+    pub(crate) const fn signature(self) -> HelperSignature {
+        self.signature
+    }
+
+    pub(crate) const fn runtime(self) -> Option<RuntimeHelper> {
+        self.runtime
+    }
+}
+
 /// Get the signature for a helper function.
 pub fn get_helper_signature(id: HelperId) -> HelperSignature {
+    get_helper_descriptor(id).signature()
+}
+
+/// Get the shared verifier/runtime descriptor for a helper.
+pub(crate) fn get_helper_descriptor(id: HelperId) -> HelperDescriptor {
+    HelperDescriptor {
+        signature: helper_signature(id),
+        runtime: runtime_helper(id),
+    }
+}
+
+const fn runtime_helper(id: HelperId) -> Option<RuntimeHelper> {
+    match id {
+        HelperId::KtimeGetNs => Some(RuntimeHelper::KtimeGetNs),
+        HelperId::TracePrintk => Some(RuntimeHelper::TracePrintk),
+        HelperId::MapLookupElem => Some(RuntimeHelper::MapLookupElem),
+        HelperId::MapUpdateElem => Some(RuntimeHelper::MapUpdateElem),
+        HelperId::MapDeleteElem => Some(RuntimeHelper::MapDeleteElem),
+        HelperId::GetInterruptLatencyNs => Some(RuntimeHelper::GetInterruptLatencyNs),
+        HelperId::GetBootTimeMs => Some(RuntimeHelper::GetBootTimeMs),
+        HelperId::GetKernelHeapKb => Some(RuntimeHelper::GetKernelHeapKb),
+        HelperId::GetKernelImageMb => Some(RuntimeHelper::GetKernelImageMb),
+        HelperId::RingbufOutput => Some(RuntimeHelper::RingbufOutput),
+        HelperId::TimeseriesPush => Some(RuntimeHelper::TimeseriesPush),
+        HelperId::GpioSet => Some(RuntimeHelper::GpioSet),
+        HelperId::GpioGet => Some(RuntimeHelper::GpioGet),
+        HelperId::PwmWrite => Some(RuntimeHelper::PwmWrite),
+        _ => None,
+    }
+}
+
+const fn helper_signature(id: HelperId) -> HelperSignature {
     match id {
         // Core helpers
         HelperId::KtimeGetNs => HelperSignature::new(id, &[], ReturnType::Integer),
@@ -404,7 +493,8 @@ pub fn get_helper_signature(id: HelperId) -> HelperSignature {
             id,
             &[ArgType::PtrToMem, ArgType::MemSize],
             ReturnType::Integer,
-        ),
+        )
+        .with_logging_effect(),
 
         HelperId::GetPrandomU32 => HelperSignature::new(id, &[], ReturnType::Integer),
 
@@ -512,6 +602,7 @@ pub fn get_helper_signature(id: HelperId) -> HelperSignature {
 
         HelperId::GpioSet => {
             HelperSignature::new(id, &[ArgType::Scalar, ArgType::Scalar], ReturnType::Integer)
+                .requiring_actuation()
         }
 
         HelperId::GpioGet => HelperSignature::new(id, &[ArgType::Scalar], ReturnType::Integer),
@@ -520,7 +611,8 @@ pub fn get_helper_signature(id: HelperId) -> HelperSignature {
             id,
             &[ArgType::Scalar, ArgType::Scalar, ArgType::Scalar],
             ReturnType::Integer,
-        ),
+        )
+        .requiring_actuation(),
 
         HelperId::IioRead => HelperSignature::new(
             id,
@@ -532,7 +624,8 @@ pub fn get_helper_signature(id: HelperId) -> HelperSignature {
             id,
             &[ArgType::Scalar, ArgType::PtrToMem, ArgType::MemSize],
             ReturnType::Integer,
-        ),
+        )
+        .requiring_actuation(),
     }
 }
 
@@ -639,6 +732,52 @@ mod tests {
     }
 
     #[test]
+    fn runtime_descriptors_match_the_published_helper_catalog() {
+        for entry in abi::SUPPORTED_BPF_HELPERS {
+            let id = HelperId::from_raw(entry.id as i32).expect("catalog helper must be known");
+            assert!(
+                get_helper_descriptor(id).runtime().is_some(),
+                "published helper {} has no runtime operation",
+                entry.name
+            );
+        }
+
+        let all = [
+            HelperId::KtimeGetNs,
+            HelperId::TracePrintk,
+            HelperId::GetPrandomU32,
+            HelperId::GetSmpProcessorId,
+            HelperId::MapLookupElem,
+            HelperId::MapUpdateElem,
+            HelperId::MapDeleteElem,
+            HelperId::RingbufOutput,
+            HelperId::TimeseriesPush,
+            HelperId::GetCurrentPidTgid,
+            HelperId::GetCurrentUidGid,
+            HelperId::GetCurrentComm,
+            HelperId::GetInterruptLatencyNs,
+            HelperId::ProbeRead,
+            HelperId::GetBootTimeMs,
+            HelperId::GetKernelHeapKb,
+            HelperId::GetKernelImageMb,
+            HelperId::RingbufReserve,
+            HelperId::RingbufSubmit,
+            HelperId::RingbufDiscard,
+            HelperId::SensorLastTimestamp,
+            HelperId::GpioSet,
+            HelperId::GpioGet,
+            HelperId::PwmWrite,
+            HelperId::IioRead,
+            HelperId::CanSend,
+        ];
+        let runtime_count = all
+            .iter()
+            .filter(|id| get_helper_descriptor(**id).runtime().is_some())
+            .count();
+        assert_eq!(runtime_count, abi::SUPPORTED_BPF_HELPERS.len());
+    }
+
+    #[test]
     fn helper_signature_ktime() {
         let sig = get_helper_signature(HelperId::KtimeGetNs);
         assert_eq!(sig.args.len(), 0);
@@ -652,6 +791,13 @@ mod tests {
         assert_eq!(sig.args[0], ArgType::Scalar);
         assert_eq!(sig.args[1], ArgType::PtrToMapKey);
         assert_eq!(sig.ret, ReturnType::PtrToMapValueOrNull);
+    }
+
+    #[test]
+    fn only_trace_printk_is_marked_as_logging() {
+        assert!(get_helper_signature(HelperId::TracePrintk).may_log);
+        assert!(!get_helper_signature(HelperId::KtimeGetNs).may_log);
+        assert!(!get_helper_signature(HelperId::MapUpdateElem).may_log);
     }
 
     #[test]

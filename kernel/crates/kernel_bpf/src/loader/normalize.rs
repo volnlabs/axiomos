@@ -3,7 +3,7 @@
 //! Transforms arbitrary loaded bytecode into the canonical flat program the
 //! verifier consumes. Today this resolves BPF-to-BPF (subprogram) calls by
 //! inline expansion; it is the intended home for future BTF/CO-RE rewrites.
-//! See `docs/superpowers/specs/2026-06-30-bpf-call-canonicalization-design.md`.
+//! See `docs/archive/specs/2026-06-30-bpf-call-canonicalization-design.md`.
 
 extern crate alloc;
 

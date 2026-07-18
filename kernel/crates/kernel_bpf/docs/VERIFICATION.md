@@ -317,10 +317,10 @@ Two enforcement points consume it on the embedded profile:
   (`verifier/admission.rs`); the sum across all attached programs is capped at
   `UTILIZATION_BUDGET_NS_PER_S` = 5×10⁸ (U = 0.5, half a core). Over-budget
   attaches are refused; detach returns the budget. This is the EDF utilization
-  test, validated on Pi 5 hardware (`docs/benchmarks.md` §12).
+  test, validated on Pi 5 hardware (`docs/performance/current-results.md` §12).
 
 `trace_printk` is banned on RT-fragment programs
-(`HelperForbiddenOnRtFragment`). See `docs/verifier-fragment.md` at the repo
+(`HelperForbiddenOnRtFragment`). See `docs/security/verifier-assurance.md` at the repo
 root for the bounded-fragment definition and cost bounds.
 
 ## Profile-Specific Verification

@@ -1,7 +1,7 @@
 //! Pi5 <-> Shrike-lite UART control-link frame codec.
 //!
 //! Binary, framed, corruption-safe. Spec:
-//! `docs/superpowers/specs/2026-06-23-shrike-link-uart-protocol.md`.
+//! `docs/archive/specs/2026-06-23-shrike-link-uart-protocol.md`.
 //!
 //! Wire frame: `SYNC(0x7E) VER(0x01) TYPE LEN PAYLOAD[LEN] CRC_LO CRC_HI`,
 //! CRC16-CCITT/FALSE over `VER,TYPE,LEN,PAYLOAD`. The decoder is a byte-fed

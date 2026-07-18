@@ -251,20 +251,19 @@ pub extern "C" fn bpf_trace_printk(fmt: *const u8, _size: u32) -> i32 {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[unsafe(no_mangle)]
 pub extern "C" fn bpf_map_lookup_elem(map_id: u32, key_ptr: *const u8) -> *mut u8 {
-    use crate::BPF_MANAGER;
-    if let Some(manager) = BPF_MANAGER.get() {
-        let manager = manager.lock();
-        if let Some(def) = manager.get_map_def(map_id) {
+    super::with_current_execution_map(map_id, super::MapAccess::READ, |map| {
+        let def = map.map.def();
+        if !key_ptr.is_null() {
             let key_size = def.key_size as usize;
             // SAFETY: Verifier ensures valid memory access for key_ptr
             let key = unsafe { core::slice::from_raw_parts(key_ptr, key_size) };
-            // SAFETY: Manager lock ensures map stability
-            if let Some(ptr) = unsafe { manager.map_lookup_ptr(map_id, key) } {
-                return ptr;
-            }
+            // SAFETY: the per-map execution lease remains held until the
+            // interpreter returns, so storage cannot be mutated concurrently.
+            return unsafe { map.map.lookup_ptr(key) }.unwrap_or(core::ptr::null_mut());
         }
-    }
-    core::ptr::null_mut()
+        core::ptr::null_mut()
+    })
+    .unwrap_or(core::ptr::null_mut())
 }
 
 /// BPF helper: update a map element.
@@ -279,10 +278,9 @@ pub extern "C" fn bpf_map_update_elem(
     value_ptr: *const u8,
     flags: u64,
 ) -> i32 {
-    use crate::BPF_MANAGER;
-    if let Some(manager) = BPF_MANAGER.get() {
-        let manager = manager.lock();
-        if let Some(def) = manager.get_map_def(map_id) {
+    super::with_current_execution_map(map_id, super::MapAccess::WRITE, |map| {
+        let def = map.map.def();
+        if !key_ptr.is_null() && !value_ptr.is_null() {
             let key_size = def.key_size as usize;
             let value_size = def.value_size as usize;
 
@@ -291,12 +289,13 @@ pub extern "C" fn bpf_map_update_elem(
             // SAFETY: Verifier ensures valid memory access for value_ptr
             let value = unsafe { core::slice::from_raw_parts(value_ptr, value_size) };
 
-            if manager.map_update(map_id, key, value, flags).is_ok() {
+            if map.map.update(key, value, flags).is_ok() {
                 return 0;
             }
         }
-    }
-    -1
+        -1
+    })
+    .unwrap_or(-1)
 }
 
 /// BPF helper: delete a map element.
@@ -306,19 +305,19 @@ pub extern "C" fn bpf_map_update_elem(
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[unsafe(no_mangle)]
 pub extern "C" fn bpf_map_delete_elem(map_id: u32, key_ptr: *const u8) -> i32 {
-    use crate::BPF_MANAGER;
-    if let Some(manager) = BPF_MANAGER.get() {
-        let manager = manager.lock();
-        if let Some(def) = manager.get_map_def(map_id) {
+    super::with_current_execution_map(map_id, super::MapAccess::WRITE, |map| {
+        let def = map.map.def();
+        if !key_ptr.is_null() {
             let key_size = def.key_size as usize;
             // SAFETY: Verifier ensures valid memory access for key_ptr
             let key = unsafe { core::slice::from_raw_parts(key_ptr, key_size) };
-            if manager.map_delete(map_id, key).is_ok() {
+            if map.map.delete(key).is_ok() {
                 return 0;
             }
         }
-    }
-    -1
+        -1
+    })
+    .unwrap_or(-1)
 }
 
 /// BPF helper: output data to a ring buffer map.
@@ -344,22 +343,20 @@ pub extern "C" fn bpf_ringbuf_output(
     data_size: u64,
     flags: u64,
 ) -> i64 {
-    use crate::BPF_MANAGER;
-
     if data_ptr.is_null() {
         return -1;
     }
 
-    if let Some(manager) = BPF_MANAGER.get() {
-        let manager = manager.lock();
+    super::with_current_execution_map(map_id, super::MapAccess::WRITE, |map| {
         // SAFETY: Verifier ensures valid memory access for data_ptr
         let data = unsafe { core::slice::from_raw_parts(data_ptr, data_size as usize) };
 
-        if manager.ringbuf_output(map_id, data, flags).is_ok() {
+        if map.map.update(&[], data, flags).is_ok() {
             return 0;
         }
-    }
-    -1
+        -1
+    })
+    .unwrap_or(-1)
 }
 
 /// BPF helper: Push data to a time-series map.
@@ -381,28 +378,25 @@ pub extern "C" fn bpf_timeseries_push(
     key_ptr: *const u8,
     value_ptr: *const u8,
 ) -> i64 {
-    use crate::BPF_MANAGER;
-
     if key_ptr.is_null() || value_ptr.is_null() {
         return -1;
     }
 
-    if let Some(manager) = BPF_MANAGER.get() {
-        let manager = manager.lock();
-        if let Some(def) = manager.get_map_def(map_id) {
-            let key_size = def.key_size as usize;
-            let value_size = def.value_size as usize;
+    super::with_current_execution_map(map_id, super::MapAccess::WRITE, |map| {
+        let def = map.map.def();
+        let key_size = def.key_size as usize;
+        let value_size = def.value_size as usize;
 
-            // SAFETY: Verifier ensures valid memory access for key_ptr
-            let key = unsafe { core::slice::from_raw_parts(key_ptr, key_size) };
-            // SAFETY: Verifier ensures valid memory access for value_ptr
-            let value = unsafe { core::slice::from_raw_parts(value_ptr, value_size) };
+        // SAFETY: Verifier ensures valid memory access for key_ptr
+        let key = unsafe { core::slice::from_raw_parts(key_ptr, key_size) };
+        // SAFETY: Verifier ensures valid memory access for value_ptr
+        let value = unsafe { core::slice::from_raw_parts(value_ptr, value_size) };
 
-            // TimeSeriesMap uses update() to handle push (key treated as timestamp)
-            if manager.map_update(map_id, key, value, 0).is_ok() {
-                return 0;
-            }
+        // TimeSeriesMap uses update() to handle push (key treated as timestamp)
+        if map.map.update(key, value, 0).is_ok() {
+            return 0;
         }
-    }
-    -1
+        -1
+    })
+    .unwrap_or(-1)
 }

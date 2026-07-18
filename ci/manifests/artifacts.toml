@@ -1,0 +1,89 @@
+format_version = 1
+
+[[artifact]]
+name = "x86_64 kernel ELF"
+platform = "x86_64 QEMU/OVMF"
+status = "shipped"
+format = "ELF"
+producer = "cargo build --locked --release -p axiomos"
+output = "KERNEL_BINARY reported by target/release/axiomos --no-run"
+selection = "build.rs bindep path reported through AXIOM_ARTIFACT_PATHS"
+immutable_inputs = "Cargo.lock; rust-toolchain.toml; ci/manifests/build-inputs.env; AXIOM_BPF_TRUSTED_KEY_PATH trust root"
+hash_evidence = "SHA-256 in the required gate production_artifact_hashes file"
+
+[[artifact]]
+name = "x86_64 root filesystem"
+platform = "x86_64 QEMU/OVMF"
+status = "shipped"
+format = "ext2 disk image"
+producer = "cargo build --locked --release -p axiomos"
+output = "DISK_IMAGE reported by target/release/axiomos --no-run"
+selection = "build.rs output path reported through AXIOM_ARTIFACT_PATHS"
+immutable_inputs = "Cargo.lock; rust-toolchain.toml; userspace/core/file_structure; ci/manifests/components.toml; AXIOM_SIGNED_BPF_STARTUP_PATH payload"
+hash_evidence = "SHA-256 in the required gate production_artifact_hashes file"
+
+[[artifact]]
+name = "x86_64 boot ISO"
+platform = "x86_64 QEMU/OVMF"
+status = "shipped"
+format = "hybrid BIOS and UEFI ISO"
+producer = "cargo build --locked --release -p axiomos"
+output = "BOOTABLE_ISO reported by target/release/axiomos --no-run"
+selection = "build.rs output path reported through AXIOM_ARTIFACT_PATHS"
+immutable_inputs = "Cargo.lock; rust-toolchain.toml; LIMINE_REVISION in ci/manifests/build-inputs.env"
+hash_evidence = "SHA-256 in the required gate production_artifact_hashes file"
+
+[[artifact]]
+name = "Raspberry Pi 5 kernel ELF"
+platform = "Raspberry Pi 5"
+status = "supported after HIL"
+format = "ELF"
+producer = "cargo xtask build rpi5 -- release embedded-rpi5"
+output = "target/aarch64-unknown-none/release/kernel"
+selection = "fixed target, profile, package, and binary path"
+immutable_inputs = "Cargo.lock; rust-toolchain.toml; embedded-rpi5 feature set; AXIOM_BPF_TRUSTED_KEY_PATH trust root"
+hash_evidence = "SHA-256 in target/aarch64-unknown-none/release/rpi5-artifacts.sha256"
+
+[[artifact]]
+name = "Raspberry Pi 5 raw kernel"
+platform = "Raspberry Pi 5"
+status = "supported after HIL"
+format = "raw kernel8.img"
+producer = "cargo xtask build rpi5 -- release embedded-rpi5"
+output = "target/aarch64-unknown-none/release/kernel8.img"
+selection = "llvm-objcopy of the fixed kernel ELF path"
+immutable_inputs = "Cargo.lock; rust-toolchain.toml; embedded-rpi5 feature set; AXIOM_BPF_TRUSTED_KEY_PATH trust root"
+hash_evidence = "SHA-256 in target/aarch64-unknown-none/release/rpi5-artifacts.sha256"
+
+[[artifact]]
+name = "Raspberry Pi 5 root filesystem"
+platform = "Raspberry Pi 5"
+status = "supported after HIL"
+format = "ext2 disk image embedded in kernel8.img"
+producer = "cargo xtask build rpi5 -- release embedded-rpi5"
+output = "DISK_IMAGE reported by the Raspberry Pi 5 image-assembly invocation"
+selection = "build.rs output path reported through a unique AXIOM_ARTIFACT_PATHS file"
+immutable_inputs = "Cargo.lock; rust-toolchain.toml; userspace/core/file_structure; ci/manifests/components.toml; AXIOM_BPF_TRUSTED_KEY_PATH trust root"
+hash_evidence = "SHA-256 in target/aarch64-unknown-none/release/rpi5-artifacts.sha256"
+
+[[artifact]]
+name = "AArch64 virt root filesystem"
+platform = "AArch64 virt"
+status = "experimental"
+format = "ext2 disk image"
+producer = "cargo xtask run virt"
+output = "DISK_IMAGE reported by the AArch64 virt image-assembly invocation"
+selection = "build.rs output path reported through a unique AXIOM_ARTIFACT_PATHS file"
+immutable_inputs = "Cargo.lock; rust-toolchain.toml; userspace/core/file_structure; ci/manifests/components.toml; AXIOM_BPF_TRUSTED_KEY_PATH trust root"
+hash_evidence = "SHA-256 printed by scripts/run/virt.sh before QEMU launch"
+
+[[artifact]]
+name = "Shrike RP2040 firmware"
+platform = "Shrike RP2040 firmware"
+status = "supported after HIL"
+format = "ELF firmware image"
+producer = "cargo build --locked --release --manifest-path firmware/shrike/rp2040/Cargo.toml --target thumbv6m-none-eabi"
+output = "firmware/shrike/rp2040/target/thumbv6m-none-eabi/release/shrike_rp2040"
+selection = "fixed standalone manifest, target, profile, and binary path"
+immutable_inputs = "firmware/shrike/rp2040/Cargo.lock; rust-toolchain.toml"
+hash_evidence = "SHA-256 required in the physical-HIL retained artifact manifest"

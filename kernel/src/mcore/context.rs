@@ -4,7 +4,7 @@ use core::cell::UnsafeCell;
 use core::fmt;
 #[cfg(target_arch = "x86_64")]
 use core::sync::atomic::AtomicU32;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
 #[cfg(target_arch = "x86_64")]
@@ -162,6 +162,7 @@ pub struct ExecutionContext {
     scheduler: SchedulerSlot,
     current_pid: AtomicU64,
     bpf_stack: BpfCpuStack,
+    bpf_execution: AtomicPtr<()>,
     #[cfg(target_arch = "aarch64")]
     need_reschedule: core::sync::atomic::AtomicBool,
 }
@@ -184,9 +185,10 @@ impl ExecutionContext {
             sel,
             _idt: idt,
             tss: UnsafeCell::new(tss),
-            scheduler: SchedulerSlot::new(Scheduler::new_cpu_local()),
+            scheduler: SchedulerSlot::new(Scheduler::new_cpu_local(cpu.id as usize)),
             current_pid: AtomicU64::new(0),
             bpf_stack: BpfCpuStack::new(),
+            bpf_execution: AtomicPtr::new(core::ptr::null_mut()),
         }
     }
 
@@ -194,9 +196,10 @@ impl ExecutionContext {
     pub fn new(cpu_id: usize) -> Self {
         ExecutionContext {
             cpu_id,
-            scheduler: SchedulerSlot::new(Scheduler::new_cpu_local()),
+            scheduler: SchedulerSlot::new(Scheduler::new_cpu_local(cpu_id)),
             current_pid: AtomicU64::new(0),
             bpf_stack: BpfCpuStack::new(),
+            bpf_execution: AtomicPtr::new(core::ptr::null_mut()),
             need_reschedule: core::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -282,7 +285,7 @@ impl ExecutionContext {
     ///
     /// # Safety
     /// The caller must ensure interrupts are disabled for the complete call.
-    pub unsafe fn reschedule(&self) {
+    pub unsafe fn reschedule(&self) -> bool {
         let context_switch = {
             self.scheduler.with_mut(|scheduler| {
                 // SAFETY: The caller guarantees interrupts remain disabled and
@@ -295,6 +298,9 @@ impl ExecutionContext {
             // SAFETY: The scheduler borrow ended above. Its pinned outgoing and
             // incoming task storage remains owned by the scheduler.
             unsafe { context_switch.execute() };
+            true
+        } else {
+            false
         }
     }
 
@@ -308,6 +314,39 @@ impl ExecutionContext {
 
     pub fn with_bpf_stack<R>(&self, f: impl FnOnce(&mut [u8]) -> R) -> Option<R> {
         self.bpf_stack.with_mut(f)
+    }
+
+    pub(crate) fn with_bpf_execution<R>(
+        &self,
+        execution: *mut (),
+        f: impl FnOnce() -> R,
+    ) -> Option<R> {
+        if execution.is_null()
+            || self
+                .bpf_execution
+                .compare_exchange(
+                    core::ptr::null_mut(),
+                    execution,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_err()
+        {
+            return None;
+        }
+
+        struct Reset<'a>(&'a AtomicPtr<()>);
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                self.0.store(core::ptr::null_mut(), Ordering::Release);
+            }
+        }
+        let _reset = Reset(&self.bpf_execution);
+        Some(f())
+    }
+
+    pub(crate) fn current_bpf_execution(&self) -> *mut () {
+        self.bpf_execution.load(Ordering::Acquire)
     }
 
     pub(crate) fn with_interrupts_masked<R>(&self, f: impl FnOnce() -> R) -> R {
@@ -347,6 +386,16 @@ impl ExecutionContext {
 
     pub fn with_current_task<R>(&self, f: impl for<'task> FnOnce(&'task Task) -> R) -> R {
         self.with_interrupts_masked(|| self.scheduler.with(|scheduler| f(scheduler.current_task())))
+    }
+
+    pub(crate) fn with_current_task_mut<R>(
+        &self,
+        f: impl for<'task> FnOnce(&'task mut Task) -> R,
+    ) -> R {
+        self.with_interrupts_masked(|| {
+            self.scheduler
+                .with_mut(|scheduler| f(scheduler.current_task_mut()))
+        })
     }
 
     pub fn current_process(&self) -> Arc<Process> {

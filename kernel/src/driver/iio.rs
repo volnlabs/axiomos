@@ -22,6 +22,7 @@ use conquer_once::spin::OnceCell;
 use kernel_bpf::attach::{IioChannel, IioEvent};
 use kernel_bpf::execution::BpfContext;
 use spin::Mutex;
+use thiserror::Error;
 
 #[cfg(any(
     target_arch = "x86_64",
@@ -32,12 +33,27 @@ use crate::mcore::mtask::process::Process;
     target_arch = "x86_64",
     all(target_arch = "aarch64", not(feature = "rpi5"))
 ))]
-use crate::mcore::mtask::scheduler::global::GlobalTaskQueue;
+use crate::mcore::mtask::scheduler::run_queue::RunQueues;
+#[cfg(any(
+    target_arch = "x86_64",
+    all(target_arch = "aarch64", not(feature = "rpi5"))
+))]
+use crate::mcore::mtask::task::StackAllocationError;
 #[cfg(any(
     target_arch = "x86_64",
     all(target_arch = "aarch64", not(feature = "rpi5"))
 ))]
 use crate::mcore::mtask::task::Task;
+
+#[derive(Debug, Error)]
+pub enum IioInitError {
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", not(feature = "rpi5"))
+    ))]
+    #[error("simulation task allocation failed: {0}")]
+    SimulationTask(#[from] StackAllocationError),
+}
 
 /// Global IIO manager instance
 pub static IIO_MANAGER: OnceCell<Mutex<IioManager>> = OnceCell::uninit();
@@ -143,7 +159,7 @@ extern "C" fn iio_simulation_task(_arg: *mut c_void) {
 }
 
 /// Initialize a simulated accelerometer for testing
-pub fn init_simulated_device() {
+pub fn init_simulated_device() -> Result<(), IioInitError> {
     if let Some(manager_lock) = IIO_MANAGER.get() {
         let mut manager = manager_lock.lock();
 
@@ -164,11 +180,12 @@ pub fn init_simulated_device() {
         ))]
         {
             let task =
-                Task::create_new(Process::root(), iio_simulation_task, core::ptr::null_mut())
-                    .expect("failed to create IIO simulation task");
-            GlobalTaskQueue::enqueue(Box::pin(task));
+                Task::create_new(Process::root(), iio_simulation_task, core::ptr::null_mut())?;
+            RunQueues::enqueue(Box::pin(task));
 
             ::log::info!("Started IIO simulation background task");
         }
     }
+
+    Ok(())
 }

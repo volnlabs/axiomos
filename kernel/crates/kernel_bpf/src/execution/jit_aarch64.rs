@@ -51,6 +51,7 @@ use crate::bytecode::program::BpfProgram;
 use crate::execution::{BpfContext, BpfExecutor, BpfResult};
 use crate::profile::{ActiveProfile, PhysicalProfile};
 use crate::verifier::HelperId;
+use crate::verifier::helpers::{RuntimeHelper, get_helper_descriptor};
 
 // External kernel functions provided by the main kernel crate
 #[cfg(not(test))]
@@ -1037,18 +1038,21 @@ impl<P: PhysicalProfile> Arm64JitCompiler<P> {
             fn bpf_pwm_write(pwm_id: u32, channel: u32, duty: u32) -> i64;
         }
 
-        match HelperId::from_raw(helper_id) {
-            Some(HelperId::KtimeGetNs) => Ok(bpf_ktime_get_ns as *const () as u64),
-            Some(HelperId::TracePrintk) => Ok(bpf_trace_printk as *const () as u64),
-            Some(HelperId::MapLookupElem) => Ok(bpf_map_lookup_elem as *const () as u64),
-            Some(HelperId::MapUpdateElem) => Ok(bpf_map_update_elem as *const () as u64),
-            Some(HelperId::MapDeleteElem) => Ok(bpf_map_delete_elem as *const () as u64),
-            Some(HelperId::RingbufOutput) => Ok(bpf_ringbuf_output as *const () as u64),
-            Some(HelperId::TimeseriesPush) => Ok(bpf_timeseries_push as *const () as u64),
+        let runtime = HelperId::from_raw(helper_id)
+            .and_then(|id| get_helper_descriptor(id).runtime())
+            .ok_or(Arm64JitError::UnsupportedInstruction)?;
+        match runtime {
+            RuntimeHelper::KtimeGetNs => Ok(bpf_ktime_get_ns as *const () as u64),
+            RuntimeHelper::TracePrintk => Ok(bpf_trace_printk as *const () as u64),
+            RuntimeHelper::MapLookupElem => Ok(bpf_map_lookup_elem as *const () as u64),
+            RuntimeHelper::MapUpdateElem => Ok(bpf_map_update_elem as *const () as u64),
+            RuntimeHelper::MapDeleteElem => Ok(bpf_map_delete_elem as *const () as u64),
+            RuntimeHelper::RingbufOutput => Ok(bpf_ringbuf_output as *const () as u64),
+            RuntimeHelper::TimeseriesPush => Ok(bpf_timeseries_push as *const () as u64),
             // Robotics Helpers
-            Some(HelperId::GpioSet) => Ok(bpf_gpio_write as *const () as u64),
-            Some(HelperId::GpioGet) => Ok(bpf_gpio_read as *const () as u64),
-            Some(HelperId::PwmWrite) => Ok(bpf_pwm_write as *const () as u64),
+            RuntimeHelper::GpioSet => Ok(bpf_gpio_write as *const () as u64),
+            RuntimeHelper::GpioGet => Ok(bpf_gpio_read as *const () as u64),
+            RuntimeHelper::PwmWrite => Ok(bpf_pwm_write as *const () as u64),
             _ => Err(Arm64JitError::UnsupportedInstruction),
         }
     }

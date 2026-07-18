@@ -1,0 +1,405 @@
+format_version = 1
+cargo_llvm_cov_version = "0.8.7"
+cargo_mutants_version = "27.1.0"
+
+# Every entry in ci/manifests/components.toml must appear exactly once here. "measured"
+# means the component has a coverage campaign below; the other values explain
+# why a host source-coverage percentage is not currently published.
+[disposition]
+"Cargo.toml" = "measured"
+"tools/xtask/Cargo.toml" = "measured"
+"kernel/Cargo.toml" = "target-qemu"
+"kernel/crates/kernel_abi/Cargo.toml" = "measured"
+"kernel/crates/kernel_bpf/Cargo.toml" = "measured"
+"kernel/crates/kernel_bpf/fuzz/Cargo.toml" = "fuzz-harness"
+"kernel/crates/kernel_devfs/Cargo.toml" = "measured"
+"kernel/crates/kernel_device/Cargo.toml" = "measured"
+"kernel/crates/kernel_elfloader/Cargo.toml" = "measured"
+"kernel/crates/kernel_elfloader/fuzz/Cargo.toml" = "fuzz-harness"
+"kernel/crates/kernel_memapi/Cargo.toml" = "interface-only"
+"kernel/crates/kernel_map_transaction/Cargo.toml" = "measured"
+"kernel/crates/kernel_pci/Cargo.toml" = "measured"
+"kernel/crates/kernel_physical_memory/Cargo.toml" = "measured"
+"kernel/crates/kernel_run_queue/Cargo.toml" = "measured"
+"kernel/crates/kernel_syscall/Cargo.toml" = "measured"
+"kernel/crates/kernel_syscall/fuzz/Cargo.toml" = "fuzz-harness"
+"kernel/crates/kernel_time/Cargo.toml" = "measured"
+"kernel/crates/kernel_usermem/Cargo.toml" = "measured"
+"kernel/crates/kernel_vfs/Cargo.toml" = "measured"
+"kernel/crates/kernel_virtual_memory/Cargo.toml" = "measured"
+"kernel/crates/shrike_link/Cargo.toml" = "measured"
+"firmware/shrike/control/Cargo.toml" = "measured"
+"firmware/shrike/simulation/Cargo.toml" = "measured"
+"kernel/demos/riscv/Cargo.toml" = "experimental-target"
+"firmware/shrike/rp2040/Cargo.toml" = "hardware-hil"
+"userspace/benchmarks/system/Cargo.toml" = "target-image"
+"userspace/tools/bpf_loader/Cargo.toml" = "target-image"
+"userspace/demos/file_io_demo/Cargo.toml" = "target-image"
+"userspace/core/file_structure/Cargo.toml" = "measured"
+"userspace/demos/fork_test/Cargo.toml" = "target-image"
+"userspace/demos/gpio_demo/Cargo.toml" = "target-image"
+"userspace/demos/iio_demo/Cargo.toml" = "target-image"
+"userspace/core/init/Cargo.toml" = "target-image"
+"userspace/core/minilib/Cargo.toml" = "target-image"
+"userspace/demos/pwm_demo/Cargo.toml" = "target-image"
+"userspace/tools/rk_bridge/Cargo.toml" = "measured"
+"userspace/tools/rk_bridge/fuzz/Cargo.toml" = "fuzz-harness"
+"userspace/tools/rk_cli/Cargo.toml" = "measured"
+"userspace/tools/rk_uart_forwarder/Cargo.toml" = "target-image"
+"userspace/demos/safety_demo/Cargo.toml" = "target-image"
+"userspace/demos/sched_switch_bridge_demo/Cargo.toml" = "target-image"
+"userspace/demos/sched_switch_demo/Cargo.toml" = "target-image"
+"userspace/demos/sched_switch_export_demo/Cargo.toml" = "target-image"
+"userspace/tools/signed_bpf_loader/Cargo.toml" = "target-image"
+"userspace/demos/sys_exit_demo/Cargo.toml" = "target-image"
+"userspace/demos/syscall_demo/Cargo.toml" = "target-image"
+"userspace/demos/timeseries_demo/Cargo.toml" = "target-image"
+"userspace/benchmarks/verifier/Cargo.toml" = "target-image"
+"formal/lakefile.toml" = "formal-proof"
+
+[[coverage]]
+name = "axiomos-host-runner"
+component = "Cargo.toml"
+package = "axiomos"
+mode = "workspace"
+features = ["host-runner-tests"]
+no_default_features = true
+minimum_lines = 80.0
+minimum_branches = 99.0
+baseline_lines = 80.25
+baseline_branches = 100.0
+baseline_commit = "e495c43"
+
+[[coverage]]
+name = "xtask"
+component = "tools/xtask/Cargo.toml"
+package = "xtask"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 41.0
+minimum_branches = 59.0
+baseline_lines = 41.50
+baseline_branches = 59.0
+baseline_commit = "fdf8580"
+
+[[coverage]]
+name = "kernel-abi"
+component = "kernel/crates/kernel_abi/Cargo.toml"
+package = "kernel_abi"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 68.0
+minimum_branches = 0.0
+baseline_lines = 68.35
+baseline_branches = 0.0
+baseline_commit = "fdf8580"
+
+[[coverage]]
+name = "kernel-bpf-cloud"
+component = "kernel/crates/kernel_bpf/Cargo.toml"
+package = "kernel_bpf"
+mode = "workspace"
+features = ["cloud-profile"]
+no_default_features = true
+minimum_lines = 77.0
+minimum_branches = 63.0
+baseline_lines = 77.71
+baseline_branches = 63.43
+baseline_commit = "2c3bd2c"
+
+[[coverage]]
+name = "kernel-devfs"
+component = "kernel/crates/kernel_devfs/Cargo.toml"
+package = "kernel_devfs"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 91.0
+minimum_branches = 81.0
+baseline_lines = 91.11
+baseline_branches = 81.03
+baseline_commit = "fdf8580"
+
+[[coverage]]
+name = "kernel-device"
+component = "kernel/crates/kernel_device/Cargo.toml"
+package = "kernel_device"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 99.0
+minimum_branches = 99.0
+baseline_lines = 100.0
+baseline_branches = 100.0
+baseline_commit = "74bf881"
+
+[[coverage]]
+name = "kernel-elfloader"
+component = "kernel/crates/kernel_elfloader/Cargo.toml"
+package = "kernel_elfloader"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 83.0
+minimum_branches = 66.0
+baseline_lines = 83.29
+baseline_branches = 66.67
+baseline_commit = "2c3bd2c"
+
+[[coverage]]
+name = "kernel-map-transaction"
+component = "kernel/crates/kernel_map_transaction/Cargo.toml"
+package = "kernel_map_transaction"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 94.0
+minimum_branches = 99.0
+baseline_lines = 94.35
+baseline_branches = 100.0
+baseline_commit = "97f514c"
+
+[[coverage]]
+name = "kernel-pci"
+component = "kernel/crates/kernel_pci/Cargo.toml"
+package = "kernel_pci"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 47.0
+minimum_branches = 99.0
+baseline_lines = 47.86
+baseline_branches = 100.0
+baseline_commit = "31d373f"
+
+[[coverage]]
+name = "kernel-physical-memory"
+component = "kernel/crates/kernel_physical_memory/Cargo.toml"
+package = "kernel_physical_memory"
+mode = "workspace"
+features = ["fault-injection"]
+no_default_features = false
+minimum_lines = 94.0
+minimum_branches = 77.0
+baseline_lines = 94.71
+baseline_branches = 77.08
+baseline_commit = "a5316b4"
+
+[[coverage]]
+name = "kernel-run-queue"
+component = "kernel/crates/kernel_run_queue/Cargo.toml"
+package = "kernel_run_queue"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 97.0
+minimum_branches = 85.0
+baseline_lines = 97.18
+baseline_branches = 85.71
+baseline_commit = "e0272ca"
+
+[[coverage]]
+name = "kernel-syscall"
+component = "kernel/crates/kernel_syscall/Cargo.toml"
+package = "kernel_syscall"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 67.0
+minimum_branches = 77.0
+baseline_lines = 67.47
+baseline_branches = 77.08
+baseline_commit = "fdf8580"
+
+[[coverage]]
+name = "kernel-time"
+component = "kernel/crates/kernel_time/Cargo.toml"
+package = "kernel_time"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 96.0
+minimum_branches = 88.0
+baseline_lines = 96.76
+baseline_branches = 88.24
+baseline_commit = "fbaed42"
+
+[[coverage]]
+name = "kernel-usermem"
+component = "kernel/crates/kernel_usermem/Cargo.toml"
+package = "kernel_usermem"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 98.0
+minimum_branches = 86.0
+baseline_lines = 98.40
+baseline_branches = 86.67
+baseline_commit = "946c2d2"
+
+[[coverage]]
+name = "kernel-vfs"
+component = "kernel/crates/kernel_vfs/Cargo.toml"
+package = "kernel_vfs"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 93.0
+minimum_branches = 84.0
+baseline_lines = 93.26
+baseline_branches = 84.62
+baseline_commit = "fdf8580"
+
+[[coverage]]
+name = "kernel-virtual-memory"
+component = "kernel/crates/kernel_virtual_memory/Cargo.toml"
+package = "kernel_virtual_memory"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 99.0
+minimum_branches = 99.0
+baseline_lines = 100.0
+baseline_branches = 100.0
+baseline_commit = "fdf8580"
+
+[[coverage]]
+name = "shrike-link"
+component = "kernel/crates/shrike_link/Cargo.toml"
+package = "shrike_link"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 98.0
+minimum_branches = 94.0
+baseline_lines = 98.57
+baseline_branches = 94.44
+baseline_commit = "fdf8580"
+
+[[coverage]]
+name = "shrike-control"
+component = "firmware/shrike/control/Cargo.toml"
+package = "shrike_control"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 99.0
+minimum_branches = 91.0
+baseline_lines = 99.40
+baseline_branches = 91.18
+baseline_commit = "617ae0f"
+
+[[coverage]]
+name = "shrike-rp2040-host-sim"
+component = "firmware/shrike/simulation/Cargo.toml"
+package = "shrike_rp2040_host_sim"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 73.0
+minimum_branches = 49.0
+baseline_lines = 73.85
+baseline_branches = 50.0
+baseline_commit = "617ae0f"
+
+[[coverage]]
+name = "rk-bridge"
+component = "userspace/tools/rk_bridge/Cargo.toml"
+package = "rk_bridge"
+mode = "standalone"
+features = []
+no_default_features = false
+minimum_lines = 40.0
+minimum_branches = 56.0
+baseline_lines = 40.93
+baseline_branches = 56.25
+baseline_commit = "fdf8580"
+
+[[coverage]]
+name = "file-structure"
+component = "userspace/core/file_structure/Cargo.toml"
+package = "file_structure"
+mode = "workspace"
+features = []
+no_default_features = false
+minimum_lines = 99.0
+minimum_branches = 82.0
+baseline_lines = 100.0
+baseline_branches = 82.14
+baseline_commit = "9e1d6af"
+
+[[coverage]]
+name = "rk-cli"
+component = "userspace/tools/rk_cli/Cargo.toml"
+package = "rk-cli"
+mode = "standalone"
+features = []
+no_default_features = false
+minimum_lines = 62.0
+minimum_branches = 34.0
+baseline_lines = 62.80
+baseline_branches = 34.68
+baseline_commit = "97c1f91"
+
+[[mutation]]
+name = "elf-parser-loader"
+package = "kernel_elfloader"
+files = ["kernel/crates/kernel_elfloader/src/*.rs"]
+features = []
+no_default_features = false
+minimum_score = 80.0
+baseline_caught = 67
+baseline_missed = 15
+baseline_timeout = 0
+baseline_unviable = 36
+baseline_commit = "2c3bd2c"
+
+[[mutation]]
+name = "bpf-verifier-policy"
+package = "kernel_bpf"
+files = [
+  "kernel/crates/kernel_bpf/src/verifier/admission.rs",
+  "kernel/crates/kernel_bpf/src/verifier/cost.rs",
+  "kernel/crates/kernel_bpf/src/verifier/map_policy.rs",
+  "kernel/crates/kernel_bpf/src/verifier/refine.rs",
+]
+features = ["cloud-profile"]
+no_default_features = true
+minimum_score = 75.0
+baseline_caught = 72
+baseline_missed = 21
+baseline_timeout = 0
+baseline_unviable = 8
+baseline_commit = "2c3bd2c"
+
+[[mutation]]
+name = "shrike-link-protocol"
+package = "shrike_link"
+files = ["kernel/crates/shrike_link/src/*.rs"]
+features = []
+no_default_features = false
+minimum_score = 90.0
+baseline_caught = 143
+baseline_missed = 10
+baseline_timeout = 2
+baseline_unviable = 8
+baseline_commit = "2cd870d"
+evidence = "docs/reviews/releases/2026-07-engineering-audit/evidence/shrike-link-protocol.json"
+evidence_sha256 = "265b085181741ad7fe8cb06331706f5efc4f62d8b00a5388c3a73b039602d9dc"
+
+[[mutation]]
+name = "physical-memory-region"
+package = "kernel_physical_memory"
+files = ["kernel/crates/kernel_physical_memory/src/region.rs"]
+features = []
+no_default_features = false
+minimum_score = 90.0
+baseline_caught = 29
+baseline_missed = 2
+baseline_timeout = 0
+baseline_unviable = 3
+baseline_commit = "a5316b4"
+evidence = "docs/reviews/releases/2026-07-engineering-audit/evidence/physical-memory-region.json"
+evidence_sha256 = "ca44b1555e8d235b59057037f78b06c64cd7a185eadf38f14961e84bce5e35bd"

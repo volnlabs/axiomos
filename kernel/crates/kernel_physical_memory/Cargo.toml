@@ -3,8 +3,12 @@ name = "kernel_physical_memory"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+fault-injection = []
+
 [dependencies]
 thiserror.workspace = true
+spin.workspace = true
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86_64.workspace = true

@@ -170,7 +170,7 @@ pub fn init_task_stack(stack_top: usize, entry_point: usize, arg: usize) -> usiz
 /// `naked` attribute is used because this is a trampoline that doesn't follow
 /// standard C calling convention.
 #[unsafe(naked)]
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 pub unsafe extern "C" fn task_entry_trampoline() {
     core::arch::naked_asm!(
         // Marker: reached task entry trampoline.
@@ -194,7 +194,7 @@ pub unsafe extern "C" fn task_entry_trampoline() {
 }
 
 #[unsafe(naked)]
-#[cfg(not(feature = "rpi5"))]
+#[cfg(not(all(feature = "rpi5", feature = "bringup-diagnostics")))]
 pub unsafe extern "C" fn task_entry_trampoline() {
     core::arch::naked_asm!(
         // Enable interrupts
@@ -263,7 +263,7 @@ pub unsafe fn enter_userspace(entry_point: usize, stack_pointer: usize) -> ! {
     // Note: We MUST ensure we are using EL0t, which is mode 0.
     let spsr: u64 = 0;
 
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     // SAFETY: Marker write to Pi 5 debug UART10 via higher-half alias before ERET.
     unsafe {
         (0xFFFF_8010_7D00_1000 as *mut u32).write_volatile(b'X' as u32);

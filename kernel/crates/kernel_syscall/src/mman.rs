@@ -63,9 +63,11 @@ pub fn sys_mmap<Cx: MemoryRegionAccess>(
     let mapped_addr = cx
         .create_and_track_mapping(location, len, allocation_strategy, prot)
         .map_err(|e| match e {
+            crate::access::CreateMappingError::InvalidRequest => EINVAL,
             crate::access::CreateMappingError::LocationAlreadyMapped => EINVAL,
             crate::access::CreateMappingError::OutOfMemory => ENOMEM,
             crate::access::CreateMappingError::NotFound => EINVAL,
+            crate::access::CreateMappingError::Unsupported => EINVAL,
         })?;
 
     Ok(mapped_addr.addr())
@@ -88,6 +90,7 @@ mod tests {
     struct TestRegion {
         addr: UserspacePtr<u8>,
         size: usize,
+        protection: ProtFlags,
     }
 
     impl MemoryRegion for TestRegion {
@@ -97,6 +100,10 @@ mod tests {
 
         fn size(&self) -> usize {
             self.size
+        }
+
+        fn protection(&self) -> ProtFlags {
+            self.protection
         }
     }
 
@@ -149,7 +156,11 @@ mod tests {
 
             self.mappings.lock().push((addr, size, _protection));
 
-            let region = TestRegion { addr: ptr, size };
+            let region = TestRegion {
+                addr: ptr,
+                size,
+                protection: _protection,
+            };
             self.add_memory_region(region);
             Ok(ptr)
         }

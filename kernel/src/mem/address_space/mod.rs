@@ -8,6 +8,7 @@ use kernel_usermem::{UserMemError, UserMemPerm, UserMemResult, MAX_USER_COPY};
 use log::info;
 use mapper::AddressSpaceMapper;
 use spin::RwLock;
+use thiserror::Error;
 #[cfg(target_arch = "x86_64")]
 use x86_64::instructions::interrupts;
 #[cfg(target_arch = "x86_64")]
@@ -17,6 +18,8 @@ use x86_64::structures::paging::mapper::{FlagUpdateError, MapToError};
 #[cfg(target_arch = "x86_64")]
 use x86_64::structures::paging::{Mapper, PageTable, RecursivePageTable};
 
+#[cfg(target_arch = "aarch64")]
+use crate::arch::aarch64::paging::PageTableError;
 #[cfg(target_arch = "x86_64")]
 use crate::arch::types::Size4KiB;
 #[cfg(target_arch = "aarch64")]
@@ -50,10 +53,21 @@ use crate::mem::virt::{VirtualMemoryAllocator, VirtualMemoryHigherHalf};
 use crate::U64Ext;
 
 mod mapper;
+pub(crate) use mapper::MAP_RANGE_TRANSACTION_CAPACITY;
 
 static KERNEL_ADDRESS_SPACE: OnceCell<AddressSpace> = OnceCell::uninit();
 #[cfg(target_arch = "x86_64")]
 pub static RECURSIVE_INDEX: OnceCell<usize> = OnceCell::uninit();
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Error)]
+pub enum AddressSpaceForkError {
+    #[error("cannot fork an inactive address space")]
+    Inactive,
+    #[error("out of physical memory while copying the address space")]
+    OutOfPhysicalMemory,
+    #[error("failed to map a copied page into the child address space")]
+    MapPage,
+}
 
 pub fn init() {
     #[cfg(target_arch = "x86_64")]
@@ -622,6 +636,11 @@ impl AddressSpace {
 
     /// # Errors
     /// Returns an error if the pages are already mapped or flags are invalid.
+    ///
+    /// # Panics
+    /// Panics before changing page tables when the range exceeds
+    /// [`MAP_RANGE_TRANSACTION_CAPACITY`]. Large callers must split their
+    /// ranges into bounded transactions.
     #[cfg(target_arch = "x86_64")]
     pub fn map_range<S: PageSize>(
         &self,
@@ -639,6 +658,11 @@ impl AddressSpace {
 
     /// Map a range while transferring ownership of one frame reference per page.
     /// All transferred references are released if any page fails to map.
+    ///
+    /// # Panics
+    /// Panics before changing page tables when the range exceeds
+    /// [`MAP_RANGE_TRANSACTION_CAPACITY`]. Large callers must split their
+    /// ranges into bounded transactions.
     #[cfg(target_arch = "x86_64")]
     pub fn map_range_owned<S: PageSize>(
         &self,
@@ -746,12 +770,16 @@ impl AddressSpace {
     }
 
     #[cfg(target_arch = "aarch64")]
+    /// Map one 4 KiB page.
+    ///
+    /// # Panics
+    /// Panics before changing the page table when `S` is not `Size4KiB`.
     pub fn map<S: PageSize>(
         &self,
         page: Page<S>,
         frame: PhysFrame<S>,
         flags: PageTableFlags,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PageTableError> {
         let result = self.inner.write().map(page, frame, flags);
         if result.is_ok() {
             self.shootdown();
@@ -760,12 +788,17 @@ impl AddressSpace {
     }
 
     #[cfg(target_arch = "aarch64")]
+    /// Map a range of 4 KiB pages.
+    ///
+    /// # Panics
+    /// Panics before changing page tables when the range exceeds
+    /// [`MAP_RANGE_TRANSACTION_CAPACITY`] or when `S` is not `Size4KiB`.
     pub fn map_range<S: PageSize>(
         &self,
         pages: impl Into<PageRangeInclusive<S>>,
         frames: impl Iterator<Item = PhysFrame<S>>,
         flags: PageTableFlags,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PageTableError> {
         let result = self.inner.write().map_range(pages.into(), frames, flags);
         self.shootdown();
         result
@@ -773,13 +806,17 @@ impl AddressSpace {
 
     /// Map a range while transferring ownership of one frame reference per page.
     /// All transferred references are released if any page fails to map.
+    ///
+    /// # Panics
+    /// Panics before changing page tables when the range exceeds
+    /// [`MAP_RANGE_TRANSACTION_CAPACITY`] or when `S` is not `Size4KiB`.
     #[cfg(target_arch = "aarch64")]
     pub fn map_range_owned<S: PageSize>(
         &self,
         pages: impl Into<PageRangeInclusive<S>>,
         frames: impl Iterator<Item = PhysFrame<S>>,
         flags: PageTableFlags,
-    ) -> Result<(), &'static str>
+    ) -> Result<(), PageTableError>
     where
         PhysicalMemoryManager: PhysicalFrameAllocator<S>,
     {
@@ -810,7 +847,7 @@ impl AddressSpace {
         &self,
         page: Page<S>,
         f: F,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PageTableError> {
         self.inner.write().remap(page, &f)
     }
 
@@ -819,7 +856,7 @@ impl AddressSpace {
         &self,
         pages: impl Into<PageRangeInclusive<S>>,
         f: F,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PageTableError> {
         self.inner.write().remap_range(pages.into(), &f)
     }
 
@@ -830,7 +867,7 @@ impl AddressSpace {
     ///
     /// # Errors
     /// Returns an error if memory allocation fails.
-    pub fn fork(&self) -> Result<Self, &'static str> {
+    pub fn fork(&self) -> Result<Self, AddressSpaceForkError> {
         // 1. Create a new empty address space (this sets up kernel mappings)
         let new_as = Self::new();
 
@@ -844,7 +881,7 @@ impl AddressSpace {
         // Ensure we are active so we can read the user pages
         // (On x86_64, visit_user_pages relies on recursive mapping which requires activation)
         if !self.is_active() {
-            return Err("Cannot fork inactive address space");
+            return Err(AddressSpaceForkError::Inactive);
         }
 
         self.inner.read().visit_user_pages(|page, frame, flags| {
@@ -856,14 +893,14 @@ impl AddressSpace {
             let new_frame = match PhysicalMemory::allocate_frame() {
                 Some(f) => f,
                 None => {
-                    error = Some("Out of physical memory");
+                    error = Some(AddressSpaceForkError::OutOfPhysicalMemory);
                     return;
                 }
             };
 
             // Copy memory content
             // SAFETY: We are accessing valid physical frames. We use phys_to_virt to map them.
-            // On Axiom, all physical memory is mapped in the higher half.
+            // On axiomos, all physical memory is mapped in the higher half.
             unsafe {
                 let src_ptr =
                     crate::mem::phys_to_virt(frame.start_address().as_u64() as usize) as *const u8;
@@ -889,12 +926,12 @@ impl AddressSpace {
                 // On x86_64, `map` returns Result<(), MapToError>. On AArch64, Result<(), &str>
                 #[cfg(target_arch = "x86_64")]
                 if active_as.map(page, frame, flags).is_err() {
-                    return Err("Failed to map page");
+                    return Err(AddressSpaceForkError::MapPage);
                 }
 
                 #[cfg(target_arch = "aarch64")]
                 if active_as.map(page, frame, flags).is_err() {
-                    return Err("Failed to map page");
+                    return Err(AddressSpaceForkError::MapPage);
                 }
             }
             Ok(())

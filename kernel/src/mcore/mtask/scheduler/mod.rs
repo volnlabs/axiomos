@@ -5,7 +5,11 @@ use core::arch::x86_64::_fxsave;
 use core::cell::UnsafeCell;
 use core::mem::swap;
 use core::pin::Pin;
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use cleanup::TaskCleanup;
@@ -19,22 +23,43 @@ use crate::arch::aarch64::Aarch64 as Arch;
 #[cfg(all(target_arch = "aarch64", feature = "aarch64_arch"))]
 use crate::arch::traits::Architecture;
 use crate::mcore::context::ExecutionContext;
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 use crate::mcore::mtask::process::Process;
-use crate::mcore::mtask::scheduler::global::GlobalTaskQueue;
+use crate::mcore::mtask::scheduler::run_queue::RunQueues;
+use crate::mcore::mtask::scheduler::sleep::TaskSleep;
 use crate::mcore::mtask::scheduler::switch::switch_impl;
-use crate::mcore::mtask::task::Task;
+use crate::mcore::mtask::task::{State, Task};
 
 pub mod cleanup;
-pub mod global;
+pub mod run_queue;
+pub mod sleep;
 mod switch;
+pub mod wait;
+mod wait_channel;
+mod wait_protocol;
 
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 static SCHED_SWITCH_MARKER_SENT: AtomicBool = AtomicBool::new(false);
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 static SCHED_SWITCH_TARGET_MARKER_SENT: AtomicBool = AtomicBool::new(false);
 
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 #[inline(always)]
 fn dbg_mark(_ch: u32) {
     // SAFETY: Write to Pi 5 debug UART10 data register.
@@ -43,7 +68,11 @@ fn dbg_mark(_ch: u32) {
     }
 }
 
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 #[inline(always)]
 fn dbg_hex_nibble(n: u8) -> u32 {
     let v = n & 0x0F;
@@ -97,10 +126,10 @@ impl ContextSwitch {
 
 impl Scheduler {
     #[must_use]
-    pub fn new_cpu_local() -> Self {
+    pub fn new_cpu_local(cpu_id: usize) -> Self {
         // SAFETY: We are creating a task representing the current CPU execution state.
         // This is done once per CPU during initialization.
-        let current_task = Box::pin(unsafe { Task::create_current() });
+        let current_task = Box::pin(unsafe { Task::create_current(cpu_id) });
         Self {
             current_task,
             zombie_task: None,
@@ -129,8 +158,15 @@ impl Scheduler {
             // log::info!("reschedule: cleaning up zombie task {}", zombie_task.id());
             if zombie_task.should_terminate() {
                 TaskCleanup::enqueue(zombie_task);
+            } else if zombie_task.state() == State::Sleeping {
+                TaskSleep::enqueue(zombie_task);
+            } else if zombie_task.state() == State::Waiting {
+                let mut zombie_task = zombie_task;
+                let registration = zombie_task.take_wait_registration();
+                registration.park(zombie_task);
             } else {
-                GlobalTaskQueue::enqueue(zombie_task);
+                zombie_task.mark_ready();
+                RunQueues::enqueue(zombie_task);
             }
         }
 
@@ -143,11 +179,19 @@ impl Scheduler {
                 return None;
             };
 
-            #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+            #[cfg(all(
+                target_arch = "aarch64",
+                feature = "rpi5",
+                feature = "bringup-diagnostics"
+            ))]
             if !SCHED_SWITCH_MARKER_SENT.swap(true, Ordering::Relaxed) {
                 dbg_mark(b's' as u32);
             }
-            #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+            #[cfg(all(
+                target_arch = "aarch64",
+                feature = "rpi5",
+                feature = "bringup-diagnostics"
+            ))]
             if !SCHED_SWITCH_TARGET_MARKER_SENT.swap(true, Ordering::Relaxed) {
                 // k: switched to root-process kernel task
                 // j: switched to non-root process task (expected for /bin/init)
@@ -165,6 +209,8 @@ impl Scheduler {
             }
 
             log::trace!("reschedule: switching to task {}", next_task.id());
+            next_task.set_last_cpu(ExecutionContext::load().cpu_id());
+            next_task.mark_running();
 
             next_task
                 .process()
@@ -256,6 +302,10 @@ impl Scheduler {
         &self.current_task
     }
 
+    pub(crate) fn current_task_mut(&mut self) -> &mut Task {
+        self.current_task.as_mut().get_mut()
+    }
+
     fn swap_current_task(&mut self, next_task: Pin<Box<Task>>) -> Pin<Box<Task>> {
         let mut next_task = next_task;
         swap(&mut self.current_task, &mut next_task);
@@ -264,6 +314,6 @@ impl Scheduler {
 
     #[allow(clippy::unused_self)]
     fn next_task(&self) -> Option<Pin<Box<Task>>> {
-        GlobalTaskQueue::dequeue()
+        RunQueues::dequeue()
     }
 }

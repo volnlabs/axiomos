@@ -1,0 +1,45 @@
+[package]
+name = "rk_bridge"
+version = "0.1.0"
+edition = "2021"
+description = "Bridge rkBPF kernel events to ROS2 topics"
+license = "MIT"
+
+# Standalone package, not part of the kernel workspace
+[workspace]
+
+[features]
+default = []
+# Enable actual ROS2 integration via the `ros2` CLI on the host.
+ros2 = []
+
+[dependencies]
+kernel_abi = { path = "../../../kernel/crates/kernel_abi" }
+
+# Memory mapping for ring buffer access
+libc = "0.2"
+
+# Serialization for events
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# CLI parsing
+clap = { version = "4.0", features = ["derive"] }
+
+# Async runtime for event processing
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Signal handling
+ctrlc = "3.4"
+
+[[bin]]
+name = "rk-to-ros"
+path = "src/main.rs"
