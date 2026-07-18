@@ -78,8 +78,8 @@ pub const BPF_RINGBUF_POLL: u32 = 37; // Custom command for polling ringbuf even
 // with the `verifier-cost` measurement feature; rejected otherwise.
 // attach_prog_fd = program id, attach_btf_id = run count.
 pub const BPF_BENCH_EXEC: u32 = 100;
-/// Custom lifecycle commands. Raw object IDs are tombstoned rather than reused
-/// until the ABI grows owned, generational per-process descriptors.
+/// Custom lifecycle commands. Object handles encode a slot plus generation;
+/// reclaimed slots can be reused without allowing stale-handle aliasing.
 pub const BPF_PROG_UNLOAD: u32 = 101;
 pub const BPF_MAP_DESTROY: u32 = 102;
 pub const BPF_OBJ_UNPIN: u32 = 103;

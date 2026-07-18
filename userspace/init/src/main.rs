@@ -47,8 +47,10 @@ pub extern "C" fn _start() -> ! {
     }
 
     if bpf_owner_exit_probe() {
+        write(1, b"BPF_HANDLE_REUSE_OK\n");
         write(1, b"BPF_OWNER_EXIT_OK\n");
     } else {
+        write(1, b"BPF_HANDLE_REUSE_FAIL\n");
         write(1, b"BPF_OWNER_EXIT_FAIL\n");
     }
 
@@ -367,11 +369,44 @@ fn bpf_owner_exit_probe() -> bool {
             insns: 8 | (1u64 << 32),
             ..kernel_abi::BpfAttr::default()
         };
-        let map_id = minilib::bpf(
+        let first_map = minilib::bpf(
             kernel_abi::BPF_MAP_CREATE as i32,
             (&raw const map_attr).cast(),
             core::mem::size_of::<kernel_abi::BpfAttr>() as i32,
         );
+        if first_map < 0 {
+            minilib::exit(120);
+        }
+        let destroy_map = kernel_abi::BpfAttr {
+            map_fd: first_map as u32,
+            ..kernel_abi::BpfAttr::default()
+        };
+        if minilib::bpf(
+            kernel_abi::BPF_MAP_DESTROY as i32,
+            (&raw const destroy_map).cast(),
+            core::mem::size_of::<kernel_abi::BpfAttr>() as i32,
+        ) != 0
+        {
+            minilib::exit(121);
+        }
+        let second_map = minilib::bpf(
+            kernel_abi::BPF_MAP_CREATE as i32,
+            (&raw const map_attr).cast(),
+            core::mem::size_of::<kernel_abi::BpfAttr>() as i32,
+        );
+        if second_map < 0
+            || second_map == first_map
+            || !expect_errno(
+                minilib::bpf(
+                    kernel_abi::BPF_MAP_DESTROY as i32,
+                    (&raw const destroy_map).cast(),
+                    core::mem::size_of::<kernel_abi::BpfAttr>() as i32,
+                ) as usize,
+                kernel_abi::ENOENT,
+            )
+        {
+            minilib::exit(122);
+        }
         let insns = [
             BpfInsn {
                 opcode: 0xb7,
@@ -391,16 +426,45 @@ fn bpf_owner_exit_probe() -> bool {
             insns: insns.as_ptr() as u64,
             ..kernel_abi::BpfAttr::default()
         };
-        let program_id = minilib::bpf(
+        let first_program = minilib::bpf(
             kernel_abi::BPF_PROG_LOAD as i32,
             (&raw const program_attr).cast(),
             core::mem::size_of::<kernel_abi::BpfAttr>() as i32,
         );
-        minilib::exit(if map_id >= 0 && program_id >= 0 {
-            0
-        } else {
-            125
-        });
+        if first_program < 0 {
+            minilib::exit(123);
+        }
+        let unload_program = kernel_abi::BpfAttr {
+            attach_prog_fd: first_program as u32,
+            ..kernel_abi::BpfAttr::default()
+        };
+        if minilib::bpf(
+            kernel_abi::BPF_PROG_UNLOAD as i32,
+            (&raw const unload_program).cast(),
+            core::mem::size_of::<kernel_abi::BpfAttr>() as i32,
+        ) != 0
+        {
+            minilib::exit(124);
+        }
+        let second_program = minilib::bpf(
+            kernel_abi::BPF_PROG_LOAD as i32,
+            (&raw const program_attr).cast(),
+            core::mem::size_of::<kernel_abi::BpfAttr>() as i32,
+        );
+        if second_program < 0
+            || second_program == first_program
+            || !expect_errno(
+                minilib::bpf(
+                    kernel_abi::BPF_PROG_UNLOAD as i32,
+                    (&raw const unload_program).cast(),
+                    core::mem::size_of::<kernel_abi::BpfAttr>() as i32,
+                ) as usize,
+                kernel_abi::ENOENT,
+            )
+        {
+            minilib::exit(125);
+        }
+        minilib::exit(0);
     }
 
     let mut status = 0;

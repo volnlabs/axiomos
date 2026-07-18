@@ -5,7 +5,7 @@ use kernel_abi::{
     BpfAttr, BpfObjectInfo, BPF_MAP_CREATE, BPF_MAP_DELETE_ELEM, BPF_MAP_DESTROY,
     BPF_MAP_LOOKUP_ELEM, BPF_MAP_UPDATE_ELEM, BPF_OBJ_GET, BPF_OBJ_GET_INFO_BY_FD, BPF_OBJ_PIN,
     BPF_OBJ_UNPIN, BPF_PROG_ATTACH, BPF_PROG_DETACH, BPF_PROG_LOAD, BPF_PROG_LOAD_ELF,
-    BPF_PROG_UNLOAD, BPF_RINGBUF_POLL,
+    BPF_PROG_UNLOAD, BPF_RINGBUF_POLL, EBUSY, EINVAL, ENOENT, ENOMEM, EPERM,
 };
 use kernel_bpf::bytecode::insn::BpfInsn;
 use kernel_bpf::execution::BpfError;
@@ -18,11 +18,13 @@ use crate::BPF_MANAGER;
 
 fn bpf_error_errno(error: BpfError) -> isize {
     match error {
-        BpfError::OutOfMemory | BpfError::ResourceLimit => -12, // ENOMEM
-        BpfError::ObjectBusy => -16,                            // EBUSY
-        BpfError::NotLoaded => -2,                              // ENOENT
-        BpfError::ReadOnlyMap | BpfError::SignatureRejected | BpfError::PermissionDenied => -1, // EPERM
-        _ => -22, // EINVAL
+        BpfError::OutOfMemory | BpfError::ResourceLimit => -isize::from(ENOMEM),
+        BpfError::ObjectBusy => -isize::from(EBUSY),
+        BpfError::NotLoaded => -isize::from(ENOENT),
+        BpfError::ReadOnlyMap | BpfError::SignatureRejected | BpfError::PermissionDenied => {
+            -isize::from(EPERM)
+        }
+        _ => -isize::from(EINVAL),
     }
 }
 

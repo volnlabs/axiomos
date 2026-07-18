@@ -37,7 +37,7 @@ QEMU access; the manifest records the skipped boot gate.
 The required gate fails if any selected command fails or if QEMU misses
 `QEMU_BOOT_OK`, `USERCOPY_EFAULT_OK`, `UNKNOWN_SYSCALL_ENOSYS_OK`,
 `TLB_SHOOTDOWN_OK`, `LIFECYCLE_EXIT_WAIT_OK`, `LIFECYCLE_FAULT_WAIT_OK`,
-`LIFECYCLE_EXEC_REJECT_OK`, `LIFECYCLE_EXEC_WAIT_OK`, `BPF_OWNER_EXIT_OK`,
-`BPF_OWNER_RECLAIM_OK`, or evidence that a
+`LIFECYCLE_EXEC_REJECT_OK`, `LIFECYCLE_EXEC_WAIT_OK`, `BPF_HANDLE_REUSE_OK`,
+`BPF_OWNER_EXIT_OK`, `BPF_OWNER_RECLAIM_OK`, or evidence that a
 userspace process started. GitHub quota or runner status is deliberately not
 consulted.

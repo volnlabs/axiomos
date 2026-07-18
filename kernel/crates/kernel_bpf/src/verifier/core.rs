@@ -76,11 +76,29 @@ pub struct VerifyConfig<'a> {
     /// legacy all-RW. Unavailable entries reject reads and writes; otherwise,
     /// writes require a known entry whose permission is RW.
     pub map_perms: &'a [MapPerm],
+    /// Generation for each map slot. Empty preserves the legacy raw-index ABI.
+    pub map_generations: &'a [u32],
+    /// Number of low handle bits containing the map slot index.
+    pub map_handle_slot_bits: u8,
     /// Privilege tier of the loading caller (#88). Gates the unprivileged-only
     /// restrictions. Defaults (via `LoadCaller::default()`) to `Privileged`, so
     /// `verify()` / `VerifyConfig::default()` and existing callers see no new
     /// rule.
     pub caller: LoadCaller,
+}
+
+fn map_handle_slot(id: u64, config: &VerifyConfig) -> Option<usize> {
+    if config.map_generations.is_empty() {
+        return usize::try_from(id).ok();
+    }
+    let bits = u32::from(config.map_handle_slot_bits);
+    if bits == 0 || bits >= u32::BITS || id > u64::from(u32::MAX) {
+        return None;
+    }
+    let id = id as u32;
+    let slot = (id & ((1u32 << bits) - 1)) as usize;
+    let generation = id >> bits;
+    (config.map_generations.get(slot).copied() == Some(generation)).then_some(slot)
 }
 
 /// Accessible byte size for a map-value pointer returned by a map-lookup helper
@@ -97,7 +115,7 @@ fn map_lookup_value_size(map_id_reg: &RegState, config: &VerifyConfig) -> Result
     match map_id_reg.scalar_value.and_then(|s| s.value) {
         // Known constant map id: exact size, or reject if it names no map.
         Some(id) => {
-            let index = usize::try_from(id).map_err(|_| id)?;
+            let index = map_handle_slot(id, config).ok_or(id)?;
             if matches!(config.map_perms.get(index), Some(MapPerm::Unavailable)) {
                 return Err(id);
             }
@@ -105,7 +123,9 @@ fn map_lookup_value_size(map_id_reg: &RegState, config: &VerifyConfig) -> Result
         }
         // Dynamic map id: bound to the smallest reachable map value (sound).
         None => {
-            if config.map_perms.contains(&MapPerm::Unavailable) {
+            if !config.map_generations.is_empty()
+                || config.map_perms.contains(&MapPerm::Unavailable)
+            {
                 return Err(u64::MAX);
             }
             Ok(table.iter().copied().min().unwrap_or(0))
@@ -126,9 +146,8 @@ fn map_lookup_writability(map_id_reg: &RegState, config: &VerifyConfig) -> MapWr
     let Some(id) = known_id else {
         return MapWritability::Unprovable;
     };
-    let Some(perm) = usize::try_from(id)
-        .ok()
-        .and_then(|idx| config.map_perms.get(idx))
+    let Some(perm) =
+        map_handle_slot(u64::from(id), config).and_then(|slot| config.map_perms.get(slot))
     else {
         return MapWritability::Unprovable;
     };
@@ -1876,6 +1895,28 @@ mod tests {
         };
         let r1 = RegState::scalar(Some(ScalarValue::constant(1)));
         assert_eq!(map_lookup_value_size(&r1, &cfg), Err(1));
+    }
+
+    #[test]
+    fn map_size_rejects_stale_generation_handle() {
+        const SLOT_BITS: u8 = 10;
+        let current_handle = (3u32 << SLOT_BITS) | 1;
+        let stale_handle = (2u32 << SLOT_BITS) | 1;
+        let cfg = VerifyConfig {
+            map_value_sizes: &[0, 16],
+            map_perms: &[MapPerm::Unavailable, MapPerm::ReadWrite],
+            map_generations: &[0, 3],
+            map_handle_slot_bits: SLOT_BITS,
+            ..VerifyConfig::default()
+        };
+
+        let current = RegState::scalar(Some(ScalarValue::constant(u64::from(current_handle))));
+        assert_eq!(map_lookup_value_size(&current, &cfg), Ok(16));
+        let stale = RegState::scalar(Some(ScalarValue::constant(u64::from(stale_handle))));
+        assert_eq!(
+            map_lookup_value_size(&stale, &cfg),
+            Err(u64::from(stale_handle))
+        );
     }
 
     /// A dynamic (non-constant) map id is bounded to the smallest reachable map
