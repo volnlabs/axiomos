@@ -69,7 +69,7 @@ jobs:
         run: |
           cargo fmt --all -- --check
       - name: Unsafe-code ledger
-        run: python3 -B scripts/unsafe-ledger.py --check
+        run: python3 -B scripts/verify/unsafe-ledger.py --check
       - name: Component inventory and generated documentation
         run: |
           cargo xtask inventory --check
@@ -106,13 +106,13 @@ jobs:
           rustup target add thumbv6m-none-eabi
           rustup target add riscv64gc-unknown-none-elf
       - name: Clippy (rk_bridge)
-        run: cargo clippy --manifest-path userspace/rk_bridge/Cargo.toml --lib -- -D clippy::all
+        run: cargo clippy --manifest-path userspace/tools/rk_bridge/Cargo.toml --lib -- -D clippy::all
       - name: Clippy (rk_cli)
         run: cargo clippy --manifest-path userspace/rk_cli/Cargo.toml -- -D clippy::all
       - name: Clippy (RP2040 firmware, debug)
-        run: cargo clippy --manifest-path firmware/shrike_rp2040/Cargo.toml --target thumbv6m-none-eabi -- -D clippy::all
+        run: cargo clippy --manifest-path firmware/shrike/rp2040/Cargo.toml --target thumbv6m-none-eabi -- -D clippy::all
       - name: Clippy (RP2040 firmware, release)
-        run: cargo clippy --manifest-path firmware/shrike_rp2040/Cargo.toml --target thumbv6m-none-eabi --release -- -D clippy::all
+        run: cargo clippy --manifest-path firmware/shrike/rp2040/Cargo.toml --target thumbv6m-none-eabi --release -- -D clippy::all
       - name: Clippy (RISC-V demo)
         # Audit fix R5: `--manifest-path` from the repository root does not
         # load kernel/demos/riscv/.cargo/config.toml, so the previous command
@@ -196,13 +196,13 @@ jobs:
       - name: Add RP2040 target
         run: rustup target add thumbv6m-none-eabi
       - name: Test rk_bridge
-        run: cargo test --manifest-path userspace/rk_bridge/Cargo.toml
+        run: cargo test --manifest-path userspace/tools/rk_bridge/Cargo.toml
       - name: Test rk_cli
         run: cargo test --manifest-path userspace/rk_cli/Cargo.toml
       - name: Test RP2040 firmware (debug)
-        run: cargo test --manifest-path firmware/shrike_rp2040/Cargo.toml --target thumbv6m-none-eabi --no-run
+        run: cargo test --manifest-path firmware/shrike/rp2040/Cargo.toml --target thumbv6m-none-eabi --no-run
       - name: Test RP2040 firmware (release)
-        run: cargo test --manifest-path firmware/shrike_rp2040/Cargo.toml --target thumbv6m-none-eabi --release --no-run
+        run: cargo test --manifest-path firmware/shrike/rp2040/Cargo.toml --target thumbv6m-none-eabi --release --no-run
 
   firmware-rp2040:
     name: "Firmware (RP2040)"
@@ -216,10 +216,10 @@ jobs:
           targets: thumbv6m-none-eabi
       - name: Check RP2040 firmware (debug)
         run: |
-          cargo check --manifest-path firmware/shrike_rp2040/Cargo.toml --target thumbv6m-none-eabi
+          cargo check --manifest-path firmware/shrike/rp2040/Cargo.toml --target thumbv6m-none-eabi
       - name: Check RP2040 firmware (release)
         run: |
-          cargo check --manifest-path firmware/shrike_rp2040/Cargo.toml --target thumbv6m-none-eabi --release
+          cargo check --manifest-path firmware/shrike/rp2040/Cargo.toml --target thumbv6m-none-eabi --release
 
   prepare-miri:
     name: "Prepare Miri"
@@ -351,7 +351,10 @@ jobs:
         - name: Build release (produces axiomos.iso + disk image)
           env:
             AXIOMOS_BOOT_TIMEOUT_SECS: "60"
-          run: cargo build --release --features audit-diagnostics
+          run: |
+            TRUSTED_KEY_FIXTURE="$(mktemp)"
+            printf '\xd7\x5a\x98\x01\x82\xb1\x0a\xb7\xd5\x4b\xfe\xd3\xc9\x64\x07\x3a\x0e\xe1\x72\xf3\xda\xa6\x23\x25\xaf\x02\x1a\x68\xf7\x07\x51\x1a' > "$TRUSTED_KEY_FIXTURE"
+            AXIOM_BPF_TRUSTED_KEY_PATH="$TRUSTED_KEY_FIXTURE" cargo build --release --features audit-diagnostics
         - name: Locate ISO and disk image
           id: artifacts
           run: |

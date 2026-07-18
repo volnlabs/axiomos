@@ -401,7 +401,7 @@ fn valid_section_and_symbol_names_are_returned() {
         .expect("symtab section present")
         .expect("symtab section parses");
 
-    assert_eq!(elf.section_name(symtab_header), Some(".symtab"));
+    assert_eq!(elf.section_name(&symtab_header), Some(".symtab"));
     assert_eq!(elf.sections_by_name(".symtab").count(), 1);
     assert_eq!(
         elf.section_headers_by_type(SectionHeaderType::SYMTAB)
@@ -415,7 +415,7 @@ fn valid_section_and_symbol_names_are_returned() {
     );
 
     let symtab = elf
-        .symtab_data(symtab_header)
+        .symtab_data(&symtab_header)
         .expect("symtab data is in bounds");
     let symbol = Symbol {
         name: 17,

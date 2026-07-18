@@ -5,7 +5,7 @@ This ledger turns every first-party Rust `unsafe` syntax site into an owned revi
 
 Run `cargo xtask check unsafe` before review. Run `python3 scripts/verify/unsafe-ledger.py --list` for the site-level TSV containing location, construct, owner, invariant, callers, tests, priority, and review date. Update [ledger.toml](ledger.toml) when an invariant, owner, or baseline changes, then run `python3 scripts/verify/unsafe-ledger.py --write`.
 
-Current snapshot: **676 sites in 121 files** (attribute 146, block 422, extern 25, function 61, impl 21, trait 1). Inventory fingerprint: `sha256:93dbfdff0b96812e2f3e1f5a6761fad4355e38b53b9eaa2b023678d93c8207e0`. All sites are classified by the obligations below.
+Current snapshot: **675 sites in 120 files** (attribute 146, block 421, extern 25, function 61, impl 21, trait 1). Inventory fingerprint: `sha256:9b42266d7d3e44820d56e1b28e646172435687d24b42277ea59a2e418781c5d0`. All sites are classified by the obligations below.
 
 | Obligation | Sites | Scope | Owner | Priority | Required invariant | Principal callers | Executable evidence | Reviewed |
 |---|---:|---|---|---|---|---|---|---|
@@ -33,7 +33,6 @@ Current snapshot: **676 sites in 121 files** (attribute 146, block 422, extern 2
 | ACTUATION-MMIO | 1 | production | actuation/Raspberry Pi maintainers | P1 | The RP1 GPIO register window is mapped for the kernel lifetime and the singleton peripheral is not accessed through competing mutable owners. | actuation initialization and watchdog-controlled GPIO paths | AArch64 target check and Raspberry Pi safety smoke; concurrent ownership and MMIO fault injection remain missing. | 2026-07-12 |
 | USERSPACE-ABI | 45 | production/demo | userspace/runtime maintainers | P1 | Syscall assembly and exported entrypoints obey the kernel ABI; raw event/ring buffers are aligned, initialized, bounded, and live while viewed. | userspace binaries, minilib, rk_bridge | Standalone workspace checks and QEMU userspace smoke; Miri for host-capable parsers and malformed ring/event inputs is incomplete. | 2026-07-12 |
 | FIRMWARE-MMIO | 1 | production/firmware | Shrike firmware maintainers | P1 | Peripheral singleton pointers are accessed with exclusive ownership and interrupt-safe synchronization for the firmware lifetime. | RP2040 control, motor, timer, and panic paths | thumbv6m target clippy/check; hardware concurrency and timer wraparound tests remain missing. | 2026-07-12 |
-| ELF-BYTE-VIEW | 1 | production | ELF loader maintainers | P1 | Typed ELF table views are aligned, fully in-bounds, correctly sized, and contain only values valid for the target zerocopy type. | ElfFile section/program/symbol parsing and exec | kernel_elfloader malformed-input suite and parse/load fuzz target; cross-endian ELF input is unsupported by contract. | 2026-07-12 |
 | SCHEDULER-RUN-QUEUE | 14 | production | kernel scheduler maintainers | P1 | Intrusive run-queue links, per-CPU queue ownership, and bounded stealing preserve task uniqueness and valid queue lifetimes across scheduler operations. | scheduler enqueue/dequeue and modeled queue consumers | kernel_run_queue unit tests and Loom concurrency model; SMP-4 wakeup/IPI integration remains pending. | 2026-07-17 |
 
 ## Review policy

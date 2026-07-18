@@ -86,13 +86,14 @@ where
         {
             let hdr = hdr.map_err(LoadElfError::Parse)?;
             trace!("load header {hdr:x?}");
-            let pdata = image.elf_file.program_data(hdr).ok_or(LoadElfError::Parse(
-                ElfParseError::SectionDataOutOfBounds {
+            let pdata = image
+                .elf_file
+                .program_data(&hdr)
+                .ok_or(LoadElfError::Parse(ElfParseError::SectionDataOutOfBounds {
                     offset: hdr.offset,
                     size: hdr.filesz,
                     source_len: image.elf_file.source.len(),
-                },
-            ))?;
+                }))?;
             if hdr.filesz > hdr.memsz {
                 return Err(LoadElfError::SegmentFileLargerThanMemory);
             }
@@ -152,13 +153,14 @@ where
         let tls = tls.map_err(LoadElfError::Parse)?;
         trace!("tls header {tls:x?}");
 
-        let pdata = image.elf_file.program_data(tls).ok_or(LoadElfError::Parse(
-            ElfParseError::SectionDataOutOfBounds {
+        let pdata = image
+            .elf_file
+            .program_data(&tls)
+            .ok_or(LoadElfError::Parse(ElfParseError::SectionDataOutOfBounds {
                 offset: tls.offset,
                 size: tls.filesz,
                 source_len: image.elf_file.source.len(),
-            },
-        ))?;
+            }))?;
         if tls.filesz > tls.memsz {
             return Err(LoadElfError::SegmentFileLargerThanMemory);
         }

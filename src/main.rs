@@ -42,8 +42,11 @@ fn qemu_command(args: &Args) -> std::process::Command {
     let mut cmd = std::process::Command::new("qemu-system-x86_64");
     cmd.current_dir(env!("CARGO_MANIFEST_DIR"));
 
+    let monitor_port =
+        std::env::var("AXIOMOS_QEMU_MONITOR_PORT").unwrap_or_else(|_| "45454".to_owned());
     cmd.arg("-serial").arg("stdio");
-    cmd.arg("-monitor").arg("telnet::45454,server,nowait");
+    cmd.arg("-monitor")
+        .arg(format!("telnet::{monitor_port},server,nowait"));
     cmd.arg("-s");
 
     if args.debug {
