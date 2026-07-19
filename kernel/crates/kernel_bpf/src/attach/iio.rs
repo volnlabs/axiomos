@@ -107,6 +107,9 @@ pub struct IioEvent {
     pub scale: u32,
     /// Offset
     pub offset: i32,
+    /// Reserved ABI word. This names the former trailing padding so every byte
+    /// is initialized when an event is exposed as BPF context data.
+    pub reserved: u32,
 }
 
 impl IioEvent {
@@ -239,6 +242,7 @@ mod tests {
             value: 1000,
             scale: 1_000_000, // 1.0
             offset: 0,
+            reserved: 0,
         };
         assert!((event.scaled_value() - 1000.0).abs() < 0.001);
     }

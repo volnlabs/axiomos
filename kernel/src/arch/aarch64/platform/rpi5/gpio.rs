@@ -332,6 +332,10 @@ pub fn handle_interrupt() {
 
     // Get timestamp at interrupt entry for accurate timing
     let timestamp = counter_to_ns(read_timer_counter());
+    // Bench (Task 11): stamp the cycle counter at IRQ entry so the actuation
+    // seam can report edge->actuate latency (M-C).
+    #[cfg(feature = "bench")]
+    crate::bench::mark_gpio_irq_entry();
 
     // Scan all pins for events
     for pin in 0..Rp1Gpio::NUM_PINS {
@@ -355,6 +359,24 @@ pub fn handle_interrupt() {
                     continue;
                 }
             };
+
+            // Bench (Task 11): the e-stop button is not a BPF attach — route its
+            // edge straight to the kernel-owned e-stop instead of dispatching.
+            #[cfg(feature = "bench")]
+            if pin == crate::bench::ESTOP_BUTTON_PIN {
+                // Resolve press vs release. With the external pull-up, pressed =
+                // pin low (falling edge). Edge 3 (both edges / bounce) is
+                // ambiguous, so fall back to the current pin level — a real press
+                // must never be dropped just because a release edge was coalesced.
+                let pressed = match edge {
+                    2 => true,            // falling: pressed
+                    1 => false,           // rising: released
+                    _ => !gpio.read(pin), // ambiguous: low level == pressed
+                };
+                gpio.clear_interrupt(pin);
+                crate::bench::handle_estop_button(pressed);
+                continue;
+            }
 
             // Read current pin value
             let value = if gpio.read(pin) { 1 } else { 0 };
@@ -381,24 +403,16 @@ pub fn handle_interrupt() {
 
             let ctx = kernel_bpf::execution::BpfContext::from_slice(slice);
 
-            // 3. Invoke BPF hooks (lock-free pattern)
-            //
-            // Clone programs and release lock BEFORE execution so that BPF
-            // helpers (e.g. bpf_gpio_write, bpf_ringbuf_output) can
-            // re-acquire the lock for map/GPIO operations without deadlocking.
-            if let Some(manager) = crate::BPF_MANAGER.get() {
-                let programs = manager
-                    .lock()
-                    .get_hook_programs(crate::bpf::ATTACH_TYPE_GPIO);
-                for (prog_id, program) in &programs {
-                    match crate::bpf::BpfManager::execute_program(program, &ctx) {
-                        Ok(_res) => {
-                            log::info!("GPIO BPF Hook [id={}] pin={} edge={}", prog_id, pin, edge);
-                        }
-                        Err(e) => log::error!("GPIO BPF Hook [id={}] failed: {:?}", prog_id, e),
-                    }
-                }
-            }
+            // 3. Execute the immutable route snapshot. Readers take no manager,
+            // allocator, logger, or refcount path in this IRQ context.
+            let fired = kernel_bpf::attach::GpioEdge::from_flags(edge);
+            let _ = crate::bpf::BpfManager::run_gpio_programs(0, pin, fired, &ctx);
         }
     }
+
+    // Bench (Task 11): bound the IRQ-entry stamp strictly to this interrupt. If no
+    // actuation consumed it (e.g. an edge on a pin with no attached program), drop
+    // it so it can never produce a bogus M-C line on a later, unrelated actuation.
+    #[cfg(feature = "bench")]
+    crate::bench::take_gpio_irq_entry();
 }

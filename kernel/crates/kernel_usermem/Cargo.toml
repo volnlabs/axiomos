@@ -1,0 +1,22 @@
+[package]
+name = "kernel_usermem"
+version = "0.1.0"
+edition = "2024"
+
+# Audit finding C-01: fault-safe user memory. The previous boundary
+# (`kernel_syscall::UserspacePtr` + `kernel/src/syscall/validation.rs`) only
+# validated the numeric address class and then dereferenced. Any unmapped
+# canonical address would panic the kernel.
+#
+# This crate defines the contract every user-memory accessor must honor:
+# walks the calling task's page tables, checks direction-specific permissions
+# for the *whole* range, copies in bounded chunks, and returns `UserMemError`
+# on any recoverable fault. PR #2 (this PR) ships the trait, types, and a
+# `MockUserMemory` test backend. A live kernel adapter (PR #2.2, blocked on
+# PR #3's exception/task-termination model) is the next step.
+
+[dependencies]
+kernel_abi = { path = "../kernel_abi" }
+kernel_virtual_memory = { path = "../kernel_virtual_memory" }
+
+thiserror.workspace = true

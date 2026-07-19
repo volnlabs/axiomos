@@ -23,16 +23,17 @@ use crate::bytecode::program::BpfProgram;
 use crate::bytecode::registers::{Register, RegisterFile};
 use crate::profile::{ActiveProfile, PhysicalProfile};
 use crate::verifier::HelperId;
+use crate::verifier::helpers::{RuntimeHelper, get_helper_descriptor};
 
 // SAFETY: These functions are defined in the kernel and linked into the final binary.
 // They follow the C calling convention which matches the interpreter's expectations.
 // In host-based tests, these symbols are provided by the `helpers_stub` module in `mod.rs`.
 unsafe extern "C" {
     fn bpf_ktime_get_ns() -> u64;
-    fn bpf_get_interrupt_latency_ns(ctx: *const BpfContext) -> u64;
-    fn bpf_get_boot_time_ms(ctx: *const BpfContext) -> u64;
-    fn bpf_get_kernel_heap_kb(ctx: *const BpfContext) -> u64;
-    fn bpf_get_kernel_image_mb(ctx: *const BpfContext) -> u64;
+    fn bpf_get_interrupt_latency_ns(ctx: *const BpfContext<'_>) -> u64;
+    fn bpf_get_boot_time_ms(ctx: *const BpfContext<'_>) -> u64;
+    fn bpf_get_kernel_heap_kb(ctx: *const BpfContext<'_>) -> u64;
+    fn bpf_get_kernel_image_mb(ctx: *const BpfContext<'_>) -> u64;
     fn bpf_trace_printk(fmt: *const u8, size: u32) -> i32;
     fn bpf_map_lookup_elem(map_id: u32, key: *const u8) -> *mut u8;
     fn bpf_map_update_elem(map_id: u32, key: *const u8, value: *const u8, flags: u64) -> i32;
@@ -42,7 +43,6 @@ unsafe extern "C" {
     // Robotics helpers
     fn bpf_gpio_read(pin: u32) -> i64;
     fn bpf_gpio_write(pin: u32, value: u32) -> i64;
-    fn bpf_motor_emergency_stop(reason: u32) -> i64;
     fn bpf_pwm_write(pwm_id: u32, channel: u32, duty: u32) -> i64;
 }
 
@@ -68,7 +68,7 @@ impl<P: PhysicalProfile> Interpreter<P> {
         insn: &BpfInsn,
         regs: &mut RegisterFile,
         stack: &mut [u8],
-        ctx: &BpfContext,
+        ctx: &BpfContext<'_>,
     ) -> Result<InsnResult, BpfError> {
         // Exit instruction
         if insn.is_exit() {
@@ -176,7 +176,7 @@ impl<P: PhysicalProfile> Interpreter<P> {
         insn: &BpfInsn,
         regs: &mut RegisterFile,
         is_64bit: bool,
-        ctx: &BpfContext,
+        ctx: &BpfContext<'_>,
     ) -> Result<InsnResult, BpfError> {
         let jmp_op = JmpOp::from_opcode(insn.opcode).ok_or(BpfError::InvalidInstruction)?;
 
@@ -239,7 +239,7 @@ impl<P: PhysicalProfile> Interpreter<P> {
         &self,
         insn: &BpfInsn,
         regs: &mut RegisterFile,
-        ctx: &BpfContext,
+        ctx: &BpfContext<'_>,
     ) -> Result<InsnResult, BpfError> {
         let helper_id = insn.imm;
 
@@ -266,59 +266,66 @@ impl<P: PhysicalProfile> Interpreter<P> {
         &self,
         helper_id: i32,
         args: [u64; 5],
-        ctx: &BpfContext,
+        ctx: &BpfContext<'_>,
     ) -> Result<u64, BpfError> {
+        let Some(id) = HelperId::from_raw(helper_id) else {
+            return Err(BpfError::InvalidHelper(helper_id));
+        };
+        let Some(runtime) = get_helper_descriptor(id).runtime() else {
+            return Err(BpfError::InvalidHelper(helper_id));
+        };
+
         // SAFETY: Calling BPF helpers is inherently unsafe as they are extern "C" functions.
         // We rely on the BPF verifier (in a full implementation) to ensure arguments are valid.
         // In this interpreter, we assume arguments are reasonably well-formed or the helper handles invalid inputs.
-        // Dispatch keys off `HelperId` (the shared ABI enum) rather than bare
-        // literals, so the interpreter and verifier can never disagree on which
-        // number means which helper (#121).
+        // Dispatch uses the runtime operation paired with the verifier signature.
         unsafe {
-            match HelperId::from_raw(helper_id) {
-                Some(HelperId::KtimeGetNs) => Ok(bpf_ktime_get_ns()),
+            match runtime {
+                RuntimeHelper::KtimeGetNs => Ok(bpf_ktime_get_ns()),
 
-                Some(HelperId::GetInterruptLatencyNs) => {
-                    Ok(bpf_get_interrupt_latency_ns(ctx as *const BpfContext))
+                RuntimeHelper::GetInterruptLatencyNs => {
+                    Ok(bpf_get_interrupt_latency_ns(ctx as *const BpfContext<'_>))
                 }
 
-                Some(HelperId::GetBootTimeMs) => Ok(bpf_get_boot_time_ms(ctx as *const BpfContext)),
-
-                Some(HelperId::GetKernelHeapKb) => {
-                    Ok(bpf_get_kernel_heap_kb(ctx as *const BpfContext))
+                RuntimeHelper::GetBootTimeMs => {
+                    Ok(bpf_get_boot_time_ms(ctx as *const BpfContext<'_>))
                 }
 
-                Some(HelperId::GetKernelImageMb) => {
-                    Ok(bpf_get_kernel_image_mb(ctx as *const BpfContext))
+                RuntimeHelper::GetKernelHeapKb => {
+                    Ok(bpf_get_kernel_heap_kb(ctx as *const BpfContext<'_>))
                 }
 
-                Some(HelperId::TracePrintk) => {
+                RuntimeHelper::GetKernelImageMb => {
+                    Ok(bpf_get_kernel_image_mb(ctx as *const BpfContext<'_>))
+                }
+
+                RuntimeHelper::TracePrintk => {
                     Ok(bpf_trace_printk(args[0] as *const u8, args[1] as u32) as u64)
                 }
 
-                Some(HelperId::MapLookupElem) => {
+                RuntimeHelper::MapLookupElem => {
                     Ok(bpf_map_lookup_elem(args[0] as u32, args[1] as *const u8) as u64)
                 }
 
-                Some(HelperId::MapUpdateElem) => Ok(bpf_map_update_elem(
+                RuntimeHelper::MapUpdateElem => Ok(bpf_map_update_elem(
                     args[0] as u32,
                     args[1] as *const u8,
                     args[2] as *const u8,
                     args[3],
                 ) as u64),
 
-                Some(HelperId::MapDeleteElem) => {
+                RuntimeHelper::MapDeleteElem => {
                     Ok(bpf_map_delete_elem(args[0] as u32, args[1] as *const u8) as u64)
                 }
 
-                Some(HelperId::RingbufOutput) => {
+                RuntimeHelper::RingbufOutput => {
                     Ok(
                         bpf_ringbuf_output(args[0] as u32, args[1] as *const u8, args[2], args[3])
                             as u64,
                     )
                 }
 
-                Some(HelperId::TimeseriesPush) => Ok(bpf_timeseries_push(
+                RuntimeHelper::TimeseriesPush => Ok(bpf_timeseries_push(
                     args[0] as u32,
                     args[1] as *const u8,
                     args[2] as *const u8,
@@ -326,23 +333,14 @@ impl<P: PhysicalProfile> Interpreter<P> {
 
                 // Robotics Helpers
                 // bpf_gpio_set (1003) -> bpf_gpio_write
-                Some(HelperId::GpioSet) => {
-                    Ok(bpf_gpio_write(args[0] as u32, args[1] as u32) as u64)
-                }
+                RuntimeHelper::GpioSet => Ok(bpf_gpio_write(args[0] as u32, args[1] as u32) as u64),
 
                 // bpf_gpio_get (1004) -> bpf_gpio_read
-                Some(HelperId::GpioGet) => Ok(bpf_gpio_read(args[0] as u32) as u64),
+                RuntimeHelper::GpioGet => Ok(bpf_gpio_read(args[0] as u32) as u64),
 
-                Some(HelperId::MotorEmergencyStop) => {
-                    Ok(bpf_motor_emergency_stop(args[0] as u32) as u64)
-                }
-
-                Some(HelperId::PwmWrite) => {
+                RuntimeHelper::PwmWrite => {
                     Ok(bpf_pwm_write(args[0] as u32, args[1] as u32, args[2] as u32) as u64)
                 }
-
-                // Known to the verifier but not yet implemented here, or unknown.
-                _ => Err(BpfError::InvalidHelper(helper_id)),
             }
         }
     }
@@ -353,7 +351,7 @@ impl<P: PhysicalProfile> Interpreter<P> {
         insn: &BpfInsn,
         regs: &mut RegisterFile,
         stack: &[u8],
-        ctx: &BpfContext,
+        ctx: &BpfContext<'_>,
     ) -> Result<(), BpfError> {
         let dst = Register::from_raw(insn.dst_reg()).ok_or(BpfError::InvalidInstruction)?;
         let src = Register::from_raw(insn.src_reg()).ok_or(BpfError::InvalidInstruction)?;
@@ -405,7 +403,7 @@ impl<P: PhysicalProfile> Interpreter<P> {
         // 2. Context access
         // Check if address is within the BpfContext struct
         let ctx_addr = ctx as *const _ as u64;
-        let ctx_size = core::mem::size_of::<BpfContext>() as u64;
+        let ctx_size = core::mem::size_of::<BpfContext<'_>>() as u64;
 
         if addr >= ctx_addr && addr + size.size_bytes() as u64 <= ctx_addr + ctx_size {
             // SAFETY: We verified the address and size are within the bounds of the context struct.
@@ -424,10 +422,12 @@ impl<P: PhysicalProfile> Interpreter<P> {
 
         // 3. Data access
         // Check if address is within [ctx.data, ctx.data_end)
-        let data_start = ctx.data as u64;
-        let data_end = ctx.data_end as u64;
+        let data_start = ctx.data_ptr() as u64;
+        let data_end = ctx.data_end_ptr() as u64;
 
-        if !ctx.data.is_null() && addr >= data_start && addr + size.size_bytes() as u64 <= data_end
+        if !ctx.data_ptr().is_null()
+            && addr >= data_start
+            && addr + size.size_bytes() as u64 <= data_end
         {
             // SAFETY: We verified the address and size are within the valid data range [data, data_end).
             // read_unaligned is used because packet data may be unaligned.
@@ -551,19 +551,38 @@ impl<P: PhysicalProfile> Default for Interpreter<P> {
     }
 }
 
-impl<P: PhysicalProfile> BpfExecutor<P> for Interpreter<P> {
-    fn execute(&self, program: &BpfProgram<P>, ctx: &BpfContext) -> BpfResult {
+impl<P: PhysicalProfile> Interpreter<P> {
+    /// Execute a program using a caller-provided stack buffer, allocating
+    /// nothing on the hot path.
+    ///
+    /// `stack` must be at least `P::MAX_STACK_SIZE` bytes; the leading
+    /// `MAX_STACK_SIZE` bytes are zeroed and used as the BPF stack frame. This
+    /// is the form the kernel's per-hook execution path calls so that no heap
+    /// allocation lands on an interrupt/real-time path — a heap allocation
+    /// there is both WCET-unsound (the admitted cycle bound does not model
+    /// allocator latency) and, in IRQ context, a deadlock hazard against the
+    /// global heap lock. See issue #181.
+    pub fn execute_with_stack(
+        &self,
+        program: &BpfProgram<P>,
+        ctx: &BpfContext<'_>,
+        stack: &mut [u8],
+    ) -> BpfResult {
         let insns = program.instructions();
 
         if insns.is_empty() {
             return Err(BpfError::NotLoaded);
         }
 
+        if stack.len() < P::MAX_STACK_SIZE {
+            return Err(BpfError::OutOfBounds);
+        }
+        let stack = &mut stack[..P::MAX_STACK_SIZE];
+        let used_stack_start = P::MAX_STACK_SIZE - program.stack_size();
+        stack[used_stack_start..].fill(0);
+
         // Initialize register file
         let mut regs = RegisterFile::new();
-
-        // Allocate stack
-        let mut stack = vec![0u8; P::MAX_STACK_SIZE];
 
         // R1 = context pointer
         regs.set(Register::R1, ctx as *const _ as u64);
@@ -571,7 +590,7 @@ impl<P: PhysicalProfile> BpfExecutor<P> for Interpreter<P> {
         // R10 = frame pointer (top of stack)
         let fp = stack.as_ptr() as u64 + P::MAX_STACK_SIZE as u64;
         // SAFETY: We are initializing the frame pointer R10 with a valid stack address.
-        // This is safe because we just allocated the stack.
+        // The stack slice is live for the duration of this call.
         unsafe {
             regs.set_unchecked(Register::R10, fp);
         }
@@ -611,7 +630,7 @@ impl<P: PhysicalProfile> BpfExecutor<P> for Interpreter<P> {
             }
 
             // Execute instruction
-            match self.execute_insn(insn, &mut regs, &mut stack, ctx)? {
+            match self.execute_insn(insn, &mut regs, stack, ctx)? {
                 InsnResult::Continue => {
                     pc += 1;
                 }
@@ -627,6 +646,18 @@ impl<P: PhysicalProfile> BpfExecutor<P> for Interpreter<P> {
                 }
             }
         }
+    }
+}
+
+impl<P: PhysicalProfile> BpfExecutor<P> for Interpreter<P> {
+    /// Convenience entry point that allocates a fresh stack per call.
+    ///
+    /// Suitable for tests, benchmarks, and any cold path. The kernel's hot
+    /// execution path calls [`Interpreter::execute_with_stack`] with a reused
+    /// buffer instead — see #181.
+    fn execute(&self, program: &BpfProgram<P>, ctx: &BpfContext<'_>) -> BpfResult {
+        let mut stack = vec![0u8; P::MAX_STACK_SIZE];
+        self.execute_with_stack(program, ctx, &mut stack)
     }
 }
 
@@ -668,6 +699,67 @@ mod tests {
 
         let result = interpreter.execute(&program, &ctx);
         assert_eq!(result, Ok(42));
+    }
+
+    #[test]
+    fn execute_with_stack_matches_execute_and_rejects_small_buffer() {
+        let program = ProgramBuilder::<ActiveProfile>::new(BpfProgType::SocketFilter)
+            .insn(BpfInsn::mov64_imm(0, 42))
+            .exit()
+            .build()
+            .expect("valid program");
+        let interpreter = Interpreter::<ActiveProfile>::new();
+        let ctx = BpfContext::empty();
+
+        // A caller-provided, reusable buffer gives the same result as the
+        // allocating path — and a reused buffer stays correct across fires (#181).
+        let mut stack = vec![0u8; ActiveProfile::MAX_STACK_SIZE];
+        assert_eq!(
+            interpreter.execute_with_stack(&program, &ctx, &mut stack),
+            Ok(42)
+        );
+        assert_eq!(
+            interpreter.execute_with_stack(&program, &ctx, &mut stack),
+            Ok(42)
+        );
+        assert_eq!(interpreter.execute(&program, &ctx), Ok(42));
+
+        // A stack-free verified program must not clear unrelated scratch bytes.
+        let mut untouched = vec![0xa5; ActiveProfile::MAX_STACK_SIZE];
+        assert_eq!(
+            interpreter.execute_with_stack(&program, &ctx, &mut untouched),
+            Ok(42)
+        );
+        assert!(untouched.iter().all(|byte| *byte == 0xa5));
+
+        // Clearing is limited to the verifier-recorded suffix while preserving
+        // the fixed top-of-stack address used by R10.
+        let stack_program = ProgramBuilder::<ActiveProfile>::new(BpfProgType::SocketFilter)
+            .insn(BpfInsn::new(0x7a, 10, 0, -16, 42))
+            .insn(BpfInsn::mov64_imm(0, 0))
+            .exit()
+            .build()
+            .expect("valid stack program");
+        assert_eq!(stack_program.stack_size(), 16);
+        let mut reused = vec![0xa5; ActiveProfile::MAX_STACK_SIZE];
+        let cleared_from = ActiveProfile::MAX_STACK_SIZE - stack_program.stack_size();
+        assert_eq!(
+            interpreter.execute_with_stack(&stack_program, &ctx, &mut reused),
+            Ok(0)
+        );
+        assert!(reused[..cleared_from].iter().all(|byte| *byte == 0xa5));
+        assert_eq!(
+            &reused[cleared_from..cleared_from + 8],
+            &42i64.to_ne_bytes()
+        );
+        assert!(reused[cleared_from + 8..].iter().all(|byte| *byte == 0));
+
+        // An undersized buffer is refused, not a UB write past the end.
+        let mut small = vec![0u8; ActiveProfile::MAX_STACK_SIZE - 1];
+        assert_eq!(
+            interpreter.execute_with_stack(&program, &ctx, &mut small),
+            Err(BpfError::OutOfBounds)
+        );
     }
 
     #[test]
@@ -716,31 +808,38 @@ mod tests {
             .insn(BpfInsn::mov64_imm(0, 0)) // r0 = 0
             .insn(BpfInsn::ja(-1)) // infinite loop
             .exit()
-            .build()
-            .expect("valid program");
+            .build();
 
+        #[cfg(feature = "embedded-profile")]
+        {
+            assert!(program.is_err());
+            return;
+        }
+
+        #[cfg(feature = "cloud-profile")]
+        let program = program.expect("cloud profile permits loops with a runtime limit");
+
+        #[cfg(feature = "cloud-profile")]
         let interpreter = Interpreter::<ActiveProfile>::new();
+        #[cfg(feature = "cloud-profile")]
         let ctx = BpfContext::empty();
 
+        #[cfg(feature = "cloud-profile")]
         let result = interpreter.execute(&program, &ctx);
+        #[cfg(feature = "cloud-profile")]
         assert_eq!(result, Err(BpfError::Timeout));
     }
 
     #[test]
-    fn execute_division_by_zero() {
-        let program = ProgramBuilder::<ActiveProfile>::new(BpfProgType::SocketFilter)
+    fn verifier_rejects_division_by_zero_before_execution() {
+        let result = ProgramBuilder::<ActiveProfile>::new(BpfProgType::SocketFilter)
             .insn(BpfInsn::mov64_imm(0, 10)) // r0 = 10
             .insn(BpfInsn::mov64_imm(1, 0)) // r1 = 0
             .insn(BpfInsn::new(0x3f, 0, 1, 0, 0)) // r0 /= r1
             .exit()
-            .build()
-            .expect("valid program");
+            .build();
 
-        let interpreter = Interpreter::<ActiveProfile>::new();
-        let ctx = BpfContext::empty();
-
-        let result = interpreter.execute(&program, &ctx);
-        assert_eq!(result, Err(BpfError::DivisionByZero));
+        assert!(result.is_err());
     }
 
     #[test]
@@ -750,8 +849,10 @@ mod tests {
         helpers_stub::reset_test_map();
 
         let program = ProgramBuilder::<ActiveProfile>::new(BpfProgType::SocketFilter)
+            .insn(BpfInsn::new(0x7a, 10, 0, -8, 0)) // *(u64 *)(r10 - 8) = key
             .insn(BpfInsn::mov64_imm(1, 0)) // r1 = map_id (0)
-            .insn(BpfInsn::mov64_imm(2, 0)) // r2 = key_ptr (dummy)
+            .insn(BpfInsn::mov64_reg(2, 10))
+            .insn(BpfInsn::add64_imm(2, -8)) // r2 = &key
             .insn(BpfInsn::call(5)) // r0 = bpf_map_lookup_elem(r1, r2)
             .exit()
             .build()
@@ -766,6 +867,20 @@ mod tests {
         assert_ne!(result.unwrap(), 0);
     }
 
+    /// # Miri safety contract
+    ///
+    /// This test is the regression test for the Stacked Borrows bug that
+    /// arose when `bpf_map_update_elem` formed a `&u64` reference through an
+    /// integer-derived raw pointer passed across the BPF helper ABI. Under
+    /// `cargo miri test -p kernel_bpf --no-default-features --features
+    /// cloud-profile` the test must pass — a regression that re-introduces
+    /// `*(value as *const u64)` (or any other ref-forming deref) inside the
+    /// helper fails Miri on the read.
+    ///
+    /// Miri proves the read is aliasing-clean under sequential single-
+    /// threaded execution. It does NOT prove concurrent safety; that
+    /// requires Loom or true kernel concurrency, tracked under
+    /// "Loom/Miri epoch reclamation tests" in the engineering audit package.
     #[test]
     fn execute_map_update_helper() {
         // Test that calling bpf_map_update_elem helper works
@@ -776,9 +891,13 @@ mod tests {
         // We need to put a value on the stack and pass its pointer
         // For this test, we'll just verify the helper is called and returns 0
         let program = ProgramBuilder::<ActiveProfile>::new(BpfProgType::SocketFilter)
+            .insn(BpfInsn::new(0x7a, 10, 0, -8, 0)) // key
+            .insn(BpfInsn::new(0x7a, 10, 0, -16, 42)) // value
             .insn(BpfInsn::mov64_imm(1, 0)) // r1 = map_id (0)
-            .insn(BpfInsn::mov64_imm(2, 0)) // r2 = key_ptr (dummy)
-            .insn(BpfInsn::mov64_imm(3, 0)) // r3 = value_ptr (dummy)
+            .insn(BpfInsn::mov64_reg(2, 10))
+            .insn(BpfInsn::add64_imm(2, -8)) // r2 = &key
+            .insn(BpfInsn::mov64_reg(3, 10))
+            .insn(BpfInsn::add64_imm(3, -16)) // r3 = &value
             .insn(BpfInsn::mov64_imm(4, 0)) // r4 = flags (0)
             .insn(BpfInsn::call(6)) // r0 = bpf_map_update_elem(r1, r2, r3, r4)
             .exit()
@@ -800,8 +919,10 @@ mod tests {
         helpers_stub::reset_test_map();
 
         let program = ProgramBuilder::<ActiveProfile>::new(BpfProgType::SocketFilter)
+            .insn(BpfInsn::new(0x7a, 10, 0, -8, 0)) // key
             .insn(BpfInsn::mov64_imm(1, 0)) // r1 = map_id (0)
-            .insn(BpfInsn::mov64_imm(2, 0)) // r2 = key_ptr (dummy)
+            .insn(BpfInsn::mov64_reg(2, 10))
+            .insn(BpfInsn::add64_imm(2, -8)) // r2 = &key
             .insn(BpfInsn::call(7)) // r0 = bpf_map_delete_elem(r1, r2)
             .exit()
             .build()
@@ -825,7 +946,11 @@ mod tests {
             .insn(BpfInsn::mov64_imm(2, 1)) // r2 = value 1
             .insn(BpfInsn::call(1003)) // r0 = bpf_gpio_write(r1, r2)
             .exit()
-            .build()
+            .build_raw()
+            .verify_with_config(crate::verifier::VerifyConfig {
+                allow_actuation: true,
+                ..crate::verifier::VerifyConfig::default()
+            })
             .expect("valid program");
 
         let interpreter = Interpreter::<ActiveProfile>::new();
@@ -846,7 +971,7 @@ mod tests {
 
         let interpreter = Interpreter::<ActiveProfile>::new();
         let mut ctx = BpfContext::empty();
-        ctx.interrupt_latency_ns = 12345;
+        ctx.set_interrupt_latency_ns(12345);
 
         let result = interpreter.execute(&program, &ctx);
         assert_eq!(result, Ok(12345));

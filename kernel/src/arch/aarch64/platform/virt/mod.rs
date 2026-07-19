@@ -23,7 +23,7 @@ pub fn init() {
 
     // Print boot banner
     use core::fmt::Write;
-    let _ = writeln!(SERIAL_CONSOLE.lock(), "\n=== axiom-ebpf on QEMU virt ===");
+    let _ = writeln!(SERIAL_CONSOLE.lock(), "\n=== axiomos on QEMU virt ===");
     let _ = writeln!(SERIAL_CONSOLE.lock(), "Platform initialized");
 }
 

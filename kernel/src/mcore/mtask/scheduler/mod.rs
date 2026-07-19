@@ -5,7 +5,11 @@ use core::arch::x86_64::_fxsave;
 use core::cell::UnsafeCell;
 use core::mem::swap;
 use core::pin::Pin;
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use cleanup::TaskCleanup;
@@ -19,22 +23,43 @@ use crate::arch::aarch64::Aarch64 as Arch;
 #[cfg(all(target_arch = "aarch64", feature = "aarch64_arch"))]
 use crate::arch::traits::Architecture;
 use crate::mcore::context::ExecutionContext;
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 use crate::mcore::mtask::process::Process;
-use crate::mcore::mtask::scheduler::global::GlobalTaskQueue;
+use crate::mcore::mtask::scheduler::run_queue::RunQueues;
+use crate::mcore::mtask::scheduler::sleep::TaskSleep;
 use crate::mcore::mtask::scheduler::switch::switch_impl;
-use crate::mcore::mtask::task::Task;
+use crate::mcore::mtask::task::{State, Task};
 
 pub mod cleanup;
-pub mod global;
+pub mod run_queue;
+pub mod sleep;
 mod switch;
+pub mod wait;
+mod wait_channel;
+mod wait_protocol;
 
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 static SCHED_SWITCH_MARKER_SENT: AtomicBool = AtomicBool::new(false);
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 static SCHED_SWITCH_TARGET_MARKER_SENT: AtomicBool = AtomicBool::new(false);
 
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 #[inline(always)]
 fn dbg_mark(_ch: u32) {
     // SAFETY: Write to Pi 5 debug UART10 data register.
@@ -43,7 +68,11 @@ fn dbg_mark(_ch: u32) {
     }
 }
 
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 #[inline(always)]
 fn dbg_hex_nibble(n: u8) -> u32 {
     let v = n & 0x0F;
@@ -67,12 +96,40 @@ pub struct Scheduler {
     dummy_old_stack_ptr: UnsafeCell<usize>,
 }
 
+/// Raw context-switch inputs prepared while the scheduler is exclusively
+/// borrowed, then consumed only after that Rust borrow has ended.
+pub(crate) struct ContextSwitch {
+    old_stack_ptr: *mut usize,
+    new_stack_ptr: usize,
+    new_cr3_value: usize,
+}
+
+impl ContextSwitch {
+    /// Perform the architecture context switch.
+    ///
+    /// # Safety
+    /// The scheduler that produced this value must remain alive, interrupts
+    /// must remain disabled, and this switch must be executed exactly once.
+    pub(crate) unsafe fn execute(self) {
+        // SAFETY: `prepare_context_switch` derives both stack pointers from
+        // pinned tasks retained by the scheduler and records the target page
+        // table value before ending its exclusive borrow.
+        unsafe {
+            switch_impl(
+                self.old_stack_ptr,
+                self.new_stack_ptr as *const u8,
+                self.new_cr3_value,
+            );
+        }
+    }
+}
+
 impl Scheduler {
     #[must_use]
-    pub fn new_cpu_local() -> Self {
+    pub fn new_cpu_local(cpu_id: usize) -> Self {
         // SAFETY: We are creating a task representing the current CPU execution state.
         // This is done once per CPU during initialization.
-        let current_task = Box::pin(unsafe { Task::create_current() });
+        let current_task = Box::pin(unsafe { Task::create_current(cpu_id) });
         Self {
             current_task,
             zombie_task: None,
@@ -80,11 +137,16 @@ impl Scheduler {
         }
     }
 
+    /// Mutate scheduler state and prepare a context switch without executing it.
+    ///
+    /// Ending the `&mut Scheduler` borrow before [`ContextSwitch::execute`] is
+    /// essential: the incoming task may access this CPU's scheduler before the
+    /// outgoing task eventually resumes and returns from the assembly switch.
+    ///
     /// # Safety
-    /// Trivially unsafe. If you don't know why, please don't call this function.
-    // SAFETY: This function performs a context switch, which is inherently unsafe.
-    // It manipulates raw pointers and CPU state.
-    pub unsafe fn reschedule(&mut self) {
+    /// Interrupts must be disabled and the returned switch must be executed at
+    /// most once before interrupts are re-enabled.
+    pub(crate) unsafe fn prepare_context_switch(&mut self) -> Option<ContextSwitch> {
         // log::info!("reschedule: entering");
         #[cfg(target_arch = "x86_64")]
         assert!(!interrupts::are_enabled());
@@ -96,8 +158,15 @@ impl Scheduler {
             // log::info!("reschedule: cleaning up zombie task {}", zombie_task.id());
             if zombie_task.should_terminate() {
                 TaskCleanup::enqueue(zombie_task);
+            } else if zombie_task.state() == State::Sleeping {
+                TaskSleep::enqueue(zombie_task);
+            } else if zombie_task.state() == State::Waiting {
+                let mut zombie_task = zombie_task;
+                let registration = zombie_task.take_wait_registration();
+                registration.park(zombie_task);
             } else {
-                GlobalTaskQueue::enqueue(zombie_task);
+                zombie_task.mark_ready();
+                RunQueues::enqueue(zombie_task);
             }
         }
 
@@ -107,14 +176,22 @@ impl Scheduler {
                 // log::info!("reschedule: no next task, staying on current task {}", self.current_task.id());
             }
             let Some(next_task) = next_task_opt else {
-                return;
+                return None;
             };
 
-            #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+            #[cfg(all(
+                target_arch = "aarch64",
+                feature = "rpi5",
+                feature = "bringup-diagnostics"
+            ))]
             if !SCHED_SWITCH_MARKER_SENT.swap(true, Ordering::Relaxed) {
                 dbg_mark(b's' as u32);
             }
-            #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+            #[cfg(all(
+                target_arch = "aarch64",
+                feature = "rpi5",
+                feature = "bringup-diagnostics"
+            ))]
             if !SCHED_SWITCH_TARGET_MARKER_SENT.swap(true, Ordering::Relaxed) {
                 // k: switched to root-process kernel task
                 // j: switched to non-root process task (expected for /bin/init)
@@ -131,7 +208,13 @@ impl Scheduler {
                 dbg_mark(dbg_hex_nibble(pid));
             }
 
-            log::info!("reschedule: switching to task {}", next_task.id());
+            log::trace!("reschedule: switching to task {}", next_task.id());
+            next_task.set_last_cpu(ExecutionContext::load().cpu_id());
+            next_task.mark_running();
+
+            next_task
+                .process()
+                .mark_address_space_resident(ExecutionContext::load().cpu_id());
 
             #[cfg(target_arch = "x86_64")]
             let cr3_value = next_task
@@ -205,37 +288,22 @@ impl Scheduler {
         assert!(self.zombie_task.is_none());
         self.zombie_task = Some(old_task);
 
-        // log::trace!("reschedule: calling switch_impl (old_sp_ptr={:p}, new_sp={:#x}, ttbr0={:#x})",
-        //     old_stack_ptr, *self.current_task.last_stack_ptr(), cr3_value);
+        ExecutionContext::load().set_current_pid(self.current_task.process().pid().as_u64());
 
-        // SAFETY: Performing the actual context switch.
-        // We provide valid pointers to the old task's stack pointer location and the new task's stack.
-        // new_cr3_value is derived from the new task's address space.
-        unsafe {
-            Self::switch(
-                &mut *old_stack_ptr, // yay, UB (but how else are we going to do this?)
-                *self.current_task.last_stack_ptr(),
-                cr3_value,
-            );
-        }
-        // log::trace!("reschedule: switch_impl returned");
-    }
-
-    // SAFETY: Low-level context switch implementation.
-    unsafe fn switch(old_stack_ptr: &mut usize, new_stack_ptr: usize, new_cr3_value: usize) {
-        // SAFETY: Calling the assembly implementation of context switch.
-        unsafe {
-            switch_impl(
-                core::ptr::from_mut::<usize>(old_stack_ptr),
-                new_stack_ptr as *const u8,
-                new_cr3_value,
-            );
-        }
+        Some(ContextSwitch {
+            old_stack_ptr,
+            new_stack_ptr: *self.current_task.last_stack_ptr(),
+            new_cr3_value: cr3_value,
+        })
     }
 
     #[must_use]
     pub fn current_task(&self) -> &Task {
         &self.current_task
+    }
+
+    pub(crate) fn current_task_mut(&mut self) -> &mut Task {
+        self.current_task.as_mut().get_mut()
     }
 
     fn swap_current_task(&mut self, next_task: Pin<Box<Task>>) -> Pin<Box<Task>> {
@@ -246,6 +314,6 @@ impl Scheduler {
 
     #[allow(clippy::unused_self)]
     fn next_task(&self) -> Option<Pin<Box<Task>>> {
-        GlobalTaskQueue::dequeue()
+        RunQueues::dequeue()
     }
 }

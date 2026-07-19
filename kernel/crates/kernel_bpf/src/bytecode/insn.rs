@@ -19,6 +19,8 @@
 
 use core::fmt;
 
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
 use super::opcode::{AluOp, DecodedOpcode, JmpOp, MemMode, MemSize, OpcodeClass, SourceType};
 use super::registers::Register;
 
@@ -27,7 +29,7 @@ use super::registers::Register;
 /// This is the fundamental unit of BPF bytecode. Each instruction
 /// contains an opcode, two register fields, an offset, and an
 /// immediate value.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable)]
 #[repr(C)]
 pub struct BpfInsn {
     /// Opcode specifying operation type

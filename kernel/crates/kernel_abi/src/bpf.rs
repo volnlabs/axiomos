@@ -1,4 +1,5 @@
 use bitflags::bitflags;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 bitflags! {
     pub struct BpfMapTags: u32 {
@@ -72,14 +73,94 @@ pub const BPF_LINK_DETACH: u32 = 34;
 pub const BPF_PROG_BIND_MAP: u32 = 35;
 pub const BPF_PROG_LOAD_ELF: u32 = 36; // Custom command for loading ELF files
 pub const BPF_RINGBUF_POLL: u32 = 37; // Custom command for polling ringbuf events
+
 // Custom command: execute a loaded program N times and emit an
 // `AXIOM EXEC COST` timing marker over serial. Only honoured by kernels built
 // with the `verifier-cost` measurement feature; rejected otherwise.
 // attach_prog_fd = program id, attach_btf_id = run count.
 pub const BPF_BENCH_EXEC: u32 = 100;
+/// Custom lifecycle commands. Object handles encode a slot plus generation;
+/// reclaimed slots can be reused without allowing stale-handle aliasing.
+pub const BPF_PROG_UNLOAD: u32 = 101;
+pub const BPF_MAP_DESTROY: u32 = 102;
+pub const BPF_OBJ_UNPIN: u32 = 103;
+
+/// Map type identifiers accepted by shipped kernels.
+pub const BPF_MAP_TYPE_HASH: u32 = 1;
+pub const BPF_MAP_TYPE_ARRAY: u32 = 2;
+pub const BPF_MAP_TYPE_RINGBUF: u32 = 27;
+pub const BPF_MAP_TYPE_TIMESERIES: u32 = 100;
+
+/// Program attach identifiers accepted by shipped kernels.
+pub const BPF_ATTACH_TYPE_TIMER: u32 = 1;
+pub const BPF_ATTACH_TYPE_GPIO: u32 = 2;
+pub const BPF_ATTACH_TYPE_PWM: u32 = 3;
+pub const BPF_ATTACH_TYPE_IIO: u32 = 4;
+pub const BPF_ATTACH_TYPE_SYS_ENTER: u32 = 5;
+pub const BPF_ATTACH_TYPE_SYSCALL: u32 = BPF_ATTACH_TYPE_SYS_ENTER;
+pub const BPF_ATTACH_TYPE_SYS_EXIT: u32 = 6;
+pub const BPF_ATTACH_TYPE_SCHED_SWITCH: u32 = 7;
+
+/// Helper identifiers dispatched by shipped kernels.
+pub const BPF_HELPER_KTIME_GET_NS: i32 = 1;
+pub const BPF_HELPER_TRACE_PRINTK: i32 = 2;
+pub const BPF_HELPER_GET_PRANDOM_U32: i32 = 3;
+pub const BPF_HELPER_GET_SMP_PROCESSOR_ID: i32 = 4;
+pub const BPF_HELPER_MAP_LOOKUP_ELEM: i32 = 5;
+pub const BPF_HELPER_MAP_UPDATE_ELEM: i32 = 6;
+pub const BPF_HELPER_MAP_DELETE_ELEM: i32 = 7;
+pub const BPF_HELPER_RINGBUF_OUTPUT: i32 = 8;
+pub const BPF_HELPER_TIMESERIES_PUSH: i32 = 9;
+pub const BPF_HELPER_GET_CURRENT_PID_TGID: i32 = 10;
+pub const BPF_HELPER_GET_CURRENT_UID_GID: i32 = 11;
+pub const BPF_HELPER_GET_CURRENT_COMM: i32 = 12;
+pub const BPF_HELPER_GET_INTERRUPT_LATENCY_NS: i32 = 13;
+pub const BPF_HELPER_PROBE_READ: i32 = 14;
+pub const BPF_HELPER_GET_BOOT_TIME_MS: i32 = 15;
+pub const BPF_HELPER_GET_KERNEL_HEAP_KB: i32 = 16;
+pub const BPF_HELPER_GET_KERNEL_IMAGE_MB: i32 = 17;
+pub const BPF_HELPER_RINGBUF_RESERVE: i32 = 40;
+pub const BPF_HELPER_RINGBUF_SUBMIT: i32 = 41;
+pub const BPF_HELPER_RINGBUF_DISCARD: i32 = 42;
+pub const BPF_HELPER_SENSOR_LAST_TIMESTAMP: i32 = 1002;
+pub const BPF_HELPER_GPIO_SET: i32 = 1003;
+pub const BPF_HELPER_GPIO_GET: i32 = 1004;
+pub const BPF_HELPER_PWM_WRITE: i32 = 1005;
+pub const BPF_HELPER_IIO_READ: i32 = 1006;
+pub const BPF_HELPER_CAN_SEND: i32 = 1007;
+
+/// Requested/offered access rights in [`BpfAttr::file_flags`] for object pin/open.
+/// Zero is accepted as a backwards-compatible read-only request.
+pub const BPF_OBJ_ACCESS_READ: u32 = 1 << 0;
+pub const BPF_OBJ_ACCESS_WRITE: u32 = 1 << 1;
+pub const BPF_OBJ_ACCESS_MASK: u32 = BPF_OBJ_ACCESS_READ | BPF_OBJ_ACCESS_WRITE;
+
+/// Capability bits accepted by `SYS_SPAWN_RESTRICTED`.
+pub const BPF_CAP_PROGRAM_LOAD: u32 = 1 << 0;
+pub const BPF_CAP_MAP_CREATE: u32 = 1 << 1;
+pub const BPF_CAP_MAP_READ: u32 = 1 << 2;
+pub const BPF_CAP_MAP_WRITE: u32 = 1 << 3;
+pub const BPF_CAP_ATTACH_TRACE: u32 = 1 << 4;
+pub const BPF_CAP_ATTACH_SCHEDULER: u32 = 1 << 5;
+pub const BPF_CAP_ATTACH_DEVICE: u32 = 1 << 6;
+pub const BPF_CAP_OBJECT_PIN: u32 = 1 << 7;
+pub const BPF_CAP_ACTUATE: u32 = 1 << 8;
+pub const BPF_CAP_PRIVILEGED_VERIFY: u32 = 1 << 9;
+pub const BPF_CAP_OBJECT_ADMIN: u32 = 1 << 10;
+pub const BPF_CAP_ALL: u32 = BPF_CAP_PROGRAM_LOAD
+    | BPF_CAP_MAP_CREATE
+    | BPF_CAP_MAP_READ
+    | BPF_CAP_MAP_WRITE
+    | BPF_CAP_ATTACH_TRACE
+    | BPF_CAP_ATTACH_SCHEDULER
+    | BPF_CAP_ATTACH_DEVICE
+    | BPF_CAP_OBJECT_PIN
+    | BPF_CAP_ACTUATE
+    | BPF_CAP_PRIVILEGED_VERIFY
+    | BPF_CAP_OBJECT_ADMIN;
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, KnownLayout, Immutable)]
 pub struct BpfAttr {
     // Field 0-1: Used by multiple commands
     // - MAP_CREATE: map_type, key_size
@@ -129,7 +210,7 @@ pub struct BpfAttr {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct BpfObjectInfo {
     pub id: u32,
     pub object_kind: u32,
@@ -140,3 +221,35 @@ pub struct BpfObjectInfo {
 }
 
 pub const BPF_OBJECT_KIND_MAP: u32 = 1;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bpf_capabilities_are_independent_and_covered_by_all() {
+        let capabilities = [
+            BPF_CAP_PROGRAM_LOAD,
+            BPF_CAP_MAP_CREATE,
+            BPF_CAP_MAP_READ,
+            BPF_CAP_MAP_WRITE,
+            BPF_CAP_ATTACH_TRACE,
+            BPF_CAP_ATTACH_SCHEDULER,
+            BPF_CAP_ATTACH_DEVICE,
+            BPF_CAP_OBJECT_PIN,
+            BPF_CAP_ACTUATE,
+            BPF_CAP_PRIVILEGED_VERIFY,
+            BPF_CAP_OBJECT_ADMIN,
+        ];
+
+        for (index, capability) in capabilities.iter().enumerate() {
+            assert_eq!(capability.count_ones(), 1);
+            assert_ne!(BPF_CAP_ALL & capability, 0);
+            assert!(
+                capabilities[index + 1..]
+                    .iter()
+                    .all(|other| capability & other == 0)
+            );
+        }
+    }
+}

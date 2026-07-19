@@ -1,32 +1,23 @@
 use alloc::borrow::ToOwned;
 use core::ffi::c_int;
-use core::slice::from_raw_parts;
 
-use kernel_abi::{EINVAL, ENAMETOOLONG, ENOENT, Errno, PATH_MAX};
+use kernel_abi::{EINVAL, ENAMETOOLONG, Errno, PATH_MAX};
 use kernel_vfs::path::{AbsolutePath, Path};
 use log::debug;
 
 use crate::access::{CwdAccess, FileAccess};
-use crate::ptr::UserspacePtr;
 
 pub fn sys_open<Cx: CwdAccess + FileAccess>(
     cx: &Cx,
-    path: UserspacePtr<u8>,
-    path_len: usize,
+    path_bytes: &[u8],
     _oflag: i32,
     _mode: i32,
 ) -> Result<usize, Errno> {
-    if path_len > PATH_MAX {
+    if path_bytes.len() > PATH_MAX {
         return Err(ENAMETOOLONG);
     }
 
-    path.validate_range(path_len).map_err(|_| EINVAL)?;
-
     let path = {
-        // SAFETY: We verified path_len is within reasonable limits (PATH_MAX).
-        // The pointer comes from a UserspacePtr which we assume points to valid memory
-        // for the specified length.
-        let path_bytes = unsafe { from_raw_parts(path.as_ptr(), path_len) };
         let path = core::str::from_utf8(path_bytes).map_err(|_| EINVAL)?;
         let path = Path::new(path);
         if let Ok(p) = AbsolutePath::try_new(path) {
@@ -40,8 +31,8 @@ pub fn sys_open<Cx: CwdAccess + FileAccess>(
 
     debug!("path: {path:?}");
 
-    let info = cx.file_info(path.as_ref()).ok_or(ENOENT)?;
-    let fd = cx.open(&info).map_err(|_| EINVAL)?; // TODO: check error
+    let info = cx.file_info(path.as_ref()).map_err(|error| error.errno())?;
+    let fd = cx.open(&info).map_err(|error| error.errno())?;
     let fd_num = Into::<c_int>::into(fd);
     Ok(fd_num as usize)
 }
@@ -57,7 +48,6 @@ mod tests {
     use spin::mutex::Mutex;
     use spin::rwlock::RwLock;
 
-    use crate::UserspacePtr;
     use crate::access::testing::{MemoryFile, MemoryFileAccess};
     use crate::access::{CwdAccess, FileAccess};
     use crate::fcntl::sys_open;
@@ -99,57 +89,63 @@ mod tests {
     {
         type FileInfo = F::FileInfo;
         type Fd = F::Fd;
-        type OpenError = F::OpenError;
-        type ReadError = F::ReadError;
-        type WriteError = F::WriteError;
-        type CloseError = F::CloseError;
-        type LseekError = F::LseekError;
-        type PipeError = F::PipeError;
-        type DupError = F::DupError;
-        type MkdirError = F::MkdirError;
-        type RmdirError = F::RmdirError;
-
-        fn file_info(&self, path: &AbsolutePath) -> Option<Self::FileInfo> {
+        fn file_info(
+            &self,
+            path: &AbsolutePath,
+        ) -> Result<Self::FileInfo, crate::access::FileAccessError> {
             self.file_access.file_info(path)
         }
 
-        fn open(&self, info: &Self::FileInfo) -> Result<Self::Fd, Self::OpenError> {
+        fn open(&self, info: &Self::FileInfo) -> Result<Self::Fd, crate::access::FileAccessError> {
             self.file_access.open(info)
         }
 
-        fn mkdir(&self, path: &AbsolutePath) -> Result<(), Self::MkdirError> {
+        fn mkdir(&self, path: &AbsolutePath) -> Result<(), crate::access::FileAccessError> {
             self.file_access.mkdir(path)
         }
 
-        fn rmdir(&self, path: &AbsolutePath) -> Result<(), Self::RmdirError> {
+        fn rmdir(&self, path: &AbsolutePath) -> Result<(), crate::access::FileAccessError> {
             self.file_access.rmdir(path)
         }
 
-        fn read(&self, fd: Self::Fd, buf: &mut [u8]) -> Result<usize, Self::ReadError> {
+        fn read(
+            &self,
+            fd: Self::Fd,
+            buf: &mut [u8],
+        ) -> Result<usize, crate::access::FileAccessError> {
             self.file_access.read(fd, buf)
         }
 
-        fn write(&self, fd: Self::Fd, buf: &[u8]) -> Result<usize, Self::WriteError> {
+        fn write(&self, fd: Self::Fd, buf: &[u8]) -> Result<usize, crate::access::FileAccessError> {
             self.file_access.write(fd, buf)
         }
 
-        fn close(&self, fd: Self::Fd) -> Result<(), Self::CloseError> {
+        fn close(&self, fd: Self::Fd) -> Result<(), crate::access::FileAccessError> {
             self.file_access.close(fd)
         }
 
-        fn lseek(&self, fd: Self::Fd, offset: i64, whence: i32) -> Result<usize, Self::LseekError> {
+        fn lseek(
+            &self,
+            fd: Self::Fd,
+            offset: i64,
+            whence: i32,
+        ) -> Result<usize, crate::access::FileAccessError> {
             self.file_access.lseek(fd, offset, whence)
         }
 
-        fn pipe(&self) -> Result<(Self::Fd, Self::Fd), Self::PipeError> {
+        fn pipe(&self) -> Result<(Self::Fd, Self::Fd), crate::access::FileAccessError> {
             self.file_access.pipe()
         }
 
-        fn dup(&self, oldfd: Self::Fd) -> Result<Self::Fd, Self::DupError> {
+        fn dup(&self, oldfd: Self::Fd) -> Result<Self::Fd, crate::access::FileAccessError> {
             self.file_access.dup(oldfd)
         }
 
-        fn dup2(&self, oldfd: Self::Fd, newfd: Self::Fd) -> Result<Self::Fd, Self::DupError> {
+        fn dup2(
+            &self,
+            oldfd: Self::Fd,
+            newfd: Self::Fd,
+        ) -> Result<Self::Fd, crate::access::FileAccessError> {
             self.file_access.dup2(oldfd, newfd)
         }
     }
@@ -160,9 +156,7 @@ mod tests {
         let cx = TestOpenCx::new(ROOT.to_owned(), Mutex::new(file_access));
 
         let path = "/foo.txt";
-        let p = UserspacePtr::try_from(path.as_ptr()).unwrap();
-
-        let result = sys_open(&cx, p, path.len(), 0, 0);
+        let result = sys_open(&cx, path.as_bytes(), 0, 0);
         assert_eq!(result, Err(ENOENT));
     }
 
@@ -176,9 +170,7 @@ mod tests {
         let cx = TestOpenCx::new(ROOT.to_owned(), Mutex::new(file_access));
 
         let path = "/foo.txt";
-        let p = UserspacePtr::try_from(path.as_ptr()).unwrap();
-
-        let result = sys_open(&cx, p, path.len(), 0, 0).expect("should be able to open file");
+        let result = sys_open(&cx, path.as_bytes(), 0, 0).expect("should be able to open file");
         assert_eq!(result, 0);
     }
 
@@ -192,10 +184,8 @@ mod tests {
         let cx = TestOpenCx::new(ROOT.to_owned(), Mutex::new(file_access));
 
         let path = "/foo.txt";
-        let p = UserspacePtr::try_from(path.as_ptr()).unwrap();
-
-        let result1 = sys_open(&cx, p, path.len(), 0, 0).expect("should be able to open file");
-        let result2 = sys_open(&cx, p, path.len(), 0, 0).expect("should be able to open file");
+        let result1 = sys_open(&cx, path.as_bytes(), 0, 0).expect("should be able to open file");
+        let result2 = sys_open(&cx, path.as_bytes(), 0, 0).expect("should be able to open file");
         assert_eq!(
             result1,
             result2 - 1,

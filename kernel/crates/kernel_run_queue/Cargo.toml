@@ -1,0 +1,13 @@
+[package]
+name = "kernel_run_queue"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cordyceps.workspace = true
+
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

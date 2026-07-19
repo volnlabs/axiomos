@@ -1,0 +1,176 @@
+{
+  "format_version": 1,
+  "campaign": "physical-memory-region",
+  "baseline_commit": "a5316b485631f5594e2def235adeb2ec34a0d2a5",
+  "cargo_mutants_version": "27.1.0",
+  "cargo_mutants_exit_code": 2,
+  "command": [
+    "cargo",
+    "mutants",
+    "-p",
+    "kernel_physical_memory",
+    "--gitignore",
+    "true",
+    "--jobs",
+    "4",
+    "--timeout",
+    "60",
+    "--no-times",
+    "--output",
+    "/tmp/axiomos-kernel-physical-memory-mutants-a5316b4",
+    "-f",
+    "kernel/crates/kernel_physical_memory/src/region.rs"
+  ],
+  "raw_outcomes_sha256": "876eb5c67e0482af2912992bccd915e900b373c7fe62e9706b520dcc87d30596",
+  "inputs": {
+    "Cargo.lock": "e1890c77d0bd209b1c16e81456a9cd9282a0988390edde42c794ebb88d66eedd",
+    "kernel/crates/kernel_physical_memory/src/region.rs": "114d80aa4371c29419ea5e1f8d4534e39671c1f9122eb518f3ab1b7a881eb480",
+    "rust-toolchain.toml": "e74988a8e96ded737122c116b6f5f45c7eda70065cc966888f35b5bfcd76185b"
+  },
+  "counts": {
+    "caught": 29,
+    "missed": 2,
+    "timeout": 0,
+    "unviable": 3
+  },
+  "score": 93.54838709677419,
+  "total_mutants": 34,
+  "outcomes": [
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:24:9: replace MemoryRegion::with_frames -> Self with Default::default()",
+      "summary": "Unviable"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:29:9: replace MemoryRegion::base_addr -> u64 with 0",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:29:9: replace MemoryRegion::base_addr -> u64 with 1",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:34:9: replace MemoryRegion::len -> usize with 0",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:34:9: replace MemoryRegion::len -> usize with 1",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:39:9: replace MemoryRegion::is_empty -> bool with false",
+      "summary": "MissedMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:39:9: replace MemoryRegion::is_empty -> bool with true",
+      "summary": "MissedMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:44:9: replace MemoryRegion::frames -> &[FrameState] with Vec::leak(Vec::new())",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:44:9: replace MemoryRegion::frames -> &[FrameState] with Vec::leak(vec![Default::default()])",
+      "summary": "Unviable"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:49:9: replace MemoryRegion::frames_mut -> &mut[FrameState] with Vec::leak(Vec::new())",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:49:9: replace MemoryRegion::frames_mut -> &mut[FrameState] with Vec::leak(vec![Default::default()])",
+      "summary": "Unviable"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:55:17: replace < with <= in MemoryRegion::frame_index",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:55:17: replace < with == in MemoryRegion::frame_index",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:55:17: replace < with > in MemoryRegion::frame_index",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:55:9: replace MemoryRegion::frame_index -> Option<usize> with None",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:55:9: replace MemoryRegion::frame_index -> Option<usize> with Some(0)",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:55:9: replace MemoryRegion::frame_index -> Option<usize> with Some(1)",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:58:27: replace - with + in MemoryRegion::frame_index",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:58:27: replace - with / in MemoryRegion::frame_index",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:59:29: replace / with % in MemoryRegion::frame_index",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:59:29: replace / with * in MemoryRegion::frame_index",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:60:18: replace < with <= in MemoryRegion::frame_index",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:60:18: replace < with == in MemoryRegion::frame_index",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:60:18: replace < with > in MemoryRegion::frame_index",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:69:18: replace < with <= in MemoryRegion::frame_address",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:69:18: replace < with == in MemoryRegion::frame_address",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:69:18: replace < with > in MemoryRegion::frame_address",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:69:9: replace MemoryRegion::frame_address -> Option<u64> with None",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:69:9: replace MemoryRegion::frame_address -> Option<u64> with Some(0)",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:69:9: replace MemoryRegion::frame_address -> Option<u64> with Some(1)",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:70:33: replace + with * in MemoryRegion::frame_address",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:70:33: replace + with - in MemoryRegion::frame_address",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:70:49: replace * with + in MemoryRegion::frame_address",
+      "summary": "CaughtMutant"
+    },
+    {
+      "mutant": "kernel/crates/kernel_physical_memory/src/region.rs:70:49: replace * with / in MemoryRegion::frame_address",
+      "summary": "CaughtMutant"
+    }
+  ]
+}

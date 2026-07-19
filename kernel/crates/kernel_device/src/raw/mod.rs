@@ -6,7 +6,7 @@ use spin::RwLock;
 
 use crate::{Device, DeviceId, RegisterDeviceError};
 
-pub trait RawDevice<Id: DeviceId>: Device<Id> {
+pub trait RawDevice<Id: DeviceId>: Device<Id> + Send + Sync {
     fn physical_memory(&self) -> PhysFrameRangeInclusive;
 }
 
@@ -16,15 +16,6 @@ where
 {
     devices: BTreeMap<Id, Arc<RwLock<dyn RawDevice<Id>>>>,
 }
-
-// SAFETY: RawDeviceRegistry owns the devices and protects access via RwLock.
-// The BTreeMap and Arc<RwLock> structure ensures that it is safe to send
-// the registry to another thread.
-unsafe impl<Id> Send for RawDeviceRegistry<Id> where Id: DeviceId + Ord + 'static {}
-
-// SAFETY: RawDeviceRegistry protects its internal map with a BTreeMap (which is Send)
-// and the individual devices are wrapped in Arc<RwLock>, ensuring thread-safe access.
-unsafe impl<Id> Sync for RawDeviceRegistry<Id> where Id: DeviceId + Ord + 'static {}
 
 impl<Id> Default for RawDeviceRegistry<Id>
 where

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-axiom-ebpf is a hobby x86-64 operating system kernel written in Rust. It boots via the Limine bootloader and runs on QEMU. The project aims for POSIX.1-2024 compliance.
+axiomos is a hobby operating system kernel written in Rust. It boots via Limine on x86_64 and supports the target boundary documented in `ci/targets.toml`.
 
 **Primary Target:** x86_64-unknown-none (bare-metal)
 **Toolchain:** Rust Nightly (configured in rust-toolchain.toml)
@@ -16,7 +16,7 @@ axiom-ebpf is a hobby x86-64 operating system kernel written in Rust. It boots v
 # Build workspace libraries (recommended for validation)
 cargo build --workspace --lib
 
-# Full release build (creates muffin.iso)
+# Full release build (creates axiomos.iso)
 cargo build --release
 
 # Format check

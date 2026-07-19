@@ -46,7 +46,7 @@
 //! | Feature       | Cloud          | Embedded       |
 //! |---------------|----------------|----------------|
 //! | Buffer size   | Up to 256 MB   | Up to 64 KB    |
-//! | Allocation    | Dynamic        | Static pool    |
+//! | Allocation    | Quota-bounded heap | Profile-bounded heap |
 //! | Resize        | Supported      | **Erased**     |
 //! | Overflow      | Drop oldest    | Drop newest    |
 
@@ -212,8 +212,7 @@ impl<P: PhysicalProfile> RingBufMap<P> {
         // Check memory budget for embedded profile
         #[cfg(feature = "embedded-profile")]
         {
-            use crate::profile::MemoryStrategy;
-            let budget = <P::MemoryStrategy as MemoryStrategy>::MEMORY_BUDGET;
+            let budget = P::MEMORY_BUDGET;
             if budget > 0 && size > budget {
                 return Err(MapError::OutOfMemory);
             }
@@ -227,7 +226,10 @@ impl<P: PhysicalProfile> RingBufMap<P> {
             flags: 0,
         };
 
-        let data = vec![0u8; size];
+        let mut data = Vec::new();
+        data.try_reserve_exact(size)
+            .map_err(|_| MapError::OutOfMemory)?;
+        data.resize(size, 0);
         let control = RingControl::new(size);
 
         Ok(Self {
@@ -254,8 +256,8 @@ impl<P: PhysicalProfile> RingBufMap<P> {
     ///
     /// Returns a reservation that must be submitted or discarded.
     pub fn reserve(&self, size: usize) -> Option<RingBufReservation> {
-        let total_size = EventHeader::SIZE + size;
-        let aligned_size = (total_size + 7) & !7;
+        let total_size = EventHeader::SIZE.checked_add(size)?;
+        let aligned_size = total_size.checked_add(7)? & !7;
 
         // Check if there's enough space
         if self.control.available_space() < aligned_size {
@@ -410,6 +412,38 @@ impl<P: PhysicalProfile> RingBufMap<P> {
     pub fn is_empty(&self) -> bool {
         self.control.used_space() == 0
     }
+
+    /// Resize after the caller-provided reservation succeeds.
+    ///
+    /// Keeping every published field update after the only fallible allocation
+    /// step makes an allocation failure leave the live ring unchanged.
+    #[cfg(feature = "cloud-profile")]
+    fn resize_with_reservation(
+        &mut self,
+        new_max_entries: u32,
+        reserve: impl FnOnce(&mut Vec<u8>, usize) -> MapResult<()>,
+    ) -> MapResult<()> {
+        let new_size = new_max_entries as usize;
+
+        if !new_size.is_power_of_two() {
+            return Err(MapError::InvalidValue);
+        }
+
+        if new_size > Self::MAX_BUFFER_SIZE {
+            return Err(MapError::OutOfMemory);
+        }
+
+        let mut buffer = self.data.lock();
+        if new_size > buffer.len() {
+            let additional = new_size - buffer.len();
+            reserve(&mut buffer, additional)?;
+        }
+        buffer.resize(new_size, 0);
+
+        self.control = RingControl::new(new_size);
+        self.def.max_entries = new_max_entries;
+        Ok(())
+    }
 }
 
 /// Reservation for writing to ring buffer.
@@ -454,25 +488,11 @@ impl<P: PhysicalProfile> BpfMap<P> for RingBufMap<P> {
 
     #[cfg(feature = "cloud-profile")]
     fn resize(&mut self, new_max_entries: u32) -> MapResult<()> {
-        let new_size = new_max_entries as usize;
-
-        if !new_size.is_power_of_two() {
-            return Err(MapError::InvalidValue);
-        }
-
-        if new_size > Self::MAX_BUFFER_SIZE {
-            return Err(MapError::OutOfMemory);
-        }
-
-        // Resize requires draining existing data
-        let mut buffer = self.data.lock();
-        buffer.resize(new_size, 0);
-
-        // Reset control
-        self.control = RingControl::new(new_size);
-        self.def.max_entries = new_max_entries;
-
-        Ok(())
+        self.resize_with_reservation(new_max_entries, |buffer, additional| {
+            buffer
+                .try_reserve_exact(additional)
+                .map_err(|_| MapError::OutOfMemory)
+        })
     }
 }
 
@@ -579,6 +599,76 @@ mod tests {
 
         // Check dropped count
         assert_eq!(ringbuf.dropped_count(), 1);
+    }
+
+    #[cfg(feature = "cloud-profile")]
+    #[test]
+    fn ringbuf_resize_growth_resets_ring_and_updates_definition() {
+        let mut ringbuf = RingBufMap::<ActiveProfile>::new(64).expect("create ringbuf");
+        ringbuf.output(b"stale event", 0).expect("publish event");
+
+        ringbuf.resize(128).expect("resize ringbuf");
+
+        assert_eq!(ringbuf.capacity(), 128);
+        assert_eq!(ringbuf.def().max_entries, 128);
+        assert!(ringbuf.is_empty());
+        assert!(ringbuf.poll().is_none());
+        ringbuf
+            .output(b"new event", 0)
+            .expect("publish after resize");
+        assert_eq!(ringbuf.poll().as_deref(), Some(b"new event".as_slice()));
+    }
+
+    #[cfg(feature = "cloud-profile")]
+    #[test]
+    fn ringbuf_resize_fail_after_n_preserves_live_ring() {
+        let mut ringbuf = RingBufMap::<ActiveProfile>::new(64).expect("create ringbuf");
+        let event = b"live event";
+        ringbuf.output(event, 0).expect("publish live event");
+
+        let before_buffer = ringbuf.data.lock().clone();
+        let before_buffer_len = before_buffer.len();
+        let before_control = (
+            ringbuf.control.head.load(Ordering::Acquire),
+            ringbuf.control.tail.load(Ordering::Acquire),
+            ringbuf.control.capacity,
+            ringbuf.control.mask,
+        );
+        let before_max_entries = ringbuf.def.max_entries;
+
+        for fail_at in 1..=1 {
+            let mut checkpoint = 0;
+            let error = ringbuf
+                .resize_with_reservation(128, |_buffer, additional| {
+                    checkpoint += 1;
+                    assert_eq!(additional, 64);
+                    if checkpoint == fail_at {
+                        Err(MapError::OutOfMemory)
+                    } else {
+                        Ok(())
+                    }
+                })
+                .expect_err("injected reservation must fail");
+
+            assert_eq!(error, MapError::OutOfMemory);
+            assert_eq!(checkpoint, fail_at);
+            let buffer = ringbuf.data.lock();
+            assert_eq!(buffer.len(), before_buffer_len);
+            assert_eq!(*buffer, before_buffer);
+            drop(buffer);
+            assert_eq!(
+                (
+                    ringbuf.control.head.load(Ordering::Acquire),
+                    ringbuf.control.tail.load(Ordering::Acquire),
+                    ringbuf.control.capacity,
+                    ringbuf.control.mask,
+                ),
+                before_control
+            );
+            assert_eq!(ringbuf.def.max_entries, before_max_entries);
+        }
+
+        assert_eq!(ringbuf.poll().as_deref(), Some(event.as_slice()));
     }
 
     #[test]

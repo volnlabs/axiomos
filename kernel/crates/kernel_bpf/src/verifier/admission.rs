@@ -15,7 +15,88 @@
 //! test is `Σ utilization ≤ 1`; the budget encodes the chosen safety fraction.
 
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 use core::fmt;
+
+/// A reservation or utilization failure while committing an attachment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachmentCommitError {
+    Admission(AdmissionError),
+    Reservation,
+}
+
+/// Program ids published per attach type.
+///
+/// New hook keys are inserted only after their program vector has reserved
+/// capacity, so a recoverable reservation failure cannot leave an empty hook
+/// visible to readers.
+#[derive(Debug)]
+pub struct AttachmentTable {
+    hooks: BTreeMap<u32, Vec<u32>>,
+}
+
+impl AttachmentTable {
+    pub const fn new() -> Self {
+        Self {
+            hooks: BTreeMap::new(),
+        }
+    }
+
+    pub fn get(&self, attach_type: &u32) -> Option<&Vec<u32>> {
+        self.hooks.get(attach_type)
+    }
+
+    pub fn get_mut(&mut self, attach_type: &u32) -> Option<&mut Vec<u32>> {
+        self.hooks.get_mut(attach_type)
+    }
+
+    pub fn contains(&self, attach_type: u32, prog_id: u32) -> bool {
+        self.hooks
+            .get(&attach_type)
+            .is_some_and(|programs| programs.contains(&prog_id))
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&u32, &Vec<u32>)> {
+        self.hooks.iter()
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&u32, &mut Vec<u32>)> {
+        self.hooks.iter_mut()
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &Vec<u32>> {
+        self.hooks.values()
+    }
+
+    pub fn retain(&mut self, f: impl FnMut(&u32, &mut Vec<u32>) -> bool) {
+        self.hooks.retain(f);
+    }
+
+    fn try_insert_with(
+        &mut self,
+        attach_type: u32,
+        prog_id: u32,
+        reserve: impl FnOnce(&mut Vec<u32>) -> Result<(), ()>,
+    ) -> Result<(), ()> {
+        if let Some(programs) = self.hooks.get_mut(&attach_type) {
+            reserve(programs)?;
+            programs.push(prog_id);
+            return Ok(());
+        }
+
+        let mut programs = Vec::new();
+        reserve(&mut programs)?;
+        programs.push(prog_id);
+        self.hooks.insert(attach_type, programs);
+        Ok(())
+    }
+}
+
+impl Default for AttachmentTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// An attach was refused because the utilization budget would be exceeded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +193,11 @@ impl AdmissionLedger {
         }
     }
 
+    /// Whether `(hook, prog)` currently consumes an admission slot.
+    pub fn contains(&self, hook: u32, prog: u32) -> bool {
+        self.per_attachment.contains_key(&(hook, prog))
+    }
+
     /// Utilization currently committed across all attachments, in ns/s.
     pub fn committed_ns_per_s(&self) -> u64 {
         self.committed_ns_per_s
@@ -121,6 +207,50 @@ impl AdmissionLedger {
     pub fn budget_ns_per_s(&self) -> u64 {
         self.budget_ns_per_s
     }
+}
+
+/// Commit one attachment as a reservation-before-publication transaction.
+pub fn commit_attachment(
+    attachments: &mut AttachmentTable,
+    admission: &mut AdmissionLedger,
+    hook: u32,
+    prog: u32,
+    wcet_cycles: u64,
+    freq_hz: u64,
+) -> Result<(), AttachmentCommitError> {
+    commit_attachment_with_reservation(
+        attachments,
+        admission,
+        hook,
+        prog,
+        wcet_cycles,
+        freq_hz,
+        |programs| programs.try_reserve(1).map_err(|_| ()),
+    )
+}
+
+fn commit_attachment_with_reservation(
+    attachments: &mut AttachmentTable,
+    admission: &mut AdmissionLedger,
+    hook: u32,
+    prog: u32,
+    wcet_cycles: u64,
+    freq_hz: u64,
+    reserve: impl FnOnce(&mut Vec<u32>) -> Result<(), ()>,
+) -> Result<(), AttachmentCommitError> {
+    if attachments.contains(hook, prog) {
+        return admission
+            .admit(hook, prog, wcet_cycles, freq_hz)
+            .map_err(AttachmentCommitError::Admission);
+    }
+    admission
+        .admit(hook, prog, wcet_cycles, freq_hz)
+        .map_err(AttachmentCommitError::Admission)?;
+    if attachments.try_insert_with(hook, prog, reserve).is_err() {
+        admission.release(hook, prog);
+        return Err(AttachmentCommitError::Reservation);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -180,6 +310,82 @@ mod tests {
         ledger.release(1, 0);
         assert_eq!(ledger.committed_ns_per_s(), 0);
         ledger.admit(1, 1, 100, 8).expect("fits after release");
+    }
+
+    #[test]
+    fn new_hook_reservation_failure_rolls_back_admission_and_key() {
+        let mut attachments = AttachmentTable::new();
+        let mut admission = AdmissionLedger::new(1000, UNIT_NS);
+
+        assert_eq!(
+            commit_attachment_with_reservation(
+                &mut attachments,
+                &mut admission,
+                7,
+                41,
+                10,
+                5,
+                |_| Err(())
+            ),
+            Err(AttachmentCommitError::Reservation)
+        );
+        assert!(attachments.get(&7).is_none());
+        assert!(!admission.contains(7, 41));
+        assert_eq!(admission.committed_ns_per_s(), 0);
+
+        commit_attachment(&mut attachments, &mut admission, 7, 41, 10, 5)
+            .expect("retry after reservation failure");
+        assert_eq!(attachments.get(&7).unwrap().as_slice(), &[41]);
+        assert!(admission.contains(7, 41));
+        assert_eq!(admission.committed_ns_per_s(), 50);
+    }
+
+    #[test]
+    fn existing_hook_reservation_failure_preserves_published_programs() {
+        let mut attachments = AttachmentTable::new();
+        let mut admission = AdmissionLedger::new(1000, UNIT_NS);
+        commit_attachment(&mut attachments, &mut admission, 7, 41, 10, 5)
+            .expect("publish first attachment");
+
+        assert_eq!(
+            commit_attachment_with_reservation(
+                &mut attachments,
+                &mut admission,
+                7,
+                42,
+                20,
+                5,
+                |_| Err(())
+            ),
+            Err(AttachmentCommitError::Reservation)
+        );
+        assert_eq!(attachments.get(&7).unwrap().as_slice(), &[41]);
+        assert!(admission.contains(7, 41));
+        assert!(!admission.contains(7, 42));
+        assert_eq!(admission.committed_ns_per_s(), 50);
+
+        commit_attachment(&mut attachments, &mut admission, 7, 42, 20, 5)
+            .expect("retry extends existing hook");
+        assert_eq!(attachments.get(&7).unwrap().as_slice(), &[41, 42]);
+        assert!(admission.contains(7, 42));
+        assert_eq!(admission.committed_ns_per_s(), 150);
+    }
+
+    #[test]
+    fn repeated_commit_does_not_reserve_publish_or_charge_twice() {
+        let mut attachments = AttachmentTable::new();
+        let mut admission = AdmissionLedger::new(1000, UNIT_NS);
+        commit_attachment(&mut attachments, &mut admission, 7, 41, 10, 5)
+            .expect("publish first attachment");
+
+        commit_attachment_with_reservation(&mut attachments, &mut admission, 7, 41, 10, 5, |_| {
+            panic!("idempotent commit must not reserve again")
+        })
+        .expect("repeated commit is an idempotent success");
+
+        assert_eq!(attachments.get(&7).unwrap().as_slice(), &[41]);
+        assert!(admission.contains(7, 41));
+        assert_eq!(admission.committed_ns_per_s(), 50);
     }
 
     #[test]

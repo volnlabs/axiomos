@@ -44,11 +44,13 @@ pub mod cost;
 mod error;
 pub mod helpers;
 mod liveness;
+mod map_policy;
 mod pruner;
 mod refine;
 mod state;
 
-pub use core::{Verifier, VerifyConfig, VerifyStats};
+pub(crate) use core::VerificationToken;
+pub use core::{MapPerm, Verifier, VerifyConfig, VerifyStats};
 
 pub use alu::{compute_alu_result, compute_alu_result_width, scalar_from_imm};
 pub use caller::LoadCaller;
@@ -58,4 +60,4 @@ pub use helpers::{ArgType, HelperId, HelperSignature, get_helper_signature, vali
 pub use liveness::{Liveness, RegSet};
 pub use pruner::{PruneDecision, StatePruner, StateSubsumes};
 pub use refine::{RefinedScalar, refine_scalar};
-pub use state::{RegState, RegType, StackSlot, VerifierState};
+pub use state::{MapWritability, RegState, RegType, StackSlot, VerifierState};

@@ -71,11 +71,13 @@
 
 extern crate alloc;
 
+mod authentication;
 mod error;
 mod hash;
 mod signature;
 mod verifier;
 
+pub use authentication::{AuthenticatedProgram, AuthenticationProvenance};
 pub use error::{SigningError, SigningResult};
 pub use hash::{ProgramHash, SHA3_256_LEN};
 pub use signature::{SIGNATURE_LEN, Signature, SignedProgram, SignedProgramHeader};

@@ -1,6 +1,7 @@
 #![no_std]
 
 mod bpf;
+mod catalog;
 mod errno;
 mod fcntl;
 mod limits;
@@ -11,6 +12,7 @@ mod time;
 mod uio;
 
 pub use bpf::*;
+pub use catalog::*;
 pub use errno::*;
 pub use fcntl::*;
 pub use limits::*;

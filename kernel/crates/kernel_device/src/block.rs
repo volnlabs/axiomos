@@ -83,7 +83,7 @@ where
     }
 
     fn flush(&mut self) -> Result<(), Box<dyn Error>> {
-        todo!()
+        self.write().flush()
     }
 }
 

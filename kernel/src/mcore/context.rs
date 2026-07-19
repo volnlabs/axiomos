@@ -1,6 +1,12 @@
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::cell::UnsafeCell;
+use core::fmt;
+#[cfg(target_arch = "x86_64")]
+use core::sync::atomic::AtomicU32;
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
+use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
 #[cfg(target_arch = "x86_64")]
 use spin::Mutex;
 #[cfg(target_arch = "x86_64")]
@@ -16,9 +22,124 @@ use x86_64::structures::tss::TaskStateSegment;
 use crate::arch::gdt::Selectors;
 #[cfg(target_arch = "x86_64")]
 use crate::mcore::lapic::Lapic;
-use crate::mcore::mtask::process::{Process, ProcessId};
+use crate::mcore::mtask::process::Process;
 use crate::mcore::mtask::scheduler::Scheduler;
 use crate::mcore::mtask::task::Task;
+
+static ONLINE_CPU_MASK: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_arch = "x86_64")]
+static ONLINE_LAPIC_IDS: [AtomicU32; 64] = [const { AtomicU32::new(u32::MAX) }; 64];
+
+fn cpu_bit(cpu_id: usize) -> u64 {
+    1u64.checked_shl(u32::try_from(cpu_id).expect("CPU id must fit u32"))
+        .filter(|bit| *bit != 0)
+        .expect("axiomos supports at most 64 tracked CPUs")
+}
+
+pub fn online_cpu_mask() -> u64 {
+    ONLINE_CPU_MASK.load(Ordering::Acquire)
+}
+
+#[cfg(target_arch = "x86_64")]
+pub fn online_lapic_id(cpu_id: usize) -> Option<u32> {
+    let lapic_id = ONLINE_LAPIC_IDS.get(cpu_id)?.load(Ordering::Acquire);
+    (lapic_id != u32::MAX).then_some(lapic_id)
+}
+
+struct BpfCpuStack {
+    data: UnsafeCell<Box<[u8]>>,
+    in_use: AtomicBool,
+}
+
+struct SchedulerSlot {
+    value: UnsafeCell<Scheduler>,
+    borrowed: AtomicBool,
+}
+
+impl SchedulerSlot {
+    fn new(value: Scheduler) -> Self {
+        Self {
+            value: UnsafeCell::new(value),
+            borrowed: AtomicBool::new(false),
+        }
+    }
+
+    fn with<R>(&self, f: impl for<'scheduler> FnOnce(&'scheduler Scheduler) -> R) -> R {
+        self.with_mut(|scheduler| f(scheduler))
+    }
+
+    fn with_mut<R>(&self, f: impl for<'scheduler> FnOnce(&'scheduler mut Scheduler) -> R) -> R {
+        assert!(
+            self.borrowed
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok(),
+            "reentrant scheduler access"
+        );
+
+        struct Reset<'a>(&'a AtomicBool);
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let _reset = Reset(&self.borrowed);
+
+        // SAFETY: the atomic guard permits exactly one scoped borrow. The HRTB
+        // callback cannot return a reference tied to `scheduler` through `R`.
+        f(unsafe { &mut *self.value.get() })
+    }
+}
+
+impl fmt::Debug for SchedulerSlot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SchedulerSlot")
+            .field("borrowed", &self.borrowed.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
+impl BpfCpuStack {
+    fn new() -> Self {
+        Self {
+            data: UnsafeCell::new(
+                alloc::vec![0u8; <ActiveProfile as PhysicalProfile>::MAX_STACK_SIZE]
+                    .into_boxed_slice(),
+            ),
+            in_use: AtomicBool::new(false),
+        }
+    }
+
+    fn with_mut<R>(&self, f: impl FnOnce(&mut [u8]) -> R) -> Option<R> {
+        if self
+            .in_use
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return None;
+        }
+
+        struct Reset<'a>(&'a AtomicBool);
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let _reset = Reset(&self.in_use);
+
+        // SAFETY: this stack belongs to one CPU context and the atomic guard
+        // rejects nested execution on that CPU before forming a second borrow.
+        Some(f(unsafe { &mut **self.data.get() }))
+    }
+}
+
+impl fmt::Debug for BpfCpuStack {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BpfCpuStack")
+            .field("len", &<ActiveProfile as PhysicalProfile>::MAX_STACK_SIZE)
+            .field("in_use", &self.in_use.load(Ordering::Relaxed))
+            .finish()
+    }
+}
 
 #[derive(Debug)]
 pub struct ExecutionContext {
@@ -38,7 +159,10 @@ pub struct ExecutionContext {
     #[cfg(target_arch = "x86_64")]
     tss: UnsafeCell<&'static mut TaskStateSegment>,
 
-    scheduler: UnsafeCell<Scheduler>,
+    scheduler: SchedulerSlot,
+    current_pid: AtomicU64,
+    bpf_stack: BpfCpuStack,
+    bpf_execution: AtomicPtr<()>,
     #[cfg(target_arch = "aarch64")]
     need_reschedule: core::sync::atomic::AtomicBool,
 }
@@ -61,7 +185,10 @@ impl ExecutionContext {
             sel,
             _idt: idt,
             tss: UnsafeCell::new(tss),
-            scheduler: UnsafeCell::new(Scheduler::new_cpu_local()),
+            scheduler: SchedulerSlot::new(Scheduler::new_cpu_local(cpu.id as usize)),
+            current_pid: AtomicU64::new(0),
+            bpf_stack: BpfCpuStack::new(),
+            bpf_execution: AtomicPtr::new(core::ptr::null_mut()),
         }
     }
 
@@ -69,7 +196,10 @@ impl ExecutionContext {
     pub fn new(cpu_id: usize) -> Self {
         ExecutionContext {
             cpu_id,
-            scheduler: UnsafeCell::new(Scheduler::new_cpu_local()),
+            scheduler: SchedulerSlot::new(Scheduler::new_cpu_local(cpu_id)),
+            current_pid: AtomicU64::new(0),
+            bpf_stack: BpfCpuStack::new(),
+            bpf_execution: AtomicPtr::new(core::ptr::null_mut()),
             need_reschedule: core::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -125,6 +255,15 @@ impl ExecutionContext {
         self.cpu_id
     }
 
+    pub fn mark_online(&self) {
+        #[cfg(target_arch = "x86_64")]
+        ONLINE_LAPIC_IDS[self.cpu_id].store(
+            u32::try_from(self.lapic_id).expect("LAPIC id must fit u32"),
+            Ordering::Relaxed,
+        );
+        ONLINE_CPU_MASK.fetch_or(cpu_bit(self.cpu_id), Ordering::Release);
+    }
+
     #[cfg(target_arch = "x86_64")]
     pub fn lapic_id(&self) -> usize {
         self.lapic_id
@@ -141,45 +280,126 @@ impl ExecutionContext {
         &self.sel
     }
 
-    /// Creates and returns a mutable reference to the scheduler.
+    /// Prepare a scheduler transition under an exclusive borrow, end that
+    /// borrow, and only then transfer control to the incoming task.
     ///
     /// # Safety
-    /// The caller must ensure that only one mutable reference
-    /// to the scheduler exists at any time.
-    #[allow(clippy::mut_from_ref)]
-    // SAFETY: The caller must ensure exclusivity.
-    pub unsafe fn scheduler_mut(&self) -> &mut Scheduler {
-        // SAFETY: The UnsafeCell access is guarded by the caller's guarantee of exclusivity.
-        unsafe { &mut *self.scheduler.get() }
-    }
+    /// The caller must ensure interrupts are disabled for the complete call.
+    pub unsafe fn reschedule(&self) -> bool {
+        let context_switch = {
+            self.scheduler.with_mut(|scheduler| {
+                // SAFETY: The caller guarantees interrupts remain disabled and
+                // SchedulerSlot provides the exclusive preparation borrow.
+                unsafe { scheduler.prepare_context_switch() }
+            })
+        };
 
-    pub fn scheduler(&self) -> &Scheduler {
-        // SAFETY: We are accessing the scheduler immutably.
-        // This is safe because everything in the context is cpu-local and we are not
-        // concurrently modifying it from this thread unless via scheduler_mut which requires unsafe.
-        unsafe {
-            // SAFETY: this is safe because either:
-            // * there is a mutable reference that is used for rescheduling, in which case we are
-            //   not currently executing this
-            // * there is no mutable reference, in which case we are safe because we're not modifying
-            // * someone else has a mutable reference, in which case he violates the safety contract
-            //   if this is executed
-            //
-            // The above is true because everything in the context is cpu-local.
-            &*self.scheduler.get()
+        if let Some(context_switch) = context_switch {
+            // SAFETY: The scheduler borrow ended above. Its pinned outgoing and
+            // incoming task storage remains owned by the scheduler.
+            unsafe { context_switch.execute() };
+            true
+        } else {
+            false
         }
     }
 
-    pub fn pid(&self) -> ProcessId {
-        self.scheduler().current_task().process().pid()
+    pub fn pid(&self) -> u64 {
+        self.current_pid.load(Ordering::Relaxed)
     }
 
-    pub fn current_task(&self) -> &Task {
-        self.scheduler().current_task()
+    pub fn set_current_pid(&self, pid: u64) {
+        self.current_pid.store(pid, Ordering::Relaxed);
     }
 
-    pub fn current_process(&self) -> &Arc<Process> {
-        self.current_task().process()
+    pub fn with_bpf_stack<R>(&self, f: impl FnOnce(&mut [u8]) -> R) -> Option<R> {
+        self.bpf_stack.with_mut(f)
+    }
+
+    pub(crate) fn with_bpf_execution<R>(
+        &self,
+        execution: *mut (),
+        f: impl FnOnce() -> R,
+    ) -> Option<R> {
+        if execution.is_null()
+            || self
+                .bpf_execution
+                .compare_exchange(
+                    core::ptr::null_mut(),
+                    execution,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_err()
+        {
+            return None;
+        }
+
+        struct Reset<'a>(&'a AtomicPtr<()>);
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                self.0.store(core::ptr::null_mut(), Ordering::Release);
+            }
+        }
+        let _reset = Reset(&self.bpf_execution);
+        Some(f())
+    }
+
+    pub(crate) fn current_bpf_execution(&self) -> *mut () {
+        self.bpf_execution.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn with_interrupts_masked<R>(&self, f: impl FnOnce() -> R) -> R {
+        #[cfg(target_arch = "x86_64")]
+        {
+            return x86_64::instructions::interrupts::without_interrupts(f);
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            let daif: u64;
+            // SAFETY: DAIF is CPU-local interrupt state. The guard restores the
+            // IRQ mask to its entry state after the scoped scheduler access.
+            unsafe {
+                core::arch::asm!("mrs {}, daif", out(reg) daif, options(nostack, preserves_flags));
+                core::arch::asm!("msr daifset, #2", options(nostack, preserves_flags));
+            }
+            struct RestoreIrq(bool);
+            impl Drop for RestoreIrq {
+                fn drop(&mut self) {
+                    if self.0 {
+                        // SAFETY: Restore IRQ delivery only when it was enabled
+                        // at entry; other DAIF mask bits remain unchanged.
+                        unsafe {
+                            core::arch::asm!("msr daifclr, #2", options(nostack, preserves_flags));
+                        }
+                    }
+                }
+            }
+            let _restore = RestoreIrq((daif & (1 << 7)) == 0);
+            return f();
+        }
+
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        f()
+    }
+
+    pub fn with_current_task<R>(&self, f: impl for<'task> FnOnce(&'task Task) -> R) -> R {
+        self.with_interrupts_masked(|| self.scheduler.with(|scheduler| f(scheduler.current_task())))
+    }
+
+    pub(crate) fn with_current_task_mut<R>(
+        &self,
+        f: impl for<'task> FnOnce(&'task mut Task) -> R,
+    ) -> R {
+        self.with_interrupts_masked(|| {
+            self.scheduler
+                .with_mut(|scheduler| f(scheduler.current_task_mut()))
+        })
+    }
+
+    pub fn current_process(&self) -> Arc<Process> {
+        self.with_current_task(|task| task.process().clone())
     }
 
     #[cfg(target_arch = "x86_64")]

@@ -89,7 +89,7 @@ impl MemoryApi for LowerHalfMemoryApi {
 
         self.process
             .with_address_space(|as_| {
-                as_.map_range::<Size4KiB>(
+                as_.map_range_owned::<Size4KiB>(
                     &mapped_segment,
                     PhysicalMemory::allocate_frames_non_contiguous(),
                     PageTableFlags::PRESENT
@@ -246,32 +246,76 @@ impl<T: AllocationType> LowerHalfAllocation<T> {
         let mut shared_frames = alloc::vec::Vec::with_capacity(page_count);
         for i in 0..page_count {
             let page_vaddr = self.inner.mapped_segment.start + (i as u64 * Size4KiB::SIZE);
-            let (phys, _) = self
+            let Some((phys, _)) = self
                 .process
-                .with_address_space(|as_| as_.translate_page_flags(page_vaddr))?;
-            let frame = crate::arch::types::PhysFrame::<Size4KiB>::containing_address(phys);
-            PhysicalMemory::retain_frame(frame);
-            shared_frames.push(frame);
+                .with_address_space(|as_| as_.translate_page_flags(page_vaddr))
+            else {
+                for frame in shared_frames {
+                    PhysicalMemory::deallocate_frame(frame);
+                }
+                return None;
+            };
+            let source_frame = crate::arch::types::PhysFrame::<Size4KiB>::containing_address(phys);
+            let fork_frame = if T::fork_copies_frames() {
+                let Some(frame) = PhysicalMemory::allocate_frame::<Size4KiB>() else {
+                    for frame in shared_frames {
+                        PhysicalMemory::deallocate_frame(frame);
+                    }
+                    return None;
+                };
+                // SAFETY: Both frames are allocated 4 KiB frames available via
+                // the kernel direct map, and `frame` is exclusively owned here.
+                unsafe {
+                    let src =
+                        crate::mem::phys_to_virt(source_frame.start_address().as_u64() as usize)
+                            as *const u8;
+                    let dst = crate::mem::phys_to_virt(frame.start_address().as_u64() as usize)
+                        as *mut u8;
+                    core::ptr::copy_nonoverlapping(src, dst, Size4KiB::SIZE as usize);
+                }
+                frame
+            } else {
+                PhysicalMemory::retain_frame(source_frame);
+                source_frame
+            };
+            shared_frames.push(fork_frame);
         }
 
         if T::fork_requires_cow() {
             let cow_flags = T::fork_mapping_flags();
-            self.process
+            if self
+                .process
                 .with_address_space(|as_| {
                     as_.remap_range::<Size4KiB, _>(&self.inner.mapped_segment, |_| cow_flags)
                 })
-                .ok()?;
+                .is_err()
+            {
+                for frame in shared_frames {
+                    PhysicalMemory::deallocate_frame(frame);
+                }
+                return None;
+            }
         }
 
-        new_process
+        if new_process
             .with_address_space(|as_| {
-                as_.map_range(
+                as_.map_range_owned(
                     &self.inner.mapped_segment,
                     shared_frames.into_iter(),
                     T::fork_mapping_flags(),
                 )
             })
-            .ok()?;
+            .is_err()
+        {
+            if T::fork_requires_cow() {
+                let original_flags =
+                    T::flags() | PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+                let _ = self.process.with_address_space(|as_| {
+                    as_.remap_range::<Size4KiB, _>(&self.inner.mapped_segment, |_| original_flags)
+                });
+            }
+            return None;
+        }
 
         Some(LowerHalfAllocation {
             start: self.start,
@@ -292,6 +336,10 @@ pub trait AllocationFlags {
         false
     }
 
+    fn fork_copies_frames() -> bool {
+        false
+    }
+
     fn fork_mapping_flags() -> PageTableFlags {
         Self::flags() | PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE
     }
@@ -304,6 +352,10 @@ impl AllocationFlags for Writable {
 
     fn fork_requires_cow() -> bool {
         cfg!(target_arch = "aarch64")
+    }
+
+    fn fork_copies_frames() -> bool {
+        cfg!(target_arch = "x86_64")
     }
 
     fn fork_mapping_flags() -> PageTableFlags {

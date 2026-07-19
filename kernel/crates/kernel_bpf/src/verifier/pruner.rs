@@ -101,6 +101,7 @@ impl StateSubsumes for RegState {
             _ => {
                 self.ptr_offset == other.ptr_offset
                     && self.map_id == other.map_id
+                    && self.map_writability == other.map_writability
                     && self.maybe_null == other.maybe_null
                     && self.mem_range == other.mem_range
             }
@@ -306,6 +307,7 @@ impl StatePruner {
 mod tests {
     use super::*;
     use crate::bytecode::registers::Register;
+    use crate::verifier::MapWritability;
     use crate::verifier::state::{ScalarValue, TnumValue};
 
     fn entry_state() -> VerifierState {
@@ -505,5 +507,16 @@ mod tests {
         assert_eq!(pruner.per_pc_len(0), 2);
         assert_eq!(pruner.recorded(), 5);
         assert!(pruner.at_capacity());
+    }
+
+    #[test]
+    fn map_writability_difference_prevents_pointer_subsumption() {
+        let rw = RegState::map_value_with_writability(8, false, MapWritability::ReadWrite(Some(0)));
+        let ro = RegState::map_value_with_writability(8, false, MapWritability::ReadOnly(0));
+
+        assert!(
+            !rw.subsumes(&ro),
+            "a RW map-value state must not subsume a RO map-value state"
+        );
     }
 }

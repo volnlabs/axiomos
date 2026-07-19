@@ -1,0 +1,3 @@
+name = "quick"
+description = "Formatting, inventory, boundaries, generated docs, and host checks."
+checks = ["formatting", "inventory", "boundary", "docs", "host-tests"]

@@ -44,6 +44,7 @@ extern crate alloc;
 
 mod elf;
 mod error;
+mod normalize;
 mod object;
 mod reloc;
 
@@ -52,6 +53,7 @@ use core::marker::PhantomData;
 
 pub use elf::{ElfParser, SectionType};
 pub use error::{LoadError, LoadResult};
+pub use normalize::{Normalized, normalize};
 pub use object::{BpfObject, LoadedMap, LoadedProgram};
 pub use reloc::Relocator;
 
@@ -161,6 +163,16 @@ impl<P: PhysicalProfile> BpfLoader<P> {
         maps: &[LoadedMap],
     ) -> LoadResult<Vec<LoadedProgram<P>>> {
         let mut programs = Vec::new();
+        let mut has_entry_program = false;
+        for section in parser.sections()? {
+            if section.section_type == SectionType::Program {
+                let name = parser.section_name(section)?;
+                if !Self::is_subprogram_section(&name) {
+                    has_entry_program = true;
+                    break;
+                }
+            }
+        }
 
         // Iterate through sections looking for program sections
         for section in parser.sections()? {
@@ -168,25 +180,50 @@ impl<P: PhysicalProfile> BpfLoader<P> {
                 continue;
             }
 
+            let name = parser.section_name(section)?;
+            if has_entry_program && Self::is_subprogram_section(&name) {
+                continue;
+            }
+
             if programs.len() >= self.max_programs {
                 return Err(LoadError::TooManyPrograms);
             }
 
-            let name = parser.section_name(section)?;
             let prog_type = Self::section_to_prog_type(&name);
             let data = parser.section_data(section)?;
 
             // Parse instructions
-            let insns = Self::parse_instructions(data)?;
+            let mut insns = Self::parse_instructions(data)?;
+
+            let linked_sections = Relocator::linked_call_sections(section.index, parser)?;
+            let mut linked_layouts = Vec::new();
+            for linked_idx in linked_sections {
+                let linked_section = parser
+                    .sections()?
+                    .get(linked_idx)
+                    .ok_or(LoadError::InvalidRelocation)?;
+                let base_idx = insns.len();
+                insns.extend(Self::parse_instructions(
+                    parser.section_data(linked_section)?,
+                )?);
+                linked_layouts.push((linked_idx, base_idx));
+            }
 
             // Apply relocations
-            let mut relocator = Relocator::new(maps);
+            let mut relocator = Relocator::new(maps).with_linked_sections(linked_layouts);
             let insns = relocator.relocate(&name, insns, parser)?;
+
+            // Resolve & inline BPF-to-BPF calls into a flat program (#87).
+            let insns = normalize(&insns)?.insns;
 
             programs.push(LoadedProgram::new(name, prog_type, insns));
         }
 
         Ok(programs)
+    }
+
+    fn is_subprogram_section(name: &str) -> bool {
+        matches!(name, ".text" | "text")
     }
 
     /// Convert section name to program type.
@@ -231,7 +268,7 @@ impl<P: PhysicalProfile> BpfLoader<P> {
 
         let mut insns = Vec::with_capacity(data.len() / INSN_SIZE);
 
-        for chunk in data.chunks_exact(INSN_SIZE) {
+        for chunk in data.as_chunks::<INSN_SIZE>().0 {
             let insn = BpfInsn::from_bytes_load(chunk)?;
             insns.push(insn);
         }

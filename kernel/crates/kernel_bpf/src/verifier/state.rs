@@ -84,6 +84,33 @@ impl RegType {
     }
 }
 
+/// Verifier proof that a map-value pointer may be written.
+///
+/// `ReadWrite(None)` is the legacy/all-RW case: no `map_perms` table was
+/// supplied, so every reachable map is writable by policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapWritability {
+    ReadWrite(Option<u32>),
+    ReadOnly(u32),
+    Unprovable,
+}
+
+impl MapWritability {
+    #[inline]
+    pub const fn is_read_write(self) -> bool {
+        matches!(self, Self::ReadWrite(_))
+    }
+
+    #[inline]
+    pub const fn map_id(self) -> Option<u32> {
+        match self {
+            Self::ReadWrite(id) => id,
+            Self::ReadOnly(id) => Some(id),
+            Self::Unprovable => None,
+        }
+    }
+}
+
 /// State of a single register during verification.
 #[derive(Debug, Clone)]
 pub struct RegState {
@@ -110,6 +137,9 @@ pub struct RegState {
     /// Dereferencing a maybe-null pointer is rejected until a null check
     /// (`if r != 0`) proves it non-null on that branch.
     pub maybe_null: bool,
+
+    /// For `PtrToMapValue`: proof that stores through this pointer are allowed.
+    pub map_writability: MapWritability,
 }
 
 impl RegState {
@@ -122,6 +152,7 @@ impl RegState {
             map_id: None,
             mem_range: None,
             maybe_null: false,
+            map_writability: MapWritability::Unprovable,
         }
     }
 
@@ -134,6 +165,7 @@ impl RegState {
             map_id: None,
             mem_range: None,
             maybe_null: false,
+            map_writability: MapWritability::Unprovable,
         }
     }
 
@@ -146,6 +178,7 @@ impl RegState {
             map_id: None,
             mem_range: None,
             maybe_null: false,
+            map_writability: MapWritability::Unprovable,
         }
     }
 
@@ -158,6 +191,7 @@ impl RegState {
             map_id: None,
             mem_range: None,
             maybe_null: false,
+            map_writability: MapWritability::Unprovable,
         }
     }
 
@@ -173,6 +207,24 @@ impl RegState {
             map_id: None,
             mem_range: None,
             maybe_null: false,
+            map_writability: MapWritability::Unprovable,
+        }
+    }
+
+    /// Create a read-only pointer to the bytes behind `BpfContext::data`.
+    ///
+    /// This intentionally uses `PtrToCtx`, not `PtrToPacket`: hook payloads are
+    /// kernel-owned event structs and must be readable/passable to helpers, but
+    /// stores through them are not allowed.
+    pub fn ctx_data_ptr(size: u32) -> Self {
+        Self {
+            reg_type: RegType::PtrToCtx,
+            scalar_value: None,
+            ptr_offset: 0,
+            map_id: None,
+            mem_range: Some(size),
+            maybe_null: false,
+            map_writability: MapWritability::Unprovable,
         }
     }
 
@@ -181,13 +233,23 @@ impl RegState {
     /// `maybe_null` reflects that `bpf_map_lookup_elem` can return NULL; the
     /// verifier rejects dereferences until a null check clears it.
     pub fn map_value(size: u32, maybe_null: bool) -> Self {
+        Self::map_value_with_writability(size, maybe_null, MapWritability::ReadWrite(None))
+    }
+
+    /// Create a map-value pointer state with an explicit writability proof.
+    pub fn map_value_with_writability(
+        size: u32,
+        maybe_null: bool,
+        map_writability: MapWritability,
+    ) -> Self {
         Self {
             reg_type: RegType::PtrToMapValue,
             scalar_value: None,
             ptr_offset: 0,
-            map_id: None,
+            map_id: map_writability.map_id(),
             mem_range: Some(size),
             maybe_null,
+            map_writability,
         }
     }
 
@@ -596,14 +658,22 @@ impl StackState {
 
     /// Check if access at offset with size is valid.
     pub fn is_valid_access(&self, offset: i64, size: usize) -> bool {
-        // Stack access must be negative offset from FP
-        if offset >= 0 {
+        // The instruction address is `fp + offset`; a multi-byte access grows
+        // toward the frame pointer, just like the interpreter's byte slice.
+        if offset >= 0 || size == 0 {
             return false;
         }
 
-        // Check bounds
-        let end_offset = offset - (size as i64) + 1;
-        if end_offset < -(self.capacity as i64) {
+        let Ok(size) = i64::try_from(size) else {
+            return false;
+        };
+        let Ok(capacity) = i64::try_from(self.capacity) else {
+            return false;
+        };
+        let Some(end_exclusive) = offset.checked_add(size) else {
+            return false;
+        };
+        if offset < -capacity || end_exclusive > 0 {
             return false;
         }
 
@@ -748,6 +818,13 @@ mod tests {
         // Invalid positive offset
         assert!(!stack.set(0, StackSlot::Scalar));
         assert!(!stack.set(1, StackSlot::Scalar));
+
+        // An access begins at `fp + offset` and extends toward FP.
+        assert!(stack.is_valid_access(-8, 8));
+        assert!(stack.is_valid_access(-256, 8));
+        assert!(!stack.is_valid_access(-1, 8));
+        assert!(!stack.is_valid_access(-257, 1));
+        assert!(!stack.is_valid_access(-8, 0));
     }
 
     #[test]

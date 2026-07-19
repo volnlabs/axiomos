@@ -1,18 +1,22 @@
+use alloc::sync::Arc;
+
+use kernel_abi::ProtFlags;
 use kernel_syscall::access::{
     AllocationStrategy, CreateMappingError, Location, Mapping, MemoryAccess,
 };
 use kernel_syscall::UserspacePtr;
 use kernel_virtual_memory::Segment;
 
-use crate::arch::types::{PageSize, PageTableFlags, PhysFrameRangeInclusive, Size4KiB, VirtAddr};
-use crate::mcore::mtask::process::mem::{MappedMemoryRegion, MemoryRegion};
+use crate::arch::types::{PageSize, PhysFrameRangeInclusive, Size4KiB, VirtAddr};
+use crate::mcore::mtask::process::mem::{user_page_flags, MappedMemoryRegion, MemoryRegion};
+use crate::mcore::mtask::process::Process;
 use crate::mem::phys::PhysicalMemory;
 use crate::mem::phys_to_virt;
 use crate::mem::virt::{OwnedSegment, VirtualMemoryAllocator};
 use crate::syscall::access::{KernelAccess, KernelMemoryRegionHandle};
 use crate::UsizeExt;
 
-impl MemoryAccess for KernelAccess<'_> {
+impl MemoryAccess for KernelAccess {
     type Mapping = KernelMapping;
 
     fn create_mapping(
@@ -20,17 +24,26 @@ impl MemoryAccess for KernelAccess<'_> {
         location: Location,
         size: usize,
         allocation_strategy: AllocationStrategy,
+        protection: ProtFlags,
     ) -> Result<Self::Mapping, CreateMappingError> {
-        // For now, we only support eager allocation
-        assert!(
-            matches!(allocation_strategy, AllocationStrategy::Eager),
-            "only eager allocation is supported"
-        );
+        if size == 0 {
+            return Err(CreateMappingError::InvalidRequest);
+        }
+        if allocation_strategy != AllocationStrategy::Eager {
+            return Err(CreateMappingError::Unsupported);
+        }
 
-        let page_aligned_size = size.next_multiple_of(Size4KiB::SIZE as usize);
+        let page_size = Size4KiB::SIZE as usize;
+        let page_aligned_size = size
+            .checked_add(page_size - 1)
+            .map(|value| value / page_size * page_size)
+            .ok_or(CreateMappingError::OutOfMemory)?;
         let page_count = page_aligned_size / Size4KiB::SIZE as usize;
 
         let segment = if let Location::Fixed(addr) = location {
+            if (addr.as_ptr() as usize) % page_size != 0 {
+                return Err(CreateMappingError::InvalidRequest);
+            }
             self.process
                 .vmm()
                 .mark_as_reserved(Segment::new(
@@ -64,54 +77,51 @@ impl MemoryAccess for KernelAccess<'_> {
 
         self.process
             .with_address_space(|as_| {
-                as_.map_range::<Size4KiB>(
+                as_.map_range_owned::<Size4KiB>(
                     &*segment,
                     frames.into_iter(),
-                    PageTableFlags::PRESENT
-                        | PageTableFlags::WRITABLE
-                        | PageTableFlags::USER_ACCESSIBLE
-                        | PageTableFlags::NO_EXECUTE,
+                    user_page_flags(protection),
                 )
             })
             .map_err(|_| CreateMappingError::OutOfMemory)?;
 
         Ok(KernelMapping {
+            process: self.process.clone(),
             addr: segment.start,
             size,
-            segment,
-            physical_frames: frames,
+            protection,
+            segment: Some(segment),
+            physical_frames: Some(frames),
         })
     }
 }
 
+#[must_use = "an uncommitted kernel mapping rolls back when dropped"]
 pub struct KernelMapping {
+    process: Arc<Process>,
     addr: VirtAddr,
     size: usize,
-    segment: OwnedSegment<'static>,
-    physical_frames: PhysFrameRangeInclusive<Size4KiB>,
+    protection: ProtFlags,
+    segment: Option<OwnedSegment<'static>>,
+    physical_frames: Option<PhysFrameRangeInclusive<Size4KiB>>,
 }
 
-impl KernelMapping {
-    /// Convert this mapping into a MemoryRegion handle that can be tracked by the process.
-    pub fn into_region_handle(self) -> KernelMemoryRegionHandle {
-        let addr = self
-            .addr
-            .as_ptr::<u8>()
-            .try_into()
-            .expect("kernel mapping should be located in user space");
-        let size = self.size;
-
-        let inner = MemoryRegion::Mapped(MappedMemoryRegion::new(
-            self.segment,
-            self.size,
-            self.physical_frames,
-        ));
-
-        KernelMemoryRegionHandle { addr, size, inner }
+impl Drop for KernelMapping {
+    fn drop(&mut self) {
+        if let Some(segment) = self.segment.take() {
+            self.process.with_address_space(|address_space| {
+                address_space.unmap_range::<Size4KiB>(&*segment, |_| {});
+            });
+        }
+        if let Some(frames) = self.physical_frames.take() {
+            PhysicalMemory::deallocate_frames(frames);
+        }
     }
 }
 
 impl Mapping for KernelMapping {
+    type Region = KernelMemoryRegionHandle;
+
     fn addr(&self) -> UserspacePtr<u8> {
         self.addr
             .as_ptr::<u8>()
@@ -121,5 +131,33 @@ impl Mapping for KernelMapping {
 
     fn size(&self) -> usize {
         self.size
+    }
+
+    fn protection(&self) -> ProtFlags {
+        self.protection
+    }
+
+    fn commit(mut self) -> Self::Region {
+        let addr = self.addr();
+        let segment = self
+            .segment
+            .take()
+            .expect("uncommitted mapping owns its virtual reservation");
+        let _physical_frames = self
+            .physical_frames
+            .take()
+            .expect("uncommitted mapping owns its physical frames");
+        let inner = MemoryRegion::Mapped(MappedMemoryRegion::new(
+            &self.process,
+            segment,
+            self.size,
+            self.protection,
+        ));
+
+        KernelMemoryRegionHandle {
+            addr,
+            size: self.size,
+            inner,
+        }
     }
 }

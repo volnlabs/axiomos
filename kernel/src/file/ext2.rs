@@ -10,7 +10,8 @@ use filesystem::BlockDevice;
 use kernel_vfs::fs::{FileSystem, FsHandle};
 use kernel_vfs::path::{AbsoluteOwnedPath, AbsolutePath, Path};
 use kernel_vfs::{
-    CloseError, FsError, MkdirError, OpenError, ReadError, RmdirError, Stat, StatError, WriteError,
+    CloseError, FileType, FsError, MkdirError, OpenError, ReadError, RmdirError, Stat, StatError,
+    WriteError,
 };
 use spin::RwLock;
 
@@ -62,7 +63,8 @@ where
             .ok_or(OpenError::NotFound)?;
 
         let handle = FsHandle::from(FS_COUNTER.fetch_add(1, Relaxed));
-        let inode = VirtualExt2Inode::try_new(found_num, found).unwrap();
+        let inode =
+            VirtualExt2Inode::try_new(found_num, found).ok_or(OpenError::UnsupportedFileType)?;
 
         self.handles
             .insert(handle, Arc::new((path.to_owned(), RwLock::new(inode))));
@@ -84,7 +86,6 @@ where
         offset: usize,
     ) -> Result<usize, ReadError> {
         let inode = &self.handles.get(&handle).ok_or(FsError::InvalidHandle)?.1;
-
         let guard = inode.read();
         match &guard.inner {
             Inner::RegularFile(file) => self
@@ -101,7 +102,7 @@ where
         _buf: &[u8],
         _offset: usize,
     ) -> Result<usize, WriteError> {
-        todo!("write support for ext2");
+        Err(WriteError::NotWritable)
     }
 
     fn stat(&mut self, handle: FsHandle, stat: &mut Stat) -> Result<(), StatError> {
@@ -111,20 +112,22 @@ where
         match &guard.inner {
             Inner::RegularFile(file) => {
                 stat.size = file.len();
+                stat.file_type = FileType::Regular;
             }
-            _ => todo!(),
+            Inner::Directory(_) => {
+                stat.size = 0;
+                stat.file_type = FileType::Directory;
+            }
         }
         Ok(())
     }
 
     fn mkdir(&mut self, _path: &AbsolutePath) -> Result<(), MkdirError> {
-        // TODO: implement mkdir for ext2
-        Err(MkdirError::FsError(FsError::InvalidHandle)) // Placeholder
+        Err(MkdirError::Unsupported)
     }
 
     fn rmdir(&mut self, _path: &AbsolutePath) -> Result<(), RmdirError> {
-        // TODO: implement rmdir for ext2
-        Err(RmdirError::FsError(FsError::InvalidHandle)) // Placeholder
+        Err(RmdirError::Unsupported)
     }
 }
 
@@ -142,38 +145,35 @@ where
         path: &Path,
         starting_point: (InodeAddress, Inode),
     ) -> Result<Option<(InodeAddress, Inode)>, ext2::Error> {
-        let components = path.filenames();
-
-        let (mut current_num, mut current) = starting_point;
-        for component in components {
+        let mut stack = alloc::vec![starting_point];
+        for component in path.filenames() {
             match component {
-                "/" => {
-                    todo!("absolute path")
-                }
-                "." => {} // do nothing,
+                "/" | "." => {}
                 ".." => {
-                    todo!("parent dir");
+                    if stack.len() > 1 {
+                        stack.pop();
+                    }
                 }
                 v => {
-                    let x = current.typ();
-                    if x != Type::Directory {
-                        todo!("symlink support")
+                    let Some((_, current)) = stack.last() else {
+                        return Ok(None);
+                    };
+                    if current.typ() != Type::Directory {
+                        return Ok(None);
                     }
-                    // x is a directory
                     let found_entry = self
-                        .list_dir(&current)?
+                        .list_dir(current)?
                         .into_iter()
                         .find(|entry| entry.name() == Some(v));
                     if let Some(found_entry) = found_entry {
-                        (current_num, current) = self.resolve_dir_entry(found_entry)?;
+                        stack.push(self.resolve_dir_entry(found_entry)?);
                     } else {
                         return Ok(None);
                     }
                 }
             }
         }
-
-        Ok(Some((current_num, current)))
+        Ok(stack.pop())
     }
 }
 
@@ -184,12 +184,10 @@ pub struct VirtualExt2Inode {
 
 impl VirtualExt2Inode {
     #[must_use]
-    #[allow(clippy::missing_panics_doc)] // see comments
     pub fn try_new(inode_num: InodeAddress, inode: Inode) -> Option<Self> {
         let inner = match inode.typ() {
-            // the unwraps don't actually panic, we check the type, try_into checks again
-            Type::RegularFile => Inner::RegularFile((inode_num, inode).try_into().unwrap()),
-            Type::Directory => Inner::Directory((inode_num, inode).try_into().unwrap()),
+            Type::RegularFile => Inner::RegularFile((inode_num, inode).try_into().ok()?),
+            Type::Directory => Inner::Directory((inode_num, inode).try_into().ok()?),
             _ => return None,
         };
         Some(Self {

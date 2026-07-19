@@ -2,7 +2,7 @@ use core::marker::PhantomData;
 
 use kernel_device::DeviceId;
 use kernel_device::block::{BlockBuf, BlockDevice};
-use kernel_vfs::{ReadError, Stat, StatError, WriteError};
+use kernel_vfs::{FileType, ReadError, Stat, StatError, WriteError};
 
 use crate::DevFile;
 
@@ -182,7 +182,7 @@ where
     }
 
     fn stat(&mut self, stat: &mut Stat) -> Result<(), StatError> {
-        *stat = Stat { size: stat.size };
+        stat.file_type = FileType::BlockDevice;
         Ok(())
     }
 }

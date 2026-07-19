@@ -8,6 +8,7 @@ mod port;
 #[cfg(target_arch = "x86_64")]
 pub use port::*;
 
+/// A typed offset into the 256-byte legacy PCI configuration space.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct ConfigKey<T> {
     offset: u8,
@@ -43,7 +44,7 @@ impl TryFrom<usize> for ConfigKey<u16> {
             return Err(value);
         }
 
-        if value > u16::MAX as usize {
+        if value > u8::MAX as usize {
             Err(value)
         } else {
             Ok(ConfigKey::new(value as u8))
@@ -59,7 +60,7 @@ impl TryFrom<usize> for ConfigKey<u32> {
             return Err(value);
         }
 
-        if value > u32::MAX as usize {
+        if value > u8::MAX as usize {
             Err(value)
         } else {
             Ok(ConfigKey::new(value as u8))

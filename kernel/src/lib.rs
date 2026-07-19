@@ -1,12 +1,16 @@
 #![no_std]
 #![no_main]
 #![cfg_attr(target_arch = "x86_64", feature(abi_x86_interrupt))]
-#![feature(negative_impls, vec_push_within_capacity)]
+#![feature(negative_impls)]
 extern crate alloc;
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+compile_error!("the axiomos kernel supports only x86_64 and AArch64; use kernel/demos/riscv for the experimental RISC-V artifact");
 
 use ::log::info;
 use conquer_once::spin::OnceCell;
 use spin::Mutex;
+use thiserror::Error;
 
 #[cfg(target_arch = "x86_64")]
 use crate::driver::pci;
@@ -15,12 +19,16 @@ use crate::limine::BOOT_TIME;
 
 #[cfg(target_arch = "x86_64")]
 mod acpi;
+pub mod actuation;
 #[cfg(target_arch = "x86_64")]
 mod apic;
 pub mod arch;
 pub mod backtrace;
+#[cfg(feature = "bench")]
+pub mod bench;
 pub mod bpf;
 pub mod driver;
+mod fatal;
 pub mod file;
 #[cfg(target_arch = "x86_64")]
 pub mod hpet;
@@ -32,26 +40,11 @@ pub mod mcore;
 pub mod mem;
 pub mod serial;
 
-// Provide a dummy allocator for non-x86_64 and non-aarch64 targets
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-#[global_allocator]
-static ALLOCATOR: DummyAllocator = DummyAllocator;
-
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-struct DummyAllocator;
-
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-unsafe impl core::alloc::GlobalAlloc for DummyAllocator {
-    unsafe fn alloc(&self, _layout: core::alloc::Layout) -> *mut u8 {
-        core::ptr::null_mut()
-    }
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
-}
-
 #[cfg(target_arch = "x86_64")]
 pub mod sse;
 pub mod syscall;
 pub mod time;
+pub mod watchdog;
 
 pub static BOOT_TIME_SECONDS: OnceCell<u64> = OnceCell::uninit();
 
@@ -66,28 +59,53 @@ pub struct KernelBootMetrics {
 pub static BOOT_METRICS: OnceCell<KernelBootMetrics> = OnceCell::uninit();
 pub static BPF_MANAGER: OnceCell<Mutex<bpf::BpfManager>> = OnceCell::uninit();
 
+#[derive(Debug, Error)]
+pub enum KernelInitError {
+    #[cfg(target_arch = "x86_64")]
+    #[error("boot time was not provided by the bootloader")]
+    BootTimeUnavailable,
+    #[error("filesystem initialization failed: {0}")]
+    FileSystem(#[from] file::FileInitError),
+    #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+    #[error("embedded ramdisk registration failed: {0}")]
+    EmbeddedRamdisk(#[from] driver::block::RegisterBlockDeviceError),
+    #[error("IIO simulation task creation failed: {0}")]
+    IioSimulationTask(#[from] driver::iio::IioInitError),
+}
+
 #[inline(always)]
 pub(crate) fn dbg_mark(_ch: u32) {
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     // SAFETY: Write to Pi 5 debug UART10 data register.
     unsafe {
         (0x10_7D00_1000 as *mut u32).write_volatile(_ch);
     }
 }
 
-fn init_boot_time() {
+fn init_boot_time() -> Result<(), KernelInitError> {
     #[cfg(target_arch = "x86_64")]
-    BOOT_TIME_SECONDS.init_once(|| BOOT_TIME.get_response().unwrap().timestamp().as_secs());
+    {
+        let response = BOOT_TIME
+            .get_response()
+            .ok_or(KernelInitError::BootTimeUnavailable)?;
+        BOOT_TIME_SECONDS.init_once(|| response.timestamp().as_secs());
+    }
     #[cfg(not(target_arch = "x86_64"))]
     {
         // AArch64/RISC-V currently run without a platform RTC source here.
         // Keep boot time at epoch 0 and avoid early OnceCell initialization.
     }
+    Ok(())
 }
 
-pub fn init() {
+/// Initializes kernel subsystems in dependency order.
+///
+/// # Errors
+/// Returns a typed boot-boundary error when a fallible device or task setup
+/// step cannot be completed.
+pub fn init() -> Result<(), KernelInitError> {
     dbg_mark(0x61); // 'a'
-    init_boot_time();
+    init_boot_time()?;
     dbg_mark(0x62); // 'b'
     log::init();
     dbg_mark(0x63); // 'c'
@@ -122,13 +140,20 @@ pub fn init() {
     dbg_mark(0x68); // 'h'
     info!("BPF subsystem initialized");
 
+    #[cfg(feature = "bench")]
+    {
+        info!("Initializing v0.3 HW bench (Task 11)...");
+        bench::init();
+        info!("HW bench initialized");
+    }
+
     info!("Initializing backtrace...");
     backtrace::init();
     dbg_mark(0x69); // 'i'
     info!("Backtrace initialized");
 
     info!("Initializing VFS...");
-    file::init();
+    file::init()?;
     dbg_mark(0x6a); // 'j'
     info!("VFS initialized");
 
@@ -160,13 +185,13 @@ pub fn init() {
     #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
     {
         info!("Initializing embedded ramdisk...");
-        driver::ram::init_embedded();
+        driver::ram::init_embedded()?;
         dbg_mark(0x52); // 'R'
         info!("Embedded ramdisk initialized");
     }
 
     info!("Initializing simulated devices...");
-    driver::iio::init_simulated_device();
+    driver::iio::init_simulated_device()?;
     dbg_mark(0x6d); // 'm'
     info!("Simulated devices initialized");
 
@@ -174,6 +199,7 @@ pub fn init() {
 
     // Print benchmark metrics
     print_benchmark_metrics();
+    Ok(())
 }
 
 fn print_benchmark_metrics() {
@@ -211,6 +237,14 @@ fn print_benchmark_metrics() {
         serial_println!("Kernel heap: {} KB", heap_used_kb);
         serial_println!("Kernel image: {} MB", kernel_image_mb);
         serial_println!("");
+
+        // The deterministic boot-success marker for CI smoke tests is
+        // emitted from src/main.rs after root mount + init creation —
+        // see the call site that prints `QEMU_BOOT_OK`. Emitting it here
+        // (inside kernel::init) would fire *before* the root filesystem
+        // is mounted and the first user process exists, which the
+        // audit's review round-1 flagged as "proves kernel
+        // initialization only".
     }
 }
 

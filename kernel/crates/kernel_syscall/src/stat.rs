@@ -1,13 +1,13 @@
 //! stat/fstat syscall implementations
 
-use kernel_abi::{EBADF, EINVAL, Errno};
+use kernel_abi::Errno;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-use crate::access::FileAccess;
-use crate::ptr::UserspaceMutPtr;
+use crate::access::{FileAccess, FileAccessError};
 
 /// Linux stat structure (simplified for now)
 #[repr(C)]
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct UserStat {
     /// Device ID
     pub st_dev: u64,
@@ -69,33 +69,129 @@ pub mod mode {
 
 /// Trait for types that can provide stat information.
 pub trait StatAccess: FileAccess {
-    type StatError;
-
     /// Get file status by file descriptor.
-    fn fstat(&self, fd: Self::Fd) -> Result<UserStat, Self::StatError>;
+    fn fstat(&self, fd: Self::Fd) -> Result<UserStat, FileAccessError>;
 }
 
 /// Get file status by file descriptor.
-pub fn sys_fstat<Cx: StatAccess>(
-    cx: &Cx,
-    fildes: Cx::Fd,
-    mut buf: UserspaceMutPtr<UserStat>,
-) -> Result<usize, Errno> {
-    if buf.as_ptr().is_null() {
-        return Err(EINVAL);
+pub fn sys_fstat<Cx: StatAccess>(cx: &Cx, fildes: Cx::Fd) -> Result<UserStat, Errno> {
+    cx.fstat(fildes).map_err(|error| error.errno())
+}
+
+#[cfg(test)]
+mod tests {
+    use core::ffi::c_int;
+
+    use kernel_abi::EBADF;
+    use kernel_vfs::path::AbsolutePath;
+
+    use super::*;
+    use crate::access::FileInfo;
+
+    struct TestFileInfo;
+
+    impl FileInfo for TestFileInfo {}
+
+    struct TestStatAccess {
+        result: Result<UserStat, FileAccessError>,
     }
 
-    buf.validate_range(core::mem::size_of::<UserStat>())
-        .map_err(|_| EINVAL)?;
+    impl FileAccess for TestStatAccess {
+        type FileInfo = TestFileInfo;
+        type Fd = c_int;
 
-    let stat = cx.fstat(fildes).map_err(|_| EBADF)?;
+        fn file_info(&self, _path: &AbsolutePath) -> Result<Self::FileInfo, FileAccessError> {
+            Err(FileAccessError::OperationNotSupported)
+        }
 
-    // Write stat to userspace buffer
-    // SAFETY: buf is a UserspaceMutPtr which has been validated to be non-null.
-    // We assume the userspace memory is writable and valid for the size of UserStat.
-    unsafe {
-        core::ptr::write(buf.as_mut_ptr(), stat);
+        fn open(&self, _info: &Self::FileInfo) -> Result<Self::Fd, FileAccessError> {
+            Err(FileAccessError::OperationNotSupported)
+        }
+
+        fn mkdir(&self, _path: &AbsolutePath) -> Result<(), FileAccessError> {
+            Err(FileAccessError::OperationNotSupported)
+        }
+
+        fn rmdir(&self, _path: &AbsolutePath) -> Result<(), FileAccessError> {
+            Err(FileAccessError::OperationNotSupported)
+        }
+
+        fn read(&self, _fd: Self::Fd, _buf: &mut [u8]) -> Result<usize, FileAccessError> {
+            Err(FileAccessError::OperationNotSupported)
+        }
+
+        fn write(&self, _fd: Self::Fd, _buf: &[u8]) -> Result<usize, FileAccessError> {
+            Err(FileAccessError::OperationNotSupported)
+        }
+
+        fn close(&self, _fd: Self::Fd) -> Result<(), FileAccessError> {
+            Err(FileAccessError::OperationNotSupported)
+        }
+
+        fn lseek(
+            &self,
+            _fd: Self::Fd,
+            _offset: i64,
+            _whence: i32,
+        ) -> Result<usize, FileAccessError> {
+            Err(FileAccessError::OperationNotSupported)
+        }
+
+        fn pipe(&self) -> Result<(Self::Fd, Self::Fd), FileAccessError> {
+            Err(FileAccessError::OperationNotSupported)
+        }
+
+        fn dup(&self, _oldfd: Self::Fd) -> Result<Self::Fd, FileAccessError> {
+            Err(FileAccessError::OperationNotSupported)
+        }
+
+        fn dup2(&self, _oldfd: Self::Fd, _newfd: Self::Fd) -> Result<Self::Fd, FileAccessError> {
+            Err(FileAccessError::OperationNotSupported)
+        }
     }
 
-    Ok(0)
+    impl StatAccess for TestStatAccess {
+        fn fstat(&self, _fd: Self::Fd) -> Result<UserStat, FileAccessError> {
+            self.result
+        }
+    }
+
+    #[test]
+    fn fstat_returns_the_context_status_without_translation() {
+        let expected = UserStat {
+            st_dev: 1,
+            st_ino: 2,
+            st_nlink: 3,
+            st_mode: mode::S_IFREG | 0o640,
+            st_uid: 4,
+            st_gid: 5,
+            __pad0: 0,
+            st_rdev: 6,
+            st_size: 7,
+            st_blksize: 4096,
+            st_blocks: 8,
+            st_atime: 9,
+            st_atime_nsec: 10,
+            st_mtime: 11,
+            st_mtime_nsec: 12,
+            st_ctime: 13,
+            st_ctime_nsec: 14,
+            __unused: [15, 16, 17],
+        };
+        let cx = TestStatAccess {
+            result: Ok(expected),
+        };
+
+        let actual = sys_fstat(&cx, 23).expect("fstat succeeds");
+        assert_eq!(actual.as_bytes(), expected.as_bytes());
+    }
+
+    #[test]
+    fn fstat_maps_context_errors_to_errno() {
+        let cx = TestStatAccess {
+            result: Err(FileAccessError::BadFileDescriptor),
+        };
+
+        assert!(matches!(sys_fstat(&cx, 23), Err(error) if error == EBADF));
+    }
 }

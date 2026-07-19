@@ -239,7 +239,7 @@ impl HigherHalfStack {
             #[cfg(target_arch = "x86_64")]
             {
                 address_space
-                    .map_range::<Size4KiB>(
+                    .map_range_owned::<Size4KiB>(
                         &mapped_segment,
                         PhysicalMemory::allocate_frames_non_contiguous(),
                         // FIXME: must be user accessible for user tasks, but can only be user accessible if in lower half, otherwise it can be modified by unrelated tasks/processes
@@ -255,7 +255,7 @@ impl HigherHalfStack {
                 )
                 .expect("out of phys memory");
                 let res = address_space
-                    .map_range::<Size4KiB>(
+                    .map_range_owned::<Size4KiB>(
                         &mapped_segment,
                         frames.into_iter(),
                         PageTableFlags::PRESENT

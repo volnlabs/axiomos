@@ -1,0 +1,30 @@
+schema_version = 1
+campaign = "host-bpf-verifier-2ef74f0"
+commit = "2ef74f0d43b6beeebf24e984d7b8c74ad1b27e8f"
+date = "2026-07-17"
+command = "CARGO_TERM_COLOR=never cargo bench --locked -p kernel_bpf --bench verifier --features embedded-profile"
+raw_log = "docs/performance/evidence/2ef74f0/verifier-host.log"
+raw_log_sha256 = "a271b45124025c7062cddca5f7018b5639dda3d23f4d734ea6f6806a9243ac61"
+artifact_path = "target/release/deps/verifier-22a049a537802bff"
+artifact_sha256 = "94b4a874cdc014582db66bdc1db5350761a6e46089a2681d11e4cfb053bcb404"
+toolchain = "nightly-2026-07-02"
+rustc = "rustc 1.98.0-nightly (4c9d2bfe4 2026-07-01)"
+host = "Linux 7.0.9-arch2-1 x86_64"
+cpu = "AMD Ryzen 7 7735HS with Radeon Graphics; 16 logical CPUs"
+required_markers = [
+  "verifier/small/minimal  time:",
+  "verifier/small/arithmetic",
+  "verifier/scaling/instructions/10",
+  "verifier/scaling/instructions/50",
+  "verifier/scaling/instructions/100",
+  "verifier/scaling/instructions/500",
+  "verifier/scaling/instructions/1000",
+  "verifier/control_flow/linear",
+  "verifier/control_flow/single_branch",
+  "verifier/control_flow/multi_branch",
+]
+
+[inputs]
+"Cargo.lock" = "e1890c77d0bd209b1c16e81456a9cd9282a0988390edde42c794ebb88d66eedd"
+"rust-toolchain.toml" = "e74988a8e96ded737122c116b6f5f45c7eda70065cc966888f35b5bfcd76185b"
+"kernel/crates/kernel_bpf/benches/verifier.rs" = "7b5c5bbcf7ef0d0d8c58a07e40c8bbcb0f1ac289a11cf3bf38ca9ec050b519b7"

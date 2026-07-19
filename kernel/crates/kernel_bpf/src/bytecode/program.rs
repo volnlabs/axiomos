@@ -18,6 +18,7 @@ use core::marker::PhantomData;
 
 use super::insn::BpfInsn;
 use crate::profile::{ActiveProfile, PhysicalProfile};
+use crate::verifier::{VerificationToken, Verifier, VerifyConfig, VerifyError};
 
 /// BPF program types.
 ///
@@ -120,6 +121,65 @@ impl BpfProgType {
     }
 }
 
+/// Unverified BPF bytecode.
+///
+/// A raw program can be assembled by safe code, but execution engines do not
+/// accept it. Consume it with [`verify`](Self::verify) or
+/// [`verify_with_config`](Self::verify_with_config) to obtain a
+/// [`VerifiedProgram`].
+#[derive(Debug, Clone)]
+pub struct RawProgram<P: PhysicalProfile = ActiveProfile> {
+    prog_type: BpfProgType,
+    insns: Vec<BpfInsn>,
+    name: Option<&'static str>,
+    _profile: PhantomData<P>,
+}
+
+impl<P: PhysicalProfile> RawProgram<P> {
+    /// Create unchecked bytecode. This value cannot be executed directly.
+    pub fn new(prog_type: BpfProgType, insns: Vec<BpfInsn>) -> Self {
+        Self {
+            prog_type,
+            insns,
+            name: None,
+            _profile: PhantomData,
+        }
+    }
+
+    /// Add a diagnostic name without changing the bytecode.
+    pub fn with_name(mut self, name: &'static str) -> Self {
+        self.name = Some(name);
+        self
+    }
+
+    /// Return the unchecked instruction stream.
+    pub fn instructions(&self) -> &[BpfInsn] {
+        &self.insns
+    }
+
+    /// Return the declared program type.
+    pub fn prog_type(&self) -> BpfProgType {
+        self.prog_type
+    }
+
+    /// Verify with conservative defaults and consume the raw program.
+    pub fn verify(self) -> Result<VerifiedProgram<P>, VerifyError> {
+        self.verify_with_config(VerifyConfig::default())
+    }
+
+    /// Verify with explicit context and map bounds and consume the raw program.
+    pub fn verify_with_config(
+        self,
+        config: VerifyConfig<'_>,
+    ) -> Result<VerifiedProgram<P>, VerifyError> {
+        let mut program = Verifier::<P>::verify_with_config(self.prog_type, &self.insns, config)?;
+        if let Some(name) = self.name {
+            program = program.with_name(name);
+        }
+        Ok(program)
+    }
+}
+
 /// Validated BPF program ready for execution.
 ///
 /// A `BpfProgram` represents a BPF program that has passed verification
@@ -144,13 +204,23 @@ impl BpfProgType {
 /// use kernel_bpf::profile::ActiveProfile;
 ///
 /// // Create a program for the active profile
-/// let program: BpfProgram<ActiveProfile> = BpfProgram::new(
-///     BpfProgType::SocketFilter,
-///     instructions,
-///     512,
-/// )?;
+/// let raw = RawProgram::<ActiveProfile>::new(BpfProgType::SocketFilter, instructions);
+/// let program: VerifiedProgram<ActiveProfile> = raw.verify()?;
 /// ```
-pub struct BpfProgram<P: PhysicalProfile = ActiveProfile> {
+///
+/// Safe callers cannot manufacture this type without running the verifier:
+///
+/// ```compile_fail
+/// use kernel_bpf::bytecode::{BpfInsn, BpfProgType, VerifiedProgram};
+/// use kernel_bpf::profile::ActiveProfile;
+///
+/// let _ = VerifiedProgram::<ActiveProfile>::from_verified_parts(
+///     BpfProgType::SocketFilter,
+///     Vec::from([BpfInsn::exit()]),
+///     0,
+/// );
+/// ```
+pub struct VerifiedProgram<P: PhysicalProfile = ActiveProfile> {
     /// Program type
     prog_type: BpfProgType,
     /// Verified instructions
@@ -163,7 +233,10 @@ pub struct BpfProgram<P: PhysicalProfile = ActiveProfile> {
     _profile: PhantomData<P>,
 }
 
-impl<P: PhysicalProfile> Clone for BpfProgram<P> {
+/// Compatibility name for the verified program artifact.
+pub type BpfProgram<P = ActiveProfile> = VerifiedProgram<P>;
+
+impl<P: PhysicalProfile> Clone for VerifiedProgram<P> {
     fn clone(&self) -> Self {
         Self {
             prog_type: self.prog_type,
@@ -175,14 +248,14 @@ impl<P: PhysicalProfile> Clone for BpfProgram<P> {
     }
 }
 
-impl<P: PhysicalProfile> BpfProgram<P> {
+impl<P: PhysicalProfile> VerifiedProgram<P> {
     /// Maximum stack size for this profile.
     pub const MAX_STACK_SIZE: usize = P::MAX_STACK_SIZE;
 
     /// Maximum instruction count for this profile.
     pub const MAX_INSN_COUNT: usize = P::MAX_INSN_COUNT;
 
-    /// Create a new BPF program.
+    /// Build a verified program after the verifier has completed every phase.
     ///
     /// # Arguments
     ///
@@ -196,10 +269,11 @@ impl<P: PhysicalProfile> BpfProgram<P> {
     /// - Stack size exceeds profile limit
     /// - Instruction count exceeds profile limit
     /// - Program type is not allowed for this profile
-    pub fn new(
+    pub(crate) fn from_verified_parts(
         prog_type: BpfProgType,
         insns: Vec<BpfInsn>,
         stack_size: usize,
+        _token: VerificationToken,
     ) -> Result<Self, ProgramError> {
         // Check profile constraints
         if stack_size > Self::MAX_STACK_SIZE {
@@ -278,7 +352,7 @@ impl<P: PhysicalProfile> BpfProgram<P> {
     }
 }
 
-impl<P: PhysicalProfile> fmt::Debug for BpfProgram<P> {
+impl<P: PhysicalProfile> fmt::Debug for VerifiedProgram<P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BpfProgram")
             .field("prog_type", &self.prog_type)
@@ -291,7 +365,7 @@ impl<P: PhysicalProfile> fmt::Debug for BpfProgram<P> {
 }
 
 /// Errors that can occur when creating or validating a BPF program.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProgramError {
     /// Stack size exceeds profile limit.
     StackSizeExceeded {
@@ -323,6 +397,9 @@ pub enum ProgramError {
         /// Index of invalid instruction
         index: usize,
     },
+
+    /// Full static verification rejected the program.
+    VerificationFailed(VerifyError),
 }
 
 impl fmt::Display for ProgramError {
@@ -350,6 +427,28 @@ impl fmt::Display for ProgramError {
             Self::InvalidInstruction { index } => {
                 write!(f, "invalid instruction at index {}", index)
             }
+            Self::VerificationFailed(error) => error.fmt(f),
+        }
+    }
+}
+
+impl From<VerifyError> for ProgramError {
+    fn from(error: VerifyError) -> Self {
+        match error {
+            VerifyError::EmptyProgram => Self::EmptyProgram,
+            VerifyError::NoExit => Self::NoExitInstruction,
+            VerifyError::StackExceeded { used, limit } => Self::StackSizeExceeded {
+                required: used,
+                limit,
+            },
+            VerifyError::InsnCountExceeded { count, limit } => {
+                Self::InsnCountExceeded { count, limit }
+            }
+            VerifyError::InvalidOpcode { insn_idx, .. }
+            | VerifyError::InvalidRegister { insn_idx, .. } => {
+                Self::InvalidInstruction { index: insn_idx }
+            }
+            other => Self::VerificationFailed(other),
         }
     }
 }
@@ -405,21 +504,16 @@ impl<P: PhysicalProfile> ProgramBuilder<P> {
     ///
     /// Returns an error if the program violates profile constraints.
     pub fn build(self) -> Result<BpfProgram<P>, ProgramError> {
-        if self.insns.is_empty() {
-            return Err(ProgramError::EmptyProgram);
-        }
+        self.build_raw().verify().map_err(ProgramError::from)
+    }
 
-        // For simplicity, assume minimal stack usage in builder
-        // Real stack analysis happens in verifier
-        let stack_size = 0;
-
-        let mut program = BpfProgram::new(self.prog_type, self.insns, stack_size)?;
-
+    /// Build unchecked bytecode for verification with caller-supplied bounds.
+    pub fn build_raw(self) -> RawProgram<P> {
+        let mut program = RawProgram::new(self.prog_type, self.insns);
         if let Some(name) = self.name {
             program = program.with_name(name);
         }
-
-        Ok(program)
+        program
     }
 }
 

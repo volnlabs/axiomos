@@ -1,16 +1,17 @@
-use kernel_abi::{Errno, ECHILD, EINVAL, ENOENT, ENOMEM, WNOHANG};
+use alloc::format;
+
+use kernel_abi::{Errno, ECHILD, EINVAL, EIO, ENOENT, ENOEXEC, ENOMEM, WNOHANG};
 use kernel_vfs::path::AbsolutePath;
 
 use crate::arch::UserContext;
 use crate::mcore::context::ExecutionContext;
+use crate::mcore::mtask::process::{ExecPreflightError, ExecutableFileError};
 use crate::syscall::validation::{
     copy_to_userspace, read_userspace_string, read_userspace_string_array,
 };
 
 pub fn sys_fork(ctx: &UserContext) -> Result<usize, Errno> {
     let execution_context = ExecutionContext::load();
-    let current_task = execution_context.current_task();
-    let current_process = current_task.process();
 
     // We need to create a copy of the UserContext for the child.
     // The child needs to return 0 from fork.
@@ -25,15 +26,50 @@ pub fn sys_fork(ctx: &UserContext) -> Result<usize, Errno> {
         child_ctx.inner.x0 = 0;
     }
 
-    match current_process.fork(current_task, &child_ctx) {
-        Ok(child_process) => {
-            use crate::U64Ext;
-            Ok(child_process.pid().as_u64().into_usize())
+    execution_context.with_current_task(|current_task| {
+        match current_task.process().fork(current_task, &child_ctx) {
+            Ok(child_process) => {
+                use crate::U64Ext;
+                Ok(child_process.pid().as_u64().into_usize())
+            }
+            Err(e) => {
+                log::error!("sys_fork failed: {}", e);
+                Err(ENOMEM)
+            }
         }
-        Err(e) => {
-            log::error!("sys_fork failed: {}", e);
-            Err(ENOMEM)
-        }
+    })
+}
+
+fn apply_exec_context(ctx: &mut UserContext, entry_point: usize, sp: usize) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        ctx.frame.instruction_pointer = crate::arch::VirtAddr::new(entry_point as u64);
+        ctx.frame.stack_pointer = crate::arch::VirtAddr::new(sp as u64);
+        ctx.regs.rdi = 0;
+        ctx.regs.rsi = 0;
+        ctx.regs.rdx = 0;
+        ctx.regs.rax = 0;
+        ctx.regs.rbx = 0;
+        ctx.regs.rcx = 0;
+        ctx.regs.r8 = 0;
+        ctx.regs.r9 = 0;
+        ctx.regs.r10 = 0;
+        ctx.regs.r11 = 0;
+        ctx.regs.r12 = 0;
+        ctx.regs.r13 = 0;
+        ctx.regs.r14 = 0;
+        ctx.regs.r15 = 0;
+        ctx.regs.rbp = 0;
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        ctx.inner.elr = entry_point as u64;
+        ctx.sp = sp as u64;
+        ctx.inner.sp_el0 = sp as u64;
+        ctx.inner.x0 = 0;
+        ctx.inner.x1 = 0;
+        ctx.inner.x2 = 0;
     }
 }
 
@@ -44,8 +80,6 @@ pub fn sys_execve(
     envp_ptr: usize,
 ) -> Result<usize, Errno> {
     let execution_context = ExecutionContext::load();
-    let current_task = execution_context.current_task();
-    let current_process = current_task.process();
 
     let path_str = read_userspace_string(path_ptr, 4096)?;
     let argv = read_userspace_string_array(argv_ptr, 1024, 4096)?;
@@ -53,47 +87,87 @@ pub fn sys_execve(
 
     let path = AbsolutePath::try_new(&path_str).map_err(|_| EINVAL)?;
 
-    match current_process.execve(current_task, path, &argv, &envp) {
-        Ok((entry_point, sp)) => {
+    let process = execution_context.current_process();
+    let file_content = process.prepare_execve(path).map_err(|e| {
+        log::error!("sys_execve preflight failed: {e}");
+        match e {
+            ExecPreflightError::Open(_) => ENOENT,
+            ExecPreflightError::File(ExecutableFileError::OutOfMemory) => ENOMEM,
+            ExecPreflightError::File(_) | ExecPreflightError::Parse(_) => ENOEXEC,
+            ExecPreflightError::Stat(_) | ExecPreflightError::Read(_) => EIO,
+        }
+    })?;
+
+    let (old_ustack, old_tls, old_fx_area) = execution_context.with_current_task(|current_task| {
+        (
+            current_task.ustack().write().take(),
+            current_task.tls().write().take(),
+            current_task.fx_area().write().take(),
+        )
+    });
+    // Dropping these allocations can unmap pages and issue TLB shootdowns; do
+    // it after the scheduler borrow has ended.
+    drop((old_ustack, old_tls, old_fx_area));
+
+    let exec_result = process.execve(file_content, &argv, &envp);
+    match exec_result {
+        Ok(image) => {
+            let crate::mcore::mtask::process::ExecImage {
+                entry_point,
+                stack_pointer,
+                tls,
+                user_stack,
+            } = image;
+            let tls_start = tls.as_ref().map(|allocation| allocation.start());
+            execution_context.with_current_task(|current_task| {
+                assert!(
+                    alloc::sync::Arc::ptr_eq(current_task.process(), &process),
+                    "exec task changed process while image replacement was in progress"
+                );
+                *current_task.tls().write() = tls;
+                *current_task.ustack().write() = Some(user_stack);
+            });
+
             #[cfg(target_arch = "x86_64")]
-            {
-                ctx.frame.instruction_pointer = crate::arch::VirtAddr::new(entry_point as u64);
-                ctx.frame.stack_pointer = crate::arch::VirtAddr::new(sp as u64);
-                // We should ensure RFLAGS is clean (interrupts enabled, etc)
-                // execve clears most registers
-                ctx.regs.rdi = 0; // argc (TODO: pass argc/argv)
-                ctx.regs.rsi = 0; // argv
-                ctx.regs.rdx = 0; // envp
-                ctx.regs.rax = 0;
-                ctx.regs.rbx = 0;
-                ctx.regs.rcx = 0;
-                ctx.regs.r8 = 0;
-                ctx.regs.r9 = 0;
-                ctx.regs.r10 = 0;
-                ctx.regs.r11 = 0;
-                ctx.regs.r12 = 0;
-                ctx.regs.r13 = 0;
-                ctx.regs.r14 = 0;
-                ctx.regs.r15 = 0;
-                ctx.regs.rbp = 0;
+            if let Some(start) = tls_start {
+                x86_64::registers::model_specific::FsBase::write(start);
             }
-
             #[cfg(target_arch = "aarch64")]
-            {
-                ctx.inner.elr = entry_point as u64;
-                ctx.sp = sp as u64;
-                ctx.inner.sp_el0 = sp as u64;
-                ctx.inner.x0 = 0; // argc
-                ctx.inner.x1 = 0; // argv
-                ctx.inner.x2 = 0; // envp
-                                  // Clear other registers...
+            if let Some(start) = tls_start {
+                // SAFETY: The installed TLS allocation remains owned by the
+                // current task and is valid for userspace access.
+                unsafe {
+                    core::arch::asm!("msr tpidr_el0, {}", in(reg) start.as_u64());
+                }
             }
 
+            apply_exec_context(ctx, entry_point, stack_pointer);
             Ok(0)
         }
-        Err(e) => {
-            log::error!("sys_execve failed: {}", e);
-            Err(ENOENT)
+        Err(error) => {
+            // Map the typed ExecveError back to the syscall layer.
+            // The audit-fault-injection work requires that ENOMEM
+            // is returned specifically for the Enomem variant so
+            // that an operator can distinguish "out of memory"
+            // (transient, retryable) from "invalid ELF" / "load
+            // error" (structural, not retryable).
+            use crate::mcore::mtask::process::ExecveError;
+            let (errno, log_line) = match &error {
+                ExecveError::Parse(_) => (
+                    ENOEXEC,
+                    format!("sys_execve failed: ELF parse error: {error}"),
+                ),
+                ExecveError::Load(load_error) => (
+                    ENOEXEC,
+                    format!("sys_execve failed: ELF load error: {load_error}"),
+                ),
+                ExecveError::Enomem { stage } => (
+                    ENOMEM,
+                    format!("sys_execve failed: out of memory during {stage}"),
+                ),
+            };
+            log::error!("{}", log_line);
+            Err(errno)
         }
     }
 }
@@ -104,53 +178,40 @@ pub fn sys_waitpid(pid: isize, status_ptr: usize, options: usize) -> Result<usiz
     let pid_arg = pid;
 
     loop {
-        let mut reaped_pid = None;
-        let mut reaped_status = 0;
+        let mut tree = crate::mcore::mtask::process::tree::process_tree().write();
+        let Some(children) = tree.children.get(&current_process.pid()) else {
+            return Err(ECHILD);
+        };
 
-        {
-            let mut tree = crate::mcore::mtask::process::tree::process_tree().write();
-            // Check if we have any children at all
-            if let Some(children) = tree.children.get_mut(&current_process.pid()) {
-                let mut index_to_remove = None;
-
-                for (i, child) in children.iter().enumerate() {
-                    // Filter by PID
-                    // pid > 0: wait for specific pid
-                    // pid == -1: wait for any child
-                    // pid == 0: wait for any child in same process group (TODO)
-                    // pid < -1: wait for any child in specific process group (TODO)
-                    if pid_arg > 0 && child.pid().as_u64() != pid_arg as u64 {
-                        continue;
-                    }
-
-                    // Check if exited
-                    if let Some(code) = *child.exit_code().read() {
-                        reaped_pid = Some(child.pid());
-                        // Construct status: (exit_code << 8) | sig (0)
-                        reaped_status = (code & 0xff) << 8;
-                        index_to_remove = Some(i);
-                        break;
-                    }
-                }
-
-                if let Some(i) = index_to_remove {
-                    let child_proc = children.remove(i);
-                    // Remove from global processes map to drop the final Arc (unless other references exist)
-                    tree.processes.remove(&child_proc.pid());
-                }
-            } else {
-                // No children at all
-                return Err(ECHILD);
+        let mut matching_child = false;
+        let mut reaped = None;
+        for (index, child) in children.iter().enumerate() {
+            // pid > 0 waits for one child. Process-group forms remain TODO and
+            // currently match any child, preserving the previous behavior.
+            if pid_arg > 0 && child.pid().as_u64() != pid_arg as u64 {
+                continue;
+            }
+            matching_child = true;
+            if let Some(code) = *child.exit_code().read() {
+                reaped = Some((index, child.pid(), (code & 0xff) << 8));
+                break;
             }
         }
 
-        if let Some(pid) = reaped_pid {
+        if !matching_child {
+            return Err(ECHILD);
+        }
+
+        if let Some((index, pid, reaped_status)) = reaped {
+            let child = tree
+                .children
+                .get_mut(&current_process.pid())
+                .expect("child list disappeared while process tree was locked")
+                .remove(index);
+            tree.processes.remove(&child.pid());
+            drop(tree);
             if status_ptr != 0 {
-                // Copy status to userspace
-                let slice = unsafe {
-                    core::slice::from_raw_parts(&reaped_status as *const _ as *const u8, 4)
-                };
-                copy_to_userspace(status_ptr, slice)?;
+                copy_to_userspace(status_ptr, &reaped_status.to_ne_bytes())?;
             }
             use crate::U64Ext;
             return Ok(pid.as_u64().into_usize());
@@ -160,17 +221,21 @@ pub fn sys_waitpid(pid: isize, status_ptr: usize, options: usize) -> Result<usiz
             return Ok(0);
         }
 
-        // Yield to scheduler so other tasks (including our child) can run.
-        // TODO: Use a proper wait queue when available
-        #[cfg(target_arch = "x86_64")]
-        x86_64::instructions::interrupts::enable_and_hlt();
-        #[cfg(target_arch = "aarch64")]
-        // SAFETY: Interrupts are disabled during syscall handling. Reschedule
-        // switches to another task; when we're rescheduled, we re-check the child.
-        unsafe {
-            crate::mcore::context::ExecutionContext::load()
-                .scheduler_mut()
-                .reschedule();
+        let wait_channel = current_process.child_exit_wait().clone();
+        let blocked = crate::mcore::mtask::scheduler::wait::TaskWait::block_current(
+            &wait_channel,
+            move || {
+                drop(tree);
+            },
+        );
+        #[cfg(not(feature = "audit-diagnostics"))]
+        let _ = blocked;
+        #[cfg(feature = "audit-diagnostics")]
+        if blocked {
+            current_process
+                .telemetry()
+                .child_wait_blocks
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
     }
 }

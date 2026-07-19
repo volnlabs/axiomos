@@ -1,167 +1,127 @@
-use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::Arc;
 
-use conquer_once::spin::OnceCell;
-use kernel_vfs::fs::{FileSystem, FsHandle};
-use kernel_vfs::{
-    CloseError, FsError, MkdirError, OpenError, ReadError, RmdirError, Stat, StatError, WriteError,
-};
-use spin::{Mutex, RwLock};
+use kernel_vfs::{FileType, ReadError, Stat, StatError, WriteError};
+use spin::Mutex;
 
-pub struct Pipe {
-    buffer: Mutex<VecDeque<u8>>,
-    // TODO: Use CondVar or Waker for blocking
+use crate::file::pipe_state::{PipeRead, PipeState, PipeWrite};
+use crate::mcore::mtask::scheduler::wait::{TaskWait, WaitChannel};
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+enum PipeDirection {
+    Read,
+    Write,
 }
 
-impl Default for Pipe {
-    fn default() -> Self {
-        Self::new()
-    }
+#[derive(Debug)]
+struct Pipe {
+    state: Mutex<PipeState>,
+    readable: Arc<WaitChannel>,
+    writable: Arc<WaitChannel>,
 }
 
 impl Pipe {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
-            buffer: Mutex::new(VecDeque::new()),
+            state: Mutex::new(PipeState::new()),
+            readable: Arc::new(WaitChannel::new()),
+            writable: Arc::new(WaitChannel::new()),
         }
-    }
-
-    pub fn read(&self, buf: &mut [u8]) -> usize {
-        let mut buffer = self.buffer.lock();
-        let mut read = 0;
-        for b in buf {
-            if let Some(byte) = buffer.pop_front() {
-                *b = byte;
-                read += 1;
-            } else {
-                break;
-            }
-        }
-        read
-    }
-
-    pub fn write(&self, buf: &[u8]) -> usize {
-        let mut buffer = self.buffer.lock();
-        buffer.extend(buf);
-        buf.len()
     }
 }
 
-pub struct PipeFs {
-    pipes: BTreeMap<u64, Arc<Pipe>>,
-    next_inode: u64,
+#[derive(Debug)]
+pub struct PipeEndpoint {
+    pipe: Arc<Pipe>,
+    direction: PipeDirection,
 }
 
-impl Default for PipeFs {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PipeFs {
-    pub fn new() -> Self {
-        Self {
-            pipes: BTreeMap::new(),
-            next_inode: 1,
-        }
-    }
-
-    pub fn create_pipe(&mut self) -> (FsHandle, FsHandle) {
-        let inode = self.next_inode;
-        self.next_inode += 1;
-
+impl PipeEndpoint {
+    #[must_use]
+    pub fn pair() -> (Self, Self) {
         let pipe = Arc::new(Pipe::new());
-        self.pipes.insert(inode, pipe);
-
-        // We use the same inode for both ends for now, but in reality
-        // we might want separate handles if we track read/write ends differently.
-        // For simple VFS interaction, we can just return the same handle ID.
-        // The file descriptor flags/mode will determine read vs write.
-        (FsHandle::from(inode), FsHandle::from(inode))
-    }
-}
-
-impl FileSystem for PipeFs {
-    fn open(&mut self, _path: &kernel_vfs::path::AbsolutePath) -> Result<FsHandle, OpenError> {
-        Err(OpenError::NotFound) // Pipes are anonymous-only for now
+        (
+            Self {
+                pipe: pipe.clone(),
+                direction: PipeDirection::Read,
+            },
+            Self {
+                pipe,
+                direction: PipeDirection::Write,
+            },
+        )
     }
 
-    fn close(&mut self, handle: FsHandle) -> Result<(), CloseError> {
-        // TODO: refcounting? VfsNode holds Weak reference to FS, but FsHandle is just u64.
-        // We probably shouldn't remove the pipe until all handles are closed.
-        // But the current VFS doesn't expose refcounts on handles easily.
-        // For now, we leak or implement a simple refcount in PipeFs?
-        // Let's assume for this MVP that we don't delete pipes to avoid use-after-free
-        // issues until we have a better handle lifecycle.
-        // Or better: check if the Arc strong count is 1 (meaning only this map holds it).
+    pub fn read(&self, buf: &mut [u8]) -> Result<usize, ReadError> {
+        if self.direction != PipeDirection::Read {
+            return Err(ReadError::NotReadable);
+        }
 
-        let _inode: u64 = handle.into();
-        // if let Some(pipe) = self.pipes.get(&inode) {
-        //     if Arc::strong_count(pipe) <= 1 {
-        //         self.pipes.remove(&inode);
-        //     }
-        // }
-        // Actually, VfsNode doesn't hold the Arc<Pipe>, the PipeFs does.
-        // The VfsNode holds a FsHandle.
-        // When VfsNode is dropped, it calls close().
+        loop {
+            let mut state = self.pipe.state.lock();
+            match state.read(buf) {
+                PipeRead::Read(bytes) => {
+                    self.pipe.writable.wake_all();
+                    return Ok(bytes);
+                }
+                PipeRead::EndOfFile => return Ok(0),
+                PipeRead::Block => {
+                    let blocked = TaskWait::block_current(&self.pipe.readable, move || drop(state));
+                    #[cfg(not(feature = "audit-diagnostics"))]
+                    let _ = blocked;
+                    #[cfg(feature = "audit-diagnostics")]
+                    if blocked {
+                        use core::sync::atomic::Ordering;
 
-        // Let's assume 2 handles per pipe initially (read/write).
-        // This is tricky without more state.
-        // For now, no-op.
-        Ok(())
-    }
-
-    fn read(
-        &mut self,
-        handle: FsHandle,
-        buf: &mut [u8],
-        _offset: usize,
-    ) -> Result<usize, ReadError> {
-        let inode: u64 = handle.into();
-        if let Some(pipe) = self.pipes.get(&inode) {
-            let n = pipe.read(buf);
-            if n == 0 && !buf.is_empty() {
-                // Should block? For now return 0 (EOF) or EAGAIN?
-                // Returning 0 usually means EOF.
-                // If the write end is open but buffer empty, we should block.
-                // If write end closed, return 0.
-                // We don't track write end status yet.
-                // Let's return 0 for "buffer empty" for now, which is technically EOF or non-blocking.
-                Ok(0)
-            } else {
-                Ok(n)
+                        crate::mcore::context::ExecutionContext::load()
+                            .current_process()
+                            .telemetry()
+                            .pipe_read_blocks
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                }
             }
-        } else {
-            Err(ReadError::FsError(FsError::InvalidHandle))
         }
     }
 
-    fn write(&mut self, handle: FsHandle, buf: &[u8], _offset: usize) -> Result<usize, WriteError> {
-        let inode: u64 = handle.into();
-        if let Some(pipe) = self.pipes.get(&inode) {
-            Ok(pipe.write(buf))
-        } else {
-            Err(WriteError::FsError(FsError::InvalidHandle))
+    pub fn write(&self, buf: &[u8]) -> Result<usize, WriteError> {
+        if self.direction != PipeDirection::Write {
+            return Err(WriteError::NotWritable);
+        }
+
+        loop {
+            let mut state = self.pipe.state.lock();
+            match state.write(buf) {
+                PipeWrite::Written(bytes) => {
+                    self.pipe.readable.wake_all();
+                    return Ok(bytes);
+                }
+                PipeWrite::Broken => return Err(WriteError::BrokenPipe),
+                PipeWrite::Block => {
+                    TaskWait::block_current(&self.pipe.writable, move || drop(state));
+                }
+            }
         }
     }
 
-    fn stat(&mut self, _handle: FsHandle, stat: &mut Stat) -> Result<(), StatError> {
-        stat.size = 0; // Unknown size
-                       // TODO: Set S_IFIFO
+    pub fn stat(&self, stat: &mut Stat) -> Result<(), StatError> {
+        stat.size = self.pipe.state.lock().buffered_len();
+        stat.file_type = FileType::Pipe;
         Ok(())
-    }
-
-    fn mkdir(&mut self, _path: &kernel_vfs::path::AbsolutePath) -> Result<(), MkdirError> {
-        Err(MkdirError::FsError(FsError::InvalidHandle))
-    }
-
-    fn rmdir(&mut self, _path: &kernel_vfs::path::AbsolutePath) -> Result<(), RmdirError> {
-        Err(RmdirError::FsError(FsError::InvalidHandle))
     }
 }
 
-pub static PIPE_FS: OnceCell<Arc<RwLock<PipeFs>>> = OnceCell::uninit();
-
-pub fn init() {
-    PIPE_FS.init_once(|| Arc::new(RwLock::new(PipeFs::new())));
+impl Drop for PipeEndpoint {
+    fn drop(&mut self) {
+        let mut state = self.pipe.state.lock();
+        match self.direction {
+            PipeDirection::Read => {
+                state.close_reader();
+                self.pipe.writable.wake_all();
+            }
+            PipeDirection::Write => {
+                state.close_writer();
+                self.pipe.readable.wake_all();
+            }
+        }
+    }
 }

@@ -112,6 +112,22 @@ pub enum VerifyError {
         required: LoadCaller,
     },
 
+    /// Helper can actuate hardware but the load authorization lacks that right.
+    ActuationCapabilityRequired {
+        /// Instruction index
+        insn_idx: usize,
+        /// Helper ID (raw)
+        helper_id: i32,
+    },
+
+    /// The load policy forbids helpers that can emit log output.
+    LoggingHelperForbidden {
+        /// Instruction index
+        insn_idx: usize,
+        /// Helper ID (raw)
+        helper_id: i32,
+    },
+
     /// Unprivileged program returns a pointer (kernel-address leak) (#88).
     PointerLeakUnprivileged {
         /// Instruction index of the EXIT
@@ -132,6 +148,20 @@ pub enum VerifyError {
         insn_idx: usize,
         /// The out-of-range map id the program referenced
         map_id: u64,
+    },
+
+    /// A program tried to write a map the loader marked read-only.
+    WriteToReadOnlyMap {
+        /// Instruction index
+        insn_idx: usize,
+        /// The read-only map id.
+        map_id: u32,
+    },
+
+    /// A program tried to write through a map id that is not provably RW.
+    WriteMapNotProvablyWritable {
+        /// Instruction index
+        insn_idx: usize,
     },
 
     /// Wrong number of arguments to helper
@@ -235,7 +265,7 @@ pub enum VerifyError {
     /// A helper banned on the bounded RT fragment was called (embedded only).
     /// `bpf_trace_printk` writes to the UART — serial-I/O-bound (~ms/line) and
     /// unbounded in message length — so it cannot appear in a deadline-scheduled
-    /// hook (`docs/benchmarks.md §12`).
+    /// hook (`docs/performance/current-results.md §12`).
     #[cfg(feature = "embedded-profile")]
     HelperForbiddenOnRtFragment {
         /// Instruction index of the offending call.
@@ -323,6 +353,20 @@ impl fmt::Display for VerifyError {
                 f,
                 "helper {helper_id} requires {required:?} privilege at instruction {insn_idx}"
             ),
+            Self::ActuationCapabilityRequired {
+                insn_idx,
+                helper_id,
+            } => write!(
+                f,
+                "helper {helper_id} requires hardware-actuation authority at instruction {insn_idx}"
+            ),
+            Self::LoggingHelperForbidden {
+                insn_idx,
+                helper_id,
+            } => write!(
+                f,
+                "logging helper {helper_id} is forbidden by load policy at instruction {insn_idx}"
+            ),
             Self::PointerLeakUnprivileged { insn_idx } => write!(
                 f,
                 "unprivileged program leaks a pointer via its return value at instruction {insn_idx}"
@@ -342,6 +386,20 @@ impl fmt::Display for VerifyError {
                     f,
                     "map lookup references nonexistent map id {} at instruction {}",
                     map_id, insn_idx
+                )
+            }
+            Self::WriteToReadOnlyMap { insn_idx, map_id } => {
+                write!(
+                    f,
+                    "write to read-only map id {} at instruction {}",
+                    map_id, insn_idx
+                )
+            }
+            Self::WriteMapNotProvablyWritable { insn_idx } => {
+                write!(
+                    f,
+                    "map write target is not provably writable at instruction {}",
+                    insn_idx
                 )
             }
             Self::HelperArgCount {

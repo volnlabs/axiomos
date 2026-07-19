@@ -35,7 +35,7 @@ fn virtio_probe(addr: PciAddress, cam: &dyn ConfigurationAccess) -> bool {
 
 #[allow(clippy::needless_pass_by_value)] // signature is required like this
 fn virtio_init(addr: PciAddress, cam: Box<dyn ConfigurationAccess>) -> Result<(), Box<dyn Error>> {
-    let transport = transport(addr, cam);
+    let transport = transport(addr, cam)?;
 
     let mut gpu = VirtIOGpu::<HalImpl, _>::new(transport)?;
     let (width, height) = gpu.resolution()?;
@@ -62,7 +62,7 @@ fn virtio_init(addr: PciAddress, cam: Box<dyn ConfigurationAccess>) -> Result<()
 
     let phys_addr = AddressSpace::kernel()
         .translate(buffer_virtual_addr)
-        .expect("address should be mapped into kernel space");
+        .ok_or(VirtioGpuInitError::FramebufferNotMapped)?;
     let start = PhysFrame::<Size4KiB>::containing_address(phys_addr);
     let end = PhysFrame::<Size4KiB>::containing_address(phys_addr + buffer_len.into_u64() - 1);
     let physical_memory = PhysFrameRangeInclusive { start, end };
@@ -77,6 +77,12 @@ fn virtio_init(addr: PciAddress, cam: Box<dyn ConfigurationAccess>) -> Result<()
     RawDevices::register_raw_device(device)?;
 
     Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+enum VirtioGpuInitError {
+    #[error("virtio GPU framebuffer is not mapped in the kernel address space")]
+    FramebufferNotMapped,
 }
 
 #[derive(Clone)]

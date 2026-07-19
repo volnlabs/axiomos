@@ -13,12 +13,16 @@
 //!
 //! | Property | Cloud | Embedded |
 //! |----------|-------|----------|
-//! | Memory | Elastic (heap) | Static (64KB pool) |
-//! | Stack | 512 KB | 8 KB |
+//! | Map storage | Quota-bounded heap | 64 KiB profile-bounded heap |
+//! | Interpreter stack | 512 KB | 8 KB (reused static buffer [^stack]) |
 //! | Instructions | 1,000,000 max | 100,000 max |
-//! | JIT | Available | Erased |
-//! | Scheduling | Throughput | Deadline (EDF) |
+//! | JIT | Disabled | Disabled |
+//! | Execution | Synchronous hooks | Synchronous hooks + WCET admission |
 //! | Map Resize | Available | Erased |
+//!
+//! [^stack]: The interpreter no longer allocates its stack per program
+//! execution; a single reused static scratch buffer is used on the hot path
+//! (#181), so the stack side of the embedded profile is genuinely static.
 //!
 //! # Build-Time Selection
 //!
@@ -39,7 +43,6 @@
 //! - [`verifier`] - Static safety verification with profile constraints
 //! - [`execution`] - Program execution engines (interpreter, JIT)
 //! - [`maps`] - BPF map implementations for data storage
-//! - [`scheduler`] - Profile-aware program scheduling
 //!
 //! # Quick Start
 //!
@@ -66,8 +69,8 @@
 //!
 //! Profile-inappropriate code is physically absent from builds:
 //!
-//! - **Cloud-only**: JIT compiler, map resize, throughput scheduler
-//! - **Embedded-only**: Static pool, deadline scheduler, WCET verification
+//! - **Cloud-only**: Map resize
+//! - **Embedded-only**: WCET verification and admission limits
 //!
 //! # Documentation
 //!
@@ -79,7 +82,6 @@
 //! - `BYTECODE.md` - Instruction reference
 //! - `VERIFICATION.md` - Verifier guide
 //! - `MAPS.md` - Map types and usage
-//! - `SCHEDULING.md` - Scheduler guide
 //! - `QUICKREF.md` - Quick reference
 
 #![no_std]
@@ -99,13 +101,16 @@ compile_error!(
      Use `--features cloud-profile` or `--features embedded-profile` when building."
 );
 
+pub mod actuation;
 pub mod attach;
+pub mod behaviors;
+pub mod bench;
 pub mod bytecode;
+pub mod concurrency;
 pub mod cost_corpus;
 pub mod execution;
 pub mod loader;
 pub mod maps;
 pub mod profile;
-pub mod scheduler;
 pub mod signing;
 pub mod verifier;

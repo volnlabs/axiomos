@@ -6,9 +6,19 @@ use std::process::{Command, Stdio};
 use file_structure::{Dir, Kind};
 use ovmf_prebuilt::{Arch, FileType, Prebuilt, Source};
 
+const BUILD_INPUTS: &str = include_str!("ci/manifests/build-inputs.env");
+const HOST_RUNNER_TEST_FEATURE: &str = "CARGO_FEATURE_HOST_RUNNER_TESTS";
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=limine.conf");
+    println!("cargo:rerun-if-changed=ci/manifests/build-inputs.env");
+    println!("cargo:rerun-if-env-changed=AXIOM_SIGNED_BPF_STARTUP_PATH");
+    println!("cargo:rerun-if-env-changed=AXIOM_ARTIFACT_PATHS");
+    if host_runner_test_only() {
+        emit_host_runner_test_inputs();
+        return;
+    }
 
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
 
@@ -26,20 +36,20 @@ fn main() {
     );
     println!("cargo:rustc-env=KERNEL_BINARY={}", kernel.display());
 
+    let mut bootable_iso = None;
+    let mut ovmf_files = None;
     if target_arch == "x86_64" {
         let limine_dir = limine();
         let iso = build_iso(&limine_dir, &kernel);
         println!("cargo:rustc-env=BOOTABLE_ISO={}", iso.display());
+        bootable_iso = Some(iso);
 
         let ovmf = ovmf();
-        println!(
-            "cargo:rustc-env=OVMF_X86_64_CODE={}",
-            ovmf.get_file(Arch::X64, FileType::Code).display()
-        );
-        println!(
-            "cargo:rustc-env=OVMF_X86_64_VARS={}",
-            ovmf.get_file(Arch::X64, FileType::Vars).display()
-        );
+        let ovmf_code = ovmf.get_file(Arch::X64, FileType::Code);
+        let ovmf_vars = ovmf.get_file(Arch::X64, FileType::Vars);
+        println!("cargo:rustc-env=OVMF_X86_64_CODE={}", ovmf_code.display());
+        println!("cargo:rustc-env=OVMF_X86_64_VARS={}", ovmf_vars.display());
+        ovmf_files = Some((ovmf_code, ovmf_vars));
     } else {
         // Provide dummy values for other architectures to satisfy env!() in main.rs if it's compiled
         // though in our case we cfg-ed it out in main.rs.
@@ -51,6 +61,74 @@ fn main() {
 
     let disk_image = build_os_disk_image(&target_arch);
     println!("cargo:rustc-env=DISK_IMAGE={}", disk_image.display());
+    write_artifact_paths(
+        &kernel,
+        &disk_image,
+        bootable_iso.as_deref(),
+        ovmf_files.as_ref(),
+    );
+}
+
+fn host_runner_test_only() -> bool {
+    if std::env::var_os(HOST_RUNNER_TEST_FEATURE).is_none() {
+        return false;
+    }
+    assert_eq!(
+        std::env::var("PROFILE").as_deref(),
+        Ok("debug"),
+        "host-runner-tests is restricted to debug-profile tooling tests"
+    );
+    assert!(
+        std::env::var_os("CARGO_FEATURE_X86_64_DEPS").is_none()
+            && std::env::var_os("CARGO_FEATURE_AARCH64_DEPS").is_none(),
+        "host-runner-tests requires --no-default-features"
+    );
+    true
+}
+
+fn emit_host_runner_test_inputs() {
+    println!("cargo:rustc-env=KERNEL_BINARY=test-only/kernel");
+    println!("cargo:rustc-env=BOOTABLE_ISO=test-only/axiomos.iso");
+    println!("cargo:rustc-env=OVMF_X86_64_CODE=test-only/ovmf-code.fd");
+    println!("cargo:rustc-env=OVMF_X86_64_VARS=test-only/ovmf-vars.fd");
+    println!("cargo:rustc-env=DISK_IMAGE=test-only/disk.img");
+}
+
+fn pinned_input(name: &str) -> &'static str {
+    BUILD_INPUTS
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .find_map(|(key, value)| (key.trim() == name).then_some(value.trim()))
+        .unwrap_or_else(|| panic!("missing {name} in ci/manifests/build-inputs.env"))
+}
+
+fn write_artifact_paths(
+    kernel: &Path,
+    disk: &Path,
+    iso: Option<&Path>,
+    ovmf: Option<&(PathBuf, PathBuf)>,
+) {
+    let Some(path) = std::env::var_os("AXIOM_ARTIFACT_PATHS") else {
+        return;
+    };
+    let mut contents = format!(
+        "KERNEL_BINARY={}\nDISK_IMAGE={}\n",
+        kernel.display(),
+        disk.display()
+    );
+    if let Some(iso) = iso {
+        contents.push_str(&format!("BOOTABLE_ISO={}\n", iso.display()));
+    }
+    if let Some((code, vars)) = ovmf {
+        contents.push_str(&format!("OVMF_CODE={}\n", code.display()));
+        contents.push_str(&format!("OVMF_VARS={}\n", vars.display()));
+    }
+    fs::write(&path, contents).unwrap_or_else(|error| {
+        panic!(
+            "failed to write artifact paths to {}: {error}",
+            PathBuf::from(path).display()
+        )
+    });
 }
 
 fn build_os_disk_image(target_arch: &str) -> PathBuf {
@@ -89,13 +167,25 @@ fn build_os_disk_image(target_arch: &str) -> PathBuf {
 }
 
 fn build_os_disk_dir(target_arch: &str) -> PathBuf {
+    file_structure::STRUCTURE
+        .validate()
+        .expect("root filesystem manifest must contain safe, unique path components");
+
     let disk = out_dir().join("disk");
     let _ = remove_dir_all(&disk);
     create_dir(&disk).expect("should be able to create disk directory");
 
     build_dir(&disk, &file_structure::STRUCTURE, target_arch);
 
-    fs::write(disk.join("var/hello.txt"), "Hello, axiom-ebpf!\n")
+    if let Some(startup) = std::env::var_os("AXIOM_SIGNED_BPF_STARTUP_PATH") {
+        copy(
+            PathBuf::from(startup),
+            disk.join("var/lib/rkbpf/programs/startup.rbpf"),
+        )
+        .expect("AXIOM_SIGNED_BPF_STARTUP_PATH must name a readable signed program");
+    }
+
+    fs::write(disk.join("var/hello.txt"), "Hello, axiomos!\n")
         .expect("should be able to write hello.txt");
 
     disk
@@ -133,8 +223,14 @@ fn build_dir(current_path: &Path, current_dir: &Dir<'_>, target_arch: &str) {
 }
 
 fn ovmf() -> Prebuilt {
-    Prebuilt::fetch(Source::LATEST, PathBuf::from("target/ovmf"))
-        .expect("should be able to fetch OVMF prebuilt firmware")
+    Prebuilt::fetch(
+        Source {
+            tag: pinned_input("OVMF_TAG"),
+            sha256: pinned_input("OVMF_SHA256"),
+        },
+        PathBuf::from("target/ovmf"),
+    )
+    .expect("should be able to fetch OVMF prebuilt firmware")
 }
 
 fn build_iso(limine_checkout: impl AsRef<Path>, kernel_binary: impl AsRef<Path>) -> PathBuf {
@@ -188,7 +284,7 @@ fn build_iso(limine_checkout: impl AsRef<Path>, kernel_binary: impl AsRef<Path>)
         copy(from, to).expect("should be able to copy EFI boot files");
     }
 
-    let output_iso = out_dir.join("muffin.iso");
+    let output_iso = out_dir.join("axiomos.iso");
 
     let status = std::process::Command::new("xorriso")
         .arg("-as")
@@ -237,23 +333,87 @@ fn build_iso(limine_checkout: impl AsRef<Path>, kernel_binary: impl AsRef<Path>)
 
 fn limine() -> PathBuf {
     let limine_dir = PathBuf::from("target/limine");
+    let pinned_ref = pinned_input("LIMINE_REF");
+    let expected_revision = pinned_input("LIMINE_REVISION");
 
     // check whether we've already checked it out
     if exists(&limine_dir).expect("should be able to check if limine directory exists") {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&limine_dir)
+            .arg("rev-parse")
+            .arg("HEAD")
+            .output()
+            .expect("git rev-parse should execute for cached Limine");
+        assert!(
+            output.status.success(),
+            "cached Limine must be a git checkout"
+        );
+        let actual = String::from_utf8(output.stdout).expect("Limine revision should be UTF-8");
+        assert_eq!(
+            actual.trim(),
+            expected_revision,
+            "cached Limine revision does not match ci/manifests/build-inputs.env; remove target/limine"
+        );
         return limine_dir;
     }
 
-    // check out
-    let status = std::process::Command::new("git")
-        .arg("clone")
-        .arg("https://github.com/limine-bootloader/limine.git")
-        .arg("--branch=v9.x-binary")
-        .arg("--depth=1")
+    let status = Command::new("git")
+        .arg("init")
         .arg(&limine_dir)
         .stderr(Stdio::inherit())
         .stdout(Stdio::inherit())
         .status()
-        .expect("git clone command should execute");
+        .expect("git init command should execute");
+    assert!(status.success());
+
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(&limine_dir)
+        .arg("remote")
+        .arg("add")
+        .arg("origin")
+        .arg(pinned_input("LIMINE_REPOSITORY"))
+        .status()
+        .expect("git remote add should execute");
+    assert!(status.success());
+
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(&limine_dir)
+        .arg("fetch")
+        .arg("--depth=1")
+        .arg("origin")
+        .arg(pinned_ref)
+        .stderr(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .status()
+        .expect("git fetch should execute");
+    assert!(status.success());
+
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&limine_dir)
+        .arg("rev-parse")
+        .arg("FETCH_HEAD^{commit}")
+        .output()
+        .expect("git rev-parse should execute for fetched Limine");
+    assert!(output.status.success(), "fetched Limine ref must resolve");
+    let actual = String::from_utf8(output.stdout).expect("Limine revision should be UTF-8");
+    assert_eq!(
+        actual.trim(),
+        expected_revision,
+        "pinned Limine ref moved away from LIMINE_REVISION"
+    );
+
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(&limine_dir)
+        .arg("checkout")
+        .arg("--detach")
+        .arg(expected_revision)
+        .status()
+        .expect("git checkout should execute");
     assert!(status.success());
 
     // build

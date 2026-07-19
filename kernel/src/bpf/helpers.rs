@@ -1,5 +1,19 @@
 use crate::time::get_kernel_time_ns;
 
+const GPIO_PIN_COUNT: u32 = 28;
+
+fn valid_gpio_pin(pin: u32) -> bool {
+    pin < GPIO_PIN_COUNT
+}
+
+fn valid_pwm_id(pwm_id: u32) -> bool {
+    pwm_id <= 1
+}
+
+fn valid_pwm_channel(channel: u32) -> bool {
+    (1..=2).contains(&channel)
+}
+
 /// BPF helper: Get current time in nanoseconds
 ///
 /// # Safety
@@ -18,49 +32,52 @@ pub extern "C" fn bpf_ktime_get_ns() -> u64 {
 ///
 /// # Safety
 ///
-/// # Safety
-///
 /// This function expects the BPF context to be passed in R1 by the executor.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[unsafe(no_mangle)]
 pub extern "C" fn bpf_get_interrupt_latency_ns(
-    ctx: *const kernel_bpf::execution::BpfContext,
+    ctx: *const kernel_bpf::execution::BpfContext<'_>,
 ) -> u64 {
     if ctx.is_null() {
         return 0;
     }
     // SAFETY: The executor guarantees that R1 points to a valid BpfContext.
-    unsafe { (*ctx).interrupt_latency_ns }
+    unsafe { (*ctx).interrupt_latency_ns() }
 }
 
 /// BPF helper: Get boot time in milliseconds.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[unsafe(no_mangle)]
-pub extern "C" fn bpf_get_boot_time_ms(ctx: *const kernel_bpf::execution::BpfContext) -> u64 {
+pub extern "C" fn bpf_get_boot_time_ms(ctx: *const kernel_bpf::execution::BpfContext<'_>) -> u64 {
     if ctx.is_null() {
         return 0;
     }
-    unsafe { (*ctx).boot_time_ms }
+    // SAFETY: The executor guarantees that R1 points to a live BpfContext.
+    unsafe { (*ctx).boot_time_ms() }
 }
 
 /// BPF helper: Get kernel heap usage in KB.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[unsafe(no_mangle)]
-pub extern "C" fn bpf_get_kernel_heap_kb(ctx: *const kernel_bpf::execution::BpfContext) -> u64 {
+pub extern "C" fn bpf_get_kernel_heap_kb(ctx: *const kernel_bpf::execution::BpfContext<'_>) -> u64 {
     if ctx.is_null() {
         return 0;
     }
-    unsafe { (*ctx).kernel_heap_kb }
+    // SAFETY: The executor guarantees that R1 points to a live BpfContext.
+    unsafe { (*ctx).kernel_heap_kb() }
 }
 
 /// BPF helper: Get kernel image size in MB.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[unsafe(no_mangle)]
-pub extern "C" fn bpf_get_kernel_image_mb(ctx: *const kernel_bpf::execution::BpfContext) -> u64 {
+pub extern "C" fn bpf_get_kernel_image_mb(
+    ctx: *const kernel_bpf::execution::BpfContext<'_>,
+) -> u64 {
     if ctx.is_null() {
         return 0;
     }
-    unsafe { (*ctx).kernel_image_mb }
+    // SAFETY: The executor guarantees that R1 points to a live BpfContext.
+    unsafe { (*ctx).kernel_image_mb() }
 }
 
 /// BPF helper: Read GPIO pin value
@@ -75,7 +92,7 @@ pub extern "C" fn bpf_get_kernel_image_mb(ctx: *const kernel_bpf::execution::Bpf
 pub extern "C" fn bpf_gpio_read(pin: u32) -> i64 {
     #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
     {
-        if pin >= 28 {
+        if !valid_gpio_pin(pin) {
             return -1;
         }
         // SAFETY: Creating a temporary GPIO interface to access hardware registers.
@@ -107,26 +124,11 @@ pub extern "C" fn bpf_gpio_read(pin: u32) -> i64 {
 /// but validates inputs (pin numbers) to prevent invalid access.
 #[unsafe(no_mangle)]
 pub extern "C" fn bpf_gpio_write(pin: u32, value: u32) -> i64 {
-    #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
-    {
-        if pin >= 28 {
-            return -1;
-        }
-        // SAFETY: Creating a temporary GPIO interface to access hardware registers.
-        // Safe because we are on RPi5 (checked by feature) and access is stateless/exclusive.
-        let gpio = unsafe { crate::arch::aarch64::platform::rpi5::gpio::Rp1Gpio::new() };
-        if value != 0 {
-            gpio.set_high(pin as u8);
-        } else {
-            gpio.set_low(pin as u8);
-        }
-        0
+    if !valid_gpio_pin(pin) {
+        return -1;
     }
-    #[cfg(not(all(target_arch = "aarch64", feature = "rpi5")))]
-    {
-        let _ = (pin, value);
-        -1
-    }
+
+    crate::actuation::guard_gpio(pin as u8, value)
 }
 
 /// BPF helper: Toggle GPIO pin
@@ -138,11 +140,16 @@ pub extern "C" fn bpf_gpio_write(pin: u32, value: u32) -> i64 {
 ///
 /// This function is an entry point for BPF programs. It accesses hardware registers
 /// but validates inputs (pin numbers) to prevent invalid access.
+///
+/// NOTE: not exposed to the BPF helper ABI (no `HelperId`, not in the relocation
+/// table or interpreter/JIT dispatch). It therefore bypasses the ARM-A actuation
+/// monitor. If ever exposed to BPF, route its output through
+/// `crate::actuation::guard_gpio` first so it cannot escape the safety envelope.
 #[unsafe(no_mangle)]
 pub extern "C" fn bpf_gpio_toggle(pin: u32) -> i64 {
     #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
     {
-        if pin >= 28 {
+        if !valid_gpio_pin(pin) {
             return -1;
         }
         // SAFETY: Creating a temporary GPIO interface to access hardware registers.
@@ -172,11 +179,16 @@ pub extern "C" fn bpf_gpio_toggle(pin: u32) -> i64 {
 ///
 /// This function is an entry point for BPF programs. It accesses hardware registers
 /// but validates inputs (pin numbers) to prevent invalid access.
+///
+/// NOTE: not exposed to the BPF helper ABI (no `HelperId`, not in the relocation
+/// table or interpreter/JIT dispatch). It therefore bypasses the ARM-A actuation
+/// monitor. If ever exposed to BPF, route its level write through
+/// `crate::actuation::guard_gpio` first so it cannot escape the safety envelope.
 #[unsafe(no_mangle)]
 pub extern "C" fn bpf_gpio_set_output(pin: u32, initial_high: u32) -> i64 {
     #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
     {
-        if pin >= 28 {
+        if !valid_gpio_pin(pin) {
             return -1;
         }
         // SAFETY: Creating a temporary GPIO interface to access hardware registers.
@@ -206,73 +218,13 @@ pub extern "C" fn bpf_gpio_set_output(pin: u32, initial_high: u32) -> i64 {
 /// This function is an entry point for BPF programs. It accesses hardware registers
 /// but validates inputs (pwm_id, channel) to prevent invalid access.
 /// BPF helper: Emergency motor stop
-///
-/// Immediately stops all motor PWM outputs.
-/// Arguments:
-/// - reason: A numeric code indicating the reason for the stop
-///
-/// Returns 0 on success, -1 on failure.
-///
-/// # Safety
-///
-/// This function is an entry point for BPF programs. It accesses hardware registers
-/// to disable motor outputs in an emergency.
-#[no_mangle]
-pub extern "C" fn bpf_motor_emergency_stop(reason: u32) -> i64 {
-    log::error!("EMERGENCY STOP TRIGGERED! Reason: {}", reason);
-    #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
-    {
-        use crate::arch::aarch64::platform::rpi5::pwm::{PWM0, PWM1};
-
-        {
-            let pwm0 = PWM0.lock();
-            pwm0.set_duty_cycle(1, 0);
-            pwm0.set_duty_cycle(2, 0);
-        }
-
-        {
-            let pwm1 = PWM1.lock();
-            pwm1.set_duty_cycle(1, 0);
-            pwm1.set_duty_cycle(2, 0);
-        }
-        0
-    }
-    #[cfg(not(all(target_arch = "aarch64", feature = "rpi5")))]
-    {
-        let _ = reason;
-        -1
-    }
-}
-
 #[no_mangle]
 pub extern "C" fn bpf_pwm_write(pwm_id: u32, channel: u32, duty_percent: u32) -> i64 {
-    #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
-    {
-        use crate::arch::aarch64::platform::rpi5::pwm::{PWM0, PWM1};
-
-        if !(1..=2).contains(&channel) {
-            return -1;
-        }
-
-        match pwm_id {
-            0 => {
-                let pwm = PWM0.lock();
-                pwm.set_duty_cycle(channel as u8, duty_percent);
-                0
-            }
-            1 => {
-                let pwm = PWM1.lock();
-                pwm.set_duty_cycle(channel as u8, duty_percent);
-                0
-            }
-            _ => -1,
-        }
+    if !valid_pwm_id(pwm_id) || !valid_pwm_channel(channel) {
+        return -1;
     }
-    #[cfg(not(all(target_arch = "aarch64", feature = "rpi5")))]
-    {
-        let _ = (pwm_id, channel, duty_percent);
-        -1
-    }
+
+    crate::actuation::guard_pwm(pwm_id as u8, channel as u8, duty_percent)
 }
 
 /// # Safety
@@ -299,20 +251,19 @@ pub extern "C" fn bpf_trace_printk(fmt: *const u8, _size: u32) -> i32 {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[unsafe(no_mangle)]
 pub extern "C" fn bpf_map_lookup_elem(map_id: u32, key_ptr: *const u8) -> *mut u8 {
-    use crate::BPF_MANAGER;
-    if let Some(manager) = BPF_MANAGER.get() {
-        let manager = manager.lock();
-        if let Some(def) = manager.get_map_def(map_id) {
+    super::with_current_execution_map(map_id, super::MapAccess::READ, |map| {
+        let def = map.map.def();
+        if !key_ptr.is_null() {
             let key_size = def.key_size as usize;
             // SAFETY: Verifier ensures valid memory access for key_ptr
             let key = unsafe { core::slice::from_raw_parts(key_ptr, key_size) };
-            // SAFETY: Manager lock ensures map stability
-            if let Some(ptr) = unsafe { manager.map_lookup_ptr(map_id, key) } {
-                return ptr;
-            }
+            // SAFETY: the per-map execution lease remains held until the
+            // interpreter returns, so storage cannot be mutated concurrently.
+            return unsafe { map.map.lookup_ptr(key) }.unwrap_or(core::ptr::null_mut());
         }
-    }
-    core::ptr::null_mut()
+        core::ptr::null_mut()
+    })
+    .unwrap_or(core::ptr::null_mut())
 }
 
 /// BPF helper: update a map element.
@@ -327,10 +278,9 @@ pub extern "C" fn bpf_map_update_elem(
     value_ptr: *const u8,
     flags: u64,
 ) -> i32 {
-    use crate::BPF_MANAGER;
-    if let Some(manager) = BPF_MANAGER.get() {
-        let manager = manager.lock();
-        if let Some(def) = manager.get_map_def(map_id) {
+    super::with_current_execution_map(map_id, super::MapAccess::WRITE, |map| {
+        let def = map.map.def();
+        if !key_ptr.is_null() && !value_ptr.is_null() {
             let key_size = def.key_size as usize;
             let value_size = def.value_size as usize;
 
@@ -339,12 +289,13 @@ pub extern "C" fn bpf_map_update_elem(
             // SAFETY: Verifier ensures valid memory access for value_ptr
             let value = unsafe { core::slice::from_raw_parts(value_ptr, value_size) };
 
-            if manager.map_update(map_id, key, value, flags).is_ok() {
+            if map.map.update(key, value, flags).is_ok() {
                 return 0;
             }
         }
-    }
-    -1
+        -1
+    })
+    .unwrap_or(-1)
 }
 
 /// BPF helper: delete a map element.
@@ -354,19 +305,19 @@ pub extern "C" fn bpf_map_update_elem(
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[unsafe(no_mangle)]
 pub extern "C" fn bpf_map_delete_elem(map_id: u32, key_ptr: *const u8) -> i32 {
-    use crate::BPF_MANAGER;
-    if let Some(manager) = BPF_MANAGER.get() {
-        let manager = manager.lock();
-        if let Some(def) = manager.get_map_def(map_id) {
+    super::with_current_execution_map(map_id, super::MapAccess::WRITE, |map| {
+        let def = map.map.def();
+        if !key_ptr.is_null() {
             let key_size = def.key_size as usize;
             // SAFETY: Verifier ensures valid memory access for key_ptr
             let key = unsafe { core::slice::from_raw_parts(key_ptr, key_size) };
-            if manager.map_delete(map_id, key).is_ok() {
+            if map.map.delete(key).is_ok() {
                 return 0;
             }
         }
-    }
-    -1
+        -1
+    })
+    .unwrap_or(-1)
 }
 
 /// BPF helper: output data to a ring buffer map.
@@ -392,22 +343,20 @@ pub extern "C" fn bpf_ringbuf_output(
     data_size: u64,
     flags: u64,
 ) -> i64 {
-    use crate::BPF_MANAGER;
-
     if data_ptr.is_null() {
         return -1;
     }
 
-    if let Some(manager) = BPF_MANAGER.get() {
-        let manager = manager.lock();
+    super::with_current_execution_map(map_id, super::MapAccess::WRITE, |map| {
         // SAFETY: Verifier ensures valid memory access for data_ptr
         let data = unsafe { core::slice::from_raw_parts(data_ptr, data_size as usize) };
 
-        if manager.ringbuf_output(map_id, data, flags).is_ok() {
+        if map.map.update(&[], data, flags).is_ok() {
             return 0;
         }
-    }
-    -1
+        -1
+    })
+    .unwrap_or(-1)
 }
 
 /// BPF helper: Push data to a time-series map.
@@ -429,28 +378,25 @@ pub extern "C" fn bpf_timeseries_push(
     key_ptr: *const u8,
     value_ptr: *const u8,
 ) -> i64 {
-    use crate::BPF_MANAGER;
-
     if key_ptr.is_null() || value_ptr.is_null() {
         return -1;
     }
 
-    if let Some(manager) = BPF_MANAGER.get() {
-        let manager = manager.lock();
-        if let Some(def) = manager.get_map_def(map_id) {
-            let key_size = def.key_size as usize;
-            let value_size = def.value_size as usize;
+    super::with_current_execution_map(map_id, super::MapAccess::WRITE, |map| {
+        let def = map.map.def();
+        let key_size = def.key_size as usize;
+        let value_size = def.value_size as usize;
 
-            // SAFETY: Verifier ensures valid memory access for key_ptr
-            let key = unsafe { core::slice::from_raw_parts(key_ptr, key_size) };
-            // SAFETY: Verifier ensures valid memory access for value_ptr
-            let value = unsafe { core::slice::from_raw_parts(value_ptr, value_size) };
+        // SAFETY: Verifier ensures valid memory access for key_ptr
+        let key = unsafe { core::slice::from_raw_parts(key_ptr, key_size) };
+        // SAFETY: Verifier ensures valid memory access for value_ptr
+        let value = unsafe { core::slice::from_raw_parts(value_ptr, value_size) };
 
-            // TimeSeriesMap uses update() to handle push (key treated as timestamp)
-            if manager.map_update(map_id, key, value, 0).is_ok() {
-                return 0;
-            }
+        // TimeSeriesMap uses update() to handle push (key treated as timestamp)
+        if map.map.update(key, value, 0).is_ok() {
+            return 0;
         }
-    }
-    -1
+        -1
+    })
+    .unwrap_or(-1)
 }

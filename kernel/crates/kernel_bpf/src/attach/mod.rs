@@ -37,6 +37,7 @@ mod gpio;
 mod iio;
 mod kprobe;
 mod pwm;
+mod route;
 mod tracepoint;
 
 use alloc::boxed::Box;
@@ -48,6 +49,7 @@ pub use gpio::{GpioAttach, GpioEdge, GpioEvent};
 pub use iio::{IioAttach, IioChannel, IioEvent};
 pub use kprobe::{KprobeAttach, KprobeType};
 pub use pwm::{PwmAttach, PwmEvent};
+pub use route::GpioRouteTable;
 pub use tracepoint::TracepointAttach;
 
 use crate::bytecode::program::BpfProgram;

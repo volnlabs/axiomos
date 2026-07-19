@@ -1,10 +1,10 @@
-# Contributing to axiom-ebpf
+# Contributing to axiomos
 
-Welcome to axiom-ebpf! This guide will help you get started with contributing to this hobby x86-64 operating system kernel written in Rust.
+Welcome to axiomos! This guide will help you get started with contributing to this hobby operating system kernel written in Rust.
 
 ## Project Overview
 
-**axiom-ebpf** is a bare-metal operating system kernel that boots using the Limine bootloader and runs on QEMU. The project is organized into kernel and userspace components.
+**axiomos** is a bare-metal operating system kernel that boots using the Limine bootloader and runs on QEMU. The project is organized into kernel and userspace components.
 
 - **Language:** Rust (Nightly)
 - **Target:** x86_64-unknown-none
@@ -70,7 +70,7 @@ cargo build --release
 
 This creates:
 - Kernel binary
-- Bootable ISO image (`target/release/build/**/out/muffin.iso`)
+- Bootable ISO image (`target/release/build/**/out/axiomos.iso`)
 - Disk image (`disk.img`)
 
 The build process automatically:
@@ -154,7 +154,7 @@ The CI also runs twice daily on a schedule.
 
 ## Running the OS
 
-To build and run axiom-ebpf in QEMU:
+To build and run axiomos in QEMU:
 
 ```bash
 # Run with default settings
@@ -198,7 +198,7 @@ cargo run -- --no-run
 
 ## License
 
-axiom-ebpf is dual-licensed under Apache-2.0 OR MIT. All contributions must be compatible with this licensing.
+axiomos is dual-licensed under Apache-2.0 OR MIT. All contributions must be compatible with this licensing.
 
 ## Getting Help
 
@@ -220,4 +220,4 @@ axiom-ebpf is dual-licensed under Apache-2.0 OR MIT. All contributions must be c
 
 ---
 
-Thank you for contributing to axiom-ebpf! 🧁
+Thank you for contributing to axiomos! 🧁

@@ -4,10 +4,15 @@ on:
   pull_request:
     paths:
       - 'kernel/crates/kernel_bpf/**'
+      - 'kernel/crates/kernel_elfloader/**'
+      - 'kernel/crates/kernel_syscall/**'
+      - 'userspace/tools/rk_bridge/**'
       - '.github/workflows/fuzz.yml'
   schedule:
-    # 02:30 UTC nightly. Long campaigns run here, not on every PR.
-    - cron: '30 2 * * *'
+    # 02:30 UTC weekly (Sun). Was nightly with two 8h targets ≈ 960 billed
+    # min/run; nightly that is ~28.8k min/month, ~10× the whole quota. Weekly
+    # + 2h (below) with a persistent corpus keeps coverage growing sustainably.
+    - cron: '30 2 * * 0'
   workflow_dispatch:
 
 # A finding here is a soundness bug. Do not cancel a run that is still
@@ -25,10 +30,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install nightly toolchain
-        uses: actions-rs/toolchain@v1
+      - name: Install pinned nightly toolchain
+        uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-07-02
           components: rust-src
 
       - name: Install cargo-fuzz
@@ -46,24 +51,59 @@ jobs:
           path: kernel/crates/kernel_bpf/fuzz/artifacts/
           retention-days: 14
 
-  nightly:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    name: "Fuzz nightly (${{ matrix.target }}, 8h)"
+  elfloader-pr-smoke:
+    if: github.event_name == 'pull_request'
+    name: "Fuzz smoke (ELF parse/load, 60s)"
     runs-on: ubuntu-latest
-    timeout-minutes: 510   # 8h + slack
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - verify_only
-          - verify_then_exec
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install nightly toolchain
-        uses: actions-rs/toolchain@v1
+      - name: Install pinned nightly toolchain
+        uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-07-02
+          components: rust-src
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version "^0.13"
+
+      - name: Fuzz malformed ELF parse and load
+        working-directory: kernel/crates/kernel_elfloader
+        run: cargo fuzz run parse_and_load -- -max_total_time=60
+
+      - name: Upload crash artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-elf-parse-and-load
+          path: kernel/crates/kernel_elfloader/fuzz/artifacts/
+          retention-days: 14
+
+  nightly:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: "Fuzz weekly (${{ matrix.target }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 150   # 2h + slack
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: verify_only
+            seconds: 7200
+          - target: verify_then_exec
+            seconds: 7200
+          - target: signed_container
+            seconds: 600
+          - target: ringbuf_sequences
+            seconds: 600
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned nightly toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-02
           components: rust-src
 
       - name: Install cargo-fuzz
@@ -77,9 +117,9 @@ jobs:
           restore-keys: |
             fuzz-corpus-${{ matrix.target }}-
 
-      - name: Run ${{ matrix.target }} for 8h
+      - name: Run ${{ matrix.target }}
         working-directory: kernel/crates/kernel_bpf
-        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=28800
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=${{ matrix.seconds }}
 
       - name: Upload corpus
         if: always()
@@ -95,4 +135,168 @@ jobs:
         with:
           name: fuzz-crash-${{ matrix.target }}-${{ github.run_id }}
           path: kernel/crates/kernel_bpf/fuzz/artifacts/${{ matrix.target }}
+          retention-days: 30
+
+  elfloader-weekly:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: "Fuzz weekly (ELF parse/load, 10m)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned nightly toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-02
+          components: rust-src
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version "^0.13"
+
+      - name: Restore ELF corpus
+        uses: actions/cache@v4
+        with:
+          path: kernel/crates/kernel_elfloader/fuzz/corpus/parse_and_load
+          key: fuzz-corpus-elf-parse-and-load-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-elf-parse-and-load-
+
+      - name: Fuzz malformed ELF parse and load
+        working-directory: kernel/crates/kernel_elfloader
+        run: cargo fuzz run parse_and_load -- -max_total_time=600
+
+      - name: Upload ELF corpus
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-elf-parse-and-load-${{ github.run_id }}
+          path: kernel/crates/kernel_elfloader/fuzz/corpus/parse_and_load
+          retention-days: 30
+
+      - name: Upload ELF crash artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-elf-parse-and-load-${{ github.run_id }}
+          path: kernel/crates/kernel_elfloader/fuzz/artifacts/parse_and_load
+          retention-days: 30
+
+  syscall-weekly:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: "Fuzz weekly (syscall mmap arguments, 10m)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned nightly toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-02
+          components: rust-src
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version "^0.13"
+
+      - name: Restore syscall corpus
+        uses: actions/cache@v4
+        with:
+          path: kernel/crates/kernel_syscall/fuzz/corpus/mmap_arguments
+          key: fuzz-corpus-syscall-mmap-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-syscall-mmap-
+
+      - name: Fuzz syscall mmap arguments
+        working-directory: kernel/crates/kernel_syscall
+        run: cargo fuzz run mmap_arguments -- -max_total_time=600
+
+      - name: Upload syscall corpus
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-syscall-mmap-${{ github.run_id }}
+          path: kernel/crates/kernel_syscall/fuzz/corpus/mmap_arguments
+          retention-days: 30
+
+      - name: Upload syscall crash artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-syscall-mmap-${{ github.run_id }}
+          path: kernel/crates/kernel_syscall/fuzz/artifacts/mmap_arguments
+          retention-days: 30
+
+  rk-bridge-pr-build:
+    if: github.event_name == 'pull_request'
+    name: "Fuzz build (rk_bridge event_stream)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned nightly toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-02
+          components: rust-src
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version "^0.13"
+
+      - name: Build rk_bridge event_stream fuzz target
+        working-directory: userspace/tools/rk_bridge/fuzz
+        run: cargo fuzz build
+
+      - name: Upload crash artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-rk-bridge-event-stream
+          path: userspace/tools/rk_bridge/fuzz/artifacts/event_stream
+          retention-days: 14
+
+  rk-bridge-weekly:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: "Fuzz weekly (rk_bridge event_stream, 10m)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned nightly toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-02
+          components: rust-src
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version "^0.13"
+
+      - name: Restore rk_bridge corpus
+        uses: actions/cache@v4
+        with:
+          path: userspace/tools/rk_bridge/fuzz/corpus/event_stream
+          key: fuzz-corpus-rk-bridge-event-stream-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-rk-bridge-event-stream-
+
+      - name: Fuzz rk_bridge event stream
+        working-directory: userspace/tools/rk_bridge/fuzz
+        run: cargo fuzz run event_stream -- -max_total_time=600 -max_len=65536
+
+      - name: Upload rk_bridge corpus
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-rk-bridge-event-stream-${{ github.run_id }}
+          path: userspace/tools/rk_bridge/fuzz/corpus/event_stream
+          retention-days: 30
+
+      - name: Upload rk_bridge crash artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-rk-bridge-event-stream-${{ github.run_id }}
+          path: userspace/tools/rk_bridge/fuzz/artifacts/event_stream
           retention-days: 30

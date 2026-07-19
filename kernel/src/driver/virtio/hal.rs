@@ -13,7 +13,7 @@ use kernel_virtual_memory::Segment;
 #[cfg(target_arch = "x86_64")]
 use virtio_drivers::transport::pci::bus::{DeviceFunction, PciRoot};
 #[cfg(target_arch = "x86_64")]
-use virtio_drivers::transport::pci::PciTransport;
+use virtio_drivers::transport::pci::{PciTransport, VirtioPciError};
 use virtio_drivers::{BufferDirection, Hal};
 
 #[cfg(target_arch = "aarch64")]
@@ -38,7 +38,10 @@ use crate::mem::virt::{VirtualMemoryAllocator, VirtualMemoryHigherHalf};
 use crate::{U64Ext, UsizeExt};
 
 #[cfg(target_arch = "x86_64")]
-pub fn transport(addr: PciAddress, cam: Box<dyn ConfigurationAccess>) -> PciTransport {
+pub fn transport(
+    addr: PciAddress,
+    cam: Box<dyn ConfigurationAccess>,
+) -> Result<PciTransport, VirtioPciError> {
     let mut root = PciRoot::new(VirtIoCam::new(cam));
     PciTransport::new::<HalImpl, _>(
         &mut root,
@@ -48,11 +51,24 @@ pub fn transport(addr: PciAddress, cam: Box<dyn ConfigurationAccess>) -> PciTran
             function: addr.function,
         },
     )
-    .unwrap()
 }
 
 #[allow(dead_code)]
 pub struct HalImpl;
+
+fn require_result<T, E>(result: Result<T, E>, code: &'static str) -> T {
+    match result {
+        Ok(value) => value,
+        Err(_) => crate::fatal::halt(code),
+    }
+}
+
+fn require_some<T>(value: Option<T>, code: &'static str) -> T {
+    match value {
+        Some(value) => value,
+        None => crate::fatal::halt(code),
+    }
+}
 
 // Offset for allocating MMIO virtual addresses on AArch64
 #[cfg(target_arch = "aarch64")]
@@ -66,23 +82,36 @@ unsafe impl Hal for HalImpl {
     fn dma_alloc(pages: usize, _: BufferDirection) -> (u64, NonNull<u8>) {
         #[cfg(target_arch = "x86_64")]
         {
-            let frames = PhysicalMemory::allocate_frames(pages).unwrap();
-            let segment = VirtualMemoryHigherHalf.reserve(pages).unwrap();
-            AddressSpace::kernel()
-                .map_range::<Size4KiB>(
+            let frames = require_some(
+                PhysicalMemory::allocate_frames(pages),
+                "virtio-dma-physical-allocation",
+            );
+            let segment = require_some(
+                VirtualMemoryHigherHalf.reserve(pages),
+                "virtio-dma-virtual-allocation",
+            );
+            require_result(
+                AddressSpace::kernel().map_range_owned::<Size4KiB>(
                     &*segment,
                     frames,
                     PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
-                )
-                .unwrap();
+                ),
+                "virtio-dma-map",
+            );
             let segment = segment.leak();
-            let addr = NonNull::new(segment.start.as_mut_ptr::<u8>()).unwrap();
+            let addr = require_some(
+                NonNull::new(segment.start.as_mut_ptr::<u8>()),
+                "virtio-dma-null-virtual-address",
+            );
             (frames.start.start_address().as_u64(), addr)
         }
         #[cfg(target_arch = "aarch64")]
         {
             // 1. Allocate contiguous physical frames
-            let range = phys::allocate_frames::<Size4KiB>(pages).expect("dma_alloc: out of memory");
+            let range = require_some(
+                phys::allocate_frames::<Size4KiB>(pages),
+                "virtio-dma-physical-allocation",
+            );
             let phys_addr = range.start.addr();
 
             // 2. Use direct map for virtual address
@@ -97,7 +126,10 @@ unsafe impl Hal for HalImpl {
 
             (
                 phys_addr as u64,
-                NonNull::new(virt_addr as *mut u8).unwrap(),
+                require_some(
+                    NonNull::new(virt_addr as *mut u8),
+                    "virtio-dma-null-virtual-address",
+                ),
             )
         }
     }
@@ -122,7 +154,9 @@ unsafe impl Hal for HalImpl {
             // The caller guarantees that paddr, vaddr, and pages match the allocation.
             unsafe {
                 AddressSpace::kernel().unmap_range::<Size4KiB>(&segment, |_| {});
-                assert!(VirtualMemoryHigherHalf.release(segment));
+                if !VirtualMemoryHigherHalf.release(segment) {
+                    crate::fatal::halt("virtio-dma-release");
+                }
                 PhysicalMemory::deallocate_frames(frames);
             }
 
@@ -155,18 +189,23 @@ unsafe impl Hal for HalImpl {
                 end: PhysFrame::containing_address(PhysAddr::new(paddr + size.into_u64() - 1)),
             };
 
-            let segment = VirtualMemoryHigherHalf
-                .reserve(size.div_ceil(Size4KiB::SIZE.into_usize()))
-                .unwrap();
-            AddressSpace::kernel()
-                .map_range::<Size4KiB>(
+            let segment = require_some(
+                VirtualMemoryHigherHalf.reserve(size.div_ceil(Size4KiB::SIZE.into_usize())),
+                "virtio-mmio-virtual-allocation",
+            );
+            require_result(
+                AddressSpace::kernel().map_range::<Size4KiB>(
                     &*segment,
                     frames,
                     PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
-                )
-                .unwrap();
+                ),
+                "virtio-mmio-map",
+            );
             let segment = segment.leak();
-            NonNull::new(segment.start.as_mut_ptr::<u8>()).unwrap()
+            require_some(
+                NonNull::new(segment.start.as_mut_ptr::<u8>()),
+                "virtio-mmio-null-virtual-address",
+            )
         }
         #[cfg(target_arch = "aarch64")]
         {
@@ -186,14 +225,18 @@ unsafe impl Hal for HalImpl {
 
             let flags = pte_flags::DEVICE;
 
-            walker
-                .map_range(vaddr_page, paddr_page, size_aligned, flags)
-                .expect("Failed to map MMIO");
+            require_result(
+                walker.map_range(vaddr_page, paddr_page, size_aligned, flags),
+                "virtio-mmio-map",
+            );
 
             // Flush TLB to ensure new mappings are visible
             paging::flush_tlb();
 
-            NonNull::new((vaddr_page + paddr_offset) as *mut u8).unwrap()
+            require_some(
+                NonNull::new((vaddr_page + paddr_offset) as *mut u8),
+                "virtio-mmio-null-virtual-address",
+            )
         }
     }
 
@@ -202,10 +245,11 @@ unsafe impl Hal for HalImpl {
     unsafe fn share(buffer: NonNull<[u8]>, _: BufferDirection) -> u64 {
         #[cfg(target_arch = "x86_64")]
         {
-            AddressSpace::kernel()
-                .translate(VirtAddr::from_ptr(buffer.as_ptr()))
-                .unwrap()
-                .as_u64()
+            require_some(
+                AddressSpace::kernel().translate(VirtAddr::from_ptr(buffer.as_ptr())),
+                "virtio-share-unmapped-buffer",
+            )
+            .as_u64()
         }
         #[cfg(target_arch = "aarch64")]
         {
@@ -215,11 +259,7 @@ unsafe impl Hal for HalImpl {
             let pt_phys = mm::kernel_page_table_phys();
             let walker = unsafe { PageTableWalker::new(pt_phys as *mut _) };
 
-            if let Some(paddr) = walker.translate(vaddr) {
-                paddr as u64
-            } else {
-                panic!("Hal::share: virtual address {:#x} not mapped", vaddr);
-            }
+            require_some(walker.translate(vaddr), "virtio-share-unmapped-buffer") as u64
         }
     }
 

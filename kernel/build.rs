@@ -1,6 +1,14 @@
 fn main() {
     let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
     let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+
+    // Host unit tests link through the platform test harness. Applying the
+    // bare-metal linker script there suppresses its TLS segment and makes the
+    // kernel's otherwise host-runnable unit tests fail at link time.
+    if target_os != "none" {
+        return;
+    }
 
     // Handle embedded disk image for rpi5
     if std::env::var("CARGO_FEATURE_RPI5").is_ok() {
@@ -34,8 +42,8 @@ fn main() {
     } else {
         match arch.as_str() {
             "aarch64" => "linker-aarch64.ld",
-            "riscv64" => "linker-riscv64.ld",
-            _ => "linker-x86_64.ld", // Fallback, though x86 uses Limine
+            "x86_64" => "linker-x86_64.ld",
+            _ => panic!("unsupported main-kernel target architecture: {arch}"),
         }
     };
 
@@ -44,15 +52,6 @@ fn main() {
 
     // Compile architecture-specific assembly files
     match arch.as_str() {
-        "riscv64" => {
-            println!("cargo:rerun-if-changed=src/arch/riscv64/boot.S");
-
-            cc::Build::new()
-                .file("src/arch/riscv64/boot.S")
-                .flag("-march=rv64gc")
-                .flag("-mabi=lp64d")
-                .compile("riscv64_boot");
-        }
         "aarch64" => {
             println!("cargo:rerun-if-changed=src/arch/aarch64/boot.S");
             println!("cargo:rerun-if-changed=src/arch/aarch64/exception_vectors.S");
@@ -66,8 +65,6 @@ fn main() {
         "x86_64" => {
             // x86_64 doesn't need assembly compilation (uses Limine)
         }
-        _ => {
-            println!("cargo:warning=Unknown target architecture: {}", arch);
-        }
+        _ => unreachable!("unsupported architecture was rejected while selecting the linker"),
     }
 }

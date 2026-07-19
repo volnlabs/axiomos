@@ -1,3 +1,5 @@
+use kernel_abi::ProtFlags;
+
 use crate::UserspacePtr;
 use crate::access::{AllocationStrategy, CreateMappingError, Location};
 
@@ -9,6 +11,9 @@ pub trait MemoryRegion {
 
     /// Returns the size in bytes of this memory region.
     fn size(&self) -> usize;
+
+    /// Returns the protection enforced by the backing mapping.
+    fn protection(&self) -> ProtFlags;
 }
 
 /// Trait for managing memory regions within a process.
@@ -16,13 +21,15 @@ pub trait MemoryRegion {
 pub trait MemoryRegionAccess {
     type Region: MemoryRegion;
 
-    /// Creates a mapping and immediately tracks it as a memory region in the process.
-    /// Returns the address of the created mapping.
+    /// Creates a mapping transaction and commits it into process tracking.
+    /// Implementations must leave no reservation, PTE, or backing allocation
+    /// behind when this operation returns an error.
     fn create_and_track_mapping(
         &self,
         location: Location,
         size: usize,
         allocation_strategy: AllocationStrategy,
+        protection: ProtFlags,
     ) -> Result<UserspacePtr<u8>, CreateMappingError>;
 
     /// Adds a memory region to the process's memory region tracking.

@@ -9,6 +9,7 @@ use kernel_bpf::bytecode::insn::BpfInsn;
 use kernel_bpf::bytecode::program::{BpfProgType, ProgramBuilder};
 use kernel_bpf::execution::{BpfContext, BpfExecutor, Interpreter};
 use kernel_bpf::profile::ActiveProfile;
+use kernel_bpf::verifier::VerifyConfig;
 
 // Stubs for resolving linker errors during integration testing
 
@@ -106,12 +107,6 @@ pub extern "C" fn bpf_timeseries_push(_map_id: u32, _key: *const u8, _value: *co
     0
 }
 
-// SAFETY: Test stub for BPF helper.
-#[unsafe(no_mangle)]
-pub extern "C" fn bpf_motor_emergency_stop(_reason: u32) -> i64 {
-    0
-}
-
 /// Helper to create an interpreter
 fn interpreter() -> Interpreter<ActiveProfile> {
     Interpreter::new()
@@ -134,16 +129,7 @@ fn test_gpio_event_processing() {
         value: 1, // High
     };
 
-    // Serialize event to byte slice
-    // SAFETY: Creating a byte slice from a stack-allocated struct is safe for test data serialization.
-    // SAFETY: Creating a byte slice from a stack-allocated struct is safe for test data serialization.
-    let data = unsafe {
-        core::slice::from_raw_parts(
-            &event as *const _ as *const u8,
-            core::mem::size_of::<GpioEvent>(),
-        )
-    };
-    let ctx = BpfContext::from_slice(data);
+    let ctx = BpfContext::from_struct(&event);
 
     // 2. Create a BPF program to check for a specific pin event
     //
@@ -166,7 +152,12 @@ fn test_gpio_event_processing() {
         // No match: return 0
         .insn(BpfInsn::mov64_imm(0, 0))
         .insn(BpfInsn::exit())
-        .build()
+        .build_raw()
+        .verify_with_config(VerifyConfig {
+            ctx_size: core::mem::size_of::<BpfContext<'static>>() as u32,
+            ctx_data_size: core::mem::size_of::<GpioEvent>() as u32,
+            ..VerifyConfig::default()
+        })
         .expect("valid program");
 
     // 3. Execute program
@@ -190,14 +181,7 @@ fn test_gpio_event_edge_filtering() {
         value: 0,
     };
 
-    // SAFETY: Creating a byte slice from a stack-allocated struct is safe for test data serialization.
-    let data = unsafe {
-        core::slice::from_raw_parts(
-            &event as *const _ as *const u8,
-            core::mem::size_of::<GpioEvent>(),
-        )
-    };
-    let ctx = BpfContext::from_slice(data);
+    let ctx = BpfContext::from_struct(&event);
 
     // Program: return 1 if edge == 2 (Falling), else 0
     let program = ProgramBuilder::<ActiveProfile>::new(BpfProgType::SocketFilter)
@@ -213,7 +197,12 @@ fn test_gpio_event_edge_filtering() {
         // No match: return 0
         .insn(BpfInsn::mov64_imm(0, 0))
         .insn(BpfInsn::exit())
-        .build()
+        .build_raw()
+        .verify_with_config(VerifyConfig {
+            ctx_size: core::mem::size_of::<BpfContext<'static>>() as u32,
+            ctx_data_size: core::mem::size_of::<GpioEvent>() as u32,
+            ..VerifyConfig::default()
+        })
         .expect("valid program");
 
     let interp = interpreter();

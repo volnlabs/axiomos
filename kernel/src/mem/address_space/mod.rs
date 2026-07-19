@@ -1,9 +1,14 @@
 use core::fmt::{Debug, Formatter};
+use core::ptr::{with_exposed_provenance, with_exposed_provenance_mut};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use conquer_once::spin::OnceCell;
+use kernel_physical_memory::{PhysicalFrameAllocator, PhysicalMemoryManager};
+use kernel_usermem::{UserMemError, UserMemPerm, UserMemResult, MAX_USER_COPY};
 use log::info;
 use mapper::AddressSpaceMapper;
 use spin::RwLock;
+use thiserror::Error;
 #[cfg(target_arch = "x86_64")]
 use x86_64::instructions::interrupts;
 #[cfg(target_arch = "x86_64")]
@@ -13,6 +18,8 @@ use x86_64::structures::paging::mapper::{FlagUpdateError, MapToError};
 #[cfg(target_arch = "x86_64")]
 use x86_64::structures::paging::{Mapper, PageTable, RecursivePageTable};
 
+#[cfg(target_arch = "aarch64")]
+use crate::arch::aarch64::paging::PageTableError;
 #[cfg(target_arch = "x86_64")]
 use crate::arch::types::Size4KiB;
 #[cfg(target_arch = "aarch64")]
@@ -46,10 +53,21 @@ use crate::mem::virt::{VirtualMemoryAllocator, VirtualMemoryHigherHalf};
 use crate::U64Ext;
 
 mod mapper;
+pub(crate) use mapper::MAP_RANGE_TRANSACTION_CAPACITY;
 
 static KERNEL_ADDRESS_SPACE: OnceCell<AddressSpace> = OnceCell::uninit();
 #[cfg(target_arch = "x86_64")]
 pub static RECURSIVE_INDEX: OnceCell<usize> = OnceCell::uninit();
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Error)]
+pub enum AddressSpaceForkError {
+    #[error("cannot fork an inactive address space")]
+    Inactive,
+    #[error("out of physical memory while copying the address space")]
+    OutOfPhysicalMemory,
+    #[error("failed to map a copied page into the child address space")]
+    MapPage,
+}
 
 pub fn init() {
     #[cfg(target_arch = "x86_64")]
@@ -185,6 +203,7 @@ pub struct AddressSpace {
     #[cfg(target_arch = "aarch64")]
     level0_frame: crate::arch::aarch64::phys::PhysFrame,
     inner: RwLock<AddressSpaceMapper>,
+    resident_cpus: AtomicU64,
 }
 
 impl Debug for AddressSpace {
@@ -197,6 +216,10 @@ impl Debug for AddressSpace {
         ds.field("level0_frame", &self.level0_frame);
 
         ds.field("active", &self.inner.read().is_active())
+            .field(
+                "resident_cpus",
+                &format_args!("{:#x}", self.resident_cpus.load(Ordering::Relaxed)),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -212,6 +235,150 @@ impl AddressSpace {
             .expect("address space not initialized")
     }
 
+    fn validate_user_range_shape(addr: VirtAddr, len: usize) -> UserMemResult<u64> {
+        if addr.as_u64() == 0 {
+            return Err(UserMemError::Null);
+        }
+        if len > MAX_USER_COPY {
+            return Err(UserMemError::TooLong(len, MAX_USER_COPY));
+        }
+
+        let len_u64 = u64::try_from(len).map_err(|_| UserMemError::BadRange(addr, len))?;
+        let end = addr
+            .as_u64()
+            .checked_add(len_u64)
+            .ok_or(UserMemError::BadRange(addr, len))?;
+
+        #[cfg(target_arch = "x86_64")]
+        const USER_END_EXCLUSIVE: u64 = 0x0000_8000_0000_0000;
+        #[cfg(target_arch = "aarch64")]
+        const USER_END_EXCLUSIVE: u64 = 0x0001_0000_0000_0000;
+
+        if addr.as_u64() >= USER_END_EXCLUSIVE || end > USER_END_EXCLUSIVE {
+            return Err(UserMemError::BadRange(addr, len));
+        }
+
+        Ok(end)
+    }
+
+    fn validate_user_pages_locked(
+        mapper: &AddressSpaceMapper,
+        addr: VirtAddr,
+        end: u64,
+        permission: UserMemPerm,
+    ) -> UserMemResult<()> {
+        let mut current = addr.as_u64();
+        while current < end {
+            let current_addr = VirtAddr::new(current);
+            let Some((_physical, flags)) = mapper.translate_page_flags(current_addr) else {
+                return Err(UserMemError::Unmapped(current_addr));
+            };
+            if !flags.contains(PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE) {
+                return Err(UserMemError::PermissionDenied(current_addr, permission));
+            }
+            if permission == UserMemPerm::Write && !flags.contains(PageTableFlags::WRITABLE) {
+                return Err(UserMemError::PermissionDenied(current_addr, permission));
+            }
+
+            let next_page = (current | (Size4KiB::SIZE - 1)).saturating_add(1);
+            current = next_page.min(end);
+        }
+        Ok(())
+    }
+
+    /// Copy bytes from a locked, mapped userspace range into kernel memory.
+    pub(crate) fn copy_from_user(&self, dst: &mut [u8], src_addr: VirtAddr) -> UserMemResult<()> {
+        let end = Self::validate_user_range_shape(src_addr, dst.len())?;
+        let mapper = self.inner.read();
+        Self::validate_user_pages_locked(&mapper, src_addr, end, UserMemPerm::Read)?;
+
+        let mut copied = 0usize;
+        while copied < dst.len() {
+            let current = src_addr.as_u64() + copied as u64;
+            let page_remaining = Size4KiB::SIZE as usize - (current as usize & 0xfff);
+            let chunk = page_remaining.min(dst.len() - copied);
+            // SAFETY: Every byte in this page-bounded chunk was proven present
+            // and user-readable while `mapper` keeps map/unmap writers excluded.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    with_exposed_provenance::<u8>(current as usize),
+                    dst.as_mut_ptr().add(copied),
+                    chunk,
+                );
+            }
+            copied += chunk;
+        }
+        Ok(())
+    }
+
+    /// Copy kernel bytes into a locked, mapped, writable userspace range.
+    pub(crate) fn copy_to_user(&self, dst_addr: VirtAddr, src: &[u8]) -> UserMemResult<()> {
+        let end = Self::validate_user_range_shape(dst_addr, src.len())?;
+        let mapper = self.inner.read();
+        Self::validate_user_pages_locked(&mapper, dst_addr, end, UserMemPerm::Write)?;
+
+        let mut copied = 0usize;
+        while copied < src.len() {
+            let current = dst_addr.as_u64() + copied as u64;
+            let page_remaining = Size4KiB::SIZE as usize - (current as usize & 0xfff);
+            let chunk = page_remaining.min(src.len() - copied);
+            // SAFETY: Every byte in this page-bounded chunk was proven present,
+            // user-accessible, and writable while the mapper read guard is live.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    src.as_ptr().add(copied),
+                    with_exposed_provenance_mut::<u8>(current as usize),
+                    chunk,
+                );
+            }
+            copied += chunk;
+        }
+        Ok(())
+    }
+
+    /// Copy a NUL-terminated userspace string while holding the mapping guard.
+    pub(crate) fn copy_cstr_from_user(
+        &self,
+        dst: &mut [u8],
+        src_addr: VirtAddr,
+    ) -> UserMemResult<usize> {
+        if dst.is_empty() {
+            return Err(UserMemError::Truncated(src_addr, 0));
+        }
+        if dst.len() > MAX_USER_COPY {
+            return Err(UserMemError::TooLong(dst.len(), MAX_USER_COPY));
+        }
+        Self::validate_user_range_shape(src_addr, 1)?;
+        let mapper = self.inner.read();
+        let mut validated_page = u64::MAX;
+
+        for written in 0..dst.len() {
+            let current = src_addr
+                .as_u64()
+                .checked_add(written as u64)
+                .ok_or(UserMemError::BadRange(src_addr, dst.len()))?;
+            Self::validate_user_range_shape(VirtAddr::new(current), 1)?;
+            let page = current & !(Size4KiB::SIZE - 1);
+            if page != validated_page {
+                Self::validate_user_pages_locked(
+                    &mapper,
+                    VirtAddr::new(current),
+                    current + 1,
+                    UserMemPerm::Read,
+                )?;
+                validated_page = page;
+            }
+            // SAFETY: This byte's page was validated as mapped and readable
+            // under the still-live mapper guard.
+            let byte = unsafe { with_exposed_provenance::<u8>(current as usize).read() };
+            dst[written] = byte;
+            if byte == 0 {
+                return Ok(written);
+            }
+        }
+        Err(UserMemError::Truncated(src_addr, dst.len()))
+    }
+
     /// # Safety
     /// The level4_frame must be a valid physical frame containing a top-level page table.
     /// The level4_vaddr must be the virtual address where that frame is mapped.
@@ -220,6 +387,7 @@ impl AddressSpace {
         Self {
             level4_frame,
             inner: RwLock::new(AddressSpaceMapper::new(level4_frame, level4_vaddr)),
+            resident_cpus: AtomicU64::new(0),
         }
     }
 
@@ -234,6 +402,7 @@ impl AddressSpace {
         Self {
             level0_frame,
             inner: RwLock::new(AddressSpaceMapper::new(level0_frame, level0_vaddr)),
+            resident_cpus: AtomicU64::new(0),
         }
     }
 
@@ -326,10 +495,35 @@ impl AddressSpace {
         self.level0_frame.addr() as usize
     }
 
+    pub(crate) fn activate(&self) {
+        if let Some(context) = crate::mcore::context::ExecutionContext::try_load() {
+            self.mark_cpu_resident(context.cpu_id());
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            let flags = Cr3::read().1;
+            // SAFETY: This address space owns an initialized top-level page
+            // table and retains the shared kernel mappings needed to continue.
+            unsafe { Cr3::write(self.level4_frame, flags) };
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        // SAFETY: The address space owns an initialized L0 table. Kernel
+        // mappings remain available through TTBR1 while TTBR0 changes.
+        unsafe {
+            crate::arch::aarch64::paging::set_ttbr0(self.level0_frame.addr() as usize);
+        }
+    }
+
     pub fn with_active<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&Self) -> R,
     {
+        if let Some(context) = crate::mcore::context::ExecutionContext::try_load() {
+            self.mark_cpu_resident(context.cpu_id());
+        }
+
         #[cfg(target_arch = "x86_64")]
         {
             let current_cr3 = Cr3::read();
@@ -388,6 +582,33 @@ impl AddressSpace {
         }
     }
 
+    pub(crate) fn mark_cpu_resident(&self, cpu_id: usize) {
+        let bit = 1u64
+            .checked_shl(u32::try_from(cpu_id).expect("CPU id must fit u32"))
+            .filter(|bit| *bit != 0)
+            .expect("axiomos supports at most 64 tracked CPUs");
+        self.resident_cpus.fetch_or(bit, Ordering::Release);
+    }
+
+    pub(crate) fn shootdown_targets(&self) -> u64 {
+        if KERNEL_ADDRESS_SPACE
+            .get()
+            .is_some_and(|kernel| core::ptr::eq(self, kernel))
+        {
+            crate::mcore::context::online_cpu_mask()
+        } else {
+            self.resident_cpus.load(Ordering::Acquire)
+        }
+    }
+
+    fn shootdown(&self) {
+        #[cfg(target_arch = "x86_64")]
+        crate::arch::shootdown_tlb(self.shootdown_targets());
+
+        #[cfg(target_arch = "aarch64")]
+        crate::arch::aarch64::paging::flush_tlb();
+    }
+
     #[allow(dead_code)]
     pub fn is_active(&self) -> bool {
         self.inner.read().is_active()
@@ -406,11 +627,20 @@ impl AddressSpace {
     where
         for<'a> RecursivePageTable<'a>: Mapper<S>,
     {
-        self.inner.write().map(page, frame, flags)
+        let result = self.inner.write().map(page, frame, flags);
+        if result.is_ok() {
+            self.shootdown();
+        }
+        result
     }
 
     /// # Errors
     /// Returns an error if the pages are already mapped or flags are invalid.
+    ///
+    /// # Panics
+    /// Panics before changing page tables when the range exceeds
+    /// [`MAP_RANGE_TRANSACTION_CAPACITY`]. Large callers must split their
+    /// ranges into bounded transactions.
     #[cfg(target_arch = "x86_64")]
     pub fn map_range<S: PageSize>(
         &self,
@@ -421,7 +651,39 @@ impl AddressSpace {
     where
         for<'a> RecursivePageTable<'a>: Mapper<S>,
     {
-        self.inner.write().map_range(pages.into(), frames, flags)
+        let result = self.inner.write().map_range(pages.into(), frames, flags);
+        self.shootdown();
+        result
+    }
+
+    /// Map a range while transferring ownership of one frame reference per page.
+    /// All transferred references are released if any page fails to map.
+    ///
+    /// # Panics
+    /// Panics before changing page tables when the range exceeds
+    /// [`MAP_RANGE_TRANSACTION_CAPACITY`]. Large callers must split their
+    /// ranges into bounded transactions.
+    #[cfg(target_arch = "x86_64")]
+    pub fn map_range_owned<S: PageSize>(
+        &self,
+        pages: impl Into<PageRangeInclusive<S>>,
+        frames: impl Iterator<Item = PhysFrame<S>>,
+        flags: PageTableFlags,
+    ) -> Result<(), MapToError<S>>
+    where
+        for<'a> RecursivePageTable<'a>: Mapper<S>,
+        PhysicalMemoryManager: PhysicalFrameAllocator<S>,
+    {
+        let mut released = alloc::vec::Vec::new();
+        let result = self
+            .inner
+            .write()
+            .map_range_owned(pages.into(), frames, flags, |frame| released.push(frame));
+        self.shootdown();
+        for frame in released {
+            PhysicalMemory::deallocate_frame(frame);
+        }
+        result
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -429,7 +691,11 @@ impl AddressSpace {
     where
         for<'a> RecursivePageTable<'a>: Mapper<S>,
     {
-        self.inner.write().unmap(page)
+        let frame = self.inner.write().unmap(page);
+        if frame.is_some() {
+            self.shootdown();
+        }
+        frame
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -440,7 +706,16 @@ impl AddressSpace {
     ) where
         for<'a> RecursivePageTable<'a>: Mapper<S>,
     {
-        self.inner.write().unmap_range(pages.into(), callback);
+        let mut unmapped = alloc::vec::Vec::new();
+        self.inner
+            .write()
+            .unmap_range(pages.into(), |frame| unmapped.push(frame));
+        if !unmapped.is_empty() {
+            self.shootdown();
+        }
+        for frame in unmapped {
+            callback(frame);
+        }
     }
 
     /// # Errors
@@ -454,7 +729,11 @@ impl AddressSpace {
     where
         for<'a> RecursivePageTable<'a>: Mapper<S>,
     {
-        self.inner.write().remap(page, &f)
+        let result = self.inner.write().remap(page, &f);
+        if result.is_ok() {
+            self.shootdown();
+        }
+        result
     }
 
     /// # Errors
@@ -468,7 +747,9 @@ impl AddressSpace {
     where
         for<'a> RecursivePageTable<'a>: Mapper<S>,
     {
-        self.inner.write().remap_range(pages.into(), &f)
+        let result = self.inner.write().remap_range(pages.into(), &f);
+        self.shootdown();
+        result
     }
 
     #[allow(dead_code)]
@@ -489,23 +770,62 @@ impl AddressSpace {
     }
 
     #[cfg(target_arch = "aarch64")]
+    /// Map one 4 KiB page.
+    ///
+    /// # Panics
+    /// Panics before changing the page table when `S` is not `Size4KiB`.
     pub fn map<S: PageSize>(
         &self,
         page: Page<S>,
         frame: PhysFrame<S>,
         flags: PageTableFlags,
-    ) -> Result<(), &'static str> {
-        self.inner.write().map(page, frame, flags)
+    ) -> Result<(), PageTableError> {
+        let result = self.inner.write().map(page, frame, flags);
+        if result.is_ok() {
+            self.shootdown();
+        }
+        result
     }
 
     #[cfg(target_arch = "aarch64")]
+    /// Map a range of 4 KiB pages.
+    ///
+    /// # Panics
+    /// Panics before changing page tables when the range exceeds
+    /// [`MAP_RANGE_TRANSACTION_CAPACITY`] or when `S` is not `Size4KiB`.
     pub fn map_range<S: PageSize>(
         &self,
         pages: impl Into<PageRangeInclusive<S>>,
         frames: impl Iterator<Item = PhysFrame<S>>,
         flags: PageTableFlags,
-    ) -> Result<(), &'static str> {
-        self.inner.write().map_range(pages.into(), frames, flags)
+    ) -> Result<(), PageTableError> {
+        let result = self.inner.write().map_range(pages.into(), frames, flags);
+        self.shootdown();
+        result
+    }
+
+    /// Map a range while transferring ownership of one frame reference per page.
+    /// All transferred references are released if any page fails to map.
+    ///
+    /// # Panics
+    /// Panics before changing page tables when the range exceeds
+    /// [`MAP_RANGE_TRANSACTION_CAPACITY`] or when `S` is not `Size4KiB`.
+    #[cfg(target_arch = "aarch64")]
+    pub fn map_range_owned<S: PageSize>(
+        &self,
+        pages: impl Into<PageRangeInclusive<S>>,
+        frames: impl Iterator<Item = PhysFrame<S>>,
+        flags: PageTableFlags,
+    ) -> Result<(), PageTableError>
+    where
+        PhysicalMemoryManager: PhysicalFrameAllocator<S>,
+    {
+        let result = self
+            .inner
+            .write()
+            .map_range_owned(pages.into(), frames, flags);
+        self.shootdown();
+        result
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -527,7 +847,7 @@ impl AddressSpace {
         &self,
         page: Page<S>,
         f: F,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PageTableError> {
         self.inner.write().remap(page, &f)
     }
 
@@ -536,7 +856,7 @@ impl AddressSpace {
         &self,
         pages: impl Into<PageRangeInclusive<S>>,
         f: F,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PageTableError> {
         self.inner.write().remap_range(pages.into(), &f)
     }
 
@@ -547,7 +867,7 @@ impl AddressSpace {
     ///
     /// # Errors
     /// Returns an error if memory allocation fails.
-    pub fn fork(&self) -> Result<Self, &'static str> {
+    pub fn fork(&self) -> Result<Self, AddressSpaceForkError> {
         // 1. Create a new empty address space (this sets up kernel mappings)
         let new_as = Self::new();
 
@@ -561,7 +881,7 @@ impl AddressSpace {
         // Ensure we are active so we can read the user pages
         // (On x86_64, visit_user_pages relies on recursive mapping which requires activation)
         if !self.is_active() {
-            return Err("Cannot fork inactive address space");
+            return Err(AddressSpaceForkError::Inactive);
         }
 
         self.inner.read().visit_user_pages(|page, frame, flags| {
@@ -573,14 +893,14 @@ impl AddressSpace {
             let new_frame = match PhysicalMemory::allocate_frame() {
                 Some(f) => f,
                 None => {
-                    error = Some("Out of physical memory");
+                    error = Some(AddressSpaceForkError::OutOfPhysicalMemory);
                     return;
                 }
             };
 
             // Copy memory content
             // SAFETY: We are accessing valid physical frames. We use phys_to_virt to map them.
-            // On Axiom, all physical memory is mapped in the higher half.
+            // On axiomos, all physical memory is mapped in the higher half.
             unsafe {
                 let src_ptr =
                     crate::mem::phys_to_virt(frame.start_address().as_u64() as usize) as *const u8;
@@ -606,12 +926,12 @@ impl AddressSpace {
                 // On x86_64, `map` returns Result<(), MapToError>. On AArch64, Result<(), &str>
                 #[cfg(target_arch = "x86_64")]
                 if active_as.map(page, frame, flags).is_err() {
-                    return Err("Failed to map page");
+                    return Err(AddressSpaceForkError::MapPage);
                 }
 
                 #[cfg(target_arch = "aarch64")]
                 if active_as.map(page, frame, flags).is_err() {
-                    return Err("Failed to map page");
+                    return Err(AddressSpaceForkError::MapPage);
                 }
             }
             Ok(())

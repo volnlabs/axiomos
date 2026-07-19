@@ -24,5 +24,7 @@ pub mod registers;
 
 pub use insn::{BpfInsn, WideInsn};
 pub use opcode::{AluOp, JmpOp, MemSize, OpcodeClass};
-pub use program::{BpfProgType, BpfProgram, ProgramError};
+pub use program::{
+    BpfProgType, BpfProgram, ProgramBuilder, ProgramError, RawProgram, VerifiedProgram,
+};
 pub use registers::{Register, RegisterFile};

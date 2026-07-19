@@ -597,7 +597,7 @@ impl Default for JitExecutor {
 }
 
 impl BpfExecutor<CloudProfile> for JitExecutor {
-    fn execute(&self, program: &BpfProgram<CloudProfile>, ctx: &BpfContext) -> BpfResult {
+    fn execute(&self, program: &BpfProgram<CloudProfile>, ctx: &BpfContext<'_>) -> BpfResult {
         // Try to compile, fall back to interpreter on failure
         match self.compile(program) {
             Ok(_jit_prog) => {

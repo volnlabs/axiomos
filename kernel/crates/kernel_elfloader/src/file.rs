@@ -4,14 +4,21 @@ use core::fmt::{Debug, Display, Formatter};
 use thiserror::Error;
 use zerocopy::{Immutable, KnownLayout, TryFromBytes};
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct ElfFile<'a> {
     pub(crate) source: &'a [u8],
-    pub(crate) header: &'a ElfHeader,
+    pub(crate) header: ElfHeader,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Error)]
 pub enum ElfParseError {
+    #[error("input too small: have {have} bytes, need {need}")]
+    InputTooSmall {
+        /// Number of bytes actually present in the input buffer.
+        have: usize,
+        /// Number of bytes the parser required for this step.
+        need: usize,
+    },
     #[error("could not parse elf header")]
     HeaderParseError,
     #[error("invalid magic number")]
@@ -26,18 +33,57 @@ pub enum ElfParseError {
     UnsupportedElfVersion,
     #[error("unsupported endianness")]
     UnsupportedEndian,
+    #[error("header table arithmetic overflow: {detail}")]
+    HeaderArithmeticOverflow {
+        /// Human-readable cause, e.g. "phnum * phentsize overflows usize".
+        detail: &'static str,
+    },
+    #[error(
+        "header table out of bounds: offset {offset}, count {count}, entry size {entry_size}, source {source_len}"
+    )]
+    HeaderOutOfBounds {
+        /// Byte offset of the first header.
+        offset: usize,
+        /// Number of header entries claimed by the ELF header.
+        count: usize,
+        /// Size of each header entry in bytes.
+        entry_size: usize,
+        /// Actual length of the input source buffer.
+        source_len: usize,
+    },
+    #[error("section data out of bounds: offset {offset}, size {size}, source {source_len}")]
+    SectionDataOutOfBounds {
+        offset: usize,
+        size: usize,
+        source_len: usize,
+    },
 }
 
 impl<'a> ElfFile<'a> {
     /// # Errors
-    /// Returns an error if the ELF file is invalid or not supported.
+    /// Returns a typed [`ElfParseError`] if the input is too small to
+    /// contain an ELF64 header, or if any header field violates the
+    /// parser's preconditions (magic, endian, version, OS ABI, entry
+    /// size). All malformed-input paths return errors rather than
+    /// panicking (audit H-05).
     pub fn try_parse(source: &'a [u8]) -> Result<Self, ElfParseError> {
+        if source.len() < size_of::<ElfHeader>() {
+            return Err(ElfParseError::InputTooSmall {
+                have: source.len(),
+                need: size_of::<ElfHeader>(),
+            });
+        }
+
         #[cfg(target_endian = "little")]
         const ENDIAN: u8 = 1;
         #[cfg(target_endian = "big")]
         const ENDIAN: u8 = 2;
 
-        let header = ElfHeader::try_ref_from_bytes(&source[..size_of::<ElfHeader>()])
+        // ELF bytes may begin at any byte offset. Read an owned header rather
+        // than borrowing a naturally aligned `ElfHeader` from the byte slice;
+        // the latter rejects valid inputs under Miri when the allocation's
+        // declared alignment is one.
+        let header = ElfHeader::try_read_from_bytes(&source[..size_of::<ElfHeader>()])
             .map_err(|_| ElfParseError::HeaderParseError)?;
 
         if header.ident.magic != [0x7F, 0x45, 0x4C, 0x46] {
@@ -70,82 +116,254 @@ impl<'a> ElfFile<'a> {
         self.header.entry
     }
 
-    pub fn program_headers(&self) -> impl Iterator<Item = &ProgramHeader> {
+    /// Iterate program headers as `Result`s so that any structural problem
+    /// with the claimed table (offset out of range, count * size overflow,
+    /// count * size + offset past EOF) surfaces as a single
+    /// [`ElfParseError`] instead of panicking (audit H-05). On the happy
+    /// path yields N owned headers; on malformed input yields exactly one
+    /// `Err` and stops.
+    pub fn program_headers(&self) -> impl Iterator<Item = Result<ProgramHeader, ElfParseError>> {
         self.headers(self.header.phoff, usize::from(self.header.phnum))
     }
 
+    /// Iterate program headers of a given type. Malformed table errors
+    /// propagate as `Err`; only matching-type entries are returned as
+    /// `Ok`. Same iteration-length contract as [`Self::program_headers`]:
+    /// yields at most one `Err`, then stops.
     pub fn program_headers_by_type(
         &self,
         typ: ProgramHeaderType,
-    ) -> impl Iterator<Item = &ProgramHeader> {
-        self.program_headers().filter(move |h| h.typ == typ)
+    ) -> impl Iterator<Item = Result<ProgramHeader, ElfParseError>> {
+        ErrForwardingTypeFilter {
+            inner: self.program_headers(),
+            typ: u64::from(typ.0),
+            done: false,
+            _phantom: core::marker::PhantomData,
+        }
     }
 
-    pub fn section_headers(&self) -> impl Iterator<Item = &SectionHeader> {
+    /// See [`ElfFile::program_headers`].
+    pub fn section_headers(&self) -> impl Iterator<Item = Result<SectionHeader, ElfParseError>> {
         self.headers(self.header.shoff, usize::from(self.header.shnum))
     }
 
     pub fn section_headers_by_type(
         &self,
         typ: SectionHeaderType,
-    ) -> impl Iterator<Item = &SectionHeader> {
-        self.section_headers().filter(move |h| h.typ == typ)
+    ) -> impl Iterator<Item = Result<SectionHeader, ElfParseError>> {
+        ErrForwardingTypeFilter {
+            inner: self.section_headers(),
+            typ: u64::from(typ.0),
+            done: false,
+            _phantom: core::marker::PhantomData,
+        }
     }
 
-    fn headers<T: TryFromBytes + KnownLayout + Immutable + 'a>(
+    /// Internal: yields `count` `Result<T, ElfParseError>` items. If the
+    /// claimed offset/count/entry_size is malformed, the *first* item is
+    /// the corresponding `Err` and the iterator then stops. Otherwise
+    /// every item is an owned `Ok(T)`, so valid unaligned ELF byte slices are
+    /// accepted as well.
+    fn headers<T: TryFromBytes + KnownLayout + Immutable>(
         &self,
         header_offset: usize,
         header_num: usize,
-    ) -> impl Iterator<Item = &T> {
-        let size = size_of::<T>();
-        let data = &self.source[header_offset..header_offset + (header_num * size)];
+    ) -> impl Iterator<Item = Result<T, ElfParseError>> {
+        // Local Either type to keep the function signature stable.
+        enum Either<A, B> {
+            Ok(A),
+            Err(B),
+        }
+        impl<T, A, B> Iterator for Either<A, B>
+        where
+            A: Iterator<Item = Result<T, ElfParseError>>,
+            B: Iterator<Item = Result<T, ElfParseError>>,
+        {
+            type Item = Result<T, ElfParseError>;
+            fn next(&mut self) -> Option<Self::Item> {
+                match self {
+                    Either::Ok(it) => it.next(),
+                    Either::Err(it) => it.next(),
+                }
+            }
+        }
 
-        data.chunks_exact(size)
-            .map(T::try_ref_from_bytes)
-            .map(Result::unwrap)
+        let entry_size = size_of::<T>();
+        let source_len = self.source.len();
+
+        // Reject the overflow case first so we never panic in arithmetic.
+        let total_bytes = match header_num.checked_mul(entry_size) {
+            Some(n) => n,
+            None => {
+                return Either::Err(core::iter::once(Err(
+                    ElfParseError::HeaderArithmeticOverflow {
+                        detail: "count * entry_size overflows usize",
+                    },
+                )));
+            }
+        };
+
+        let end = match header_offset.checked_add(total_bytes) {
+            Some(n) => n,
+            None => {
+                return Either::Err(core::iter::once(Err(
+                    ElfParseError::HeaderArithmeticOverflow {
+                        detail: "offset + (count * entry_size) overflows usize",
+                    },
+                )));
+            }
+        };
+
+        if end > source_len {
+            return Either::Err(core::iter::once(Err(ElfParseError::HeaderOutOfBounds {
+                offset: header_offset,
+                count: header_num,
+                entry_size,
+                source_len,
+            })));
+        }
+
+        // Safe bounds are established above. `try_read_from_bytes` returns an
+        // owned header, avoiding an alignment requirement on the source bytes.
+        let data = &self.source[header_offset..end];
+        Either::Ok(data.chunks_exact(entry_size).map(|chunk| {
+            T::try_read_from_bytes(chunk).map_err(|_| ElfParseError::HeaderParseError)
+        }))
     }
 
+    /// Return the byte slice for a section's data. Returns `None` if the
+    /// claimed `offset + size` runs past the end of the input source
+    /// instead of panicking (audit H-05).
     #[must_use]
-    pub fn section_data(&self, header: &SectionHeader) -> &[u8] {
-        &self.source[header.offset..header.offset + header.size]
+    pub fn section_data(&self, header: &SectionHeader) -> Option<&[u8]> {
+        let end = header.offset.checked_add(header.size)?;
+        if end > self.source.len() {
+            return None;
+        }
+        Some(&self.source[header.offset..end])
     }
 
+    /// Return the name of a section, or `None` if the section's
+    /// `shstrndx` lookup or name-string extraction fails for any
+    /// reason (header table out of bounds, missing NUL terminator,
+    /// non-UTF-8 bytes, or a `name` offset that runs past the
+    /// section's string-table data). Never panics on malformed input
+    /// (audit H-05).
     #[must_use]
     pub fn section_name(&self, header: &SectionHeader) -> Option<&str> {
-        let shstrtab = self
-            .section_headers()
-            .nth(usize::from(self.header.shstrndx))?;
-        let shstrtab_data = self.section_data(shstrtab);
-        CStr::from_bytes_until_nul(&shstrtab_data[header.name as usize..])
-            .ok()?
-            .to_str()
-            .ok()
+        let idx = usize::from(self.header.shstrndx);
+        let shstrtab = self.section_headers().nth(idx)?.ok()?;
+        let shstrtab_data = self.section_data(&shstrtab)?;
+        let name_offset = usize::try_from(header.name).ok()?;
+        let tail = shstrtab_data.get(name_offset..)?;
+        CStr::from_bytes_until_nul(tail).ok()?.to_str().ok()
     }
 
-    pub fn sections_by_name(&self, name: &str) -> impl Iterator<Item = &SectionHeader> {
+    pub fn sections_by_name(&self, name: &str) -> impl Iterator<Item = SectionHeader> {
         self.section_headers()
+            .filter_map(Result::ok)
             .filter(move |h| self.section_name(h) == Some(name))
     }
 
+    /// Return a program's bytes. Returns `None` if `offset + filesz`
+    /// runs past the input source instead of panicking (audit H-05).
     #[must_use]
-    pub fn program_data(&self, header: &ProgramHeader) -> &[u8] {
-        &self.source[header.offset..header.offset + header.filesz]
+    pub fn program_data(&self, header: &ProgramHeader) -> Option<&[u8]> {
+        let end = header.offset.checked_add(header.filesz)?;
+        if end > self.source.len() {
+            return None;
+        }
+        Some(&self.source[header.offset..end])
     }
 
     #[must_use]
-    pub fn symtab_data(&'a self, header: &'a SectionHeader) -> SymtabSection<'a> {
-        let data = self.section_data(header);
-        SymtabSection { header, data }
+    pub fn symtab_data(&'a self, header: &SectionHeader) -> Option<SymtabSection<'a>> {
+        let data = self.section_data(header)?;
+        Some(SymtabSection {
+            header: header.clone(),
+            data,
+        })
     }
 
+    /// Return the symbol name, or `None` if any lookup fails (out-of-bounds
+    /// `name` offset, missing NUL terminator, non-UTF-8 bytes, or any
+    /// upstream section/strtab reference error). Never panics on
+    /// malformed input (audit H-05).
     #[must_use]
     pub fn symbol_name(&self, symtab: &SymtabSection<'a>, symbol: &Symbol) -> Option<&str> {
         let strtab_index = symtab.header.link as usize;
-        let strtab_hdr = self.section_headers().nth(strtab_index)?;
-        let strtab_data = self.section_data(strtab_hdr);
-        CStr::from_bytes_until_nul(&strtab_data[symbol.name as usize..])
+        let strtab_hdr = self.section_headers().nth(strtab_index)?.ok()?;
+        let strtab_data = self.section_data(&strtab_hdr)?;
+        let name_offset = usize::try_from(symbol.name).ok()?;
+        let tail = strtab_data.get(name_offset..)?;
+        CStr::from_bytes_until_nul(tail)
             .ok()
             .and_then(|cstr| cstr.to_str().ok())
+    }
+}
+
+/// Iterator adapter for `program_headers_by_type` / `section_headers_by_type`.
+/// Forwards any `Err` from the inner iterator unchanged (then stops) and
+/// yields only `Ok` items whose `.typ` field matches the requested type.
+///
+/// The `Inner` type parameter is the concrete iterator type returned by
+/// `ElfFile::headers`; it yields owned headers so malformed or unaligned
+/// source bytes never leak alignment requirements through the public API.
+struct ErrForwardingTypeFilter<T, Inner> {
+    inner: Inner,
+    /// Cached value of `T::TYP_TAG`. We compare by the underlying numeric
+    /// type because both `ProgramHeaderType` and `SectionHeaderType` carry
+    /// theirs as `pub` newtype fields, but their widths differ (u16 vs
+    /// u32). Using `u64` covers both without losing precision.
+    typ: u64,
+    done: bool,
+    _phantom: core::marker::PhantomData<T>,
+}
+
+impl<T, Inner> Iterator for ErrForwardingTypeFilter<T, Inner>
+where
+    Inner: Iterator<Item = Result<T, ElfParseError>>,
+    T: HasTypeTag,
+    T::Tag: Into<u64>,
+{
+    type Item = Result<T, ElfParseError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        for item in &mut self.inner {
+            match &item {
+                Ok(h) if h.typ_tag().into() == self.typ => return Some(item),
+                Ok(_) => continue,
+                Err(_) => {
+                    self.done = true;
+                    return Some(item);
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Internal trait used by `ErrForwardingTypeFilter` to read the
+/// discriminator field of a header without baking in the concrete type.
+trait HasTypeTag {
+    type Tag;
+    fn typ_tag(&self) -> Self::Tag;
+}
+
+impl HasTypeTag for ProgramHeader {
+    type Tag = u16;
+    fn typ_tag(&self) -> u16 {
+        self.typ.0
+    }
+}
+
+impl HasTypeTag for SectionHeader {
+    type Tag = u32;
+    fn typ_tag(&self) -> u32 {
+        self.typ.0
     }
 }
 
@@ -153,7 +371,7 @@ const _: () = {
     assert!(64 == size_of::<ElfHeader>());
 };
 
-#[derive(TryFromBytes, KnownLayout, Immutable, Debug, Eq, PartialEq)]
+#[derive(TryFromBytes, KnownLayout, Immutable, Debug, Eq, PartialEq, Clone)]
 #[repr(C)]
 pub struct ElfHeader {
     pub ident: ElfIdent,
@@ -186,7 +404,7 @@ const _: () = {
     assert!(16 == size_of::<ElfIdent>());
 };
 
-#[derive(TryFromBytes, KnownLayout, Immutable, Debug, Eq, PartialEq)]
+#[derive(TryFromBytes, KnownLayout, Immutable, Debug, Eq, PartialEq, Clone)]
 #[repr(C)]
 pub struct ElfIdent {
     pub magic: [u8; 4],
@@ -265,7 +483,7 @@ impl ProgramHeaderFlags {
 impl ProgramHeaderFlags {
     #[must_use]
     pub fn contains(&self, other: &Self) -> bool {
-        self.0 & other.0 > 0
+        self.0 & other.0 == other.0
     }
 }
 
@@ -309,7 +527,7 @@ const _: () = {
     assert!(64 == size_of::<SectionHeader>());
 };
 
-#[derive(TryFromBytes, KnownLayout, Immutable, Debug, Eq, PartialEq)]
+#[derive(TryFromBytes, KnownLayout, Immutable, Debug, Eq, PartialEq, Clone)]
 #[repr(C)]
 pub struct SectionHeader {
     pub name: u32,
@@ -349,7 +567,7 @@ impl SectionHeaderType {
     pub const NUM: Self = Self(0x13);
 }
 
-#[derive(TryFromBytes, KnownLayout, Immutable, Debug, Eq, PartialEq)]
+#[derive(TryFromBytes, KnownLayout, Immutable, Debug, Eq, PartialEq, Clone, Copy)]
 #[repr(transparent)]
 pub struct SectionHeaderFlags(pub u32);
 
@@ -367,21 +585,23 @@ impl SectionHeaderFlags {
 
     #[must_use]
     pub fn contains(&self, other: &Self) -> bool {
-        self.0 & other.0 > 0
+        self.0 & other.0 == other.0
     }
 }
 
 pub struct SymtabSection<'a> {
-    header: &'a SectionHeader,
+    header: SectionHeader,
     data: &'a [u8],
 }
 
 impl SymtabSection<'_> {
-    pub fn symbols(&self) -> impl Iterator<Item = &Symbol> {
+    /// Read owned symbols so an arbitrary byte-aligned ELF source remains
+    /// valid under Miri and on architectures that enforce alignment.
+    #[allow(clippy::chunks_exact_to_as_chunks)]
+    pub fn symbols(&self) -> impl Iterator<Item = Symbol> {
         self.data
             .chunks_exact(size_of::<Symbol>())
-            .map(Symbol::try_ref_from_bytes)
-            .map(Result::unwrap)
+            .filter_map(|chunk| Symbol::try_read_from_bytes(chunk).ok())
     }
 }
 

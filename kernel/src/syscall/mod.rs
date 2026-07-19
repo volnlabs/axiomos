@@ -1,13 +1,13 @@
 use core::ops::Neg;
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-use core::slice::{from_raw_parts, from_raw_parts_mut};
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use access::KernelAccess;
-use kernel_abi::{syscall_name, Errno, EINVAL};
+#[cfg(feature = "rpi5")]
+use kernel_abi::EPERM;
+use kernel_abi::{syscall_name, Errno, EAGAIN, EINVAL, ENOSYS, ESRCH};
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use kernel_syscall::{
     access::FileAccess,
@@ -18,28 +18,25 @@ use kernel_syscall::{
         sys_close, sys_dup, sys_dup2, sys_getcwd, sys_lseek, sys_pipe, sys_read, sys_write,
         sys_writev,
     },
-    UserspaceMutPtr, UserspacePtr,
+    UserspacePtr,
 };
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use kernel_usermem::MAX_USER_COPY;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use kernel_vfs::path::AbsolutePath;
-use log::{error, info, trace};
+use log::{error, trace};
 #[cfg(target_arch = "x86_64")]
 use x86_64::instructions::hlt;
-
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use zerocopy::IntoBytes;
+
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::mcore::mtask::process::Process;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use crate::mcore::mtask::task::Task;
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(target_arch = "aarch64")]
 fn hlt() {
-    #[cfg(target_arch = "riscv64")]
-    // SAFETY: wfi (wait for interrupt) is a privileged instruction that halts the CPU
-    // until an interrupt occurs. We are in kernel context with interrupts properly
-    // configured, so this is safe to execute.
-    unsafe {
-        riscv::asm::wfi();
-    }
-    #[cfg(all(target_arch = "aarch64", feature = "aarch64_arch"))]
     // SAFETY: wfi (wait for interrupt) is a privileged instruction that halts the CPU
     // until an interrupt occurs. We are in kernel context with interrupts properly
     // configured, so this is safe to execute.
@@ -51,6 +48,7 @@ fn hlt() {
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 mod access;
 pub mod bpf;
+mod estop;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 mod process;
 #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
@@ -59,16 +57,32 @@ mod validation;
 
 use crate::arch::UserContext;
 
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 static WRITE_MARKER_SENT: AtomicBool = AtomicBool::new(false);
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 static BPF_MARKER_SENT: AtomicBool = AtomicBool::new(false);
 static EXPORTED_RINGBUF_MAP_ID: AtomicU32 = AtomicU32::new(u32::MAX);
 
 const DEBUG_OP_SET_EXPORTED_RINGBUF_MAP_ID: usize = 1;
 const DEBUG_OP_GET_EXPORTED_RINGBUF_MAP_ID: usize = 2;
+#[cfg(feature = "audit-diagnostics")]
+const DEBUG_OP_GET_PIPE_READ_BLOCKS: usize = 3;
+#[cfg(feature = "audit-diagnostics")]
+const DEBUG_OP_GET_CHILD_WAIT_BLOCKS: usize = 4;
 
 #[cfg(feature = "rpi5")]
+fn require_current_bpf_capability(
+    required: crate::mcore::mtask::process::BpfCapabilities,
+) -> Result<(), Errno> {
+    let process = crate::mcore::context::ExecutionContext::load().current_process();
+    if process.bpf_capabilities().contains(required) {
+        Ok(())
+    } else {
+        Err(EPERM)
+    }
+}
+
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 #[inline(always)]
 fn dbg_mark(_ch: u32) {
     // SAFETY: Write to Pi 5 debug UART10 data register through the
@@ -90,7 +104,7 @@ pub fn dispatch_syscall(
     arg5: usize,
     arg6: usize,
 ) -> isize {
-    info!(
+    trace!(
         "syscall: {} ({n}) {arg1} {arg2} {arg3} {arg4} {arg5} {arg6}",
         syscall_name(n)
     );
@@ -121,15 +135,16 @@ pub fn dispatch_syscall(
         kernel_abi::SYS_EXIT => {
             let status = i32::try_from(arg1).unwrap_or(0);
             let ctx = crate::mcore::context::ExecutionContext::load();
-            let task = ctx.current_task();
-            let process = task.process();
-            *process.exit_code().write() = Some(status);
-            task.set_should_terminate(true);
+            let process = ctx.with_current_task(|task| {
+                task.set_should_terminate(true);
+                task.process().clone()
+            });
+            process.mark_exited(status);
             // SAFETY: Interrupts are disabled during syscall handling (PSTATE.DAIF masked on
             // exception entry). reschedule() context-switches away; since should_terminate is
             // set, this task will be cleaned up and never re-enqueued.
             unsafe {
-                ctx.scheduler_mut().reschedule();
+                ctx.reschedule();
             }
             loop {
                 hlt();
@@ -159,12 +174,13 @@ pub fn dispatch_syscall(
             // Abort the process (equivalent to exit(134) - SIGABRT)
             let status = 134;
             let ctx = crate::mcore::context::ExecutionContext::load();
-            let task = ctx.current_task();
-            let process = task.process();
-            *process.exit_code().write() = Some(status);
-            task.set_should_terminate(true);
+            let process = ctx.with_current_task(|task| {
+                task.set_should_terminate(true);
+                task.process().clone()
+            });
+            process.mark_exited(status);
             unsafe {
-                ctx.scheduler_mut().reschedule();
+                ctx.reschedule();
             }
             loop {
                 hlt();
@@ -173,23 +189,43 @@ pub fn dispatch_syscall(
         kernel_abi::SYS_MALLOC => dispatch_sys_malloc(arg1),
         kernel_abi::SYS_FREE => dispatch_sys_free(arg1),
         #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
-        kernel_abi::SYS_PWM_CONFIG => dispatch_sys_pwm_config(arg1, arg2),
+        kernel_abi::SYS_PWM_CONFIG => {
+            require_current_bpf_capability(crate::mcore::mtask::process::BpfCapabilities::ACTUATE)
+                .and_then(|()| dispatch_sys_pwm_config(arg1, arg2))
+        }
         #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
-        kernel_abi::SYS_PWM_WRITE => dispatch_sys_pwm_write(arg1, arg2, arg3),
+        kernel_abi::SYS_PWM_WRITE => {
+            require_current_bpf_capability(crate::mcore::mtask::process::BpfCapabilities::ACTUATE)
+                .and_then(|()| dispatch_sys_pwm_write(arg1, arg2, arg3))
+        }
         #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
-        kernel_abi::SYS_PWM_ENABLE => dispatch_sys_pwm_enable(arg1, arg2, arg3),
+        kernel_abi::SYS_PWM_ENABLE => {
+            require_current_bpf_capability(crate::mcore::mtask::process::BpfCapabilities::ACTUATE)
+                .and_then(|()| dispatch_sys_pwm_enable(arg1, arg2, arg3))
+        }
         kernel_abi::SYS_CLOCK_GETTIME => dispatch_sys_clock_gettime(arg1, arg2),
         kernel_abi::SYS_NANOSLEEP => dispatch_sys_nanosleep(arg1, arg2),
+        kernel_abi::SYS_INTERRUPT_SLEEP => dispatch_sys_interrupt_sleep(arg1),
         kernel_abi::SYS_SPAWN => dispatch_sys_spawn(arg1, arg2),
+        kernel_abi::SYS_SPAWN_RESTRICTED => dispatch_sys_spawn_restricted(arg1, arg2, arg3),
+        kernel_abi::SYS_RESTRICT_BPF_CAPABILITIES => match u32::try_from(arg1)
+            .ok()
+            .and_then(crate::mcore::mtask::process::BpfCapabilities::from_bits)
+        {
+            Some(allowed) => {
+                let process = crate::mcore::context::ExecutionContext::load().current_process();
+                Ok(process.restrict_bpf_capabilities(allowed).bits() as usize)
+            }
+            None => Err(EINVAL),
+        },
         kernel_abi::SYS_FORK => dispatch_sys_fork(ctx),
         kernel_abi::SYS_EXECVE => dispatch_sys_execve(ctx, arg1, arg2, arg3),
         kernel_abi::SYS_WAITPID => dispatch_sys_waitpid(arg1, arg2, arg3),
         kernel_abi::SYS_DEBUG => dispatch_sys_debug(arg1, arg2),
+        kernel_abi::SYS_ESTOP => dispatch_sys_estop(arg1),
         _ => {
             error!("unimplemented syscall: {} ({n})", syscall_name(n));
-            loop {
-                hlt();
-            }
+            Err(ENOSYS)
         }
     };
 
@@ -213,20 +249,15 @@ pub fn dispatch_syscall(
             result: result as i64,
         };
         let ctx = kernel_bpf::execution::BpfContext::from_struct(&exit_ctx);
-        if let Some(manager) = crate::BPF_MANAGER.get() {
-            let attached = manager
-                .lock()
-                .get_hook_programs(crate::bpf::ATTACH_TYPE_SYS_EXIT)
-                .len();
+        if let Ok(attached) = crate::bpf::BpfManager::run_hook_programs(
+            crate::bpf::ATTACH_TYPE_SYS_EXIT,
+            &ctx,
+            "sys_exit",
+        ) {
             if attached != 0 {
                 trace!("sys_exit dispatch: syscall={n} attached_programs={attached}");
             }
         }
-        let _ = crate::bpf::BpfManager::run_hook_programs(
-            crate::bpf::ATTACH_TYPE_SYS_EXIT,
-            &ctx,
-            "sys_exit",
-        );
     }
 
     result
@@ -247,82 +278,38 @@ fn dispatch_sys_debug(op: usize, value: usize) -> Result<usize, Errno> {
                 Ok(map_id as usize)
             }
         }
+        #[cfg(feature = "audit-diagnostics")]
+        DEBUG_OP_GET_PIPE_READ_BLOCKS => Ok(crate::mcore::context::ExecutionContext::load()
+            .current_process()
+            .telemetry()
+            .pipe_read_blocks
+            .load(AtomicOrdering::Relaxed)),
+        #[cfg(feature = "audit-diagnostics")]
+        DEBUG_OP_GET_CHILD_WAIT_BLOCKS => Ok(crate::mcore::context::ExecutionContext::load()
+            .current_process()
+            .telemetry()
+            .child_wait_blocks
+            .load(AtomicOrdering::Relaxed)),
         _ => Err(EINVAL),
     }
 }
 
-/// Create a slice from a raw pointer and length.
-///
-/// # Safety
-///
-/// The caller must ensure:
-/// - `ptr` points to valid, initialized memory for `len` elements of type `T`
-/// - The memory is properly aligned for type `T`
-/// - The memory remains valid for the lifetime `'a`
-/// - No mutable references to the memory exist during the slice's lifetime
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-unsafe fn slice_from_ptr_and_len<'a, T>(ptr: usize, len: usize) -> Result<&'a [T], Errno> {
-    if ptr == 0 {
-        return Err(EINVAL);
+fn dispatch_sys_estop(action: usize) -> Result<usize, Errno> {
+    let ret = estop::sys_estop(action);
+    if ret < 0 {
+        Err(EINVAL)
+    } else {
+        Ok(ret as usize)
     }
-    if len == 0 {
-        return Ok(&[]);
-    }
-
-    // SAFETY: We validate that ptr is in the userspace address range (canonical lower half)
-    // via try_from_usize, which rejects kernel addresses.
-    let user_ptr = unsafe { UserspacePtr::<T>::try_from_usize(ptr)? };
-
-    // Check if the memory range is valid for userspace access
-    user_ptr.validate_range(len * core::mem::size_of::<T>())?;
-
-    // SAFETY: Caller guarantees ptr points to valid memory for len elements of T,
-    // is properly aligned, and no mutable references exist. The checks above
-    // ensure it is within userspace bounds.
-    let slice = unsafe { from_raw_parts(ptr as *mut T, len) };
-    Ok(slice)
-}
-
-/// Create a mutable slice from a raw pointer and length.
-///
-/// # Safety
-///
-/// The caller must ensure:
-/// - `ptr` points to valid, initialized memory for `len` elements of type `T`
-/// - The memory is properly aligned for type `T`
-/// - The memory remains valid for the lifetime `'a`
-/// - No other references (mutable or immutable) to the memory exist
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-unsafe fn slice_from_ptr_and_len_mut<'a, T>(ptr: usize, len: usize) -> Result<&'a mut [T], Errno> {
-    if ptr == 0 {
-        return Err(EINVAL);
-    }
-    if len == 0 {
-        return Ok(&mut []);
-    }
-
-    // SAFETY: We validate that ptr is in the userspace address range (canonical lower half)
-    // via try_from_usize, which rejects kernel addresses.
-    let user_ptr = unsafe { UserspaceMutPtr::<T>::try_from_usize(ptr)? };
-
-    // Check if the memory range is valid for userspace access
-    user_ptr.validate_range(len * core::mem::size_of::<T>())?;
-
-    // SAFETY: Caller guarantees ptr points to valid memory for len elements of T,
-    // is properly aligned, and no other references exist. The checks above
-    // ensure it is within userspace bounds.
-    let slice = unsafe { from_raw_parts_mut(ptr as *mut T, len) };
-    Ok(slice)
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn dispatch_sys_getcwd(path: usize, size: usize) -> Result<usize, Errno> {
     let cx = KernelAccess::new();
-
-    // SAFETY: path comes from userspace syscall arguments. UserspaceMutPtr::try_from_usize
-    // validates that the address is in the userspace address range (canonical lower half).
-    let path = unsafe { UserspaceMutPtr::try_from_usize(path)? };
-    sys_getcwd(&cx, path, size)
+    let mut buffer = alloc::vec![0u8; size.min(kernel_abi::PATH_MAX + 1)];
+    let written = sys_getcwd(&cx, &mut buffer)?;
+    validation::copy_to_userspace(path, &buffer[..written])?;
+    Ok(path)
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -365,11 +352,11 @@ fn dispatch_sys_open(
     mode: usize,
 ) -> Result<usize, Errno> {
     let cx = KernelAccess::new();
-
-    // SAFETY: path comes from userspace syscall arguments. UserspacePtr::try_from_usize
-    // validates that the address is in the userspace address range (canonical lower half).
-    let path = unsafe { UserspacePtr::try_from_usize(path)? };
-    sys_open(&cx, path, path_len, oflag as i32, mode as i32)
+    if path_len > kernel_abi::PATH_MAX {
+        return Err(kernel_abi::ENAMETOOLONG);
+    }
+    let path = validation::read_userspace_slice(path, path_len)?;
+    sys_open(&cx, &path, oflag as i32, mode as i32)
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -379,16 +366,18 @@ fn dispatch_sys_read(fd: usize, buf: usize, nbyte: usize) -> Result<usize, Errno
     let fd = i32::try_from(fd).map_err(|_| EINVAL)?;
     let fd = <KernelAccess as FileAccess>::Fd::from(fd);
 
-    // SAFETY: buf comes from userspace syscall arguments. The slice_from_ptr_and_len_mut
-    // function validates that buf is non-null. The caller (userspace) is responsible for
-    // ensuring the buffer is valid and writable for nbyte bytes.
-    let slice = unsafe { slice_from_ptr_and_len_mut(buf, nbyte) }?;
-    sys_read(&cx, fd, slice)
+    if nbyte == 0 {
+        return Ok(0);
+    }
+    let mut buffer = alloc::vec![0u8; nbyte.min(MAX_USER_COPY)];
+    let read = sys_read(&cx, fd, &mut buffer)?;
+    validation::copy_to_userspace(buf, &buffer[..read])?;
+    Ok(read)
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn dispatch_sys_write(fd: usize, buf: usize, nbyte: usize) -> Result<usize, Errno> {
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     if !WRITE_MARKER_SENT.swap(true, Ordering::Relaxed) {
         dbg_mark(b'w' as u32);
     }
@@ -397,30 +386,54 @@ fn dispatch_sys_write(fd: usize, buf: usize, nbyte: usize) -> Result<usize, Errn
     let fd = i32::try_from(fd).map_err(|_| EINVAL)?;
     let fd = <KernelAccess as FileAccess>::Fd::from(fd);
 
-    // SAFETY: buf comes from userspace syscall arguments. The slice_from_ptr_and_len
-    // function validates that buf is non-null. The caller (userspace) is responsible for
-    // ensuring the buffer is valid and readable for nbyte bytes.
-    let slice = unsafe { slice_from_ptr_and_len(buf, nbyte) }?;
-    sys_write(&cx, fd, slice)
+    if nbyte == 0 {
+        return Ok(0);
+    }
+    let buffer = validation::read_userspace_slice(buf, nbyte.min(MAX_USER_COPY))?;
+    sys_write(&cx, fd, &buffer)
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn dispatch_sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> Result<usize, Errno> {
     let cx = KernelAccess::new();
 
+    if iovcnt > kernel_abi::UIO_MAXIOV {
+        return Err(EINVAL);
+    }
     let fd = i32::try_from(fd).map_err(|_| EINVAL)?;
-    let fd = <KernelAccess as FileAccess>::Fd::from(fd);
+    let mut total_written = 0usize;
 
-    // SAFETY: iov_ptr comes from userspace syscall arguments. UserspacePtr::try_from_usize
-    // validates that the address is in the userspace address range.
-    let iov_ptr = unsafe { UserspacePtr::<kernel_abi::iovec>::try_from_usize(iov_ptr)? };
+    for index in 0..iovcnt {
+        let offset = index
+            .checked_mul(core::mem::size_of::<kernel_abi::iovec>())
+            .ok_or(EINVAL)?;
+        let entry_addr = iov_ptr.checked_add(offset).ok_or(EINVAL)?;
+        let iov = validation::copy_from_userspace::<kernel_abi::iovec>(entry_addr)?;
+        if iov.iov_len == 0 {
+            continue;
+        }
 
-    sys_writev(&cx, fd, iov_ptr, iovcnt)
+        let chunk_len = iov.iov_len.min(MAX_USER_COPY);
+        let buffer = match validation::read_userspace_slice(iov.iov_base, chunk_len) {
+            Ok(buffer) => buffer,
+            Err(_) if total_written > 0 => return Ok(total_written),
+            Err(error) => return Err(error),
+        };
+        let current_fd = <KernelAccess as FileAccess>::Fd::from(fd);
+        let written = sys_writev(&cx, current_fd, &[buffer.as_slice()])?;
+        total_written = total_written.checked_add(written).ok_or(EINVAL)?;
+
+        if written < chunk_len || chunk_len < iov.iov_len {
+            break;
+        }
+    }
+
+    Ok(total_written)
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn dispatch_sys_bpf(cmd: usize, attr: usize, size: usize) -> Result<usize, Errno> {
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     if !BPF_MARKER_SENT.swap(true, Ordering::Relaxed) {
         dbg_mark(b'p' as u32);
     }
@@ -431,10 +444,14 @@ fn dispatch_sys_bpf(cmd: usize, attr: usize, size: usize) -> Result<usize, Errno
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn dispatch_sys_pipe(pipefd: usize) -> Result<usize, Errno> {
     let cx = KernelAccess::new();
-    // SAFETY: pipefd comes from userspace syscall arguments. UserspaceMutPtr::try_from_usize
-    // validates that the address is in the userspace address range.
-    let pipefd = unsafe { UserspaceMutPtr::<i32>::try_from_usize(pipefd)? };
-    sys_pipe(&cx, pipefd)
+    let (read_fd, write_fd) = sys_pipe(&cx)?;
+    let read_fd: i32 = read_fd.into();
+    let write_fd: i32 = write_fd.into();
+    let mut bytes = [0u8; 2 * core::mem::size_of::<i32>()];
+    bytes[..4].copy_from_slice(&read_fd.to_ne_bytes());
+    bytes[4..].copy_from_slice(&write_fd.to_ne_bytes());
+    validation::copy_to_userspace(pipefd, &bytes)?;
+    Ok(0)
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -479,18 +496,13 @@ fn dispatch_sys_lseek(fd: usize, offset: usize, whence: usize) -> Result<usize, 
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn dispatch_sys_fstat(fd: usize, statbuf: usize) -> Result<usize, Errno> {
-    use kernel_syscall::stat::UserStat;
-
     let cx = KernelAccess::new();
 
     let fd = i32::try_from(fd).map_err(|_| EINVAL)?;
     let fd = <KernelAccess as FileAccess>::Fd::from(fd);
-    // SAFETY: statbuf comes from userspace syscall arguments. UserspaceMutPtr::try_from_usize
-    // validates that the address is in the userspace address range (canonical lower half).
-    // The caller (userspace) is responsible for providing a valid, writable buffer.
-    let buf = unsafe { UserspaceMutPtr::<UserStat>::try_from_usize(statbuf)? };
-
-    sys_fstat::<KernelAccess>(&cx, fd, buf)
+    let stat = sys_fstat::<KernelAccess>(&cx, fd)?;
+    validation::copy_to_userspace(statbuf, stat.as_bytes())?;
+    Ok(0)
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -614,80 +626,137 @@ fn dispatch_sys_pwm_enable(pwm_id: usize, channel: usize, enable: usize) -> Resu
     }
 }
 
-fn dispatch_sys_clock_gettime(_clock_id: usize, tp: usize) -> Result<usize, Errno> {
-    // We strictly support CLOCK_REALTIME/MONOTONIC which are mapped to kernel time for now.
-    let ns = crate::time::get_kernel_time_ns();
+fn dispatch_sys_clock_gettime(clock_id: usize, tp: usize) -> Result<usize, Errno> {
+    let clock_id = i32::try_from(clock_id).map_err(|_| EINVAL)?;
+    let ns = match clock_id {
+        kernel_abi::CLOCK_REALTIME => crate::time::get_realtime_time_ns(),
+        kernel_abi::CLOCK_MONOTONIC => crate::time::get_monotonic_time_ns(),
+        _ => return Err(EINVAL),
+    };
     let ts = kernel_abi::timespec {
         tv_sec: (ns / 1_000_000_000) as i64,
         tv_nsec: (ns % 1_000_000_000) as i64,
     };
 
-    // Serialize struct to bytes
-    let slice = unsafe {
-        core::slice::from_raw_parts(
-            &ts as *const _ as *const u8,
-            core::mem::size_of::<kernel_abi::timespec>(),
-        )
-    };
-
-    validation::copy_to_userspace(tp, slice)?;
+    validation::copy_to_userspace(tp, ts.as_bytes())?;
     Ok(0)
 }
 
-fn dispatch_sys_nanosleep(req: usize, _rem: usize) -> Result<usize, Errno> {
+fn dispatch_sys_nanosleep(req: usize, rem: usize) -> Result<usize, Errno> {
     let ts: kernel_abi::timespec = validation::copy_from_userspace(req)?;
 
-    // Check for valid nanoseconds
-    if ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
-        return Err(EINVAL);
+    let duration_ns =
+        kernel_time::timespec_to_duration_nanoseconds(ts.tv_sec, ts.tv_nsec).ok_or(EINVAL)?;
+    if duration_ns == 0 {
+        return Ok(0);
     }
 
-    let duration_ns = (ts.tv_sec as u64)
-        .checked_mul(1_000_000_000)
-        .and_then(|s| s.checked_add(ts.tv_nsec as u64))
-        .ok_or(EINVAL)?;
-
-    let start = crate::time::get_kernel_time_ns();
-
-    // Busy wait loop
-    // TODO: Use proper scheduler sleep/wait queue
-    loop {
-        let now = crate::time::get_kernel_time_ns();
-        if now.wrapping_sub(start) >= duration_ns {
-            break;
+    let deadline_ns = crate::time::get_monotonic_time_ns().saturating_add(duration_ns);
+    let context = crate::mcore::context::ExecutionContext::load();
+    context.with_interrupts_masked(|| {
+        context.with_current_task(|task| task.begin_sleep(deadline_ns));
+        // SAFETY: interrupts remain masked for the complete scheduler transition.
+        if !unsafe { context.reschedule() } {
+            context.with_current_task(Task::abort_sleep_before_switch);
         }
+    });
 
-        // On x86_64, enable interrupts and halt to save power
-        #[cfg(target_arch = "x86_64")]
-        x86_64::instructions::interrupts::enable_and_hlt();
-
-        #[cfg(not(target_arch = "x86_64"))]
-        core::hint::spin_loop();
+    // A globally queued task may resume on a different CPU.
+    let resumed_context = crate::mcore::context::ExecutionContext::load();
+    let reason = resumed_context.with_current_task(|task| task.take_sleep_wake_reason());
+    if reason == crate::mcore::mtask::task::SleepWakeReason::Deadline {
+        return Ok(0);
     }
 
-    Ok(0)
+    if rem != 0 {
+        let remaining_ns = deadline_ns.saturating_sub(crate::time::get_monotonic_time_ns());
+        let remaining = kernel_abi::timespec {
+            tv_sec: (remaining_ns / kernel_time::NANOSECONDS_PER_SECOND) as i64,
+            tv_nsec: (remaining_ns % kernel_time::NANOSECONDS_PER_SECOND) as i64,
+        };
+        validation::copy_to_userspace(rem, remaining.as_bytes())?;
+    }
+    Err(kernel_abi::EINTR)
+}
+
+fn dispatch_sys_interrupt_sleep(pid: usize) -> Result<usize, Errno> {
+    let pid = u64::try_from(pid).map_err(|_| ESRCH)?;
+    let parent = crate::mcore::context::ExecutionContext::load().current_process();
+    let child = parent
+        .children()
+        .get()
+        .and_then(|mut children| children.find(|child| child.pid() == pid).cloned())
+        .ok_or(ESRCH)?;
+
+    // If the task is still scheduler-owned as a zombie, enqueue observes the
+    // process request under the same queue lock and wakes it instead of parking.
+    if crate::mcore::mtask::scheduler::sleep::TaskSleep::interrupt_process(&child) {
+        Ok(0)
+    } else {
+        Err(EAGAIN)
+    }
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn dispatch_sys_spawn(path_ptr: usize, path_len: usize) -> Result<usize, Errno> {
+    dispatch_sys_spawn_with_bpf_capabilities(path_ptr, path_len, None)
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn child_bpf_capabilities(
+    parent: crate::mcore::mtask::process::BpfCapabilities,
+    delegated: Option<crate::mcore::mtask::process::BpfCapabilities>,
+) -> Result<crate::mcore::mtask::process::BpfCapabilities, Errno> {
+    use crate::mcore::mtask::process::BpfCapabilities;
+
+    let child = delegated.unwrap_or(BpfCapabilities::NONE);
+    if parent.contains(child) {
+        Ok(child)
+    } else {
+        Err(kernel_abi::EPERM)
+    }
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn dispatch_sys_spawn_restricted(
+    path_ptr: usize,
+    path_len: usize,
+    bpf_capabilities: usize,
+) -> Result<usize, Errno> {
+    use crate::mcore::mtask::process::BpfCapabilities;
+
+    let bits = u32::try_from(bpf_capabilities).map_err(|_| EINVAL)?;
+    let capabilities = BpfCapabilities::from_bits(bits).ok_or(EINVAL)?;
+    dispatch_sys_spawn_with_bpf_capabilities(path_ptr, path_len, Some(capabilities))
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn dispatch_sys_spawn_with_bpf_capabilities(
+    path_ptr: usize,
+    path_len: usize,
+    delegated_capabilities: Option<crate::mcore::mtask::process::BpfCapabilities>,
+) -> Result<usize, Errno> {
     use kernel_abi::{ENAMETOOLONG, ENOMEM};
 
     use crate::mcore::mtask::process::CreateProcessError;
     use crate::mcore::mtask::task::StackAllocationError;
 
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     dbg_mark(b's' as u32);
 
-    // 1. Read path from userspace
-    // We reuse logic similar to sys_open
+    let parent = crate::mcore::context::ExecutionContext::load().current_process();
+    let parent_capabilities = parent.bpf_capabilities();
+    // Plain spawn is intentionally capability-free. Authority crosses a spawn
+    // boundary only through SYS_SPAWN_RESTRICTED's explicit subset mask.
+    let child_capabilities = child_bpf_capabilities(parent_capabilities, delegated_capabilities)?;
+
+    // Validate delegation before reading the userspace path or allocating the child.
     if path_len > kernel_abi::PATH_MAX {
         return Err(ENAMETOOLONG);
     }
 
-    // SAFETY: We checked path_len. UserspacePtr ensures address range validity.
-    // We assume the caller provides valid memory for the duration of the call.
-    let path_slice = unsafe { slice_from_ptr_and_len(path_ptr, path_len)? };
-    let path_str = core::str::from_utf8(path_slice).map_err(|_| EINVAL)?;
+    let path = validation::read_userspace_slice(path_ptr, path_len)?;
+    let path_str = core::str::from_utf8(&path).map_err(|_| EINVAL)?;
 
     // 2. Resolve AbsolutePath
     // We assume the path string is valid UTF-8 and represents a path
@@ -696,21 +765,22 @@ fn dispatch_sys_spawn(path_ptr: usize, path_len: usize) -> Result<usize, Errno> 
         Err(_) => return Err(EINVAL),
     };
 
-    // 3. Create Process
-    let parent = crate::mcore::context::ExecutionContext::load().current_process();
-
-    // Process::create_from_executable handles task creation and enqueuing
-    let child_proc = match Process::create_from_executable(parent, abs_path) {
+    // Restriction occurs inside process construction before its task is enqueued.
+    let child_proc = match Process::create_from_executable_with_bpf_capabilities(
+        &parent,
+        abs_path,
+        child_capabilities,
+    ) {
         Ok(p) => p,
         Err(CreateProcessError::StackAllocationError(StackAllocationError::OutOfVirtualMemory)) => {
-            #[cfg(feature = "rpi5")]
+            #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
             dbg_mark(b'v' as u32);
             return Err(ENOMEM);
         }
         Err(CreateProcessError::StackAllocationError(
             StackAllocationError::OutOfPhysicalMemory,
         )) => {
-            #[cfg(feature = "rpi5")]
+            #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
             dbg_mark(b'f' as u32);
             return Err(ENOMEM);
         }
@@ -719,7 +789,7 @@ fn dispatch_sys_spawn(path_ptr: usize, path_len: usize) -> Result<usize, Errno> 
     // Use .as_u64() and then cast/convert to usize
     // We defined U64Ext for u64, so we can use into_usize() on the u64 value.
     use crate::U64Ext;
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     dbg_mark(b'g' as u32);
     #[cfg(target_arch = "aarch64")]
     crate::mcore::context::ExecutionContext::load().set_need_reschedule();
@@ -728,6 +798,15 @@ fn dispatch_sys_spawn(path_ptr: usize, path_len: usize) -> Result<usize, Errno> 
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 fn dispatch_sys_spawn(_path: usize, _len: usize) -> Result<usize, Errno> {
+    Err(EINVAL)
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn dispatch_sys_spawn_restricted(
+    _path: usize,
+    _len: usize,
+    _bpf_capabilities: usize,
+) -> Result<usize, Errno> {
     Err(EINVAL)
 }
 
@@ -769,4 +848,28 @@ fn dispatch_sys_execve(
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 fn dispatch_sys_waitpid(_pid: usize, _status: usize, _options: usize) -> Result<usize, Errno> {
     Err(EINVAL)
+}
+
+#[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
+mod tests {
+    use super::*;
+    use crate::mcore::mtask::process::BpfCapabilities;
+
+    #[test]
+    fn plain_spawn_is_unprivileged_and_explicit_delegation_is_monotonic() {
+        let parent = BpfCapabilities::MAP_READ | BpfCapabilities::OBJECT_PIN;
+
+        assert_eq!(
+            child_bpf_capabilities(parent, None),
+            Ok(BpfCapabilities::NONE)
+        );
+        assert_eq!(
+            child_bpf_capabilities(parent, Some(BpfCapabilities::MAP_READ)),
+            Ok(BpfCapabilities::MAP_READ)
+        );
+        assert_eq!(
+            child_bpf_capabilities(parent, Some(BpfCapabilities::PROGRAM_LOAD)),
+            Err(kernel_abi::EPERM)
+        );
+    }
 }

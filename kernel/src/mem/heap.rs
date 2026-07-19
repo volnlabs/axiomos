@@ -8,14 +8,25 @@ use log::info;
 use crate::arch::aarch64::phys;
 #[cfg(target_arch = "x86_64")]
 use crate::arch::types::Size2MiB;
-use crate::arch::types::{Page, PageRangeInclusive, PageTableFlags, Size4KiB, VirtAddr};
+use crate::arch::types::{Page, PageRangeInclusive, PageSize, PageTableFlags, Size4KiB, VirtAddr};
 #[cfg(target_arch = "x86_64")]
 use crate::mem::address_space::virt_addr_from_page_table_indices;
-use crate::mem::address_space::AddressSpace;
+use crate::mem::address_space::{AddressSpace, MAP_RANGE_TRANSACTION_CAPACITY};
 #[cfg(target_arch = "x86_64")]
 use crate::mem::phys::PhysicalMemory;
 #[cfg(target_arch = "aarch64")]
 use crate::U64Ext;
+
+#[path = "heap_policy.rs"]
+mod policy;
+
+use policy::{inclusive_end_offset, HeapSizes, PageChunks};
+
+const _: () = assert!(
+    core::mem::size_of::<kernel_physical_memory::FrameState>() + core::mem::size_of::<u32>()
+        == policy::EXPECTED_FRAME_METADATA_BYTES,
+    "boot heap metadata budget must be updated when frame metadata layout changes",
+);
 
 static HEAP_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
@@ -27,56 +38,6 @@ static HEAP_START: VirtAddr = VirtAddr::new(crate::arch::aarch64::mem::kernel::H
 
 /// Runtime-initialized heap sizes based on available physical memory.
 static HEAP_SIZES: OnceCell<HeapSizes> = OnceCell::uninit();
-
-struct HeapSizes {
-    /// Initial heap size for stage1
-    initial: usize,
-    /// Total heap size after stage2
-    total: usize,
-}
-
-impl HeapSizes {
-    /// Calculate heap sizes based on available physical memory.
-    ///
-    /// We use a conservative multiplier to ensure we have enough heap for other data structures:
-    /// - Initial heap: RAM / 1024 (minimum 2 MiB, maximum 128 MiB to keep stage1 fast)
-    ///   Must be 2MiB-aligned (for stage2 to start at a 2MiB boundary)
-    /// - Total heap: RAM / 256 (minimum initial + 2 MiB, maximum 512 MiB)
-    ///   The extension (total - initial) must also be 2MiB-aligned
-    fn from_physical_memory(usable_ram_bytes: usize) -> Self {
-        const MIB_2: usize = 2 * 1024 * 1024;
-
-        // Calculate initial heap size: RAM / 1024
-        // This gives us ~0.1% of RAM, which is more than enough for Vec<FrameState>
-        let initial = {
-            let calculated = usable_ram_bytes / 1024;
-            // Clamp between 2 MiB and 128 MiB
-            let clamped = calculated.clamp(2 * 1024 * 1024, 128 * 1024 * 1024);
-            // Round up to next 2MiB boundary (required for stage2 to start at a 2MiB boundary)
-            clamped.div_ceil(MIB_2) * MIB_2
-        };
-
-        // Calculate total heap size: RAM / 256
-        // This gives us ~0.4% of RAM for all kernel heap needs
-        let total = {
-            let calculated = usable_ram_bytes / 256;
-            // Clamp between (initial + 2 MiB) and 512 MiB
-            let clamped = calculated.clamp(initial + MIB_2, 512 * 1024 * 1024);
-            // Round up to next 2MiB boundary
-            clamped.div_ceil(MIB_2) * MIB_2
-        };
-
-        Self { initial, total }
-    }
-
-    fn initial(&self) -> usize {
-        self.initial
-    }
-
-    fn total(&self) -> usize {
-        self.total
-    }
-}
 
 #[global_allocator]
 static ALLOCATOR: linked_list_allocator::LockedHeap = linked_list_allocator::LockedHeap::empty();
@@ -102,39 +63,51 @@ pub(in crate::mem) fn init(address_space: &AddressSpace, usable_physical_memory_
     #[cfg(target_arch = "x86_64")]
     {
         info!("initializing heap at {HEAP_START:p}");
-        let page_range = PageRangeInclusive::<Size4KiB> {
-            start: Page::containing_address(HEAP_START),
-            end: Page::containing_address(HEAP_START + initial_heap_size as u64 - 1),
-        };
+        let page_count = initial_heap_size / Size4KiB::SIZE as usize;
+        for chunk in PageChunks::new(page_count, MAP_RANGE_TRANSACTION_CAPACITY) {
+            let chunk_start = HEAP_START + (chunk.start_page * Size4KiB::SIZE as usize) as u64;
+            let chunk_bytes = chunk.page_count * Size4KiB::SIZE as usize;
+            let page_range = PageRangeInclusive::<Size4KiB> {
+                start: Page::containing_address(chunk_start),
+                end: Page::containing_address(chunk_start + inclusive_end_offset(chunk_bytes)),
+            };
 
-        address_space
-            .map_range(
-                page_range,
-                PhysicalMemory::allocate_frames_non_contiguous(),
-                PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
-            )
-            .expect("should be able to map heap");
+            // Stage 1 is a bump allocator and cannot release frames. Each
+            // bounded transaction therefore rolls back PTEs only; any failure
+            // aborts boot before the global heap becomes observable.
+            address_space
+                .map_range(
+                    page_range,
+                    PhysicalMemory::allocate_frames_non_contiguous().take(chunk.page_count),
+                    PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
+                )
+                .expect("should be able to map heap chunk");
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
     {
         let heap_start = HEAP_START.as_u64();
         info!("initializing heap at {:#x}", heap_start);
-        let num_pages = initial_heap_size / 4096;
-        let frames = core::iter::from_fn(phys::allocate_frame::<Size4KiB>).take(num_pages);
+        let page_count = initial_heap_size / Size4KiB::SIZE as usize;
+        for chunk in PageChunks::new(page_count, MAP_RANGE_TRANSACTION_CAPACITY) {
+            let chunk_start = HEAP_START + (chunk.start_page * Size4KiB::SIZE as usize) as u64;
+            let chunk_bytes = chunk.page_count * Size4KiB::SIZE as usize;
+            let frames =
+                core::iter::from_fn(phys::allocate_frame::<Size4KiB>).take(chunk.page_count);
+            let page_range = PageRangeInclusive::<Size4KiB> {
+                start: Page::containing_address(chunk_start),
+                end: Page::containing_address(chunk_start + inclusive_end_offset(chunk_bytes)),
+            };
 
-        let page_range = PageRangeInclusive::<Size4KiB> {
-            start: Page::containing_address(HEAP_START),
-            end: Page::containing_address(HEAP_START + (initial_heap_size as u64 - 1)),
-        };
-
-        address_space
-            .map_range(
-                page_range,
-                frames,
-                PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
-            )
-            .expect("should be able to map heap");
+            address_space
+                .map_range(
+                    page_range,
+                    frames,
+                    PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
+                )
+                .expect("should be able to map heap chunk");
+        }
     }
 
     // SAFETY: We are initializing the global allocator with a valid memory range
@@ -166,12 +139,14 @@ pub(in crate::mem) fn init_stage2() {
 
         let page_range = PageRangeInclusive::<Size2MiB> {
             start: Page::containing_address(new_start),
-            end: Page::containing_address(new_start + (total_heap_size - initial_heap_size) as u64),
+            end: Page::containing_address(
+                new_start + inclusive_end_offset(total_heap_size - initial_heap_size),
+            ),
         };
 
         let address_space = AddressSpace::kernel();
         address_space
-            .map_range(
+            .map_range_owned(
                 page_range,
                 PhysicalMemory::allocate_frames_non_contiguous(),
                 PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
@@ -183,23 +158,29 @@ pub(in crate::mem) fn init_stage2() {
     {
         let new_start = HEAP_START + initial_heap_size as u64;
         let size_to_map = total_heap_size - initial_heap_size;
-        // On AArch64 we stick to 4KiB pages for now as we don't have block mapping iterator setup in address_space yet
-        let num_pages = size_to_map / 4096;
-        let frames = core::iter::from_fn(phys::allocate_frame::<Size4KiB>).take(num_pages);
-
-        let page_range = PageRangeInclusive::<Size4KiB> {
-            start: Page::containing_address(new_start),
-            end: Page::containing_address(new_start + (size_to_map as u64 - 1)),
-        };
-
+        // AArch64 uses 4 KiB pages for the extension until block-map
+        // iteration is available. Keep each owned rollback transaction within
+        // the same stack-backed capacity as the bootstrap mapping.
+        let page_count = size_to_map / Size4KiB::SIZE as usize;
         let address_space = AddressSpace::kernel();
-        address_space
-            .map_range(
-                page_range,
-                frames,
-                PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
-            )
-            .expect("should be able to map more heap");
+        for chunk in PageChunks::new(page_count, MAP_RANGE_TRANSACTION_CAPACITY) {
+            let chunk_start = new_start + (chunk.start_page * Size4KiB::SIZE as usize) as u64;
+            let chunk_bytes = chunk.page_count * Size4KiB::SIZE as usize;
+            let frames =
+                core::iter::from_fn(phys::allocate_frame::<Size4KiB>).take(chunk.page_count);
+            let page_range = PageRangeInclusive::<Size4KiB> {
+                start: Page::containing_address(chunk_start),
+                end: Page::containing_address(chunk_start + inclusive_end_offset(chunk_bytes)),
+            };
+
+            address_space
+                .map_range_owned(
+                    page_range,
+                    frames,
+                    PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
+                )
+                .expect("should be able to map more heap");
+        }
     }
 
     // SAFETY: We are extending the global allocator with a new memory range

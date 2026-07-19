@@ -1,23 +1,36 @@
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use core::pin::Pin;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 use core::sync::atomic::{AtomicBool as Rpi5AtomicBool, Ordering as Rpi5Ordering};
 
 use conquer_once::spin::OnceCell;
 
 use crate::mcore::mtask::process::Process;
-use crate::mcore::mtask::scheduler::global::GlobalTaskQueue;
+use crate::mcore::mtask::scheduler::run_queue::RunQueues;
 use crate::mcore::mtask::task::{Task, TaskQueue};
 
 static CLEANUP_QUEUE: OnceCell<TaskQueue> = OnceCell::uninit();
 static CLEANUP_WORKER_SCHEDULED: AtomicBool = AtomicBool::new(false);
 
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 static CLEANUP_RUN_MARKER_SENT: Rpi5AtomicBool = Rpi5AtomicBool::new(false);
 
-#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bringup-diagnostics"
+))]
 #[inline(always)]
 fn dbg_mark(_ch: u32) {
     // SAFETY: Write to Pi 5 debug UART10 data register.
@@ -41,7 +54,7 @@ impl TaskCleanup {
         if !CLEANUP_WORKER_SCHEDULED.swap(true, Ordering::AcqRel) {
             let task = Task::create_new(Process::root(), Self::run, ptr::null_mut())
                 .expect("should be able to create task cleanup");
-            GlobalTaskQueue::enqueue(Box::pin(task));
+            RunQueues::enqueue(Box::pin(task));
         }
     }
 
@@ -51,16 +64,41 @@ impl TaskCleanup {
     }
 
     extern "C" fn run(_arg: *mut core::ffi::c_void) {
-        #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+        #[cfg(all(
+            target_arch = "aarch64",
+            feature = "rpi5",
+            feature = "bringup-diagnostics"
+        ))]
         if !CLEANUP_RUN_MARKER_SENT.swap(true, Rpi5Ordering::Relaxed) {
             dbg_mark(b'c' as u32);
         }
 
-        // log::info!("TaskCleanup: running");
+        let mut pending_bpf_owners = Vec::new();
         loop {
             while let Some(task) = cleanup_queue().dequeue() {
-                // log::trace!("TaskCleanup: cleaning up task {}", task.id());
+                let exited_owner = task
+                    .process()
+                    .exit_code()
+                    .read()
+                    .is_some()
+                    .then(|| task.process().pid().as_u64());
                 drop(task);
+                if let Some(owner) = exited_owner {
+                    if !pending_bpf_owners.contains(&owner) {
+                        pending_bpf_owners.push(owner);
+                    }
+                }
+            }
+
+            if !pending_bpf_owners.is_empty() {
+                crate::mcore::context::ExecutionContext::load().with_interrupts_masked(|| {
+                    if let Some(manager) = crate::BPF_MANAGER.get() {
+                        let mut manager = manager.lock();
+                        pending_bpf_owners.retain(|owner| !manager.reclaim_owner(*owner));
+                    } else {
+                        pending_bpf_owners.clear();
+                    }
+                });
             }
 
             #[cfg(target_arch = "x86_64")]

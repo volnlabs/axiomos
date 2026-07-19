@@ -20,7 +20,7 @@
 //! The RP1's GPIO Bank 0 generates internal IRQ 0, which routes through
 //! the RP1's interrupt controller to one of these PCIe lines.
 
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::gic;
@@ -41,12 +41,12 @@ const TIMER_IRQ: u32 = gic::irq::TIMER_PHYS;
 #[cfg(feature = "rpi5")]
 const RP1_GPIO_IRQ: u32 = 261; // GIC SPI 229 = 32 + 229
 
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 static TIMER_IRQ_MARKER_SENT: AtomicBool = AtomicBool::new(false);
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 static FIRST_IRQ_MARKER_SENT: AtomicBool = AtomicBool::new(false);
 
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 #[inline(always)]
 fn dbg_mark(_ch: u32) {
     // SAFETY: Write to Pi 5 debug UART10 data register.
@@ -55,7 +55,7 @@ fn dbg_mark(_ch: u32) {
     }
 }
 
-#[cfg(feature = "rpi5")]
+#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 #[inline(always)]
 fn dbg_hex_nibble(v: u32) -> u32 {
     match v & 0xF {
@@ -114,7 +114,7 @@ pub extern "C" fn handle_irq(_ctx: &mut ExceptionContext) {
         return;
     }
 
-    #[cfg(feature = "rpi5")]
+    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     if !FIRST_IRQ_MARKER_SENT.swap(true, Ordering::Relaxed) {
         // Emit "M" + 3 hex nibbles of IRQ ID once (e.g., M01E for IRQ 30).
         dbg_mark(b'M' as u32);
@@ -127,7 +127,7 @@ pub extern "C" fn handle_irq(_ctx: &mut ExceptionContext) {
 
     // Dispatch based on IRQ number
     if irq == TIMER_IRQ {
-        #[cfg(feature = "rpi5")]
+        #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
         if !TIMER_IRQ_MARKER_SENT.swap(true, Ordering::Relaxed) {
             dbg_mark(b't' as u32);
         }
@@ -135,6 +135,9 @@ pub extern "C" fn handle_irq(_ctx: &mut ExceptionContext) {
         handle_timer_interrupt(_ctx);
         // Signal end of interrupt for timer
         gic::end_of_interrupt(iar);
+
+        // (The Shrike control link is serviced by a dedicated kernel poller
+        // task, not here — actuation/BPF work must run in thread context.)
 
         // Trigger scheduler tick (may cause context switch)
         // We do this AFTER EOI so that new tasks don't inherit the active interrupt state
@@ -162,22 +165,23 @@ fn handle_timer_interrupt(ctx: &ExceptionContext) {
     clear_timer_interrupt();
     set_next_timer();
 
-    // Run BPF hooks (AttachType::Timer = 1)
-    //
-    // We clone programs and release the lock BEFORE execution so that BPF
-    // helpers (e.g. bpf_ringbuf_output) can re-acquire the lock for map
-    // operations without deadlocking.
-    if let Some(manager) = crate::BPF_MANAGER.get() {
-        let programs = manager.lock().get_hook_programs(1);
+    crate::mcore::mtask::scheduler::sleep::TaskSleep::wake_expired(
+        crate::time::get_monotonic_time_ns(),
+    );
 
+    // Build the timer context, then resolve the bounded hook snapshot without
+    // allocating while the interrupt is active.
+    {
         // Calculate interrupt latency from vector entry to now
         let mut bpf_ctx = kernel_bpf::execution::BpfContext::empty();
 
         // Include kernel metrics if available
         if let Some(metrics) = crate::BOOT_METRICS.get() {
-            bpf_ctx.boot_time_ms = metrics.boot_time_ms;
-            bpf_ctx.kernel_heap_kb = metrics.kernel_heap_kb;
-            bpf_ctx.kernel_image_mb = metrics.kernel_image_mb;
+            bpf_ctx.set_kernel_metrics(
+                metrics.boot_time_ms,
+                metrics.kernel_heap_kb,
+                metrics.kernel_image_mb,
+            );
         }
 
         unsafe {
@@ -188,16 +192,16 @@ fn handle_timer_interrupt(ctx: &ExceptionContext) {
             // Convert ticks to nanoseconds: ns = ticks * 1,000,000,000 / freq
             let freq: u64;
             core::arch::asm!("mrs {}, cntfrq_el0", out(reg) freq);
-            bpf_ctx.interrupt_latency_ns =
-                (latency_ticks as u128 * 1_000_000_000 / freq as u128) as u64;
+            bpf_ctx.set_interrupt_latency_ns(
+                (latency_ticks as u128 * 1_000_000_000 / freq as u128) as u64,
+            );
         }
 
-        for (prog_id, program) in &programs {
-            match crate::bpf::BpfManager::execute_program(program, &bpf_ctx) {
-                Ok(_res) => {}
-                Err(e) => log::error!("BPF Timer Hook [id={}] failed: {:?}", prog_id, e),
-            }
-        }
+        let _ = crate::bpf::BpfManager::run_hook_programs(
+            crate::bpf::ATTACH_TYPE_TIMER,
+            &bpf_ctx,
+            "timer",
+        );
     }
 }
 

@@ -1,5 +1,13 @@
 name: BPF Profile Tests
 
+# H-06 / PR #1: pinned every job to nightly-2026-07-02 through
+# dtolnay/rust-toolchain@master (the channel declared in rust-toolchain.toml).
+# Previously this workflow
+# installed stable, but stable Cargo cannot parse the root workspace's
+# `artifact = "bin"` (requires nightly -Z bindeps), so every job in this
+# workflow was guaranteed-red. Until that fix this workflow is the audit's
+# "profile CI uses the wrong toolchain" finding.
+
 on:
   push:
     branches: [main]
@@ -22,10 +30,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned nightly
+        uses: dtolnay/rust-toolchain@master
         with:
-          components: rustfmt, clippy
+          toolchain: nightly-2026-07-02
+          components: rustfmt, clippy, rust-src
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -43,7 +52,7 @@ jobs:
         run: cargo test --no-default-features --features cloud-profile -p kernel_bpf
 
       - name: Clippy with cloud-profile
-        run: cargo clippy --no-default-features --features cloud-profile -p kernel_bpf -- -D warnings
+        run: cargo clippy --no-default-features --features cloud-profile -p kernel_bpf -- -D clippy::all
 
   embedded-profile:
     name: Embedded Profile Tests
@@ -51,10 +60,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned nightly
+        uses: dtolnay/rust-toolchain@master
         with:
-          components: rustfmt, clippy
+          toolchain: nightly-2026-07-02
+          components: rustfmt, clippy, rust-src
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -72,7 +82,7 @@ jobs:
         run: cargo test --no-default-features --features embedded-profile -p kernel_bpf
 
       - name: Clippy with embedded-profile
-        run: cargo clippy --no-default-features --features embedded-profile -p kernel_bpf -- -D warnings
+        run: cargo clippy --no-default-features --features embedded-profile -p kernel_bpf -- -D clippy::all
 
   mutual-exclusion:
     name: Profile Mutual Exclusion
@@ -80,8 +90,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-02
 
       - name: Verify both profiles fail to compile together
         run: |
@@ -108,8 +120,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-02
+          components: rust-src
 
       - name: Run semantic tests with cloud-profile
         run: cargo test --no-default-features --features cloud-profile -p kernel_bpf --test semantic_consistency
@@ -123,9 +138,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned nightly
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-02
           components: rustfmt
 
       - name: Check formatting

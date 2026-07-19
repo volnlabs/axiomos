@@ -6,8 +6,9 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use super::elf::ElfParser;
+use super::elf::{ElfParser, Relocation, SectionType, Symbol};
 use super::error::{LoadError, LoadResult};
+use super::normalize::BPF_PSEUDO_CALL;
 use super::object::LoadedMap;
 use crate::bytecode::insn::BpfInsn;
 use crate::verifier::HelperId;
@@ -17,17 +18,57 @@ const R_BPF_64_64: u32 = 1;
 const R_BPF_64_ABS64: u32 = 2;
 const R_BPF_64_ABS32: u32 = 3;
 const R_BPF_64_32: u32 = 10;
+const STT_FUNC: u8 = 2;
+const SHN_UNDEF: u16 = 0;
+
+/// Per-section relocation context shared by `apply_relocations` and
+/// `relocate_call`. The three indices are always passed together; collapsing
+/// them keeps call sites readable and lets both methods drop one argument each
+/// (audit H-06 quick-win #2: argument-group refactor).
+#[derive(Clone, Copy)]
+struct SectionContext {
+    /// Index of the section currently being relocated.
+    section_idx: usize,
+    /// Base instruction offset of `section_idx` in the combined instruction
+    /// stream (`0` for the root program).
+    section_base: usize,
+    /// Index of the root program section. Cross-section calls targeting this
+    /// index resolve to `section_base == 0`.
+    root_section_idx: usize,
+}
 
 /// BPF instruction relocation handler.
 pub struct Relocator<'a> {
     /// Map definitions for resolving map references
     maps: &'a [LoadedMap],
+    /// Extra executable sections appended after the root program, with their
+    /// base instruction index in the combined instruction stream.
+    linked_sections: Vec<(usize, usize)>,
 }
 
 impl<'a> Relocator<'a> {
     /// Create a new relocator.
     pub fn new(maps: &'a [LoadedMap]) -> Self {
-        Self { maps }
+        Self {
+            maps,
+            linked_sections: Vec::new(),
+        }
+    }
+
+    /// Provide executable sections that were appended to the root program.
+    pub fn with_linked_sections(mut self, linked_sections: Vec<(usize, usize)>) -> Self {
+        self.linked_sections = linked_sections;
+        self
+    }
+
+    /// Discover executable sections reached by cross-section BPF-to-BPF calls.
+    pub fn linked_call_sections(
+        root_section_idx: usize,
+        parser: &ElfParser,
+    ) -> LoadResult<Vec<usize>> {
+        let mut out = Vec::new();
+        Self::collect_linked_call_sections(root_section_idx, root_section_idx, parser, &mut out)?;
+        Ok(out)
     }
 
     /// Apply relocations to instructions.
@@ -49,18 +90,113 @@ impl<'a> Relocator<'a> {
             })
             .ok_or(LoadError::InvalidRelocation)?;
 
-        // Get relocations for this section
-        let relocs = parser.relocations(section_idx)?;
-        if relocs.is_empty() {
+        let root_relocs = parser.relocations(section_idx)?;
+        let mut linked_relocs = Vec::new();
+        let mut has_relocations = !root_relocs.is_empty();
+        for &(linked_idx, base_idx) in &self.linked_sections {
+            let relocs = parser.relocations(linked_idx)?;
+            has_relocations |= !relocs.is_empty();
+            linked_relocs.push((linked_idx, base_idx, relocs));
+        }
+
+        if !has_relocations {
             return Ok(insns);
         }
 
         // Get symbol table
         let symbols = parser.symbols()?;
 
-        // Apply each relocation
+        self.apply_relocations(
+            &mut insns,
+            parser,
+            &root_relocs,
+            &symbols,
+            SectionContext {
+                section_idx,
+                section_base: 0,
+                root_section_idx: section_idx,
+            },
+        )?;
+        for (linked_idx, base_idx, relocs) in linked_relocs {
+            self.apply_relocations(
+                &mut insns,
+                parser,
+                &relocs,
+                &symbols,
+                SectionContext {
+                    section_idx: linked_idx,
+                    section_base: base_idx,
+                    root_section_idx: section_idx,
+                },
+            )?;
+        }
+
+        Ok(insns)
+    }
+
+    fn collect_linked_call_sections(
+        root_section_idx: usize,
+        section_idx: usize,
+        parser: &ElfParser,
+        out: &mut Vec<usize>,
+    ) -> LoadResult<()> {
+        let relocs = parser.relocations(section_idx)?;
+        if relocs.is_empty() {
+            return Ok(());
+        }
+
+        let sections = parser.sections()?;
+        let symbols = parser.symbols()?;
         for reloc in relocs {
-            let insn_idx = (reloc.offset / 8) as usize;
+            if reloc.rel_type != R_BPF_64_32 {
+                continue;
+            }
+            let sym = symbols
+                .get(reloc.sym_idx as usize)
+                .ok_or(LoadError::UndefinedSymbol)?;
+            let sym_name = parser.symbol_name(sym)?;
+            if Self::helper_name_to_id(&sym_name).is_some()
+                || sym.sym_type() != STT_FUNC
+                || sym.shndx == SHN_UNDEF
+            {
+                continue;
+            }
+
+            let target_idx = sym.shndx as usize;
+            if target_idx == section_idx || target_idx == root_section_idx {
+                continue;
+            }
+
+            match sections.get(target_idx) {
+                Some(section) if section.section_type == SectionType::Program => {}
+                _ => return Err(LoadError::InvalidRelocation),
+            }
+
+            if !out.contains(&target_idx) {
+                out.push(target_idx);
+                Self::collect_linked_call_sections(root_section_idx, target_idx, parser, out)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn apply_relocations(
+        &self,
+        insns: &mut [BpfInsn],
+        parser: &ElfParser,
+        relocs: &[Relocation],
+        symbols: &[Symbol],
+        ctx: SectionContext,
+    ) -> LoadResult<()> {
+        for reloc in relocs {
+            if !reloc.offset.is_multiple_of(BpfInsn::SIZE as u64) {
+                return Err(LoadError::InvalidRelocation);
+            }
+            let insn_idx = ctx
+                .section_base
+                .checked_add((reloc.offset / BpfInsn::SIZE as u64) as usize)
+                .ok_or(LoadError::InvalidRelocation)?;
             if insn_idx >= insns.len() {
                 return Err(LoadError::InvalidRelocation);
             }
@@ -76,11 +212,11 @@ impl<'a> Relocator<'a> {
             match reloc.rel_type {
                 R_BPF_64_64 => {
                     // Map reference - 64-bit load immediate
-                    self.relocate_map_ref(&mut insns, insn_idx, &sym_name)?;
+                    self.relocate_map_ref(insns, insn_idx, &sym_name)?;
                 }
                 R_BPF_64_32 => {
-                    // Helper function call
-                    self.relocate_call(&mut insns, insn_idx, &sym_name)?;
+                    // Helper or BPF-to-BPF function call.
+                    self.relocate_call(insns, insn_idx, sym, &sym_name, ctx)?;
                 }
                 R_BPF_64_ABS64 | R_BPF_64_ABS32 => {
                     // Absolute references - typically for data
@@ -92,7 +228,7 @@ impl<'a> Relocator<'a> {
             }
         }
 
-        Ok(insns)
+        Ok(())
     }
 
     /// Relocate a map reference.
@@ -132,16 +268,66 @@ impl<'a> Relocator<'a> {
         &self,
         insns: &mut [BpfInsn],
         insn_idx: usize,
+        sym: &Symbol,
         sym_name: &str,
+        ctx: SectionContext,
     ) -> LoadResult<()> {
         // Check if this is a helper function call
         if let Some(helper_id) = Self::helper_name_to_id(sym_name) {
+            insns[insn_idx].regs &= 0x0f;
             insns[insn_idx].imm = helper_id;
+            return Ok(());
         }
-        // Otherwise, it's a BPF-to-BPF call which needs different handling
-        // (BPF-to-BPF calls are not yet implemented)
+
+        if sym.sym_type() != STT_FUNC || sym.shndx == SHN_UNDEF {
+            return Ok(());
+        }
+        if !sym.value.is_multiple_of(BpfInsn::SIZE as u64) {
+            return Err(LoadError::InvalidRelocation);
+        }
+
+        let target_section_idx = sym.shndx as usize;
+        let target_base = self
+            .section_base_for(
+                target_section_idx,
+                ctx.section_idx,
+                ctx.section_base,
+                ctx.root_section_idx,
+            )
+            .ok_or(LoadError::InvalidRelocation)?;
+        let target_idx = target_base
+            .checked_add((sym.value / BpfInsn::SIZE as u64) as usize)
+            .ok_or(LoadError::InvalidRelocation)?;
+        if target_idx >= insns.len() {
+            return Err(LoadError::InvalidRelocation);
+        }
+        let imm = target_idx as i64 - insn_idx as i64 - 1;
+        if imm < i32::MIN as i64 || imm > i32::MAX as i64 {
+            return Err(LoadError::InvalidRelocation);
+        }
+
+        insns[insn_idx].regs = (insns[insn_idx].regs & 0x0f) | (BPF_PSEUDO_CALL << 4);
+        insns[insn_idx].imm = imm as i32;
 
         Ok(())
+    }
+
+    fn section_base_for(
+        &self,
+        target_section_idx: usize,
+        current_section_idx: usize,
+        current_section_base: usize,
+        root_section_idx: usize,
+    ) -> Option<usize> {
+        if target_section_idx == root_section_idx {
+            return Some(0);
+        }
+        if target_section_idx == current_section_idx {
+            return Some(current_section_base);
+        }
+        self.linked_sections
+            .iter()
+            .find_map(|&(idx, base)| (idx == target_section_idx).then_some(base))
     }
 
     /// Convert a helper function name to its runtime helper ID.
@@ -172,7 +358,6 @@ impl<'a> Relocator<'a> {
             "bpf_ringbuf_submit" => HelperId::RingbufSubmit,
             "bpf_ringbuf_discard" => HelperId::RingbufDiscard,
             // rkBPF robotics-specific helpers
-            "bpf_motor_emergency_stop" => HelperId::MotorEmergencyStop,
             "bpf_timeseries_push" => HelperId::TimeseriesPush,
             "bpf_sensor_last_timestamp" => HelperId::SensorLastTimestamp,
             _ => return None,
@@ -184,6 +369,7 @@ impl<'a> Relocator<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::loader::normalize::BPF_PSEUDO_CALL;
 
     #[test]
     fn helper_name_mapping_uses_runtime_abi() {
@@ -206,7 +392,7 @@ mod tests {
         );
         assert_eq!(
             Relocator::helper_name_to_id("bpf_motor_emergency_stop"),
-            Some(HelperId::MotorEmergencyStop as i32)
+            None
         );
         assert_eq!(Relocator::helper_name_to_id("unknown_helper"), None);
     }
@@ -233,7 +419,6 @@ mod tests {
             "bpf_ringbuf_reserve",
             "bpf_ringbuf_submit",
             "bpf_ringbuf_discard",
-            "bpf_motor_emergency_stop",
             "bpf_timeseries_push",
             "bpf_sensor_last_timestamp",
         ] {
@@ -244,5 +429,77 @@ mod tests {
                 "{name} relocated to id {id}, which the runtime ABI does not know"
             );
         }
+    }
+
+    #[test]
+    fn function_relocation_marks_section_local_pseudo_call() {
+        let mut insns = alloc::vec![
+            BpfInsn::call(-1),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+            BpfInsn::mov64_imm(0, 1),
+            BpfInsn::exit(),
+        ];
+        let sym = crate::loader::elf::Symbol {
+            name_offset: 0,
+            info: 2,
+            other: 0,
+            shndx: 7,
+            value: (3 * BpfInsn::SIZE) as u64,
+            size: (2 * BpfInsn::SIZE) as u64,
+        };
+
+        Relocator::new(&[])
+            .relocate_call(
+                &mut insns,
+                0,
+                &sym,
+                "leaf",
+                SectionContext {
+                    section_idx: 7,
+                    section_base: 0,
+                    root_section_idx: 7,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(insns[0].src_reg(), BPF_PSEUDO_CALL);
+        assert_eq!(insns[0].imm, 2);
+    }
+
+    #[test]
+    fn function_relocation_targets_linked_section() {
+        let mut insns = alloc::vec![
+            BpfInsn::call(-1),
+            BpfInsn::exit(),
+            BpfInsn::mov64_imm(0, 1),
+            BpfInsn::exit(),
+        ];
+        let sym = crate::loader::elf::Symbol {
+            name_offset: 0,
+            info: 2,
+            other: 0,
+            shndx: 9,
+            value: 0,
+            size: (2 * BpfInsn::SIZE) as u64,
+        };
+
+        Relocator::new(&[])
+            .with_linked_sections(alloc::vec![(9, 2)])
+            .relocate_call(
+                &mut insns,
+                0,
+                &sym,
+                "leaf",
+                SectionContext {
+                    section_idx: 7,
+                    section_base: 0,
+                    root_section_idx: 7,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(insns[0].src_reg(), BPF_PSEUDO_CALL);
+        assert_eq!(insns[0].imm, 1);
     }
 }

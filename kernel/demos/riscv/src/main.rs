@@ -1,8 +1,8 @@
 #![no_std]
 #![no_main]
 
-use core::panic::PanicInfo;
 use core::fmt::Write;
+use core::panic::PanicInfo;
 
 // SBI console functions
 const SBI_CONSOLE_PUTCHAR: usize = 1;
@@ -60,8 +60,8 @@ macro_rules! println {
 /// It expects `hart_id` in a0 and `dtb_addr` in a1.
 /// It must not return.
 pub unsafe extern "C" fn _start_rust(hart_id: usize, dtb_addr: usize) -> ! {
-    println!("axiom-ebpf RISC-V Kernel");
-    println!("=======================");
+    println!("axiomos RISC-V demo");
+    println!("===================");
     println!("Hart ID: {}", hart_id);
     println!("DTB Address: 0x{:x}", dtb_addr);
     println!("");
@@ -75,7 +75,7 @@ pub unsafe extern "C" fn _start_rust(hart_id: usize, dtb_addr: usize) -> ! {
     println!("  - Proper linker script usage");
     println!("");
     println!("Halting...");
-    
+
     loop {
         riscv::asm::wfi();
     }
@@ -85,8 +85,7 @@ pub unsafe extern "C" fn _start_rust(hart_id: usize, dtb_addr: usize) -> ! {
 fn panic(info: &PanicInfo) -> ! {
     println!("PANIC: {}", info);
     loop {
-        // SAFETY: Safe to execute wfi (wait for interrupt) in the panic loop
-        // to save power while the system is halted.
-        unsafe { riscv::asm::wfi(); }
+        // Wait for interrupt in the panic loop to save power while the system is halted.
+        riscv::asm::wfi();
     }
 }

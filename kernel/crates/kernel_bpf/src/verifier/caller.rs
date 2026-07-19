@@ -1,7 +1,7 @@
 //! Caller privilege tier for BPF program loads (#88).
 //!
 //! Linux applies stricter verification to unprivileged BPF (a larger attack
-//! surface). Axiom keys the same tiering on *who loaded the program*. The tier
+//! surface). axiomos keys the same tiering on *who loaded the program*. The tier
 //! is carried in [`super::VerifyConfig`] and consulted by privilege-gated rules.
 
 /// Privilege tier of the caller that loaded a BPF program.

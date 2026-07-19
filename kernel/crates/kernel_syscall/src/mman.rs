@@ -30,6 +30,12 @@ pub fn sys_mmap<Cx: MemoryRegionAccess>(
     // Validate protection flags
     let prot = ProtFlags::from_bits(prot).ok_or(EINVAL)?;
 
+    // PROT_NONE needs a demand-fault representation that eager mappings do not
+    // have yet. Reject it rather than silently creating readable memory.
+    if prot.is_empty() {
+        return Err(EINVAL);
+    }
+
     // Ensure WRITE and EXEC are mutually exclusive (W^X policy)
     if prot.contains(ProtFlags::WRITE) && prot.contains(ProtFlags::EXEC) {
         return Err(EINVAL);
@@ -55,11 +61,13 @@ pub fn sys_mmap<Cx: MemoryRegionAccess>(
     // Create the mapping and add it to the process's memory regions
     // The context is responsible for converting the mapping to a region
     let mapped_addr = cx
-        .create_and_track_mapping(location, len, allocation_strategy)
+        .create_and_track_mapping(location, len, allocation_strategy, prot)
         .map_err(|e| match e {
+            crate::access::CreateMappingError::InvalidRequest => EINVAL,
             crate::access::CreateMappingError::LocationAlreadyMapped => EINVAL,
             crate::access::CreateMappingError::OutOfMemory => ENOMEM,
             crate::access::CreateMappingError::NotFound => EINVAL,
+            crate::access::CreateMappingError::Unsupported => EINVAL,
         })?;
 
     Ok(mapped_addr.addr())
@@ -82,6 +90,7 @@ mod tests {
     struct TestRegion {
         addr: UserspacePtr<u8>,
         size: usize,
+        protection: ProtFlags,
     }
 
     impl MemoryRegion for TestRegion {
@@ -92,10 +101,14 @@ mod tests {
         fn size(&self) -> usize {
             self.size
         }
+
+        fn protection(&self) -> ProtFlags {
+            self.protection
+        }
     }
 
     struct TestMemoryAccess {
-        mappings: Mutex<Vec<(usize, usize)>>, // (addr, size)
+        mappings: Mutex<Vec<(usize, usize, ProtFlags)>>, // (addr, size, protection)
         next_addr: Mutex<usize>,
     }
 
@@ -116,6 +129,7 @@ mod tests {
             location: Location,
             size: usize,
             _allocation_strategy: AllocationStrategy,
+            _protection: ProtFlags,
         ) -> Result<UserspacePtr<u8>, CreateMappingError> {
             let addr = match location {
                 Location::Anywhere => {
@@ -128,7 +142,7 @@ mod tests {
                     let addr = ptr.addr();
                     // Check if this overlaps with existing mappings
                     let mappings = self.mappings.lock();
-                    for (existing_addr, existing_size) in mappings.iter() {
+                    for (existing_addr, existing_size, _) in mappings.iter() {
                         if addr < existing_addr + existing_size && existing_addr < &(addr + size) {
                             return Err(CreateMappingError::LocationAlreadyMapped);
                         }
@@ -140,9 +154,13 @@ mod tests {
             // SAFETY: In tests, we trust that the address calculation logic above produces valid addresses.
             let ptr = unsafe { UserspacePtr::try_from_usize(addr).unwrap() };
 
-            self.mappings.lock().push((addr, size));
+            self.mappings.lock().push((addr, size, _protection));
 
-            let region = TestRegion { addr: ptr, size };
+            let region = TestRegion {
+                addr: ptr,
+                size,
+                protection: _protection,
+            };
             self.add_memory_region(region);
             Ok(ptr)
         }
@@ -274,5 +292,43 @@ mod tests {
         );
 
         assert_eq!(result, Err(EINVAL));
+    }
+
+    #[test]
+    fn test_mmap_forwards_readonly_protection() {
+        let cx = Arc::new(TestMemoryAccess::new());
+        let addr = unsafe { UserspacePtr::try_from_usize(0).unwrap() };
+
+        let result = sys_mmap(
+            &cx,
+            addr,
+            4096,
+            ProtFlags::READ.bits(),
+            (MapFlags::ANONYMOUS | MapFlags::PRIVATE).bits(),
+            0,
+            0,
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(cx.mappings.lock()[0].2, ProtFlags::READ);
+    }
+
+    #[test]
+    fn test_mmap_rejects_prot_none_in_eager_mode() {
+        let cx = Arc::new(TestMemoryAccess::new());
+        let addr = unsafe { UserspacePtr::try_from_usize(0).unwrap() };
+
+        let result = sys_mmap(
+            &cx,
+            addr,
+            4096,
+            ProtFlags::NONE.bits(),
+            (MapFlags::ANONYMOUS | MapFlags::PRIVATE).bits(),
+            0,
+            0,
+        );
+
+        assert_eq!(result, Err(EINVAL));
+        assert!(cx.mappings.lock().is_empty());
     }
 }

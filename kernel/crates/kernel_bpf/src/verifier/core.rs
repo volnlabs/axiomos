@@ -13,8 +13,12 @@ use super::LoadCaller;
 use super::alu::{compute_alu_result_width, scalar_from_imm};
 use super::cfg::ControlFlowGraph;
 use super::error::{VerifyError, VerifyResult};
-use super::helpers::{HelperValidation, ReturnType, validate_helper_call};
+use super::helpers::{ArgType, HelperValidation, ReturnType, validate_helper_call};
 use super::liveness::{Liveness, RegSet};
+use super::map_policy::{
+    check_map_write_writability, map_lookup_value_size, map_lookup_writability,
+    mutating_helper_map_arg, referenced_map_helper_arg,
+};
 use super::pruner::{PruneDecision, StatePruner};
 use super::refine::refine_scalar;
 use super::state::{RegState, RegType, ScalarValue, StackSlot, VerifierState};
@@ -24,16 +28,45 @@ use crate::bytecode::program::{BpfProgType, BpfProgram};
 use crate::bytecode::registers::Register;
 use crate::profile::{ActiveProfile, PhysicalProfile};
 
+/// Unforgeable capability consumed by `VerifiedProgram` construction.
+///
+/// The tuple field and constructor are private to this module, so no other
+/// safe crate code can bypass the verifier even though the program type lives
+/// in a sibling module.
+pub(crate) struct VerificationToken(());
+
+impl VerificationToken {
+    fn new() -> Self {
+        Self(())
+    }
+}
+
 /// Sizes the verifier cannot infer from bytecode alone and must be told by the
 /// caller (eventually the `sys_bpf` load path, #48): the byte size of the
 /// context struct reachable through R1 (`PtrToCtx`) at entry, and the byte
 /// size of a map value returned by `bpf_map_lookup_elem`. Both default to 0,
 /// under which the verifier **rejects** ctx/map dereferences — it will not
 /// assume a region size it was not given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapPerm {
+    /// The caller cannot reference this map at all.
+    Unavailable,
+    ReadOnly,
+    /// Mutating helpers may address the map, but lookup cannot return a value pointer.
+    WriteOnly,
+    ReadWrite,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct VerifyConfig<'a> {
     /// Bytes accessible through the context pointer (R1) at program entry.
     pub ctx_size: u32,
+    /// Bytes accessible through the payload pointer loaded from `BpfContext::data`.
+    ///
+    /// Raw program load uses a conservative maximum across known hook payloads;
+    /// attach paths should re-run verification with the exact payload size for
+    /// that hook.
+    pub ctx_data_size: u32,
     /// Fallback bytes accessible through a map-value / allocated-memory pointer
     /// when a precise per-map size is unavailable — used for non-map allocation
     /// returns (`bpf_ringbuf_reserve`) and when `map_value_sizes` is empty.
@@ -45,33 +78,25 @@ pub struct VerifyConfig<'a> {
     /// smallest entry (sound: never over-permits any reachable map). Empty means
     /// the caller supplied no per-map info and `map_value_size` is used.
     pub map_value_sizes: &'a [u32],
+    /// Per-map access and write permissions, indexed by map id. Empty means
+    /// legacy all-RW. Unavailable entries reject reads and writes; otherwise,
+    /// writes require a known entry whose permission is RW.
+    pub map_perms: &'a [MapPerm],
+    /// Generation for each map slot. Empty preserves the legacy raw-index ABI.
+    pub map_generations: &'a [u32],
+    /// Number of low handle bits containing the map slot index.
+    pub map_handle_slot_bits: u8,
     /// Privilege tier of the loading caller (#88). Gates the unprivileged-only
     /// restrictions. Defaults (via `LoadCaller::default()`) to `Privileged`, so
     /// `verify()` / `VerifyConfig::default()` and existing callers see no new
     /// rule.
     pub caller: LoadCaller,
-}
-
-/// Accessible byte size for a map-value pointer returned by a map-lookup helper
-/// (`ReturnType::PtrToMapValueOrNull`), given the map-id register (R1 at the
-/// call) and the verifier config. See [`VerifyConfig::map_value_sizes`] for the
-/// soundness rationale. `Err(map_id)` means a known-constant id has no entry in
-/// the table — a reference to a nonexistent map.
-fn map_lookup_value_size(map_id_reg: &RegState, config: &VerifyConfig) -> Result<u32, u64> {
-    let table = config.map_value_sizes;
-    if table.is_empty() {
-        // No per-map info supplied: fall back to the single configured size.
-        return Ok(config.map_value_size);
-    }
-    match map_id_reg.scalar_value.and_then(|s| s.value) {
-        // Known constant map id: exact size, or reject if it names no map.
-        Some(id) => usize::try_from(id)
-            .ok()
-            .and_then(|i| table.get(i).copied())
-            .ok_or(id),
-        // Dynamic map id: bound to the smallest reachable map value (sound).
-        None => Ok(table.iter().copied().min().unwrap_or(0)),
-    }
+    /// Explicit authority to call helpers that can change physical device
+    /// state. Signature trust alone never grants this capability.
+    pub allow_actuation: bool,
+    /// Reject helpers that may emit log output. Disabled by default to preserve
+    /// the existing verifier API; hot-path loaders opt in to the stricter rule.
+    pub forbid_logging_helpers: bool,
 }
 
 /// Cost of a verification run, returned by [`Verifier::verify_with_stats`].
@@ -81,8 +106,8 @@ fn map_lookup_value_size(map_id_reg: &RegState, config: &VerifyConfig) -> Result
 /// both verification time (work per state is bounded) and memory (one recorded
 /// state each). For the loop-free embedded fragment this is bounded by the
 /// program size; this is the figure the bounded-verification / verifier-WCET
-/// work measures. See `docs/verifier-fragment.md`.
-#[derive(Debug, Clone, Copy, Default)]
+/// work measures. See `docs/security/verifier-assurance.md`.
+#[derive(Debug, Clone, Default)]
 pub struct VerifyStats {
     /// Distinct verifier states explored during verification.
     pub states_explored: usize,
@@ -90,6 +115,9 @@ pub struct VerifyStats {
     /// most expensive path through the loop-free CFG (Track C / #43). Relative
     /// units pending A76 calibration; see [`crate::verifier::cost`].
     pub wcet_cycles: u64,
+    /// Proven constant map handles referenced by helper calls on any explored
+    /// path. Dynamic handles are intentionally omitted rather than guessed.
+    pub referenced_map_handles: Vec<u32>,
 }
 
 /// BPF program verifier.
@@ -124,6 +152,9 @@ pub struct Verifier<'a, P: PhysicalProfile = ActiveProfile> {
     /// value range), and `verify_memory` (bounds checks).
     config: VerifyConfig<'a>,
 
+    /// Map handles proven constant at helper call sites during path exploration.
+    referenced_map_handles: Vec<u32>,
+
     /// Profile marker
     _profile: PhantomData<P>,
 }
@@ -137,6 +168,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
             pruner: StatePruner::new(),
             liveness: None,
             config: VerifyConfig::default(),
+            referenced_map_handles: Vec::new(),
             _profile: PhantomData,
         }
     }
@@ -176,7 +208,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
     /// [`VerifyStats`] describing the verification *cost* — chiefly the number
     /// of distinct states explored. This is the metric the bounded-verification
     /// work measures: for the loop-free embedded fragment it is bounded by the
-    /// program size (see `docs/verifier-fragment.md`).
+    /// program size (see `docs/security/verifier-assurance.md`).
     pub fn verify_with_stats(
         prog_type: BpfProgType,
         insns: &[BpfInsn],
@@ -208,13 +240,22 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
         // longest-path cycle bound over the now-built CFG (execution cost).
         // Both are read before building the program so they reflect exactly the
         // verified bytecode.
+        verifier.referenced_map_handles.sort_unstable();
+        verifier.referenced_map_handles.dedup();
         let stats = VerifyStats {
             states_explored: verifier.pruner.recorded(),
             wcet_cycles: super::cost::wcet_cycles(insns, verifier.cfg.as_ref().unwrap()),
+            referenced_map_handles: verifier.referenced_map_handles,
         };
 
         // Build the verified program
-        let prog = BpfProgram::new(prog_type, insns.to_vec(), stack_size).map_err(|e| match e {
+        let prog = BpfProgram::from_verified_parts(
+            prog_type,
+            insns.to_vec(),
+            stack_size,
+            VerificationToken::new(),
+        )
+        .map_err(|e| match e {
             crate::bytecode::program::ProgramError::StackSizeExceeded { required, limit } => {
                 VerifyError::StackExceeded {
                     used: required,
@@ -435,7 +476,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
 
     /// Verify a single instruction.
     fn verify_insn(
-        &self,
+        &mut self,
         insn: &BpfInsn,
         state: &mut VerifierState,
         idx: usize,
@@ -763,7 +804,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
 
     /// Verify a call instruction.
     fn verify_call(
-        &self,
+        &mut self,
         insn: &BpfInsn,
         state: &mut VerifierState,
         idx: usize,
@@ -789,6 +830,32 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                         required: sig.min_tier,
                     });
                 }
+                if sig.requires_actuation && !self.config.allow_actuation {
+                    return Err(VerifyError::ActuationCapabilityRequired {
+                        insn_idx: idx,
+                        helper_id,
+                    });
+                }
+                if sig.may_log && self.config.forbid_logging_helpers {
+                    return Err(VerifyError::LoggingHelperForbidden {
+                        insn_idx: idx,
+                        helper_id,
+                    });
+                }
+                if let Some(map_arg) = mutating_helper_map_arg(sig.id) {
+                    let writability = map_lookup_writability(state.reg(map_arg), &self.config);
+                    check_map_write_writability(writability, idx)?;
+                }
+                check_helper_mem_bounds(sig.args, state, idx)?;
+                if let Some(map_arg) = referenced_map_helper_arg(sig.id)
+                    && let Some(handle) = state
+                        .reg(map_arg)
+                        .scalar_value
+                        .and_then(|value| value.value)
+                        .and_then(|value| u32::try_from(value).ok())
+                {
+                    self.referenced_map_handles.push(handle);
+                }
                 // Determine R0's region size *before* clobbering caller-saved
                 // registers, since a map lookup's value size depends on the map
                 // id still held in R1 (#123).
@@ -799,7 +866,9 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                                 insn_idx: idx,
                                 map_id,
                             })?;
-                        RegState::map_value(size, true)
+                        let writability =
+                            map_lookup_writability(state.reg(Register::R1), &self.config);
+                        RegState::map_value_with_writability(size, true, writability)
                     }
                     // Non-map allocation returns (e.g. ringbuf_reserve) and
                     // scalar/void returns keep the single configured size.
@@ -929,8 +998,12 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                     check_ranged_deref(src_state, insn.offset as i64, size.size_bytes(), idx)?;
                 }
 
-                // Result is scalar
-                state.set_scalar(dst, Some(ScalarValue::unknown()));
+                let loaded = self.ctx_load_result(src_state, insn.offset as i64, size.size_bytes());
+                if let Some(loaded) = loaded {
+                    *state.reg_mut(dst) = loaded;
+                } else {
+                    state.set_scalar(dst, Some(ScalarValue::unknown()));
+                }
             }
 
             OpcodeClass::Stx => {
@@ -965,6 +1038,9 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                         reason: "cannot write to this pointer type",
                     });
                 }
+                if dst_state.reg_type == RegType::PtrToMapValue {
+                    check_map_write_writability(dst_state.map_writability, idx)?;
+                }
 
                 // Update stack state if writing to stack; otherwise bounds-
                 // check the write against the pointer's tracked region (map
@@ -983,7 +1059,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
 
                     // Mark stack slots as written
                     for i in 0..size.size_bytes() {
-                        let _ = state.stack.set(offset - i as i64, StackSlot::Scalar);
+                        let _ = state.stack.set(offset + i as i64, StackSlot::Scalar);
                     }
                 } else {
                     check_ranged_deref(dst_state, insn.offset as i64, size.size_bytes(), idx)?;
@@ -1011,6 +1087,9 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                         reason: "cannot write to this pointer type",
                     });
                 }
+                if dst_state.reg_type == RegType::PtrToMapValue {
+                    check_map_write_writability(dst_state.map_writability, idx)?;
+                }
 
                 // Bounds-check the immediate store, same as Stx.
                 if dst_state.reg_type == RegType::PtrToStack
@@ -1025,7 +1104,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                         });
                     }
                     for i in 0..size.size_bytes() {
-                        let _ = state.stack.set(offset - i as i64, StackSlot::Scalar);
+                        let _ = state.stack.set(offset + i as i64, StackSlot::Scalar);
                     }
                 } else {
                     check_ranged_deref(dst_state, insn.offset as i64, size.size_bytes(), idx)?;
@@ -1036,6 +1115,23 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
         }
 
         Ok(())
+    }
+
+    fn ctx_load_result(
+        &self,
+        src_state: &RegState,
+        insn_offset: i64,
+        access_size: usize,
+    ) -> Option<RegState> {
+        if src_state.reg_type != RegType::PtrToCtx || access_size != core::mem::size_of::<u64>() {
+            return None;
+        }
+
+        let effective_offset = src_state.ptr_offset.checked_add(insn_offset)?;
+        match effective_offset {
+            0 => Some(RegState::ctx_data_ptr(self.config.ctx_data_size)),
+            _ => None,
+        }
     }
 
     /// Verify a wide load instruction (64-bit immediate).
@@ -1105,7 +1201,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
 
                 // Helpers banned on the bounded RT fragment. `bpf_trace_printk`
                 // is serial-I/O-bound and unbounded in message length, so it has
-                // no place in a deadline-scheduled hook (docs/benchmarks.md §12).
+                // no place in a deadline-scheduled hook (docs/performance/current-results.md §12).
                 const FORBIDDEN_RT_HELPERS: &[i32] = &[super::HelperId::TracePrintk as i32];
 
                 if FORBIDDEN_RT_HELPERS.contains(&insn.imm) {
@@ -1216,6 +1312,84 @@ fn apply_null_refine(state: &mut VerifierState, nr: PtrNullRefine, is_true_arm: 
     }
 }
 
+fn helper_arg_register(arg_idx: usize) -> Register {
+    match arg_idx {
+        0 => Register::R1,
+        1 => Register::R2,
+        2 => Register::R3,
+        3 => Register::R4,
+        4 => Register::R5,
+        _ => unreachable!("helper signatures have at most five arguments"),
+    }
+}
+
+fn helper_mem_size(state: &VerifierState, reg: Register, idx: usize) -> VerifyResult<usize> {
+    let Some(scalar) = state.reg(reg).scalar_value else {
+        return Err(VerifyError::InvalidMemoryAccess {
+            insn_idx: idx,
+            reason: "helper memory size is not bounded",
+        });
+    };
+
+    if scalar.max > i64::MAX as u64 {
+        return Err(VerifyError::OutOfBoundsAccess {
+            insn_idx: idx,
+            offset: 0,
+            size: usize::MAX,
+        });
+    }
+
+    usize::try_from(scalar.max).map_err(|_| VerifyError::OutOfBoundsAccess {
+        insn_idx: idx,
+        offset: 0,
+        size: usize::MAX,
+    })
+}
+
+fn check_helper_mem_bounds(
+    args: &[ArgType],
+    state: &VerifierState,
+    idx: usize,
+) -> VerifyResult<()> {
+    for (arg_idx, arg_type) in args.iter().copied().enumerate() {
+        let Some(next_arg) = args.get(arg_idx + 1).copied() else {
+            continue;
+        };
+        if next_arg != ArgType::MemSize {
+            continue;
+        }
+        if !matches!(
+            arg_type,
+            ArgType::PtrToMem | ArgType::PtrToMapValue | ArgType::PtrToStack
+        ) {
+            continue;
+        }
+
+        let ptr_reg = helper_arg_register(arg_idx);
+        let size_reg = helper_arg_register(arg_idx + 1);
+        let size = helper_mem_size(state, size_reg, idx)?;
+        if size == 0 {
+            continue;
+        }
+
+        let ptr_state = state.reg(ptr_reg);
+        if ptr_state.reg_type == RegType::PtrToStack || ptr_state.reg_type == RegType::PtrToFp {
+            let offset = ptr_state.ptr_offset;
+            if !state.stack.is_valid_access(offset, size) {
+                return Err(VerifyError::OutOfBoundsAccess {
+                    insn_idx: idx,
+                    offset,
+                    size,
+                });
+            }
+        } else {
+            check_ranged_deref(ptr_state, 0, size, idx)?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Bounds-check a dereference through a non-stack pointer that carries a
 /// tracked region size (map value, ctx, packet).
 ///
@@ -1268,11 +1442,125 @@ fn check_ranged_deref(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::verifier::{HelperId, LoadCaller};
+    use crate::verifier::{HelperId, LoadCaller, MapPerm};
 
     #[test]
     fn verify_config_default_caller_is_privileged() {
         assert_eq!(VerifyConfig::default().caller, LoadCaller::Privileged);
+        assert!(!VerifyConfig::default().forbid_logging_helpers);
+    }
+
+    #[test]
+    fn referenced_map_helper_set_matches_runtime_map_operations() {
+        for helper in [
+            HelperId::MapLookupElem,
+            HelperId::MapUpdateElem,
+            HelperId::MapDeleteElem,
+            HelperId::RingbufOutput,
+            HelperId::TimeseriesPush,
+        ] {
+            assert_eq!(referenced_map_helper_arg(helper), Some(Register::R1));
+        }
+        assert_eq!(referenced_map_helper_arg(HelperId::KtimeGetNs), None);
+        assert_eq!(referenced_map_helper_arg(HelperId::RingbufReserve), None);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn verify_stats_collect_constant_map_handles_across_branch_paths() {
+        let insns = [
+            BpfInsn::call(HelperId::GetPrandomU32 as i32),
+            BpfInsn::jeq_imm(0, 0, 7),
+            BpfInsn::mov64_imm(1, 7),
+            BpfInsn::new(0x7b, 10, 1, -8, 0),
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::add64_imm(2, -8),
+            BpfInsn::call(HelperId::MapDeleteElem as i32),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+            BpfInsn::mov64_imm(1, 11),
+            BpfInsn::new(0x7b, 10, 1, -8, 0),
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::add64_imm(2, -8),
+            BpfInsn::call(HelperId::MapDeleteElem as i32),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ];
+
+        let (_, stats) = Verifier::<ActiveProfile>::verify_with_stats(
+            BpfProgType::SocketFilter,
+            &insns,
+            VerifyConfig::default(),
+        )
+        .expect("both map-reference branches verify");
+
+        assert_eq!(stats.referenced_map_handles, alloc::vec![7, 11]);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn verify_stats_omit_dynamic_map_handles() {
+        let insns = [
+            BpfInsn::call(HelperId::GetPrandomU32 as i32),
+            BpfInsn::mov64_reg(1, 0),
+            BpfInsn::new(0x7b, 10, 1, -8, 0),
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::add64_imm(2, -8),
+            BpfInsn::call(HelperId::MapLookupElem as i32),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ];
+
+        let (_, stats) = Verifier::<ActiveProfile>::verify_with_stats(
+            BpfProgType::SocketFilter,
+            &insns,
+            VerifyConfig::default(),
+        )
+        .expect("dynamic map handle remains valid under the legacy config");
+
+        assert!(stats.referenced_map_handles.is_empty());
+    }
+
+    #[cfg(feature = "cloud-profile")]
+    fn trace_printk_program() -> [BpfInsn; 4] {
+        [
+            BpfInsn::mov64_imm(2, 0),
+            BpfInsn::call(HelperId::TracePrintk as i32),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ]
+    }
+
+    #[test]
+    #[cfg(feature = "cloud-profile")]
+    fn logging_helpers_remain_allowed_by_default() {
+        Verifier::<ActiveProfile>::verify_with_config(
+            BpfProgType::SocketFilter,
+            &trace_printk_program(),
+            VerifyConfig::default(),
+        )
+        .expect("default config must preserve logging-helper compatibility");
+    }
+
+    #[test]
+    #[cfg(feature = "cloud-profile")]
+    fn logging_helpers_are_rejected_when_policy_forbids_them() {
+        let result = Verifier::<ActiveProfile>::verify_with_config(
+            BpfProgType::SocketFilter,
+            &trace_printk_program(),
+            VerifyConfig {
+                forbid_logging_helpers: true,
+                ..VerifyConfig::default()
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(VerifyError::LoggingHelperForbidden {
+                insn_idx: 1,
+                helper_id
+            }) if helper_id == HelperId::TracePrintk as i32
+        ));
     }
 
     #[test]
@@ -1521,7 +1809,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn ctx_read_bounded_to_bpfcontext_size() {
-        let ctx_size = core::mem::size_of::<crate::execution::BpfContext>() as u32;
+        let ctx_size = core::mem::size_of::<crate::execution::BpfContext<'static>>() as u32;
         let cfg = VerifyConfig {
             ctx_size,
             map_value_size: 0,
@@ -1559,6 +1847,67 @@ mod tests {
                 Err(VerifyError::OutOfBoundsAccess { .. })
             ),
             "reading past the context must be rejected"
+        );
+    }
+
+    fn ctx_data_ringbuf_prog(output_size: i32) -> [BpfInsn; 9] {
+        [
+            BpfInsn::mov64_reg(6, 1),
+            BpfInsn::new(0x79, 6, 1, 0, 0), // r6 = *(u64 *)(ctx + 0) == ctx.data
+            BpfInsn::mov64_imm(1, 0),       // ringbuf map id
+            BpfInsn::mov64_reg(2, 6),       // data pointer
+            BpfInsn::mov64_imm(3, output_size),
+            BpfInsn::mov64_imm(4, 0),
+            BpfInsn::call(HelperId::RingbufOutput as i32),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ]
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn ctx_data_pointer_ringbuf_output_verifies_when_declared_size_covers_helper_size() {
+        let cfg = VerifyConfig {
+            ctx_size: core::mem::size_of::<crate::execution::BpfContext<'static>>() as u32,
+            ctx_data_size: core::mem::size_of::<crate::execution::SchedSwitchContext>() as u32,
+            map_perms: &[MapPerm::ReadWrite],
+            ..VerifyConfig::default()
+        };
+
+        let result = Verifier::<ActiveProfile>::verify_with_config(
+            BpfProgType::SocketFilter,
+            &ctx_data_ringbuf_prog(
+                core::mem::size_of::<crate::execution::SchedSwitchContext>() as i32
+            ),
+            cfg,
+        );
+
+        assert!(
+            result.is_ok(),
+            "sched-switch ctx.data export rejected: {result:?}"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn ctx_data_pointer_ringbuf_output_rejects_oversized_helper_size() {
+        let declared = core::mem::size_of::<crate::execution::SchedSwitchContext>() as u32;
+        let cfg = VerifyConfig {
+            ctx_size: core::mem::size_of::<crate::execution::BpfContext<'static>>() as u32,
+            ctx_data_size: declared,
+            map_perms: &[MapPerm::ReadWrite],
+            ..VerifyConfig::default()
+        };
+
+        let result = Verifier::<ActiveProfile>::verify_with_config(
+            BpfProgType::SocketFilter,
+            &ctx_data_ringbuf_prog((declared + 1) as i32),
+            cfg,
+        );
+
+        assert!(
+            matches!(result, Err(VerifyError::OutOfBoundsAccess { .. })),
+            "oversized ctx.data helper read must be rejected, got {result:?}"
         );
     }
 
@@ -1602,6 +1951,50 @@ mod tests {
         assert_eq!(map_lookup_value_size(&r1, &cfg), Err(5));
     }
 
+    #[test]
+    fn map_size_known_unavailable_id_is_rejected() {
+        let cfg = VerifyConfig {
+            map_value_sizes: &[8, 16],
+            map_perms: &[MapPerm::ReadWrite, MapPerm::Unavailable],
+            ..VerifyConfig::default()
+        };
+        let r1 = RegState::scalar(Some(ScalarValue::constant(1)));
+        assert_eq!(map_lookup_value_size(&r1, &cfg), Err(1));
+    }
+
+    #[test]
+    fn map_lookup_rejects_write_only_id() {
+        let cfg = VerifyConfig {
+            map_value_sizes: &[8],
+            map_perms: &[MapPerm::WriteOnly],
+            ..VerifyConfig::default()
+        };
+        let r1 = RegState::scalar(Some(ScalarValue::constant(0)));
+        assert_eq!(map_lookup_value_size(&r1, &cfg), Err(0));
+    }
+
+    #[test]
+    fn map_size_rejects_stale_generation_handle() {
+        const SLOT_BITS: u8 = 10;
+        let current_handle = (3u32 << SLOT_BITS) | 1;
+        let stale_handle = (2u32 << SLOT_BITS) | 1;
+        let cfg = VerifyConfig {
+            map_value_sizes: &[0, 16],
+            map_perms: &[MapPerm::Unavailable, MapPerm::ReadWrite],
+            map_generations: &[0, 3],
+            map_handle_slot_bits: SLOT_BITS,
+            ..VerifyConfig::default()
+        };
+
+        let current = RegState::scalar(Some(ScalarValue::constant(u64::from(current_handle))));
+        assert_eq!(map_lookup_value_size(&current, &cfg), Ok(16));
+        let stale = RegState::scalar(Some(ScalarValue::constant(u64::from(stale_handle))));
+        assert_eq!(
+            map_lookup_value_size(&stale, &cfg),
+            Err(u64::from(stale_handle))
+        );
+    }
+
     /// A dynamic (non-constant) map id is bounded to the smallest reachable map
     /// value — sound: it never over-permits any map the program could hit.
     #[test]
@@ -1618,6 +2011,293 @@ mod tests {
         // A register with no tracked scalar value is also dynamic.
         let r1_none = RegState::scalar(None);
         assert_eq!(map_lookup_value_size(&r1_none, &cfg), Ok(8));
+    }
+
+    #[test]
+    fn map_size_dynamic_id_is_rejected_when_any_map_is_unavailable() {
+        let cfg = VerifyConfig {
+            map_value_sizes: &[8, 16],
+            map_perms: &[MapPerm::ReadWrite, MapPerm::Unavailable],
+            ..VerifyConfig::default()
+        };
+        let r1 = RegState::scalar(Some(ScalarValue::unknown()));
+        assert_eq!(map_lookup_value_size(&r1, &cfg), Err(u64::MAX));
+    }
+
+    fn lookup_then_store_prog(map_id_insn: BpfInsn) -> alloc::vec::Vec<BpfInsn> {
+        alloc::vec![
+            BpfInsn::mov64_imm(1, 0),
+            BpfInsn::new(0x7b, 10, 1, -8, 0), // *(u64 *)(r10 - 8) = r1 (key)
+            map_id_insn,
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::add64_imm(2, -8),
+            BpfInsn::call(HelperId::MapLookupElem as i32),
+            BpfInsn::jeq_imm(0, 0, 2), // if lookup returned null, skip store
+            BpfInsn::new(0x7a, 0, 0, 0, 1), // *(u64 *)(r0 + 0) = 1
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ]
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn store_through_read_only_map_lookup_is_rejected() {
+        let cfg = VerifyConfig {
+            map_value_sizes: &[8],
+            map_perms: &[MapPerm::ReadOnly],
+            ..VerifyConfig::default()
+        };
+        let insns = lookup_then_store_prog(BpfInsn::mov64_imm(1, 0));
+
+        let result =
+            Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, cfg);
+
+        assert!(
+            matches!(
+                result,
+                Err(VerifyError::WriteToReadOnlyMap {
+                    insn_idx: 7,
+                    map_id: 0
+                })
+            ),
+            "store through RO map lookup must be rejected, got {result:?}"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn store_through_read_write_map_lookup_is_accepted() {
+        let cfg = VerifyConfig {
+            map_value_sizes: &[8],
+            map_perms: &[MapPerm::ReadWrite],
+            ..VerifyConfig::default()
+        };
+        let insns = lookup_then_store_prog(BpfInsn::mov64_imm(1, 0));
+
+        Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, cfg)
+            .expect("store through a proven-RW map lookup must verify");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn store_through_dynamic_map_lookup_is_rejected_when_perms_are_authoritative() {
+        let cfg = VerifyConfig {
+            ctx_size: core::mem::size_of::<crate::execution::BpfContext<'static>>() as u32,
+            map_value_sizes: &[8, 8],
+            map_perms: &[MapPerm::ReadWrite, MapPerm::ReadWrite],
+            ..VerifyConfig::default()
+        };
+        let insns = alloc::vec![
+            BpfInsn::mov64_imm(2, 0),
+            BpfInsn::new(0x7b, 10, 2, -8, 0), // *(u64 *)(r10 - 8) = r2 (key)
+            BpfInsn::new(0x79, 1, 1, 24, 0),  // r1 = *(u64 *)(ctx + 24), dynamic map id
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::add64_imm(2, -8),
+            BpfInsn::call(HelperId::MapLookupElem as i32),
+            BpfInsn::jeq_imm(0, 0, 2),
+            BpfInsn::new(0x7a, 0, 0, 0, 1),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ];
+
+        let result =
+            Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, cfg);
+
+        assert!(
+            matches!(
+                result,
+                Err(VerifyError::WriteMapNotProvablyWritable { insn_idx: 7 })
+            ),
+            "dynamic map-id store must be rejected under authoritative perms, got {result:?}"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn read_through_read_only_and_dynamic_map_lookup_is_accepted() {
+        let cfg = VerifyConfig {
+            ctx_size: core::mem::size_of::<crate::execution::BpfContext<'static>>() as u32,
+            map_value_sizes: &[8, 8],
+            map_perms: &[MapPerm::ReadOnly, MapPerm::ReadWrite],
+            ..VerifyConfig::default()
+        };
+        let insns = alloc::vec![
+            BpfInsn::mov64_imm(2, 0),
+            BpfInsn::new(0x7b, 10, 2, -8, 0),
+            BpfInsn::new(0x79, 1, 1, 24, 0), // dynamic map id from scalar ctx field
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::add64_imm(2, -8),
+            BpfInsn::call(HelperId::MapLookupElem as i32),
+            BpfInsn::jeq_imm(0, 0, 1),
+            BpfInsn::new(0x79, 0, 0, 0, 0), // r0 = *(u64 *)(r0 + 0)
+            BpfInsn::exit(),
+        ];
+
+        Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, cfg)
+            .expect("RO/dynamic map lookups remain readable when bounded by map_value_sizes");
+    }
+
+    fn mutating_helper_prog(helper: HelperId, map_id_insn: BpfInsn) -> alloc::vec::Vec<BpfInsn> {
+        let mut insns = alloc::vec![
+            BpfInsn::mov64_imm(5, 0),
+            BpfInsn::new(0x7b, 10, 5, -8, 0),  // key/timestamp slot
+            BpfInsn::new(0x7b, 10, 5, -16, 0), // value/data slot
+            map_id_insn,
+        ];
+
+        match helper {
+            HelperId::MapUpdateElem => {
+                insns.extend_from_slice(&[
+                    BpfInsn::mov64_reg(2, 10),
+                    BpfInsn::add64_imm(2, -8),
+                    BpfInsn::mov64_reg(3, 10),
+                    BpfInsn::add64_imm(3, -16),
+                    BpfInsn::mov64_imm(4, 0),
+                    BpfInsn::call(helper as i32),
+                ]);
+            }
+            HelperId::MapDeleteElem => {
+                insns.extend_from_slice(&[
+                    BpfInsn::mov64_reg(2, 10),
+                    BpfInsn::add64_imm(2, -8),
+                    BpfInsn::call(helper as i32),
+                ]);
+            }
+            HelperId::RingbufOutput => {
+                insns.extend_from_slice(&[
+                    BpfInsn::mov64_reg(2, 10),
+                    BpfInsn::add64_imm(2, -16),
+                    BpfInsn::mov64_imm(3, 8),
+                    BpfInsn::mov64_imm(4, 0),
+                    BpfInsn::call(helper as i32),
+                ]);
+            }
+            HelperId::TimeseriesPush => {
+                insns.extend_from_slice(&[
+                    BpfInsn::mov64_reg(2, 10),
+                    BpfInsn::add64_imm(2, -8),
+                    BpfInsn::mov64_reg(3, 10),
+                    BpfInsn::add64_imm(3, -16),
+                    BpfInsn::call(helper as i32),
+                ]);
+            }
+            _ => unreachable!("test only builds mutating map helpers"),
+        }
+
+        insns.extend_from_slice(&[BpfInsn::mov64_imm(0, 0), BpfInsn::exit()]);
+        insns
+    }
+
+    #[test]
+    fn map_mutating_helper_table_covers_current_mutating_dispatch() {
+        for helper in [
+            HelperId::MapUpdateElem,
+            HelperId::MapDeleteElem,
+            HelperId::RingbufOutput,
+            HelperId::TimeseriesPush,
+        ] {
+            assert_eq!(mutating_helper_map_arg(helper), Some(Register::R1));
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn mutating_helpers_reject_read_only_map_ids() {
+        let cfg = VerifyConfig {
+            map_perms: &[MapPerm::ReadOnly],
+            ..VerifyConfig::default()
+        };
+
+        for helper in [
+            HelperId::MapUpdateElem,
+            HelperId::MapDeleteElem,
+            HelperId::RingbufOutput,
+            HelperId::TimeseriesPush,
+        ] {
+            let insns = mutating_helper_prog(helper, BpfInsn::mov64_imm(1, 0));
+            let result = Verifier::<ActiveProfile>::verify_with_config(
+                BpfProgType::SocketFilter,
+                &insns,
+                cfg,
+            );
+
+            assert!(
+                matches!(
+                    result,
+                    Err(VerifyError::WriteToReadOnlyMap { map_id: 0, .. })
+                ),
+                "{helper:?} to RO map must be rejected, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn mutating_helpers_accept_read_write_map_ids() {
+        let cfg = VerifyConfig {
+            map_perms: &[MapPerm::ReadWrite],
+            ..VerifyConfig::default()
+        };
+
+        for helper in [
+            HelperId::MapUpdateElem,
+            HelperId::MapDeleteElem,
+            HelperId::RingbufOutput,
+            HelperId::TimeseriesPush,
+        ] {
+            let insns = mutating_helper_prog(helper, BpfInsn::mov64_imm(1, 0));
+            Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, cfg)
+                .unwrap_or_else(|e| panic!("{helper:?} to RW map must verify: {e}"));
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn mutating_helpers_accept_write_only_map_ids() {
+        let cfg = VerifyConfig {
+            map_perms: &[MapPerm::WriteOnly],
+            ..VerifyConfig::default()
+        };
+
+        for helper in [
+            HelperId::MapUpdateElem,
+            HelperId::MapDeleteElem,
+            HelperId::RingbufOutput,
+            HelperId::TimeseriesPush,
+        ] {
+            let insns = mutating_helper_prog(helper, BpfInsn::mov64_imm(1, 0));
+            Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, cfg)
+                .unwrap_or_else(|e| panic!("{helper:?} to write-only map must verify: {e}"));
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn mutating_helpers_reject_dynamic_map_ids_when_perms_are_authoritative() {
+        let cfg = VerifyConfig {
+            ctx_size: core::mem::size_of::<crate::execution::BpfContext<'static>>() as u32,
+            map_perms: &[MapPerm::ReadWrite, MapPerm::ReadWrite],
+            ..VerifyConfig::default()
+        };
+
+        for helper in [
+            HelperId::MapUpdateElem,
+            HelperId::MapDeleteElem,
+            HelperId::RingbufOutput,
+            HelperId::TimeseriesPush,
+        ] {
+            let insns = mutating_helper_prog(helper, BpfInsn::new(0x79, 1, 1, 24, 0));
+            let result = Verifier::<ActiveProfile>::verify_with_config(
+                BpfProgType::SocketFilter,
+                &insns,
+                cfg,
+            );
+
+            assert!(
+                matches!(result, Err(VerifyError::WriteMapNotProvablyWritable { .. })),
+                "{helper:?} with dynamic map id must be rejected, got {result:?}"
+            );
+        }
     }
 
     /// Acceptance for the ALU32 width fix.
@@ -1929,7 +2609,7 @@ mod tests {
     /// A straight-line program of `n` instructions has a single path, so the
     /// verifier explores exactly one state per reachable instruction — cost is
     /// linear in program size. This is the empirical form of the bound in
-    /// `docs/verifier-fragment.md`; it guards against a regression that would
+    /// `docs/security/verifier-assurance.md`; it guards against a regression that would
     /// make verification cost super-linear on loop-free programs.
     #[test]
     #[cfg_attr(miri, ignore)]
@@ -2033,6 +2713,44 @@ mod tests {
         assert!(
             verify_as(BpfProgType::SocketFilter, &insns, LoadCaller::Unprivileged).is_ok(),
             "ordinary helper must be callable unprivileged"
+        );
+    }
+
+    #[test]
+    fn actuation_helper_requires_explicit_capability() {
+        let insns = alloc::vec![
+            BpfInsn::mov64_imm(1, 0),
+            BpfInsn::mov64_imm(2, 0),
+            BpfInsn::mov64_imm(3, 0),
+            BpfInsn::call(HelperId::PwmWrite as i32),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ];
+        let denied = Verifier::<ActiveProfile>::verify_with_config(
+            BpfProgType::SocketFilter,
+            &insns,
+            VerifyConfig {
+                caller: LoadCaller::Trusted,
+                ..VerifyConfig::default()
+            },
+        );
+        assert!(matches!(
+            denied,
+            Err(VerifyError::ActuationCapabilityRequired { .. })
+        ));
+
+        let allowed = Verifier::<ActiveProfile>::verify_with_config(
+            BpfProgType::SocketFilter,
+            &insns,
+            VerifyConfig {
+                caller: LoadCaller::Unprivileged,
+                allow_actuation: true,
+                ..VerifyConfig::default()
+            },
+        );
+        assert!(
+            allowed.is_ok(),
+            "explicit actuation authority should verify"
         );
     }
 
