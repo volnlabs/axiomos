@@ -16,6 +16,7 @@ pub mod memory_map;
 pub mod mmio;
 pub mod pl011;
 pub mod pwm;
+pub mod rp1_irq;
 pub mod uart;
 
 use conquer_once::spin::Lazy;

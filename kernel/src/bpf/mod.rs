@@ -1087,6 +1087,27 @@ impl BpfManager {
             return Err(BpfError::SignatureRejected);
         }
 
+        self.load_verified_raw_program(owner, insns, authorization)
+    }
+
+    /// Load bytecode compiled into the kernel image.
+    ///
+    /// Unlike a runtime raw load, a built-in has no external signature container:
+    /// its provenance is the authenticated kernel image itself. Keep this path
+    /// crate-private so syscall callers cannot bypass signature enforcement.
+    pub(crate) fn load_kernel_builtin_program(
+        &mut self,
+        insns: Vec<BpfInsn>,
+    ) -> Result<u32, BpfError> {
+        self.load_verified_raw_program(0, insns, BpfLoadAuthorization::kernel())
+    }
+
+    fn load_verified_raw_program(
+        &mut self,
+        owner: u64,
+        insns: Vec<BpfInsn>,
+        authorization: BpfLoadAuthorization,
+    ) -> Result<u32, BpfError> {
         let charge = insns
             .len()
             .checked_mul(core::mem::size_of::<BpfInsn>())
@@ -2466,6 +2487,22 @@ mod tests {
             ),
             Err(BpfError::ResourceLimit)
         );
+    }
+
+    #[test]
+    fn signature_enforcement_still_allows_verified_kernel_builtins() {
+        let mut manager = BpfManager::new();
+        manager.set_allow_unsigned(false);
+        let insns = vec![BpfInsn::mov64_imm(0, 0), BpfInsn::exit()];
+
+        assert_eq!(
+            manager.load_raw_program(insns.clone()),
+            Err(BpfError::SignatureRejected)
+        );
+        let id = manager
+            .load_kernel_builtin_program(insns)
+            .expect("compiled-in kernel program should still verify and load");
+        assert!(manager.program_slot(id).is_some());
     }
 
     #[test]

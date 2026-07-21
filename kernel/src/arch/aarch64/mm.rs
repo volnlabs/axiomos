@@ -166,7 +166,8 @@ unsafe fn setup_kernel_page_tables(total_memory: usize) {
     #[cfg(feature = "rpi5")]
     {
         use crate::arch::aarch64::platform::rpi5::memory_map::{
-            BCM2712_UART10_BASE_PHYS, GICC_BASE_PHYS, GICD_BASE_PHYS, RP1_PERIPHERAL_BASE_PHYS,
+            BCM2712_PCIE2_MIP0_APERTURE_BASE_PHYS, BCM2712_UART10_BASE_PHYS, GICC_BASE_PHYS,
+            GICD_BASE_PHYS, RP1_PERIPHERAL_BASE_PHYS,
         };
 
         // Keep Pi 5 high MMIO apertures accessible after MMU-on.
@@ -178,6 +179,7 @@ unsafe fn setup_kernel_page_tables(total_memory: usize) {
             | pte_flags::attr_index(mem::mair::DEVICE_NGNRE);
 
         for &phys_base in &[
+            BCM2712_PCIE2_MIP0_APERTURE_BASE_PHYS,
             BCM2712_UART10_BASE_PHYS,
             GICD_BASE_PHYS,
             GICC_BASE_PHYS,
@@ -297,7 +299,8 @@ pub fn create_user_address_space() -> Option<usize> {
         #[cfg(feature = "rpi5")]
         {
             use crate::arch::aarch64::platform::rpi5::memory_map::{
-                GICC_BASE_PHYS, GICD_BASE_PHYS, RP1_PERIPHERAL_BASE_PHYS,
+                BCM2712_PCIE2_MIP0_APERTURE_BASE_PHYS, GICC_BASE_PHYS, GICD_BASE_PHYS,
+                RP1_PERIPHERAL_BASE_PHYS,
             };
 
             // Keep the Pi 5 GIC distributor + CPU interface visible while TTBR0 is active.
@@ -307,6 +310,17 @@ pub fn create_user_address_space() -> Option<usize> {
             let gic_size = gic_end - gic_start;
             walker
                 .map_range(gic_start, gic_start, gic_size, device_flags.to_pte_bits())
+                .ok()?;
+
+            // PCIe2 root-complex and MIP0 live in the same aligned 1 GiB
+            // aperture. The RP1 MSI-X route touches both while processes are
+            // active, so keep this block visible in every TTBR0 address space.
+            walker
+                .map_l1_block(
+                    BCM2712_PCIE2_MIP0_APERTURE_BASE_PHYS,
+                    BCM2712_PCIE2_MIP0_APERTURE_BASE_PHYS,
+                    device_flags.to_pte_bits(),
+                )
                 .ok()?;
 
             // Map RP1 peripheral range using an efficient 1GB block mapping.

@@ -12,6 +12,20 @@ use crate::arch::aarch64::mem::phys_to_virt;
 pub const RP1_PERIPHERAL_BASE_PHYS: usize = 0x1F_0000_0000;
 pub const RP1_PERIPHERAL_BASE: usize = phys_to_virt(RP1_PERIPHERAL_BASE_PHYS);
 
+/// Start of the 1 GiB L1 block containing the PCIe2 root-complex and MIP0.
+///
+/// The MMU uses 1 GiB block descriptors for high Pi 5 MMIO apertures, so this
+/// aligned address must be mapped before either register block is accessed.
+pub const BCM2712_PCIE2_MIP0_APERTURE_BASE_PHYS: usize = 0x10_0000_0000;
+
+/// BCM2712 PCIe2 root-complex register block. PCIe2 is the link to RP1.
+pub const BCM2712_PCIE2_BASE_PHYS: usize = 0x10_0012_0000;
+pub const BCM2712_PCIE2_BASE: usize = phys_to_virt(BCM2712_PCIE2_BASE_PHYS);
+
+/// BCM2712 MIP0 MSI interrupt-controller register block.
+pub const BCM2712_MIP0_BASE_PHYS: usize = 0x10_0013_0000;
+pub const BCM2712_MIP0_BASE: usize = phys_to_virt(BCM2712_MIP0_BASE_PHYS);
+
 /// BCM2712 primary/debug UART (PL011, uart10)
 pub const BCM2712_UART10_BASE_PHYS: usize = 0x10_7D00_1000;
 pub const BCM2712_UART10_BASE: usize = phys_to_virt(BCM2712_UART10_BASE_PHYS);
@@ -25,6 +39,9 @@ pub const RP1_UART1_OFFSET: usize = 0x0003_4000;
 /// RP1 internal offset for GPIO
 pub const RP1_GPIO_OFFSET: usize = 0x000D_0000;
 
+/// RP1 internal offset for the user GPIO pad-control bank.
+pub const RP1_PADS_BANK0_OFFSET: usize = 0x000F_0000;
+
 /// RP1 internal offset for I2C0
 pub const RP1_I2C0_OFFSET: usize = 0x0007_0000;
 
@@ -36,6 +53,10 @@ pub const RP1_PWM0_OFFSET: usize = 0x0009_8000;
 
 /// RP1 internal offset for PWM1
 pub const RP1_PWM1_OFFSET: usize = 0x0009_C000;
+
+/// RP1 PCIe endpoint APB configuration block. The per-vector MSI-X control
+/// registers live here; vector 0 carries IO_BANK0.
+pub const RP1_PCIE_APBS_OFFSET: usize = 0x0010_8000;
 
 /// Calculate CPU virtual address for an RP1 peripheral
 #[inline]
@@ -52,11 +73,17 @@ pub const RP1_UART1_BASE: usize = rp1_peripheral_addr(RP1_UART1_OFFSET);
 /// GPIO base address
 pub const RP1_GPIO_BASE: usize = rp1_peripheral_addr(RP1_GPIO_OFFSET);
 
+/// User GPIO pad-control base address.
+pub const RP1_PADS_BANK0_BASE: usize = rp1_peripheral_addr(RP1_PADS_BANK0_OFFSET);
+
 /// PWM0 base address
 pub const RP1_PWM0_BASE: usize = rp1_peripheral_addr(RP1_PWM0_OFFSET);
 
 /// PWM1 base address
 pub const RP1_PWM1_BASE: usize = rp1_peripheral_addr(RP1_PWM1_OFFSET);
+
+/// RP1 PCIe endpoint APB configuration base address.
+pub const RP1_PCIE_APBS_BASE: usize = rp1_peripheral_addr(RP1_PCIE_APBS_OFFSET);
 
 /// ARM GIC-400 distributor base address
 pub const GICD_BASE_PHYS: usize = 0x10_7FFF_9000;

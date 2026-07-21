@@ -248,10 +248,16 @@ unsafe extern "C" fn main() -> ! {
             dbg_mark(0x68); // 'h'
             boot_fatal(BootError::InitExecutableMissing);
         }
-        if Process::create_userspace_init(Process::root(), init_path).is_err() {
-            dbg_mark(0x69); // 'i'
-            boot_fatal(BootError::InitProcessCreationFailed);
-        }
+        let proc = match Process::create_userspace_init(Process::root(), init_path) {
+            Ok(process) => process,
+            Err(_) => {
+                dbg_mark(0x69); // 'i'
+                boot_fatal(BootError::InitProcessCreationFailed);
+            }
+        };
+        kernel::serial_println!("INIT_PROCESS_STARTED pid={}", proc.pid());
+        #[cfg(feature = "bench")]
+        kernel::serial_println!("PI5_BOOT_OK");
         dbg_mark(0x45); // 'E'
     } else {
         // Expected on Pi5 bring-up before a block driver is wired in.

@@ -14,7 +14,7 @@
 //!   - GPIO12 = PWM0 channel 1 physical output to motor-A speed/enable
 //!   - PWM0 channel 1 = motor-A speed/enable (driver enable pin)
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Sensor pin: the reflex fires on this pin's rising edge.
 pub const REFLEX_SENSOR_PIN: u8 = 23;
@@ -36,6 +36,8 @@ pub fn is_bench_pwm_output(chip: u8, channel: u8) -> bool {
 /// Cycle stamp captured at GPIO IRQ entry; read at the actuation apply point to
 /// compute edge->actuate latency (M-C). 0 means "no GPIO IRQ in flight".
 static GPIO_IRQ_ENTRY: AtomicU64 = AtomicU64::new(0);
+/// Ensures the physical route-proven marker is emitted at most once per boot.
+static GPIO_IRQ_PROVEN: AtomicBool = AtomicBool::new(false);
 
 /// Read the ARM virtual counter (`CNTVCT_EL0`) — a cheap, always-available
 /// on-chip timestamp. Returns 0 off AArch64.
@@ -141,36 +143,94 @@ pub fn handle_estop_button(pressed: bool) {
     }
 }
 
+/// Emit the physical GPIO route marker only after a single GPIO23 source was
+/// observed through IO_BANK0 PCIE_INTS, handled exactly once, cleared, and left
+/// the parent status inactive. This is a probe result, not a latency result.
+pub fn report_gpio_irq_probe(pending_before: u32, pending_after: u32, handled_events: u32) {
+    let expected = 1u32 << REFLEX_SENSOR_PIN;
+    if pending_before == expected
+        && pending_after == 0
+        && handled_events == 1
+        && !GPIO_IRQ_PROVEN.swap(true, Ordering::Relaxed)
+    {
+        crate::serial_println!(
+            "PI5_GPIO_IRQ_PROVEN pin={} pending_before=0x{:08x} pending_after=0x{:08x}",
+            REFLEX_SENSOR_PIN,
+            pending_before,
+            pending_after
+        );
+    }
+}
+
 /// Boot-time bench setup (Pi 5 only): arm the sensor + button pin IRQs and
 /// auto-load the reflex program attached to the sensor's rising edge.
 #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
-pub fn init() {
+pub fn init() -> bool {
     use kernel_bpf::attach::GpioEdge;
 
-    use crate::arch::aarch64::platform::rpi5::gpio::{GpioFunction, Rp1Gpio};
-    use crate::bpf::ATTACH_TYPE_GPIO;
+    use crate::arch::aarch64::platform::rpi5::gpio::{GpioFunction, GpioPull, Rp1Gpio};
 
     // SAFETY: the kernel owns the RP1 GPIO block; this runs once at boot.
     let gpio = unsafe { Rp1Gpio::new() };
+    // Firmware may preserve RP1 across a warm reboot. Quiesce and clear every
+    // IO_BANK0 source before MSI-X is enabled so stale state cannot interrupt
+    // halfway through route construction.
+    for pin in 0..Rp1Gpio::NUM_PINS {
+        gpio.disable_interrupt(pin);
+    }
+    let route = match gpio.init_pcie_interrupt_route() {
+        Ok(route) => route,
+        Err(error) => {
+            log::error!("[bench] RP1 interrupt route failed: {:?}", error);
+            crate::serial_println!("PI5_BENCH_FAIL stage=rp1_irq_route error={:?}", error);
+            return false;
+        }
+    };
     gpio.set_function(BENCH_PWM_PIN, GpioFunction::Alt0);
+
+    // ponytail: temporary bring-up dump. Reports the sensor pad as firmware
+    // left it, before configure_input touches it, so one boot shows whether
+    // the input buffer (bit 6) was the reason a real edge raised no event.
+    // Delete with the PI5_PCIE2_* dumps once the route is proven.
+    let pad_before = gpio.pad_state(REFLEX_SENSOR_PIN);
+
     gpio.configure_input(REFLEX_SENSOR_PIN);
     gpio.configure_input(ESTOP_BUTTON_PIN);
+    // Keep disconnected inputs deterministic. The external fail-safe e-stop
+    // circuit overrides this weak pull by holding GPIO24 high through its
+    // closed NC contact; an open contact/cable therefore remains low and safe.
+    gpio.set_pull(REFLEX_SENSOR_PIN, GpioPull::Down);
+    gpio.set_pull(ESTOP_BUTTON_PIN, GpioPull::Down);
+    let initial_estop_pressed = !gpio.read(ESTOP_BUTTON_PIN);
+    handle_estop_button(initial_estop_pressed);
     // Sensor: rising edge only. Button: both edges (press + release).
     gpio.enable_interrupt(REFLEX_SENSOR_PIN, true, false);
     gpio.enable_interrupt(ESTOP_BUTTON_PIN, true, true);
+
+    crate::serial_println!(
+        "PI5_PAD_DIAG pin={} pad_before=0x{:08x} pad_after=0x{:08x} in_enable_was={} status=0x{:08x} level={}",
+        REFLEX_SENSOR_PIN,
+        pad_before,
+        gpio.pad_state(REFLEX_SENSOR_PIN),
+        pad_before & (1 << 6) != 0,
+        gpio.status_state(REFLEX_SENSOR_PIN),
+        gpio.read(REFLEX_SENSOR_PIN),
+    );
 
     // Build + load + attach the reflex (stop local PWM0/ch1 on the sensor edge).
     let insns = kernel_bpf::bench::reflex_pwm_program(BENCH_PWM_CHIP, BENCH_PWM_CHANNEL, 0);
     let Some(manager) = crate::BPF_MANAGER.get() else {
         log::error!("[bench] BPF manager not initialized; reflex not loaded");
-        return;
+        crate::serial_println!("PI5_BENCH_FAIL stage=bpf_manager_missing");
+        return false;
     };
     let mut mgr = manager.lock();
-    match mgr.load_raw_program(insns) {
+    match mgr.load_kernel_builtin_program(insns) {
         Ok(prog_id) => {
             if let Err(e) = mgr.attach_gpio_route(0, REFLEX_SENSOR_PIN, GpioEdge::Rising, prog_id) {
                 log::error!("[bench] reflex attach failed: {:?}", e);
-                return;
+                crate::serial_println!("PI5_BENCH_FAIL stage=attach error={:?}", e);
+                return false;
             }
             log::info!(
                 "[bench] reflex loaded id={} -> (gpiochip0, pin {}, rising) stops PWM{} ch{} on GPIO{}",
@@ -180,11 +240,32 @@ pub fn init() {
                 BENCH_PWM_CHANNEL,
                 BENCH_PWM_PIN
             );
+            crate::serial_println!(
+                "PI5_BENCH_READY sensor_gpio={} estop_gpio={} pwm_gpio={} initial_estop_asserted={} rp1_chip_id=0x{:08x} rp1_vendor_device=0x{:08x} rp1_msix_cap=0x{:02x} rp1_msix_vectors={} rp1_msix_control=0x{:08x} rp1_msix0_cfg=0x{:08x} pcie_link=0x{:08x}",
+                REFLEX_SENSOR_PIN,
+                ESTOP_BUTTON_PIN,
+                BENCH_PWM_PIN,
+                initial_estop_pressed,
+                route.chip_id,
+                route.vendor_device,
+                route.msix_cap_offset,
+                route.msix_table_size,
+                route.msix_control,
+                route.vector0_config,
+                route.pcie_link_status
+            );
+            true
         }
-        Err(e) => log::error!("[bench] reflex load rejected: {:?}", e),
+        Err(e) => {
+            log::error!("[bench] reflex load rejected: {:?}", e);
+            crate::serial_println!("PI5_BENCH_FAIL stage=load error={:?}", e);
+            false
+        }
     }
 }
 
 /// Boot-time bench setup is a no-op off the Pi 5 platform.
 #[cfg(not(all(target_arch = "aarch64", feature = "rpi5")))]
-pub fn init() {}
+pub fn init() -> bool {
+    true
+}

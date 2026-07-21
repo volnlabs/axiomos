@@ -143,8 +143,11 @@ pub fn init() -> Result<(), KernelInitError> {
     #[cfg(feature = "bench")]
     {
         info!("Initializing v0.3 HW bench (Task 11)...");
-        bench::init();
-        info!("HW bench initialized");
+        if bench::init() {
+            info!("HW bench initialized");
+        } else {
+            ::log::error!("HW bench initialization failed; PI5_BENCH_READY suppressed");
+        }
     }
 
     info!("Initializing backtrace...");
