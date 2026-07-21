@@ -246,17 +246,6 @@ impl Rp1Gpio {
             .modify(|v| v | pads::IN_ENABLE | pads::SCHMITT);
     }
 
-    /// Raw PADS_BANK0 control word for a pin. Bring-up diagnostics only.
-    pub fn pad_state(&self, pin: u8) -> u32 {
-        assert!(pin < Self::NUM_PINS, "Invalid GPIO pin: {}", pin);
-        self.reg_pad(pin).read()
-    }
-
-    /// Raw IO_BANK0 status word for a pin. Bring-up diagnostics only.
-    pub fn status_state(&self, pin: u8) -> u32 {
-        assert!(pin < Self::NUM_PINS, "Invalid GPIO pin: {}", pin);
-        self.reg_status(pin).read()
-    }
 
     /// Configure the pad's internal pull resistor.
     pub fn set_pull(&self, pin: u8, pull: GpioPull) {

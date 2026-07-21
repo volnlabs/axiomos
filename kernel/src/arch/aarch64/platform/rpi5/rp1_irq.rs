@@ -342,22 +342,6 @@ fn configure_msix_table(table_offset: usize, table_size: usize) -> bool {
 /// Complete and validate the RP1 IO_BANK0 -> MIP0 -> GIC MSI-X route.
 pub fn initialize_gpio_route() -> Result<Rp1InterruptRoute, Rp1InterruptRouteError> {
     let pcie_link_status = read32(BCM2712_PCIE2_BASE + PCIE_LINK_STATUS);
-
-    // ponytail: temporary bring-up dump. An all-ones aperture also satisfies
-    // the link-up bits, so print root-complex state to tell "aperture dead"
-    // apart from "endpoint config access wrong". Delete once the route works.
-    crate::serial_println!(
-        "PI5_PCIE2_DIAG status={:#010x} rc_id={:#010x} rc_class={:#010x} rc_bus={:#010x} idx_rb={:#010x}",
-        pcie_link_status,
-        read32(BCM2712_PCIE2_BASE),
-        read32(BCM2712_PCIE2_BASE + 0x08),
-        read32(BCM2712_PCIE2_BASE + 0x18),
-        {
-            write32(BCM2712_PCIE2_BASE + PCIE_CONFIG_ADDRESS, 1 << 20);
-            read32(BCM2712_PCIE2_BASE + PCIE_CONFIG_ADDRESS)
-        },
-    );
-
     if pcie_link_status & PCIE_LINK_UP != PCIE_LINK_UP {
         return Err(Rp1InterruptRouteError::PcieLinkDown(pcie_link_status));
     }
@@ -365,15 +349,6 @@ pub fn initialize_gpio_route() -> Result<Rp1InterruptRoute, Rp1InterruptRouteErr
     configure_root_complex_buses()?;
 
     let vendor_device = Rp1Config::read(0);
-
-    // ponytail: temporary bring-up dump, pairs with PI5_PCIE2_DIAG above.
-    // Delete together with it once the route works.
-    crate::serial_println!(
-        "PI5_PCIE2_BUS rc_bus={:#010x} rc_cmd={:#010x} vendor_device={:#010x}",
-        read32(BCM2712_PCIE2_BASE + PCI_PRIMARY_BUS),
-        read32(BCM2712_PCIE2_BASE + PCI_COMMAND_STATUS),
-        vendor_device,
-    );
 
     if vendor_device != RP1_VENDOR_DEVICE {
         return Err(Rp1InterruptRouteError::EndpointUnavailable(vendor_device));

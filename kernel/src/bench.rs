@@ -187,13 +187,6 @@ pub fn init() -> bool {
         }
     };
     gpio.set_function(BENCH_PWM_PIN, GpioFunction::Alt0);
-
-    // ponytail: temporary bring-up dump. Reports the sensor pad as firmware
-    // left it, before configure_input touches it, so one boot shows whether
-    // the input buffer (bit 6) was the reason a real edge raised no event.
-    // Delete with the PI5_PCIE2_* dumps once the route is proven.
-    let pad_before = gpio.pad_state(REFLEX_SENSOR_PIN);
-
     gpio.configure_input(REFLEX_SENSOR_PIN);
     gpio.configure_input(ESTOP_BUTTON_PIN);
     // Keep disconnected inputs deterministic. The external fail-safe e-stop
@@ -206,16 +199,6 @@ pub fn init() -> bool {
     // Sensor: rising edge only. Button: both edges (press + release).
     gpio.enable_interrupt(REFLEX_SENSOR_PIN, true, false);
     gpio.enable_interrupt(ESTOP_BUTTON_PIN, true, true);
-
-    crate::serial_println!(
-        "PI5_PAD_DIAG pin={} pad_before=0x{:08x} pad_after=0x{:08x} in_enable_was={} status=0x{:08x} level={}",
-        REFLEX_SENSOR_PIN,
-        pad_before,
-        gpio.pad_state(REFLEX_SENSOR_PIN),
-        pad_before & (1 << 6) != 0,
-        gpio.status_state(REFLEX_SENSOR_PIN),
-        gpio.read(REFLEX_SENSOR_PIN),
-    );
 
     // Build + load + attach the reflex (stop local PWM0/ch1 on the sensor edge).
     let insns = kernel_bpf::bench::reflex_pwm_program(BENCH_PWM_CHIP, BENCH_PWM_CHANNEL, 0);
