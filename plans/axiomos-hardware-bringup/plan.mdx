@@ -1,0 +1,395 @@
+---
+title: "axiomos v0.3 and v0.4 hardware benchmark campaign"
+brief: "A bench-first plan to boot the Raspberry Pi 5, validate v0.3 physical I/O and actuation safety, then integrate the Shrike-Lite V1.0/R0.4 and run only the v0.4 robot benchmarks."
+kind: "plan"
+localOnly: true
+---
+
+# axiomos v0.3 and v0.4 hardware benchmark campaign
+
+This campaign has one purpose: produce attributable physical evidence for the requested v0.3 and v0.4 acceptance benchmarks on the confirmed Raspberry Pi 5 8 GB and Shrike-Lite V1.0/R0.4 bench. Boot, signing, host tests, firmware fixes, and wiring review are prerequisites only. General performance work, Linux comparisons, OSDI experiments, patent gates, v0.5 scope, and unrelated release closure are outside this plan.
+
+Done means every row in the acceptance matrix has one of three honest outcomes: **pass with retained raw evidence**, **fail with retained raw evidence**, or **blocked with the exact missing prerequisite named**. Source code, simulation, a roadmap statement, or an earlier reconnaissance run never substitutes for a physical result.
+
+<Callout tone="decision">
+
+The benchmark source of truth is the checked-out implementation plus the campaign artifacts. The numerical thresholds copied into this plan are operator-selected acceptance targets, not existing performance claims. The current benchmark authority explicitly says ARM-A and GPIO latency are not yet measured.
+
+</Callout>
+
+<Callout tone="decision">
+
+Locked inputs: use a dedicated lab Ed25519 key; identify the board as Shrike-Lite **V1.0/R0.4**; start the FPGA project from the minimum Vicharak board files for that exact revision; power the Pi with the official 27 W USB-C supply; acquire a regulated, current-limited 6 V motor supply; and use the HC-SR04 interface specified below.
+
+</Callout>
+
+<Callout tone="risk">
+
+Do not flash the repository's current RP2040 binary. Its GPIO0/1 UART, GPIO2 PWM, GPIO4 PWM, and GPIO12 e-stop assignments conflict respectively with the Shrike configuration link, MCU LED, and FPGA power control. The current FPGA RTL also has no V1.0/R0.4 ForgeFPGA project, pin assignment, or physical six-bit-link receiver. These are benchmark-enablement blockers, not validated v0.4 hardware.
+
+</Callout>
+
+<Callout tone="risk">
+
+Pi 5 GPIO IRQ delivery is now implemented against RP1 IO_BANK0 MSI-X vector 0 / GIC interrupt ID 160 and has passed the AArch64 cross-build. It is not yet hardware-proven: a real slow-edge probe must produce `PI5_GPIO_IRQ_PROVEN`, deliver exactly once, clear the RP1 source, and return the parent status inactive without an interrupt storm before any N=10,000 run.
+
+</Callout>
+
+The campaign will freeze `acceptance.toml` before the first measured run. User-supplied requirements are: v0.3 GPIO N=10,000 with a target below 500 ns and a fallback below 1 µs, monitor overhead below 5 µs, exactly 1,000 invalid requests with zero escapes, and e-stop below 1 ms; v0.4 behavior-load reporting with a target below 100 ms, hook and sensor-to-actuator reporting, FPGA e-stop below 1 ms, and a 24-hour zero-panic soak. Statistics and v0.4 sample counts not stated by the user are proposed defaults in the tables below and may change only before `HIL_COMMIT`, never after seeing data.
+
+## What is confirmed
+
+| Item | Confirmed fact | Campaign use |
+|---|---|---|
+| Main computer | Raspberry Pi 5, 8 GB | Target for boot and all v0.3/v0.4 Pi measurements. |
+| Pi power | Official Raspberry Pi 27 W USB-C supply | Dedicated to the Pi; never powers the motors. |
+| FPGA/MCU board | Vicharak Shrike-Lite, sticker V1.0/R0.4 | Use only the upstream `hardware/shrike-lite/kicad/v1_r0.4/` electrical files. |
+| Shrike silicon | RP2040 plus Renesas ForgeFPGA with 1120 LUTs and 4 MB QSPI | Matches Vicharak's current hardware overview; physical pin use still comes from the R0.4 schematic. |
+| Logic analyzer | ElectroPi generic USB analyzer, 8 channels, 24 MHz maximum | 41.67 ns/sample. A 500 ns interval spans about 12 samples, so it can test the requested threshold, but it cannot characterize analog edge integrity. |
+| Motor driver | L298N module shown in the supplied front/back photographs | Inspect and continuity-test before power; exact module schematic and jumper state remain campaign metadata. |
+| Motors | 3–6 V dual-shaft geared TT DC motors | Record quantity and measure or source the stall-current specification before choosing the 6 V supply current rating. |
+| Sensor | HC-SR04 | Requires a 5 V supply and 5 V-to-3.3 V echo interface. |
+| Meter | Multimeter | Sufficient for continuity, rail, divider, polarity, and static current checks; not for sub-microsecond timing. |
+| Existing batteries | Rectangular 9 V batteries | Excluded from motor tests. They are above the motor's stated range and are not the controlled 6 V source required here. |
+| Planned motor source | Regulated 6 V supply | Not resolved until its current limit, continuous-current rating, and connector polarity are recorded. |
+
+The Shrike was observed enumerating over USB in its factory MicroPython mode during reconnaissance, and its factory `blink_all.bin` matched the current Vicharak copy. Repeat and record that check inside the campaign; it is not a v0.4 pass by itself.
+
+Primary hardware references are the [Vicharak repository](https://github.com/vicharak-in/shrike), [hardware overview](https://vicharak-in.github.io/shrike/hardware_overview.html), [Shrike pinout](https://vicharak-in.github.io/shrike/shrike_pinouts.html), [HC-SR04 electrical sheet](https://cdn.sparkfun.com/datasheets/Sensors/Proximity/HCSR04.pdf), and [RP2040 datasheet](https://datasheets.raspberrypi.com/rp2040/rp2040-datasheet.pdf). Pin the downloaded files or upstream commit hashes used by the campaign.
+
+## Evidence status before the campaign
+
+| Requested capability | Present in the checked-out source | What is still unproved |
+|---|---|---|
+| GPIO edge to BPF dispatch | `rpi5/gpio.rs::handle_interrupt` constructs `GpioEvent`, dispatches it, acknowledges RP1 MSI-X vector 0, and the bench auto-loads a GPIO23 reflex. | Cross-build passes; physical interrupt delivery, acknowledgement, missed-edge rate, and external GPIO23-to-GPIO12 latency remain unproved until the one-edge route probe passes. |
+| ARM-A gate | `kernel/src/actuation.rs` routes normal PWM/GPIO magnitude writes through the monitor. | Added physical-path overhead under the requested load and hardware configuration. |
+| Invalid-request containment | `actuation_property.rs::invalid_and_latched_request_sweep_has_zero_unsafe_escapes` runs two 1,000-request software sweeps. | A retained 1,000-request physical-output corpus with zero out-of-envelope outputs. |
+| Kernel e-stop | GPIO24 is routed directly to the kernel-owned e-stop in the bench feature. | Physical button-edge to physical PWM-low time. The current M-B log starts at IRQ entry, not at the button edge. |
+| Pi-to-Shrike link | The PL011 transport, codec/session/watchdog, motor routing, and inbound sensor-to-IIO dispatch exist in source. | Pin-safe wiring, physical framing, loss/corruption behavior, and timing on this R0.4 board. |
+| RP2040 controller | Codec, watchdog, L298N logic, and HC-SR04 polling have host tests. | The hardware file is explicitly unverified and currently uses conflicting Shrike pins. |
+| FPGA safety gate | `shrike_safety_gate.sv` and a self-checking simulation exist. | Synthesis, R0.4 pin mapping, the MCU-to-FPGA command transport, programmed bitstream, and physical latency. |
+| v0.4 benchmark harness | Behaviors and IIO dispatch paths exist. | There is no current v0.4 reducer for load time, hook latency, sensor-to-actuator latency, FPGA e-stop latency, or a 24-hour soak. |
+
+## Campaign flow
+
+<Diagram caption="Only the two benchmark campaigns are outcomes; everything above them is a prerequisite or safety gate." data={{"nodes":[{"id":"freeze","label":"Freeze campaign commit","detail":"lab key, hashes, clean tree","x":8,"y":10},{"id":"boot","label":"Pi 5 bench boot","detail":"serial capture, no peripherals","x":38,"y":10},{"id":"v03fix","label":"Close v0.3 measurement gaps","detail":"physical e-stop + paired overhead","x":68,"y":10},{"id":"v03","label":"Run v0.3","detail":"N≥10,000; 1,000 invalid requests","x":68,"y":42},{"id":"board","label":"R0.4 board profile","detail":"vendor files, safe pins, recoverable flash","x":8,"y":42},{"id":"unloaded","label":"Shrike unloaded integration","detail":"UART, HC-SR04, FPGA gate","x":38,"y":70},{"id":"powered","label":"Controlled motor gate","detail":"6 V, fuse, hard cut, wheels raised","x":68,"y":70},{"id":"v04","label":"Run v0.4","detail":"latencies, load time, soak","x":38,"y":94}],"edges":[{"from":"freeze","to":"boot","label":"attributable image"},{"from":"boot","to":"v03fix","label":"stable serial boot"},{"from":"v03fix","to":"v03","label":"reducer self-tests"},{"from":"freeze","to":"board","label":"pinned R0.4 source"},{"from":"v03","to":"unloaded","label":"v0.3 recorded"},{"from":"board","to":"unloaded","label":"pin review passes"},{"from":"unloaded","to":"powered","label":"all outputs safe"},{"from":"powered","to":"v04","label":"power gate passes"}]}} />
+
+## Master TODO list
+
+This is the execution checklist. Check items off in order; a later section supplies the detailed procedure and pass/fail rule.
+
+### A. Can be done now
+
+<Checklist items={[
+  {"id":"now-freeze","label":"Create a dedicated HIL branch from release/v0.5.0-alpha.2, record BASE_COMMIT 1c8a3397ef5e34ca5a7c34e12fda1a80a0664125, and freeze a clean HIL_COMMIT after benchmark-enablement changes."},
+  {"id":"now-campaign","label":"Create the campaign directory and record operator, UTC time, git status, toolchain, host, Pi serial/revision, Shrike V1.0/R0.4, photos, and every instrument identifier."},
+  {"id":"now-key","label":"Generate a dedicated lab Ed25519 key outside the repository; retain only the 32-byte public-key hash and signed-payload hash in campaign metadata."},
+  {"id":"now-tests","label":"Run the kernel BPF tests, v0.3 reducer self-test, Shrike link/control simulations, RP2040 release build from its crate directory, and FPGA RTL simulation."},
+  {"id":"now-vendor","label":"Pin Vicharak upstream commit 763d0a7dd9ebdfc3f61de148457d5c34f112f61e and import the minimum V1.0/R0.4 schematics/project evidence plus one vendor ForgeFPGA project scaffold and license notices."},
+  {"id":"now-driver","label":"Photograph and inspect the L298N front/back, record jumper positions, and use the multimeter to check for shorts between motor supply, 5 V, 3.3 V, outputs, and ground before power."},
+  {"id":"now-hcsr04","label":"Build the HC-SR04 echo divider from 2.2 kΩ and 3.3 kΩ 1% resistors plus a 1 kΩ trigger series resistor; validate the divided node at 3.0 V nominal before connecting an RP2040 pin."},
+  {"id":"now-plan-card","label":"Print or export one reviewed wiring card per stage; no wiring is changed while any involved rail is powered."}
+]} />
+
+### B. Obtain or positively identify before hardware execution
+
+<Checklist items={[
+  {"id":"get-sd","label":"Confirm a dedicated removable microSD card and card reader for the Pi image; record the exact block device and boot-partition mount before deployment."},
+  {"id":"get-uart","label":"Obtain a 3.3 V USB-UART adapter or Raspberry Pi Debug Probe for durable Pi boot logs; the logic analyzer is not the serial-console control path."},
+  {"id":"get-analyzer-spec","label":"Record the analyzer's exact USB identity, supported input-voltage range, threshold, channel skew, verified 24 MHz clock, driver, and CSV-export version; connect it only to reviewed 3.3 V or divided logic nodes."},
+  {"id":"get-analyzer-access","label":"Install and validate the logic-analyzer driver/udev access, export a known pulse train to CSV, and record the measured sample-clock error before campaign capture."},
+  {"id":"get-cooling","label":"Fit active cooling suitable for repeated and 24-hour Pi 5 operation; record fan/heatsink model and ambient temperature."},
+  {"id":"get-6v","label":"Obtain a regulated, current-limited 6 V motor supply whose continuous rating is at least the measured or documented simultaneous motor-start current."},
+  {"id":"get-5v-logic","label":"Provide a separate regulated 5 V L298N logic rail or a documented dual-output bench supply; at a 6 V motor input, do not assume the module's onboard 5 V regulator has enough dropout margin."},
+  {"id":"get-fuse","label":"Obtain an inline fuse, keyed connector, master motor-power switch, and wiring rated for the selected supply current."},
+  {"id":"get-estop","label":"Obtain a latching dual-NC-contact e-stop: one contact drives the FPGA estop_n fail-safe line; the second de-energizes a relay or rated electronic switch that cuts motor power independently."},
+  {"id":"get-level-parts","label":"Obtain 2.2 kΩ, 3.3 kΩ, 1 kΩ, and 10 kΩ 1% resistors, breadboard or perfboard, and short jumpers for the HC-SR04 and fail-safe e-stop inputs."},
+  {"id":"get-motor-suppression","label":"Obtain motor-noise suppression/decoupling parts appropriate to the exact L298N module and TT motors, plus a flyback diode or suppressed driver for the e-stop relay coil."},
+  {"id":"get-distance-jig","label":"Obtain a ruler/tape and rigid flat target so HC-SR04 distance and angle remain fixed during each capture chunk."},
+  {"id":"get-mechanical","label":"Record whether chassis, wheels, caster, motor mounts, and a wheels-off-ground fixture are available; acquire what is missing before calling any test a physical-robot or 24-hour robot soak."},
+  {"id":"get-thermal","label":"Obtain a way to retain motor-driver and motor temperature during the soak, plus current logging or a supply with logged current/limit events; a multimeter spot check alone does not authorize an unattended 24-hour powered run."},
+  {"id":"get-quarantine-9v","label":"Remove or clearly quarantine the rectangular 9 V batteries from the powered bench before the motor stages."}
+]} />
+
+### C. Benchmark-enablement code blockers
+
+<Checklist items={[
+  {"id":"code-boot-marker","label":"DONE IN SOURCE, PHYSICAL CAPTURE PENDING — PI5_BENCH_READY is emitted only after benchmark GPIO/PWM setup and reflex attachment succeed; the cold-boot UART capture must still reject panic, fatal, watchdog-reset, and missing-ready runs."},
+  {"id":"code-rp1-irq","label":"DONE IN SOURCE, PHYSICAL PROBE PENDING — RP1 IO_BANK0 MSI-X routing, demux, source acknowledgement, and PI5_GPIO_IRQ_PROVEN are implemented; prove them with one externally injected slow edge before acquisition."},
+  {"id":"code-v03-runner","label":"Add a deterministic sample runner that raises the unloaded PWM, waits for a stable armed state, accepts exactly one external edge, records a sample ID, and re-arms only after the response; do the equivalent release/re-arm sequence for e-stop samples."},
+  {"id":"code-v03-overhead","label":"Change the v0.3 bench to report paired unloaded MMIO baseline and monitor+MMIO timings, then calculate added_ns over N≥10,000; keep the bypass baseline bench-only and physically disconnected from actuators."},
+  {"id":"code-v03-estop","label":"Extend scripts/benchmark/analyze-v03.py to measure external GPIO24 falling edge to physical GPIO12 PWM-low, not only IRQ-entry-to-safe M-B logs; require one input/response pair per sample ID so missed edges cannot disappear from the statistics."},
+  {"id":"code-v03-invalid","label":"Add a deterministic 1,000-request invalid corpus and correlate each request with audit decision plus captured output duty; Reject must be low and Clamp must remain inside the configured envelope."},
+  {"id":"code-r04-profile","label":"Move Shrike pins into an explicit V1.0/R0.4 board profile; remap UART, PWM/direction, HC-SR04, and e-stop observation away from GPIO0–4 and GPIO12–15 until the FPGA configuration/runtime handoff deliberately owns them."},
+  {"id":"code-r04-flash","label":"Define W25Q32 firmware/FPGA-bitstream flash regions with linker overlap/size checks, build from firmware/shrike/rp2040 so crate-local linker configuration is applied, pin the ELF-to-UF2 tool/command, and retain ELF/UF2 hashes before flashing."},
+  {"id":"code-r04-recovery","label":"Cache and hash a verified V1.0/R0.4-compatible factory UF2 plus the factory main.py and blink_all.bin before the first custom flash; prove the complete restore path, not BOOTSEL enumeration alone."},
+  {"id":"code-fpga-tool","label":"Pin the Renesas Go Configure/ForgeFPGA Workshop version and build host; port the safety gate to the supported Verilog-2005 subset if the tool rejects SystemVerilog, then retain synthesis/programming logs."},
+  {"id":"code-fpga-project","label":"Create the ForgeFPGA project from the pinned vendor scaffold, add exact R0.4 pin assignments, implement the specified post-configuration SPI command plus two-PWM runtime link, and route both L298N enable outputs only through the FPGA gate."},
+  {"id":"code-v04-markers","label":"Add machine-readable v0.4 markers for behavior load→verify→admit→activate, IIO echo completion, motor command, link loss, e-stop, panic, and soak heartbeat; add a reviewed spare Pi debug-GPIO hook-entry marker and calibrate its write overhead for analyzer timing."},
+  {"id":"code-v04-reducer","label":"Add scripts/benchmark/analyze-v04.py with self-tests, sample-count checks, explicit time boundaries, percentile output, soak-gap detection, and nonzero exit on missing/duplicate markers."}
+]} />
+
+## Electrical decisions
+
+### HC-SR04 interface
+
+Use a passive echo divider for the first campaign:
+
+```text
+Shrike 5 V OUT ---- HC-SR04 VCC
+Shrike GND -------- HC-SR04 GND -------- logic analyzer GND
+
+RP2040 TRIG ---- 1.0 kΩ ---- HC-SR04 TRIG
+
+HC-SR04 ECHO ---- 2.2 kΩ ----+---- RP2040 ECHO input
+                              |
+                             3.3 kΩ
+                              |
+                             GND
+```
+
+At a 5.0 V echo, the input node is `5.0 × 3.3 / (2.2 + 3.3) = 3.0 V`. The RP2040 specifies a 2.0 V minimum high threshold and an `IOVDD + 0.5 V` absolute input limit at 3.3 V I/O, so 3.0 V provides both a valid high and margin below the absolute limit. The HC-SR04 sheet specifies a 5 V supply and a 10 µs TTL trigger. Drive its trigger from 3.3 V through the 1 kΩ resistor; if this particular clone does not reliably recognize 3.3 V, add a 5 V 74AHCT-family buffer for the trigger rather than altering the echo divider.
+
+Before connection, power only the 5 V sensor rail, substitute a steady 5 V input at the divider, and confirm approximately 3.0 V at its output with the multimeter. Never connect HC-SR04 Echo directly to the Shrike. Do not power the sensor from the 6 V motor rail or the L298N module's noisy regulator. The Shrike may supply the sensor from its 5 V header while it is USB-powered only after the R0.4 schematic confirms the header direction; do not simultaneously inject external 5 V into that header.
+
+### E-stop and motor power
+
+The first v0.3 software e-stop uses Pi GPIO24 with an active-low input and no motor attached. Use the same fail-safe NC-contact pattern as the v0.4 gate—normal state held high through the closed contact, press/open state pulled low—then update the stale pull-up/press-to-ground bench comment to match the tested wiring. The Vicharak board itself does not provide the required independent robot e-stop; it is external campaign hardware.
+
+- A latching NC contact connects 3.3 V to the chosen FPGA `estop_n` input; a 10 kΩ pull-down makes a press, broken wire, or disconnected switch assert low.
+- A second independent NC contact keeps a normally energized relay or rated power switch enabled. Pressing the e-stop or breaking its cable removes motor power.
+- The FPGA output, never an RP2040 bypass, is the only signal connected to each L298N enable input.
+- Remove the L298N ENA/ENB high-enable jumpers. Fit and verify a 10 kΩ pull-down at each enable so reset, unpowered, and unconfigured controllers default to motor-disabled.
+- Keep Pi power, Shrike logic power, L298N 5 V logic power, and 6 V motor power separately documented and switchable. Join grounds at the reviewed star/reference point; never join unrelated positive rails. Validate that the specific L298N module recognizes 3.3 V FPGA/RP2040 highs and does not back-power either controller when its 5 V logic rail is absent.
+- The relay or electronic cut must be DC-rated above the fused combined stall current. Suppress a relay coil with the correct flyback device so release transients do not reset the controllers.
+
+Choose the exact FPGA input/output pins only after the R0.4 schematic and ForgeFPGA I/O planner agree. Record powered-off continuity from each selected header pin to its intended destination.
+
+### Shrike internal link and Pi UART
+
+Vicharak documents GPIO12 as FPGA PWR, GPIO13 as FPGA EN, GPIO0–3 as dual-purpose FPGA configuration/runtime signals, and GPIO14/15 as internally connected to FPGA pins 18/17 by default. Those pins require an explicit configuration-to-runtime ownership handoff.
+
+Use this minimum runtime contract after successful FPGA configuration:
+
+- GPIO2 is SPI clock, GPIO1 is chip-select/frame, GPIO3 carries RP2040-to-FPGA command data, and GPIO0 returns FPGA ready/status. These are the same four configuration-capable lines, reassigned only after the FPGA positively reports ready.
+- GPIO14 and GPIO15 carry left and right RP2040 PWM into FPGA pins 18 and 17. They are not used as external header I/O.
+- SPI commands are fixed-length, versioned frames containing sequence, signed left/right per-mille commands, flags, and CRC. The FPGA commits both commands atomically only after a complete valid frame; malformed, replayed, stale, or reset state clears command-valid and forces both PWM outputs low.
+- A directly wired external `estop_n` input and two selected FPGA header outputs remain outside this six-bit link. Exact pins come from the R0.4 schematic and I/O planner.
+
+The [current Renesas support answer](https://en-support.renesas.com/knowledgeBase/22509228) limits the Workshop HDL flow to Verilog-2005, so the existing `.sv` simulation is not synthesis proof.
+
+For the external Pi link, use this candidate only after the R0.4 schematic and continuity review:
+
+| Pi 5 | Shrike-Lite RP2040 | Rule |
+|---|---|---|
+| GPIO14 / UART TX | GPIO17 / UART0 RX | 3.3 V signal only |
+| GPIO15 / UART RX | GPIO16 / UART0 TX | 3.3 V signal only |
+| GND | GND | Connect ground before TX/RX |
+
+Power the Pi from its 27 W supply and Shrike from its own USB-C connection. Do not connect 5 V or 3.3 V rails between them.
+
+## Campaign artifact contract
+
+Create one immutable directory outside normal Cargo targets:
+
+```text
+axiomos-hil-<UTC>/
+  00-metadata/       campaign.toml, acceptance.toml, photos, wiring, tool versions
+  01-preflight/      commands, host tests, RTL simulation, build logs
+  02-pi-boot/        retained bench image, hashes, UART cold/warm boot logs
+  03-v03/            serial logs, analyzer CSV, request corpus, summary.json
+  04-shrike-r04/     vendor source manifest, firmware/UF2, Forge project, bitstream
+  05-v04-unloaded/   UART/link/sensor/FPGA fault-injection captures
+  06-v04-powered/    supply checks, motor tests, benchmark captures, soak log
+  SHA256SUMS
+```
+
+Every result records the frozen commit, dirty-tree state, exact command, Rust/tool versions, Pi boot firmware, image hash, lab public-key hash, signed-startup hash, RP2040 firmware hash, FPGA bitstream hash, wiring revision, analyzer rate, supply settings, raw-log hash, exclusions, and stop conditions. Failed runs remain in the directory.
+
+## Stage 0 — freeze, sign, build, and boot the Pi
+
+1. Create a HIL branch. Make only the benchmark-enablement changes listed above, pass review, then record a clean immutable `HIL_COMMIT`.
+2. Generate the dedicated lab key outside the repository. The CLI creates a PKCS#8 private key and a raw 32-byte public key:
+
+```sh
+cargo run --locked --manifest-path userspace/tools/rk_cli/Cargo.toml -- key generate --output /secure/axiomos-v03-v04-lab
+test "$(wc -c < /secure/axiomos-v03-v04-lab.pub)" -eq 32
+sha256sum /secure/axiomos-v03-v04-lab.pub
+```
+
+Keep `/secure/axiomos-v03-v04-lab.key` out of the repository and campaign bundle. Build and sign one explicit startup object:
+
+```sh
+clang -target bpf -O2 -c examples/bpf/hello.bpf.c -o /secure/axiomos-v03-v04-startup.bpf.o
+cargo run --locked --manifest-path userspace/tools/rk_cli/Cargo.toml -- sign --input /secure/axiomos-v03-v04-startup.bpf.o --output /secure/axiomos-v03-v04-startup.rbpf --key /secure/axiomos-v03-v04-lab.key
+cargo run --locked --manifest-path userspace/tools/rk_cli/Cargo.toml -- verify --input /secure/axiomos-v03-v04-startup.rbpf --key /secure/axiomos-v03-v04-lab.pub
+```
+
+Record only hashes and the key ID. This key authenticates the userspace startup container; the v0.3 reflex is kernel-constructed raw bytecode and is trusted by its in-kernel origin, not by this signature. Do not describe the lab key as authenticating the reflex.
+
+3. Run preflight:
+
+```sh
+cargo test --locked -p kernel_bpf --features embedded-profile
+python3 -B scripts/benchmark/analyze-v03.py --self-test
+cargo test --locked -p shrike_link
+cargo test --locked -p shrike_control
+cargo test --locked -p shrike_rp2040_host_sim
+scripts/verify/fpga-safety-gate.sh
+(cd firmware/shrike/rp2040 && cargo build --locked --release)
+```
+
+The RP2040 build is compilation evidence only until the R0.4 profile is merged and reviewed.
+
+4. Build and retain the Pi bench image.
+
+`/secure` was a ramdisk and did not survive. The public key and the signed
+startup object were recovered from `/tmp` on 2026-07-21 and are now kept in
+`~/.local/share/axiomos-lab` (hashes in that directory's `SHA256SUMS` match
+every `02-pi-boot/image-*/build.toml`). The matching private key is gone, so
+these two files cannot be regenerated — signing a new startup object requires
+a new keypair, which changes `trusted_key_sha256` and breaks comparison with
+runs 01-09.
+
+```sh
+export AXIOM_BPF_TRUSTED_KEY_PATH=~/.local/share/axiomos-lab/axiomos-v03-v04-lab.pub
+export AXIOM_SIGNED_BPF_STARTUP_PATH=~/.local/share/axiomos-lab/axiomos-v03-v04-startup.rbpf
+cargo xtask build rpi5 -- release embedded-rpi5,bench
+sha256sum -c target/aarch64-unknown-none/release/rpi5-artifacts.sha256
+```
+
+Copy the image, ELF, embedded rootfs, build manifest, and hashes to `02-pi-boot/image/` before any later build overwrites the target paths.
+
+5. Dry-run deployment against the mounted Pi boot partition, verify it is the intended removable microSD, deploy, sync, and safely unmount:
+
+```sh
+cargo xtask deploy rpi5 --dry-run -- /path/to/pi-boot
+cargo xtask deploy rpi5 -- /path/to/pi-boot
+sync
+```
+
+6. With no 40-pin peripherals connected, configure and start raw 115200 8N1 UART capture before applying Pi power:
+
+```sh
+PORT=/dev/serial/by-id/<pi-debug-uart>
+stty -F "$PORT" 115200 cs8 -cstopb -parenb raw -echo -ixon -ixoff
+timeout 120s stdbuf -oL cat "$PORT" | tr -d '\r' | tee /path/to/02-pi-boot/cold-01.log
+```
+
+Use a capture wrapper with `pipefail` for the real campaign so a failed `cat`, timeout before ready, or failed `tee` cannot look successful. Run three cold boots. Each must reach `PI5_BENCH_READY`, show the reflex load/attach marker, remain observable for 120 seconds, and contain no panic/fatal/watchdog-reset marker. Record any undervoltage or thermal warning. A warm run is recorded only if a deterministic software-reset path exists.
+
+**Gate 0:** three cold boots from the exact retained image pass. Otherwise v0.3 wiring does not begin. `PI5_BENCH_READY` proves initialization only; it does not prove RP1 GPIO IRQ delivery.
+
+## Stage 1 — run and validate v0.3
+
+### Wiring
+
+Shrike remains in factory MicroPython mode and acts only as an external 3.3 V pulse generator on a schematic-reviewed free pin such as GPIO22. Use an in-memory REPL script; do not overwrite its factory `main.py`. Connect that stimulus to Pi GPIO23 (physical pin 16) and analyzer channel 0. Connect Pi GPIO12/PWM0 channel 1 (physical pin 32) to analyzer channel 1. Connect the software e-stop button at Pi GPIO24 (physical pin 18) to analyzer channel 2. Grounds are common; no motor driver or motor is connected.
+
+Configure 24 MHz acquisition and preserve CSV exports with columns `time_s,input_gpio23,pwm_ena_gpio12,estop_gpio24`. First inject one slow edge and require `PI5_GPIO_IRQ_PROVEN`: the correct GIC/RP1 source is identified, one event is delivered, the source is acknowledged, and no interrupt storm follows. Then run 100 slow pulses and confirm one rising input produces exactly one PWM-low response, followed by a clearly separated re-arm. The reducer must reject missing, duplicated, or out-of-order pairs. Then run each accepted campaign at N≥10,000.
+
+At 24 MHz the sample interval is 41.67 ns. Conservatively budget two sample intervals plus recorded clock error/channel skew for an input-to-output interval. `acceptance.toml` must define whether a threshold pass requires the measured statistic plus this uncertainty to remain below the limit. A result whose uncertainty overlaps 500 ns is **indeterminate at this instrument resolution**, not automatically a target pass.
+
+### v0.3 acceptance
+
+| ID | Measurement boundary | Sample rule | Pass rule | Required evidence |
+|---|---|---:|---|---|
+| V03-A | Paired unloaded PWM apply baseline versus the identical path with ARM-A | N≥10,000 pairs | `max(added_ns) < 5,000` | Raw serial counter samples, actual CNTFRQ, reducer output, image hash |
+| V03-B | Physical GPIO23 rising edge to physical GPIO12 PWM falling edge | N≥10,000 per declared load condition | Target: median below 500 ns; fallback classification: median below 1,000 ns; always report min/median/p95/p99/p99.9/max | Raw 24 MHz analyzer CSV plus internal M-C serial distribution |
+| V03-C | Deterministic invalid-request corpus through the real helper/monitor/apply path | Exactly 1,000 correlated requests | 0 escapes: every Reject produces safe-low; every Clamp remains inside the configured duty envelope | Corpus seed/hash, audit log, PWM capture/decoded duty, summary |
+| V03-D | Physical GPIO24 e-stop edge to physical GPIO12 PWM low | N≥100 physical latching-button cycles; an automated electrical-injection population is optional and must be reported separately | Maximum below 1 ms; any PWM high while e-stop is latched is immediate failure | Raw analyzer CSV, M-B serial distribution, bounce/exclusion policy |
+
+Run V03-B and V03-D after a cold boot and under one declared representative non-critical load. Do not discard slow samples unless the exclusion rule was written in `acceptance.toml` before capture. Internal CNTVCT numbers explain software segments; only analyzer edges prove the external boundary.
+
+**Gate 1:** all four rows have valid evidence. A fallback V03-B result is recorded as fallback, not rewritten as a sub-500 ns pass.
+
+## Stage 2 — make the Shrike-Lite V1.0/R0.4 flashable and recoverable
+
+1. Repeat the factory USB baseline. Record USB VID/PID/serial, MicroPython version, board string, factory file hashes, and a successful hard-reset return to factory behavior.
+2. Import the minimum upstream material under a versioned vendor directory:
+
+- R0.4 top, RP2040, FPGA, and power KiCad schematics plus the project file and exported schematic PDF.
+- One known-working vendor `.ffpga` example and its source as the ForgeFPGA scaffold.
+- Upstream commit, source paths, file hashes, GPL/CERN-OHL notices, and a `SOURCE.toml` describing local use.
+
+3. Produce `firmware/shrike/rp2040/src/board/shrike_lite_v1_r04.rs` or an equivalent single board profile. It must name every GPIO, voltage domain, reset state, alternate function, and internal FPGA relationship. No assignment is accepted from silkscreen alone.
+4. Define the FPGA lifecycle: RP2040 holds PWR/EN safe, configures the FPGA using the vendor sequence, waits for a positive ready condition, then reassigns GPIO0–3 and GPIO14/15 to the documented runtime protocol. Reset, failed configuration, stale command, invalid frame, and RP2040 watchdog all produce safe-low PWM outputs.
+5. Synthesize the existing safety function inside that project. The current parallel signed-duty RTL interface must be connected to a real decoded runtime command; it cannot remain a diagram-only port list.
+6. Retain the RP2040 ELF/UF2 and bitstream hashes. Verify BOOTSEL recovery and restore the factory image before flashing the custom firmware a second time.
+
+**Gate 2:** a second reviewer signs the R0.4 pin table; the custom firmware configures the FPGA, survives power cycle, and remains recoverable with no L298N or motors attached.
+
+## Stage 3 — unloaded v0.4 integration
+
+Add one boundary at a time:
+
+1. Connect Pi GPIO14/15 UART to Shrike GPIO17/16 as listed above, plus common ground. Keep separate USB power supplies and leave all positive rails unconnected between boards.
+2. Capture at least 1,000 valid frames, then inject CRC errors, truncated frames, replayed sequence values, Pi TX silence, Shrike TX silence, and RP2040 reset. Each fault must reach the documented safe/link-down state without a spurious motor command.
+3. Connect the HC-SR04 through the validated interface. Capture trigger, divided Echo, Shrike-to-Pi Sensor frames, and IIO hook markers. Confirm at three fixed distances with the multimeter used only for rail verification, not distance timing.
+4. Connect RP2040 PWM/runtime-link inputs to the FPGA and the FPGA gated outputs to logic-analyzer channels. Exercise e-stop, commands below/at/above the envelope, stale commands, reset, and link loss. Both outputs must be low whenever any safe condition is active.
+5. Connect the L298N logic inputs with the motor supply still off and motors disconnected. Verify direction and enable truth tables at the connector.
+
+**Gate 3:** every fault matrix row passes unloaded, and the logic analyzer proves there is no route around the FPGA enable outputs.
+
+## Stage 4 — controlled motor power
+
+Before applying 6 V, record the supply's model, current limit, polarity, current rating, fuse, wire rating, L298N jumper state, and e-stop relay behavior. Determine motor count and stall current from a trustworthy datasheet or a brief current-limited measurement of one motor at a time. Prefer supply readback or a rated shunt; do not intentionally route stall current through a handheld multimeter unless its fused current range, leads, and expected current are positively within rating. Size the supply, fuse, relay/DC switch, and wiring from combined simultaneous stall current while respecting the L298N's real thermal/current limits.
+
+First power-up order:
+
+1. Wheels raised and mechanically contained; L298N outputs disconnected from motors.
+2. With ENA/ENB jumpers removed and 10 kΩ pull-downs fitted, apply Shrike/FPGA logic and confirm both L298N enable nodes remain low through reset and configuration.
+3. Apply regulated L298N 5 V logic power, check for controller back-power, then apply 6 V motor power and verify expected input voltage and zero unexpected motor output.
+4. Remove motor power, connect one motor, restore power with a low predeclared duty cap, and test start/stop/e-stop.
+5. Repeat for the second channel, then both channels. At every step, pressing the physical e-stop must cut motor power and assert the FPGA gate.
+
+An unexpected motion, reset, current-limit event, excessive heating, reversed polarity, PWM while latched, or link-loss motion is a stop condition. Remove motor power and preserve the capture.
+
+**Gate 4:** both channels pass low-duty, direction, watchdog, link-loss, and independent e-stop tests with wheels raised.
+
+## Stage 5 — run and validate v0.4
+
+The reducer must define every boundary before data collection:
+
+| ID | Benchmark | Physical/software boundary | Sample/interval | Acceptance |
+|---|---|---|---:|---|
+| V04-A | Behavior load time | First load request byte/marker to successful verify→admit→attach→active marker | N≥100 per behavior | Report distributions; target maximum below 100 ms |
+| V04-B | Hook latency | Calibrated Pi debug-GPIO marker asserted at IIO/BPF hook entry to first final FPGA-gated PWM response | Proposed N≥1,000 per behavior | Report min/median/p95/p99/p99.9/max and marker-write calibration; no numerical pass threshold is invented |
+| V04-C | Sensor-to-actuator latency | HC-SR04 Trigger rising edge to first final FPGA-gated PWM response | Proposed N≥1,000 at each locked distance | Report the same distribution plus distance; no numerical pass threshold is invented |
+| V04-D | FPGA e-stop latency | Physical `estop_n` assertion at the FPGA pin to both final PWM outputs low | N≥100 physical latching-button cycles; an automated electrical-injection population is optional and must be reported separately | Maximum below 1 ms; report analyzer quantization and measured minimum |
+| V04-E | Continuous behavior soak | Successful behavior activation to 24 hours of uninterrupted heartbeat and controlled behavior | 24 hours | 0 kernel panics, 0 uncontrolled motions, 0 missed e-stop tests, 0 unplanned resets; all watchdog/thermal/current-limit events reported |
+
+Run `forward_drive`, `obstacle_stop`, and `wall_follow` only if their checked-in builders still exist and their real hardware preconditions are documented. “Software present” is not proof that a behavior is safe or meaningful on the assembled rover.
+
+Use chunked analyzer captures for V04-B/C if a continuous capture would overrun memory. Each chunk carries monotonic sample IDs, starts and ends in a known state, and is rejected on an unexplained time gap or input/response count mismatch.
+
+For V04-E, start with a one-hour supervised pilot. Proceed to 24 hours only after the e-stop power cut, fuse, duty cap, current logging, temperature logging, stable chassis/wheels-off-ground fixture, and stop automation pass. The operator may instead run a 24-hour logic-only soak with motor power removed, but it must be labelled **logic-only** and cannot satisfy the requested physical-robot soak row.
+
+**Gate 5:** all v0.4 rows are classified from retained data. A benchmark without a numeric target is reported, not converted into an arbitrary pass claim.
+
+## Result publication
+
+Run the reducers against copies of the raw data, never edit the raw captures, and hash all artifacts:
+
+```sh
+python3 -B scripts/benchmark/analyze-v03.py --serial /path/to/03-v03/bench.log --logic /path/to/03-v03/logic.csv
+
+python3 -B scripts/benchmark/analyze-v04.py --campaign /path/to/axiomos-hil-<UTC>/06-v04-powered
+
+sha256sum -c /path/to/axiomos-hil-<UTC>/SHA256SUMS
+python3 -B scripts/verify/benchmark-provenance.py
+```
+
+Add `docs/performance/evidence/<HIL_COMMIT>/manifest.toml` and update `docs/performance/current-results.md` only after a human reviews wiring, hashes, raw captures, exclusions, and stop conditions. Publish failed or fallback classifications alongside passes. Do not claim “non-bypassable,” “real robot,” “24-hour soak,” or a latency bound beyond the exact measured boundary.
+
+## Final go/no-go audit
+
+<Checklist items={[
+  {"id":"final-scope","label":"The results contain only v0.3/v0.4 benchmark claims and prerequisites; no Linux, OSDI, patent, v0.5, or production-safety claim leaked in."},
+  {"id":"final-provenance","label":"Every number traces to HIL_COMMIT, an exact image/firmware/bitstream hash, raw capture, command, instrument configuration, and reducer version."},
+  {"id":"final-v03","label":"V03-A through V03-D are each pass, fallback where explicitly allowed, fail, or blocked—never assumed from source or simulation."},
+  {"id":"final-r04","label":"The flashed firmware and FPGA project are explicitly for Shrike-Lite V1.0/R0.4 and contain no unresolved GPIO0–4 or GPIO12–15 conflict."},
+  {"id":"final-power","label":"The 9 V batteries were not used; the 6 V source, fuse, current limit, independent e-stop cut, and temperature/current evidence are retained."},
+  {"id":"final-v04","label":"V04-A through V04-E are classified from real hardware data, with logic-only soak clearly separated from physical-robot soak."},
+  {"id":"final-failures","label":"All failed runs and anomalies remain retained and linked to corrective work before any retry."}
+]} />
