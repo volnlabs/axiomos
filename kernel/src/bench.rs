@@ -192,6 +192,104 @@ pub fn report_gpio_irq_probe(
     }
 }
 
+/// V03-C containment corpus: fire a deterministic set of 1000 invalid /
+/// out-of-envelope actuation requests through the REAL ARM-A monitor decision
+/// (the same `decide().apply()` the guards use) and count "escapes" — any
+/// applied value outside the channel's envelope, or any unknown-channel request
+/// that did not drive the universal safe value 0. Runs the monitor logic only
+/// (no MMIO), and avoids the bench's own channels so it cannot disturb the
+/// reflex arm. Emits `PI5_V03C n=.. escapes=.. rejects=.. clamps=.. seed=..`.
+#[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+pub fn run_containment_corpus() {
+    use kernel_bpf::actuation::{
+        ActuationKind, ActuationRequest, AuditSource, Authority, ChannelId,
+    };
+
+    const N: u32 = 1000;
+    const SEED: u64 = 0x5652_3033_4300_0001;
+    let mut rng = SEED;
+    let mut next = || {
+        rng = rng
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (rng >> 33) as u32
+    };
+
+    let now = crate::time::get_kernel_time_ns();
+    let mut escapes = 0u32;
+    let mut safed = 0u32;
+
+    let mut mon = crate::actuation::ACTUATION_MONITOR.lock();
+    for _ in 0..N {
+        let r = next();
+        let kind = if r & 1 == 0 {
+            ActuationKind::PwmDuty
+        } else {
+            ActuationKind::GpioLevel
+        };
+        // Draw channels including invalid ones, but never the bench's own
+        // channel/pin (PWM ch1 / GPIO12) so the reflex arm state stays clean.
+        let channel = match kind {
+            ActuationKind::PwmDuty => match (r >> 1) % 5 {
+                0 => 0,  // invalid (0-based / below 1) -> reject
+                1 => 2,  // valid
+                2 => 3,  // valid-or-invalid depending on PWM_CHANNELS
+                3 => 99, // invalid -> reject
+                _ => 2,
+            },
+            ActuationKind::GpioLevel => {
+                let p = ((r >> 1) % 40) as u8; // includes >=28 (invalid)
+                if p == BENCH_PWM_PIN || p == REFLEX_SENSOR_PIN || p == ESTOP_BUTTON_PIN {
+                    5
+                } else {
+                    p
+                }
+            }
+        };
+        let value = match r % 4 {
+            0 => r % 512,   // frequently over the duty envelope
+            1 => 0,         // safe
+            2 => r % 3,     // small (in range for gpio, low duty for pwm)
+            _ => u32::MAX,  // extreme -> must clamp/reject
+        };
+        let ch = ChannelId {
+            kind,
+            chip: 0,
+            channel,
+        };
+        let (applied, code) = mon
+            .decide(
+                ActuationRequest { ch, value },
+                Authority::Learned,
+                AuditSource::LearnedBehavior,
+                now,
+            )
+            .apply();
+        // Containment invariant: a known channel must apply within [min,max];
+        // an unknown channel must apply the universal safe value 0.
+        let contained = match mon.cached_envelope(ch) {
+            Some(env) => applied >= env.min && applied <= env.max,
+            None => applied == 0,
+        };
+        if !contained {
+            escapes += 1;
+        }
+        // code < 0 marks a policy intervention (Reject/Safe drove the safe value).
+        if code < 0 {
+            safed += 1;
+        }
+    }
+    drop(mon);
+
+    crate::serial_println!(
+        "PI5_V03C n={} escapes={} safed={} seed=0x{:016x}",
+        N,
+        escapes,
+        safed,
+        SEED
+    );
+}
+
 /// Boot-time bench setup (Pi 5 only): arm the sensor + button pin IRQs and
 /// auto-load the reflex program attached to the sensor's rising edge.
 #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
@@ -216,6 +314,11 @@ pub fn init() -> bool {
             return false;
         }
     };
+
+    // V03-C: prove on-device that no invalid/out-of-envelope request escapes the
+    // monitor. Runs before the reflex is armed; monitor-decision only, no MMIO.
+    run_containment_corpus();
+
     // Configure the reflex output pin (GPIO12). GPIO mode drives it as a plain
     // GPIO output; PWM mode routes it to the PWM0 peripheral (Alt0).
     match BENCH_REFLEX_OUTPUT {
