@@ -172,7 +172,9 @@ LOGIC_PID=$!
 
 sleep 1
 mpremote connect "$SHRIKE_UART" exec \
-  "from machine import Pin; import time; p=Pin(22, Pin.OUT); p.value(0); time.sleep_ms(500); print('MULTIPULSE_START'); [(p.value(1), time.sleep_ms($PULSE_HIGH_MS), p.value(0), time.sleep_ms($PULSE_LOW_MS)) for _ in range($PULSE_COUNT)]; print('MULTIPULSE_DONE')"
+  "from machine import Pin; import time; p=Pin(22, Pin.OUT); p.value(0); time.sleep_ms(500); print('MULTIPULSE_START')
+for _ in range($PULSE_COUNT): p.value(1); time.sleep_ms($PULSE_HIGH_MS); p.value(0); time.sleep_ms($PULSE_LOW_MS)
+print('MULTIPULSE_DONE')"
 
 wait "$LOGIC_PID"
 LOGIC_STATUS=$?

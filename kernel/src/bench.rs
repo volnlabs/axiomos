@@ -118,12 +118,11 @@ pub fn take_gpio_irq_entry() -> u64 {
 }
 
 /// Report monitor decision overhead (M-A). Logged on every guarded actuation.
+/// Emits a compact serial marker so a host reducer can build the distribution
+/// (`log::info` does not reach the Pi UART).
 #[inline]
 pub fn report_monitor_overhead(decide_cycles: u64) {
-    log::info!(
-        "[bench] M-A monitor_overhead_ns={}",
-        cycles_to_ns(decide_cycles)
-    );
+    crate::serial_println!("PI5_MA ns={}", cycles_to_ns(decide_cycles));
 }
 
 /// Report edge->actuate latency for the GPIO IRQ currently in flight (M-C).
@@ -135,13 +134,9 @@ pub fn report_edge_to_actuate(kind: &str, channel: u8, value: u32) {
         return;
     }
     let ns = cycles_to_ns(now_cycles().wrapping_sub(start));
-    log::info!(
-        "[bench] M-C edge->{}-apply ch={} val={} latency_ns={}",
-        kind,
-        channel,
-        value,
-        ns
-    );
+    // Compact serial marker for the V03-B latency distribution (edge -> actuate,
+    // M-C). One line per sensor edge; the host reducer parses `ns=`.
+    crate::serial_println!("PI5_MC ns={} kind={} ch={} val={}", ns, kind, channel, value);
 }
 
 /// Handle the physical e-stop button (M-B), called from the GPIO IRQ handler
