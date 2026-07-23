@@ -1,0 +1,27 @@
+schema_version = 1
+purpose = "V03-B Phase A: GPIO-level reflex output (armed high, driven low on sensor edge) - validates the measurement rig independent of the PWM clock"
+source_commit = "03a4137f9fe450ad57fea57223051e800a0d4068"
+worktree_dirty = true
+profile = "release"
+features = ["embedded-rpi5", "bench"]
+build_command = "cargo xtask build rpi5 -- release embedded-rpi5,bench"
+bench_reflex_output = "Gpio"
+trusted_key_sha256 = "16daa2cd24e9dc1dad1a85ce2900dbc117055e9e46c4282a53d3d6ef10346ff3"
+startup_rbpf_sha256 = "2aeb7979945f72f87ed9fcfd07bc1a9e685464dff7b41c4133a385f2dbe8eed5"
+kernel_sha256 = "98a0f90255aa641271b35fa6c5ff2e1db4716dc737ca0b407970c4e4e50f9075"
+kernel8_sha256 = "8aa77fd7bba04f748ccdae8973cece668742e0244466c81b6528887b6ce3272d"
+disk_sha256 = "fde6f1e436369e3e999f18b5063668fcb9625ceac9950d6d4851d2c859d751cc"
+expected_markers = ["PI5_PAD_SELFTEST", "PI5_OUT_ARM", "PI5_BENCH_READY", "PI5_GPIO_IRQ_PROVEN", "SIGNED_BPF_LOAD_OK"]
+forbidden_markers = ["PI5_BENCH_FAIL", "panic"]
+
+[test]
+requires = "e-stop released (GPIO24 held high), R1 220 ohm, D0=GPIO23, D1=GPIO12"
+expect = "PI5_OUT_ARM mode=gpio code=0 estop_asserted=false; D1/GPIO12 armed HIGH at boot, one falling edge when the GPIO23 pulse fires the reflex"
+note = "GPIO output path uses guard_gpio -> apply_gpio_value (set_high/set_low), no PWM clock. Phase B (image-v03-pwm-*) covers real PWM once clk_pwm0 is fixed."
+
+[result]
+probe = "03-gpio/shrike-gpio23-pulse-23"
+sensor_edge_to_gpio_edge_ns = 9250
+sample = "222 @ 24 MHz (41.7 ns/sample); D1 armed high at sample 0, falls at 222"
+arm = "PI5_OUT_ARM mode=gpio code=0 estop_asserted=false"
+note = "single sample; interpreted-BPF reflex through the full ARM-A monitor. Above the <1us plan target - a JIT/native reflex is the path to sub-us, separate work. Rig validated."

@@ -234,12 +234,37 @@ cargo xtask bench verifier -- "$CAMPAIGN/verifier-cost.log" \
 - [ ] Use the `bench` image only and record the input stimulus and the logic
   analyzer clock calibration.
 - [ ] Capture at least: GPIO edge, IRQ entry, BPF dispatch, monitor decision,
-  and final PWM transition. Preserve raw analyzer exports, not screenshots
+  and final output transition. Preserve raw analyzer exports, not screenshots
   alone.
 - [ ] Report distribution statistics (sample count, min/median/p95/p99/max),
   trigger configuration, analyzer sample rate, and all excluded samples.
 - [ ] Repeat after cold boot, warm boot, and representative non-critical load.
   Do not call a single best run a latency bound.
+
+#### V03-D unloaded e-stop diagnostic
+
+The repeated e-stop test uses an explicit diagnostic feature that re-arms the
+GPIO12 bench output after each physical release. It is for an unloaded HIL rig
+only and must never be enabled in a production image:
+
+```sh
+cargo xtask build rpi5 -- release embedded-rpi5,bench-estop-rearm
+```
+
+Remove any GPIO24-to-3.3 V/static-high jumper. With motors, motor drivers, and
+actuators disconnected, wire Shrike GPIO21 through 220 ohm to Pi GPIO24
+(physical pin 18), share ground, and connect analyzer D0 to GPIO24 and D1 to
+GPIO12. Run the retained 24 MHz, 100-press capture:
+
+```sh
+ACTUATORS_MOTORS_DISCONNECTED=YES scripts/hil/v03d-estop-cycle.sh
+```
+
+The harness refuses a normal bench image, requires successful re-arm markers,
+and ends with the active-low e-stop asserted. `scripts/hil/v03d-reduce.py`
+requires 100 or more ordered GPIO24-falling→GPIO12-falling pairs, a safe final
+state, and a maximum below 1 ms. Retain the UART log, `.sr` capture, deployed
+image hash, clean source commit, and exact build/flash commands.
 
 ## 6. Evidence review and readiness decision
 

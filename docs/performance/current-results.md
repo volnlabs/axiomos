@@ -1,10 +1,13 @@
 # axiomos benchmark evidence
 
-This page is the current benchmark authority. A number is publishable here only
-when its campaign records the exact source commit, toolchain, command, host or
-hardware boundary, tracked raw output, and SHA-256 hashes for both the raw log
-and the Cargo-reported benchmark executable. Methodology and unsupported legacy
-claims are retained in the [historical benchmark record](../archive/benchmarks/2026-06-legacy-benchmarks.md),
+This page is the current benchmark authority. A number is current release
+evidence only when its campaign records the exact source commit, toolchain,
+command, host or hardware boundary, tracked raw output, and SHA-256 hashes for
+both the raw log and measured artifact. Provisional lab observations may be
+retained in a separately labeled section, but they do not satisfy this
+publication contract and must not support release claims. Methodology and
+unsupported legacy claims are retained in the
+[historical benchmark record](../archive/benchmarks/2026-06-legacy-benchmarks.md),
 not silently presented as current results.
 
 ## Current attributable campaign
@@ -42,6 +45,47 @@ objective or a cross-machine comparison. Criterion's change annotations compare
 against an untracked local baseline and are not part of the published result;
 only the absolute intervals above are claimed.
 
+## Provisional Pi 5 v0.3 HIL observations
+
+These measurements are retained for engineering use, not as current release
+evidence. The deployed-image records all say `worktree_dirty = true`. Clean
+rebuilds of the subsequent commits produced different `kernel8.img` hashes, so
+the deployed binaries cannot be tied to exact source commits under the contract
+above. The tracked [capture notes](evidence/hil-v03-20260724/README.md) and
+[provisional hash manifest](evidence/hil-v03-20260724/provisional.toml) preserve
+the raw UART logs, sigrok captures, deployed-image hashes, and failed
+clean-rebuild comparisons.
+
+| Field | Value |
+|---|---|
+| Date | 2026-07-24 |
+| Toolchain | `nightly-2026-07-02`; `rustc 1.98.0-nightly (4c9d2bfe4 2026-07-01)` |
+| Hardware | Raspberry Pi 5 (8 GB, RP1); Shrike-Lite GPIO22 stimulus; fx2lafw logic analyzer at 24 MHz; Pi Debug Probe UART |
+| Boundary | GPIO23 sensor edge → verified BPF reflex → ARM-A monitor → GPIO12 GPIO-level actuation |
+| Timebase | on-chip `CNTVCT_EL0`, converted with `CNTFRQ_EL0` |
+| Reduction | `python3 scripts/hil/v03b-reduce.py --warmup 16 latency-smoke-uart.log latency-main-uart.log` |
+
+The two latency logs are separate cold boots of the same deployed image. The
+reducer drops 16 cold-cache/TLB samples from each log before pooling and uses
+nearest-rank percentiles.
+
+| Metric | n | median | p95 | p99 | p99.9 | max | target | observation |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| **M-A** monitor decision overhead (V03-A) | 10 164 | 37 ns | 55 ns | 55 ns | 55 ns | 55 ns | < 5 µs | target met; provenance provisional |
+| **M-C** IRQ-entry→actuate software path (V03-B) | 10 162 | 4.500 µs | 5.462 µs | 5.481 µs | 5.500 µs | 6.888 µs | < 1 µs | **target failed** |
+
+- The M-C sample-count requirement is met, but its latency requirement is not:
+  the median is 4.5 times the 1 µs target.
+- The single GPIO23-rising→GPIO12-falling analyzer sample was **9.25 µs**
+  (D1 fell at sample 222 at 24 MHz). It validates the rig only; it is not a
+  distribution or bound.
+- The V03-C log reports
+  `PI5_V03C n=1000 escapes=0 safed=450 seed=0x5652303343000001`. This is a
+  successful provisional observation, not an attributable acceptance result.
+- V03-D (physical e-stop edge→output low, N≥100) has not run.
+- No hardware-PWM latency is claimed; the tested output was GPIO-level because
+  RP1 `clk_pwm0` bring-up remains unresolved.
+
 ## Historical claim disposition
 
 | Legacy campaign | Disposition |
@@ -51,7 +95,7 @@ only the absolute intervals above are claimed.
 | Raspberry Pi OS/Linux comparison | Historical only. No tracked raw `dmesg`, `cyclictest`, binary, or artifact hashes. |
 | 2026-06 host verifier table | Superseded by the attributable `2ef74f0` campaign above; its raw Criterion output and executable hash were not retained. |
 | Pi 5 verifier/WCET calibration and admission tables | Historical only. Local UART text was not committed, and the kernel artifact was not hashed into a campaign manifest. |
-| ARM-A monitor and GPIO latency | Not measured; requires the physical HIL contract and retained serial/logic-analyzer captures. |
+| ARM-A monitor and GPIO latency | Provisional 2026-07-24 observations are retained above, but the dirty deployed-image source prevents promotion to attributable current evidence. |
 
 No QEMU, Pi, Linux, boot-time, interrupt-latency, WCET, or comparative-speed
 headline is current release evidence until it is rerun under this contract.

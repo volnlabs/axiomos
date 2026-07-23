@@ -6,8 +6,10 @@ overhead, M-A) lines and reports count + min/median/p95/p99/p99.9/max.
 
 Usage: v03b-reduce.py [--warmup N] <uart-log> [uart-log ...]
 
---warmup N   drop the first N M-C/M-A samples (cold cache/TLB). Default 0.
+--warmup N   drop the first N M-C/M-A samples from each input log
+             (cold cache/TLB after each boot). Default 0.
 """
+import math
 import re
 import sys
 
@@ -19,7 +21,7 @@ def pct(xs, p):
     # nearest-rank percentile on a sorted list
     if not xs:
         return 0
-    k = max(0, min(len(xs) - 1, round(p / 100.0 * (len(xs) - 1))))
+    k = max(0, min(len(xs) - 1, math.ceil(p / 100.0 * len(xs)) - 1))
     return xs[k]
 
 
@@ -44,11 +46,15 @@ def main(paths, warmup=0):
     mc, ma = [], []
     for p in paths:
         data = open(p, "rb").read()
-        mc += [int(m.group(1)) for m in MC.finditer(data)]
-        ma += [int(m.group(1)) for m in MA.finditer(data)]
+        path_mc = [int(m.group(1)) for m in MC.finditer(data)]
+        path_ma = [int(m.group(1)) for m in MA.finditer(data)]
+        if warmup:
+            path_mc = path_mc[warmup:]
+            path_ma = path_ma[warmup:]
+        mc += path_mc
+        ma += path_ma
     if warmup:
-        print(f"(dropping first {warmup} samples as warmup)")
-        mc, ma = mc[warmup:], ma[warmup:]
+        print(f"(dropping first {warmup} samples per input log as warmup)")
     # V03-B target: median < 500 ns (fallback < 1000 ns). V03-A: M-A < 5000 ns.
     summarize("M-C edge->actuate (V03-B software path)", mc, target_ns=1000)
     summarize("M-A monitor overhead (V03-A)", ma, target_ns=5000)

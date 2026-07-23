@@ -105,3 +105,8 @@ audit-fault-injection = ["kernel_physical_memory/fault-injection"]
 # Off by default — measurement/demo instrumentation, not for production images.
 # Enable alongside a profile, e.g. `--features embedded-rpi5,bench`.
 bench = []
+
+# Unloaded-HIL-only diagnostic: after a successful physical GPIO24 e-stop
+# release IRQ, re-arm the bench reflex output through the monitored guard path.
+# Never enable this in production; it implies `bench` but is otherwise opt-in.
+bench-estop-rearm = ["bench"]
