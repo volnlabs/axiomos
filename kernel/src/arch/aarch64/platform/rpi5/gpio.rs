@@ -107,6 +107,8 @@ mod pads {
     pub const PULL_MASK: u32 = 0b11 << PULL_SHIFT;
     /// Input buffer enable (bit 6).
     pub const IN_ENABLE: u32 = 1 << 6;
+    /// Output disable (bit 7). Must be clear for the pad to drive.
+    pub const OUT_DISABLE: u32 = 1 << 7;
 }
 
 /// Status register bit fields (from Linux pinctrl-rp1.c)
@@ -252,6 +254,53 @@ impl Rp1Gpio {
         }
         self.reg_ctrl(pin)
             .modify(|v| (v & !ctrl::OEOVER_MASK) | (ctrl::OEOVER_ENABLE << ctrl::OEOVER_SHIFT));
+        // Enable the pad output driver (clear output-disable) and keep the input
+        // buffer on so the driven level can be read back. RP1 leaves the pad
+        // output-disabled on pins firmware never claims, so OEOVER alone would
+        // not drive the pin.
+        self.reg_pad(pin)
+            .modify(|v| (v & !pads::OUT_DISABLE) | pads::IN_ENABLE);
+    }
+
+    /// Route a pad to its selected peripheral function as an output.
+    ///
+    /// `set_function` only sets FUNCSEL; the pad still needs its output driver
+    /// on. Force output-enable (OEOVER) and clear the pad output-disable so the
+    /// peripheral signal (e.g. PWM) actually reaches the pin.
+    pub fn configure_peripheral_output(&self, pin: u8, func: GpioFunction) {
+        self.set_function(pin, func);
+        self.reg_ctrl(pin)
+            .modify(|v| (v & !ctrl::OEOVER_MASK) | (ctrl::OEOVER_ENABLE << ctrl::OEOVER_SHIFT));
+        // Clear output-disable so the pad drives; keep the input buffer on so
+        // the driven level can be read back for the boot self-test.
+        self.reg_pad(pin)
+            .modify(|v| (v & !pads::OUT_DISABLE) | pads::IN_ENABLE);
+    }
+
+    /// Force a pad's output level via the CTRL output-override, independent of
+    /// its selected peripheral. `Some(true)` drives high, `Some(false)` low,
+    /// `None` restores normal (data from the peripheral/GPIO). Bring-up only.
+    pub fn force_output_override(&self, pin: u8, level: Option<bool>) {
+        assert!(pin < Self::NUM_PINS, "Invalid GPIO pin: {}", pin);
+        let ov = match level {
+            Some(true) => ctrl::OUTOVER_HIGH,
+            Some(false) => ctrl::OUTOVER_LOW,
+            None => 0,
+        };
+        self.reg_ctrl(pin)
+            .modify(|v| (v & !ctrl::OUTOVER_MASK) | (ov << ctrl::OUTOVER_SHIFT));
+    }
+
+    /// Read back a pad's PADS_BANK0 control word. Bring-up diagnostics.
+    pub fn pad_readback(&self, pin: u8) -> u32 {
+        assert!(pin < Self::NUM_PINS, "Invalid GPIO pin: {}", pin);
+        self.reg_pad(pin).read()
+    }
+
+    /// Read back a pad's CTRL word. Bring-up diagnostics.
+    pub fn ctrl_readback(&self, pin: u8) -> u32 {
+        assert!(pin < Self::NUM_PINS, "Invalid GPIO pin: {}", pin);
+        self.reg_ctrl(pin).read()
     }
 
     /// Configure a GPIO pin as input

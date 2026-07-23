@@ -34,12 +34,50 @@ pub fn reflex_pwm_program(chip: u32, channel: u32, duty: u32) -> Vec<BpfInsn> {
     ]
 }
 
+/// Build the reflex: `bpf_gpio_write(pin, level)` then `return 0`.
+///
+/// The GPIO-level variant of [`reflex_pwm_program`]: it drives a pad directly
+/// instead of a PWM channel, so it does not depend on the RP1 PWM functional
+/// clock. `bpf_gpio_write` is a 2-arg helper (no R3). The call still routes
+/// through the kernel actuation monitor (ARM-A) at runtime.
+pub fn reflex_gpio_program(pin: u32, level: u32) -> Vec<BpfInsn> {
+    vec![
+        BpfInsn::new(MOV64_IMM, 1, 0, 0, pin as i32), // r1 = pin
+        BpfInsn::new(MOV64_IMM, 2, 0, 0, level as i32), // r2 = level
+        BpfInsn::new(CALL, 0, 0, 0, HelperId::GpioSet as i32), // bpf_gpio_write(r1,r2)
+        BpfInsn::new(MOV64_IMM, 0, 0, 0, 0),          // r0 = 0
+        BpfInsn::new(EXIT, 0, 0, 0, 0),               // return r0
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bytecode::program::BpfProgType;
     use crate::profile::ActiveProfile;
     use crate::verifier::{Verifier, VerifyConfig};
+
+    #[test]
+    fn reflex_gpio_program_verifies() {
+        let insns = reflex_gpio_program(12, 0);
+        let result = Verifier::<ActiveProfile>::verify_with_config(
+            BpfProgType::Unspec,
+            &insns,
+            VerifyConfig {
+                allow_actuation: true,
+                ..VerifyConfig::default()
+            },
+        );
+        assert!(result.is_ok(), "gpio reflex program must pass the verifier");
+    }
+
+    #[test]
+    fn reflex_calls_gpio_set() {
+        let insns = reflex_gpio_program(12, 0);
+        assert_eq!(insns.len(), 5);
+        assert_eq!(insns[2].opcode, CALL);
+        assert_eq!(insns[2].imm, HelperId::GpioSet as i32);
+    }
 
     #[test]
     fn reflex_pwm_program_verifies() {
