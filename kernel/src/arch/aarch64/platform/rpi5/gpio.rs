@@ -63,6 +63,8 @@ mod reg {
     pub const STATUS: usize = 0x00;
     /// GPIO control register
     pub const CTRL: usize = 0x04;
+    /// Raw interrupt status before destination masking.
+    pub const INTR: usize = 0x100;
     /// Interrupt enable for the PCIe-facing IO_BANK0 output.
     pub const PCIE_INTE: usize = 0x11C;
     /// Interrupt status after masking for the PCIe-facing IO_BANK0 output.
@@ -144,6 +146,26 @@ mod irq_ctrl {
 /// RP1 GPIO Driver
 pub struct Rp1Gpio {
     base: usize,
+}
+
+/// Readback of the complete GPIO interrupt path inside IO_BANK0.
+#[derive(Debug, Clone, Copy)]
+pub struct Rp1GpioInterruptState {
+    pub status: u32,
+    pub control: u32,
+    pub pad: u32,
+    pub raw_interrupts: u32,
+    pub pcie_enable: u32,
+    pub pcie_status: u32,
+}
+
+#[inline(always)]
+fn device_sync() {
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: This is an ordering barrier only; it does not access memory.
+    unsafe {
+        core::arch::asm!("dsb osh", options(nostack, preserves_flags));
+    }
 }
 
 impl Rp1Gpio {
@@ -246,7 +268,6 @@ impl Rp1Gpio {
             .modify(|v| v | pads::IN_ENABLE | pads::SCHMITT);
     }
 
-
     /// Configure the pad's internal pull resistor.
     pub fn set_pull(&self, pin: u8, pull: GpioPull) {
         assert!(pin < Self::NUM_PINS, "Invalid GPIO pin: {}", pin);
@@ -299,6 +320,16 @@ impl Rp1Gpio {
         unsafe { MmioReg::new(self.base + ATOMIC_CLEAR_OFFSET + reg::PCIE_INTE) }
     }
 
+    fn reg_pcie_inte(&self) -> MmioReg<u32> {
+        // SAFETY: PCIE_INTE is inside IO_BANK0.
+        unsafe { MmioReg::new(self.base + reg::PCIE_INTE) }
+    }
+
+    fn reg_raw_interrupts(&self) -> MmioReg<u32> {
+        // SAFETY: INTR is a read-only IO_BANK0 register.
+        unsafe { MmioReg::new(self.base + reg::INTR) }
+    }
+
     /// Complete and validate the RP1 IO_BANK0 MSI-X route.
     pub fn init_pcie_interrupt_route(
         &self,
@@ -317,6 +348,24 @@ impl Rp1Gpio {
         // SAFETY: PCIE_INTS is a read-only IO_BANK0 register.
         let ints = unsafe { MmioReg::<u32>::new(self.base + reg::PCIE_INTS) };
         ints.read() & ((1u32 << Self::NUM_PINS) - 1)
+    }
+
+    /// Read back every stage needed to diagnose a pin's interrupt route.
+    pub fn interrupt_state(&self, pin: u8) -> Rp1GpioInterruptState {
+        assert!(pin < Self::NUM_PINS, "Invalid GPIO pin: {}", pin);
+        // RP1 is reached through PCIe. Order all posted configuration writes
+        // before the reads, which also flush them through the endpoint.
+        device_sync();
+        let state = Rp1GpioInterruptState {
+            status: self.reg_status(pin).read(),
+            control: self.reg_ctrl(pin).read(),
+            pad: self.reg_pad(pin).read(),
+            raw_interrupts: self.reg_raw_interrupts().read() & ((1u32 << Self::NUM_PINS) - 1),
+            pcie_enable: self.reg_pcie_inte().read() & ((1u32 << Self::NUM_PINS) - 1),
+            pcie_status: self.pending_pcie_interrupts(),
+        };
+        device_sync();
+        state
     }
 
     /// Enable interrupt for a specific pin
@@ -341,6 +390,10 @@ impl Rp1Gpio {
         ctrl.modify(|v| (v & !all_events) | mask);
         self.clear_interrupt(pin);
         self.reg_pcie_inte_atomic_set().write(1u32 << pin);
+        // The official RP1 driver orders posted GPIO writes before reading
+        // state. Force the same endpoint readback here so the interrupt is
+        // definitely armed before PI5_BENCH_READY is emitted.
+        let _ = self.interrupt_state(pin);
     }
 
     /// Disable interrupt for a specific pin
@@ -439,6 +492,8 @@ pub fn handle_interrupt() {
     crate::bench::mark_gpio_irq_entry();
 
     let mut handled_events = 0u32;
+    #[cfg(feature = "bench")]
+    let mut sensor_events = 0u32;
 
     // Scan only pins asserted in IO_BANK0's PCIe interrupt status.
     for pin in 0..Rp1Gpio::NUM_PINS {
@@ -446,6 +501,10 @@ pub fn handle_interrupt() {
             continue;
         }
         let events = gpio.get_pending_events(pin);
+        #[cfg(feature = "bench")]
+        if pin == crate::bench::REFLEX_SENSOR_PIN {
+            sensor_events = events;
+        }
 
         // Check if any event is pending on this pin
         if events != 0 {
@@ -523,7 +582,12 @@ pub fn handle_interrupt() {
     gpio.acknowledge_pcie_interrupt();
 
     #[cfg(feature = "bench")]
-    crate::bench::report_gpio_irq_probe(pending_before, pending_after, handled_events);
+    crate::bench::report_gpio_irq_probe(
+        pending_before,
+        pending_after,
+        handled_events,
+        sensor_events,
+    );
 
     // Bench (Task 11): bound the IRQ-entry stamp strictly to this interrupt. If no
     // actuation consumed it (e.g. an edge on a pin with no attached program), drop

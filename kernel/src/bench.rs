@@ -38,6 +38,8 @@ pub fn is_bench_pwm_output(chip: u8, channel: u8) -> bool {
 static GPIO_IRQ_ENTRY: AtomicU64 = AtomicU64::new(0);
 /// Ensures the physical route-proven marker is emitted at most once per boot.
 static GPIO_IRQ_PROVEN: AtomicBool = AtomicBool::new(false);
+/// Bound the per-entry handler census so a stuck source cannot flood serial.
+static GPIO_IRQ_DIAG_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Read the ARM virtual counter (`CNTVCT_EL0`) — a cheap, always-available
 /// on-chip timestamp. Returns 0 off AArch64.
@@ -146,8 +148,22 @@ pub fn handle_estop_button(pressed: bool) {
 /// Emit the physical GPIO route marker only after a single GPIO23 source was
 /// observed through IO_BANK0 PCIE_INTS, handled exactly once, cleared, and left
 /// the parent status inactive. This is a probe result, not a latency result.
-pub fn report_gpio_irq_probe(pending_before: u32, pending_after: u32, handled_events: u32) {
+pub fn report_gpio_irq_probe(
+    pending_before: u32,
+    pending_after: u32,
+    handled_events: u32,
+    sensor_events: u32,
+) {
     let expected = 1u32 << REFLEX_SENSOR_PIN;
+    if GPIO_IRQ_DIAG_COUNT.fetch_add(1, Ordering::Relaxed) < 8 {
+        crate::serial_println!(
+            "PI5_GPIO_IRQ_DIAG pending_before=0x{:08x} sensor_events=0x{:08x} handled={} pending_after=0x{:08x}",
+            pending_before,
+            sensor_events,
+            handled_events,
+            pending_after
+        );
+    }
     if pending_before == expected
         && pending_after == 0
         && handled_events == 1
@@ -199,6 +215,24 @@ pub fn init() -> bool {
     // Sensor: rising edge only. Button: both edges (press + release).
     gpio.enable_interrupt(REFLEX_SENSOR_PIN, true, false);
     gpio.enable_interrupt(ESTOP_BUTTON_PIN, true, true);
+    let sensor_irq = gpio.interrupt_state(REFLEX_SENSOR_PIN);
+    let estop_irq = gpio.interrupt_state(ESTOP_BUTTON_PIN);
+    let expected_pcie_enable = (1u32 << REFLEX_SENSOR_PIN) | (1u32 << ESTOP_BUTTON_PIN);
+    if sensor_irq.control & (1 << 21) == 0
+        || sensor_irq.pad & (1 << 6) == 0
+        || sensor_irq.pcie_enable & expected_pcie_enable != expected_pcie_enable
+    {
+        crate::serial_println!(
+            "PI5_BENCH_FAIL stage=gpio_irq_readback sensor_status=0x{:08x} sensor_ctrl=0x{:08x} sensor_pad=0x{:08x} raw=0x{:08x} pcie_inte=0x{:08x} pcie_ints=0x{:08x}",
+            sensor_irq.status,
+            sensor_irq.control,
+            sensor_irq.pad,
+            sensor_irq.raw_interrupts,
+            sensor_irq.pcie_enable,
+            sensor_irq.pcie_status
+        );
+        return false;
+    }
 
     // Build + load + attach the reflex (stop local PWM0/ch1 on the sensor edge).
     let insns = kernel_bpf::bench::reflex_pwm_program(BENCH_PWM_CHIP, BENCH_PWM_CHANNEL, 0);
@@ -224,11 +258,18 @@ pub fn init() -> bool {
                 BENCH_PWM_PIN
             );
             crate::serial_println!(
-                "PI5_BENCH_READY sensor_gpio={} estop_gpio={} pwm_gpio={} initial_estop_asserted={} rp1_chip_id=0x{:08x} rp1_vendor_device=0x{:08x} rp1_msix_cap=0x{:02x} rp1_msix_vectors={} rp1_msix_control=0x{:08x} rp1_msix0_cfg=0x{:08x} pcie_link=0x{:08x}",
+                "PI5_BENCH_READY sensor_gpio={} estop_gpio={} pwm_gpio={} initial_estop_asserted={} sensor_status=0x{:08x} sensor_ctrl=0x{:08x} sensor_pad=0x{:08x} estop_status=0x{:08x} estop_ctrl=0x{:08x} pcie_inte=0x{:08x} raw=0x{:08x} rp1_chip_id=0x{:08x} rp1_vendor_device=0x{:08x} rp1_msix_cap=0x{:02x} rp1_msix_vectors={} rp1_msix_control=0x{:08x} rp1_msix0_cfg=0x{:08x} pcie_link=0x{:08x}",
                 REFLEX_SENSOR_PIN,
                 ESTOP_BUTTON_PIN,
                 BENCH_PWM_PIN,
                 initial_estop_pressed,
+                sensor_irq.status,
+                sensor_irq.control,
+                sensor_irq.pad,
+                estop_irq.status,
+                estop_irq.control,
+                sensor_irq.pcie_enable,
+                sensor_irq.raw_interrupts,
                 route.chip_id,
                 route.vendor_device,
                 route.msix_cap_offset,
