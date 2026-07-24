@@ -138,7 +138,18 @@ fn build_os_disk_image(target_arch: &str) -> PathBuf {
     let _ = remove_file(&disk_image); // if this fails, doesn't matter
 
     // works on my machine. TODO: use the mkfs-ext2 crate once it's ready
+    //
+    // This image is embedded in the kernel, so it must be byte-reproducible:
+    // any variation changes kernel8.img and breaks artifact provenance for HIL
+    // benchmark campaigns. mke2fs otherwise stamps a random filesystem UUID, a
+    // random directory hash seed, and the current time into the superblock and
+    // inodes. Pin all three. The hash seed UUID must be non-zero — mke2fs
+    // treats the all-zero UUID as unset and falls back to a random seed.
+    const DISK_UUID: &str = "a5106f0e-9d4f-4b7a-8c21-3f6d0e5b1c94";
     let mut cmd = Command::new("mke2fs");
+    cmd.env("SOURCE_DATE_EPOCH", "0");
+    cmd.arg("-U").arg(DISK_UUID);
+    cmd.arg("-E").arg(format!("hash_seed={DISK_UUID}"));
     cmd.arg("-d").arg(
         disk_dir
             .to_str()

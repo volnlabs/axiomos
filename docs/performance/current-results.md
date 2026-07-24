@@ -118,6 +118,32 @@ well-formed executable hash. It does not claim reproducible binary bytes across
 different hosts or linker environments; the executable hash identifies the
 artifact that produced this specific campaign.
 
+### Reproducing a Pi 5 HIL image
+
+Pi 5 kernel images are bit-reproducible on the same host and toolchain. A clean
+rebuild at the campaign's `source_commit`, with the same feature set and the
+same embedded trust-root inputs, must reproduce `kernel8_sha256` exactly:
+
+```sh
+export AXIOM_BPF_TRUSTED_KEY_PATH=~/.local/share/axiomos-lab/axiomos-v03-v04-lab.pub
+export AXIOM_SIGNED_BPF_STARTUP_PATH=~/.local/share/axiomos-lab/axiomos-v03-v04-startup.rbpf
+cargo clean
+cargo xtask build rpi5 -- release <features from build.toml>
+sha256sum target/aarch64-unknown-none/release/kernel8.img
+```
+
+This holds only because the embedded ext2 rootfs is generated deterministically.
+`mke2fs` otherwise stamps a random filesystem UUID, a random directory hash
+seed, and the current time into the superblock and inodes, so every build
+produced a different `disk.img` and therefore a different `kernel8.img`. Both
+generators (`build.rs` and `kernel/build.rs`) now pin `-U`, `-E hash_seed=`, and
+`SOURCE_DATE_EPOCH`. The hash-seed UUID must be non-zero: `mke2fs` treats the
+all-zero UUID as unset and falls back to a random seed.
+
+An image whose `build.toml` records `worktree_dirty = true` cannot be
+reproduced, because its source is not fully described by the commit. Such
+evidence stays provisional regardless of how well its hashes are recorded.
+
 ## Adding a campaign
 
 1. Start from a clean, committed tree and use the pinned repository toolchain.
