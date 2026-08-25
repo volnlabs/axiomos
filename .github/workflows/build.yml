@@ -322,6 +322,14 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y xorriso e2fsprogs gcc-aarch64-linux-gnu
+      - name: Install CI BPF trust fixture
+        run: |
+          # This RFC 8032 public key is a reproducible CI fixture, not a secret
+          # or a production trust root. Keeping it in the job makes fork PR
+          # builds work without weakening signed-only production builds.
+          TRUSTED_KEY_FIXTURE="$RUNNER_TEMP/axiomos-bpf-ci-trusted-key.bin"
+          printf '\xd7\x5a\x98\x01\x82\xb1\x0a\xb7\xd5\x4b\xfe\xd3\xc9\x64\x07\x3a\x0e\xe1\x72\xf3\xda\xa6\x23\x25\xaf\x02\x1a\x68\xf7\x07\x51\x1a' > "$TRUSTED_KEY_FIXTURE"
+          echo "AXIOM_BPF_TRUSTED_KEY_PATH=$TRUSTED_KEY_FIXTURE" >> "$GITHUB_ENV"
       - name: Build (x86_64)
         run: |
           cargo build --release

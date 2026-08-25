@@ -49,7 +49,7 @@ const PCI_CAP_ID_MSIX: u32 = 0x11;
 const PCI_MSIX_FUNCTION_MASK: u32 = 1 << 30;
 const PCI_MSIX_ENABLE: u32 = 1 << 31;
 
-// AxiomOS owns this aperture after boot. Match the RP1 layout used by the
+// axiomos owns this aperture after boot. Match the RP1 layout used by the
 // official DT and by known bare-metal implementations: BAR1 peripherals at
 // PCIe 0, BAR2 SRAM at 4 MiB, BAR0 MSI-X table at 8 MiB.
 const RP1_BAR1_PCI: u32 = 0x0000_0000;

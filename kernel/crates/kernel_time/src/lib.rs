@@ -2,6 +2,11 @@
 
 #![no_std]
 
+extern crate alloc;
+
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+
 /// Number of femtoseconds in one nanosecond.
 pub const FEMTOSECONDS_PER_NANOSECOND: u128 = 1_000_000;
 
@@ -35,11 +40,12 @@ impl<T> DeadlineEntry<T> {
 
 /// Fixed-capacity queue ordered by monotonic deadline.
 ///
-/// Storage is reserved inside the queue, so insertion, expiry, and cancellation
-/// never allocate. Items with the same deadline retain insertion order.
+/// Capacity storage is allocated once when the queue is created, so insertion,
+/// expiry, and cancellation never allocate. Items with the same deadline retain
+/// insertion order.
 #[derive(Debug)]
 pub struct DeadlineQueue<T, const N: usize> {
-    entries: [Option<DeadlineEntry<T>>; N],
+    entries: Box<[Option<DeadlineEntry<T>>]>,
     len: usize,
     next_sequence: u64,
 }
@@ -47,8 +53,10 @@ pub struct DeadlineQueue<T, const N: usize> {
 impl<T, const N: usize> DeadlineQueue<T, N> {
     #[must_use]
     pub fn new() -> Self {
+        let mut entries = Vec::with_capacity(N);
+        entries.resize_with(N, || None);
         Self {
-            entries: core::array::from_fn(|_| None),
+            entries: entries.into_boxed_slice(),
             len: 0,
             next_sequence: 0,
         }
@@ -352,5 +360,13 @@ mod tests {
 
         assert_eq!(queue.push(20, 2), Err(2));
         assert_eq!(queue.len(), 1);
+    }
+
+    #[test]
+    fn deadline_queue_capacity_does_not_inflate_its_stack_footprint() {
+        assert_eq!(
+            core::mem::size_of::<DeadlineQueue<u64, 1>>(),
+            core::mem::size_of::<DeadlineQueue<u64, 1024>>()
+        );
     }
 }
