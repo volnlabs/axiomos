@@ -90,7 +90,7 @@ hash_evidence = "SHA-256 required in the physical-HIL retained artifact manifest
 
 [[artifact]]
 name = "Shrike RP2040 UF2"
-platform = "Shrike-lite V1.0/R0.4"
+platform = "Shrike RP2040 firmware"
 status = "supported after HIL"
 format = "UF2 firmware image"
 producer = "firmware/shrike/rp2040/build-uf2.sh"

@@ -211,6 +211,10 @@ jobs:
         run: cargo test --manifest-path firmware/shrike/rp2040/Cargo.toml --target thumbv6m-none-eabi --no-run
       - name: Test RP2040 firmware (release)
         run: cargo test --manifest-path firmware/shrike/rp2040/Cargo.toml --target thumbv6m-none-eabi --release --no-run
+      - name: Build and verify Shrike-lite R0.4 UF2
+        run: |
+          firmware/shrike/rp2040/build-uf2.sh
+          sha256sum --check firmware/shrike/rp2040/target/thumbv6m-none-eabi/release/shrike_rp2040.uf2.sha256
 
   firmware-rp2040:
     name: "Firmware (RP2040)"
