@@ -1,0 +1,15 @@
+name = "Vicharak Shrike recovery payloads"
+repository = "https://github.com/vicharak-in/shrike"
+commit = "763d0a7dd9ebdfc3f61de148457d5c34f112f61e"
+board = "Shrike-lite V1.0/R0.4"
+
+# The pinned source contains these vendor hardware-test payloads.  It does not
+# identify either archived UF2 as V1.0/R0.4 factory firmware, so none is kept
+# here: restoring a factory UF2 remains a physical acceptance item.
+[files]
+"main.py" = "0e3b259a4f2387260823435a3a53e98dbc9f4164860cff95d84421a2f73f5b59"
+"blink_all.bin" = "cd40b215efa40f272fe788202417d7f312a4e8f772fb06c2f96beafaf4fb65fd"
+
+[source_paths]
+"main.py" = "test/hardware_test/main.py"
+"blink_all.bin" = "test/bitstreams/v1_4/blink_all.bin"

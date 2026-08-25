@@ -205,6 +205,8 @@ jobs:
         run: |
           rustc --edition=2021 --test firmware/shrike/rp2040/host-tests/r04_board_profile.rs -o /tmp/r04-board-profile-test
           /tmp/r04-board-profile-test
+      - name: Test Shrike-lite R0.4 flash contract
+        run: python3 firmware/shrike/rp2040/host-tests/test_flash_contract.py
       - name: Test RP2040 firmware (debug)
         run: cargo test --manifest-path firmware/shrike/rp2040/Cargo.toml --target thumbv6m-none-eabi --no-run
       - name: Test RP2040 firmware (release)
