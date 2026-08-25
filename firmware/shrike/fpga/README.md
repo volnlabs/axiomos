@@ -21,9 +21,9 @@ gated because PWM-low disables the H-bridge output.
 
 The default maximum is ±800 per-mille. Any change requires matching the kernel
 actuation envelope and validating the final pin assignment on the assembled
-robot. This directory does not include a ForgeFPGA pin-constraint/project file
-because the repository has no finalized Shrike-lite board revision or pin map;
-it must be added with the board bring-up, not guessed here.
+robot. The repository now pins the Shrike-lite V1.0/R0.4 electrical source and
+MCU interconnect, but the external `estop_n` and motor-output FPGA pins still
+require ForgeFPGA I/O-planner agreement and powered-off continuity review.
 
 ## Simulation
 

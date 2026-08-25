@@ -201,6 +201,10 @@ jobs:
         run: cargo test --manifest-path userspace/tools/rk_bridge/Cargo.toml
       - name: Test rk_cli
         run: cargo test --manifest-path userspace/tools/rk_cli/Cargo.toml
+      - name: Test Shrike-lite R0.4 board profile
+        run: |
+          rustc --edition=2021 --test firmware/shrike/rp2040/host-tests/r04_board_profile.rs -o /tmp/r04-board-profile-test
+          /tmp/r04-board-profile-test
       - name: Test RP2040 firmware (debug)
         run: cargo test --manifest-path firmware/shrike/rp2040/Cargo.toml --target thumbv6m-none-eabi --no-run
       - name: Test RP2040 firmware (release)

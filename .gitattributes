@@ -2,3 +2,6 @@
 # flag their original whitespace. Sigrok session archives are binary evidence.
 docs/performance/evidence/**/*.log -whitespace
 docs/performance/evidence/**/*.sr binary
+
+# Pinned vendor sources are retained byte-for-byte, including upstream spacing.
+firmware/shrike/vendor/** -whitespace

@@ -6,11 +6,14 @@
 //! watchdog, anti-replay, fail-safe) is all in `shrike_link` and host-tested;
 //! this file is the hardware wiring.
 //!
-//! NOTE: pin map, baud, and timing below are bench config knobs — set them to
-//! match your wiring. Real-hardware behaviour is unverified until flashed.
+//! NOTE: the pin map is for Shrike-lite V1.0/R0.4. External wiring and
+//! real-hardware behaviour remain unverified until the retained-board checks.
 
 #![no_std]
 #![no_main]
+
+#[allow(dead_code)]
+mod board;
 
 use cortex_m_rt::entry;
 use embedded_hal::digital::InputPin;
@@ -19,10 +22,9 @@ use hal::clocks::Clock;
 use hal::pac;
 use panic_halt as _;
 use rp2040_hal as hal;
+use shrike_control::{run, ByteIo, Config, EstopLine, L298n, MicrosClock, Ultrasonic};
 
-use shrike_control::{run, ByteIo, Config, EstopLine, MicrosClock, Ultrasonic, L298n};
-
-/// Second-stage bootloader (W25Q080 flash on most RP2040 boards).
+/// Second-stage bootloader compatible with the board's W25Q32JV QSPI flash.
 #[link_section = ".boot2"]
 #[used]
 pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
@@ -34,14 +36,11 @@ const LINK_TIMEOUT_US: u64 = 100_000; // 100 ms link-silence -> motors safe
 const PEER_HEARTBEAT_PERIOD_US: u64 = 20_000; // 50 Hz Shrike->Pi liveness
 const PING_PERIOD_US: u64 = 50_000; // 20 Hz ultrasonic ping
 const ECHO_TIMEOUT_US: u64 = 30_000; // HC-SR04 max ~ 5 m round trip
-const ESTOP_ACTIVE_LOW: bool = true; // button to GND with pull-up
+const ESTOP_ACTIVE_LOW: bool = true; // NC loop: closed=3.3 V, open=pulled low
 
-// Pins: ENA via PWM, IN1/IN2 direction, UART0, HC-SR04 trig/echo, e-stop.
-// (Documented here so the wiring is one glance away.)
-// gpio0=UART0 TX, gpio1=UART0 RX
-// gpio2=ENA_L(PWM1A), gpio6=IN1_L, gpio7=IN2_L
-// gpio4=ENA_R(PWM2A), gpio8=IN1_R, gpio9=IN2_R
-// gpio10=ULTRA_TRIG, gpio11=ULTRA_ECHO, gpio12=ESTOP
+// The reviewed compile-time map lives in board/shrike_lite_v1_r04.rs.
+// GPIO0-3 and 12-13 stay reserved for FPGA configuration/control.
+// GPIO14/15 stay unused until the FPGA configuration/runtime handoff exists.
 // -----------------------------------------------------------------------------
 
 /// Free-running microsecond clock backed by the RP2040 1 MHz timer. Reads the
@@ -185,10 +184,10 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
 
-    // UART0 on gpio0 (TX) / gpio1 (RX).
+    // UART0 to Pi5: gpio16 TX / gpio17 RX.
     let uart_pins = (
-        pins.gpio0.into_function::<hal::gpio::FunctionUart>(),
-        pins.gpio1.into_function::<hal::gpio::FunctionUart>(),
+        pins.gpio16.into_function::<hal::gpio::FunctionUart>(),
+        pins.gpio17.into_function::<hal::gpio::FunctionUart>(),
     );
     let uart = hal::uart::UartPeripheral::new(pac.UART0, uart_pins, &mut pac.RESETS)
         .enable(
@@ -203,18 +202,15 @@ fn main() -> ! {
         .unwrap();
     let io = Uart { inner: uart };
 
-    // PWM: slice1 (gpio2 = ENA_L), slice2 (gpio4 = ENA_R), channel A each.
+    // Unloaded compile/logic-test outputs only. Do not connect these header
+    // pins directly to an L298N; the final path must pass through the FPGA.
     let mut pwm_slices = hal::pwm::Slices::new(pac.PWM, &mut pac.RESETS);
 
-    let pwm_l = &mut pwm_slices.pwm1;
-    pwm_l.set_ph_correct();
-    pwm_l.enable();
-    pwm_l.channel_a.output_to(pins.gpio2);
-
-    let pwm_r = &mut pwm_slices.pwm2;
-    pwm_r.set_ph_correct();
-    pwm_r.enable();
-    pwm_r.channel_a.output_to(pins.gpio4);
+    let pwm = &mut pwm_slices.pwm1;
+    pwm.set_ph_correct();
+    pwm.enable();
+    pwm.channel_a.output_to(pins.gpio18);
+    pwm.channel_b.output_to(pins.gpio19);
 
     // Direction pins.
     let left = L298n::new(
@@ -223,7 +219,7 @@ fn main() -> ! {
         pins.gpio7.into_push_pull_output(),
     );
     let right = L298n::new(
-        pwm_slices.pwm2.channel_a,
+        pwm_slices.pwm1.channel_b,
         pins.gpio8.into_push_pull_output(),
         pins.gpio9.into_push_pull_output(),
     );
@@ -234,7 +230,7 @@ fn main() -> ! {
         pins.gpio11.into_floating_input(),
     );
     let estop = Estop {
-        pin: pins.gpio12.into_pull_up_input(),
+        pin: pins.gpio5.into_pull_down_input(),
     };
 
     // `run` returns `Option<RunSummary>` for the bounded form used by

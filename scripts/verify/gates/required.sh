@@ -21,6 +21,8 @@ if [[ "$MODE" != "quick" ]]; then
     run_cargo_step clippy-rk-cli clippy --manifest-path userspace/tools/rk_cli/Cargo.toml -- -D clippy::all
     run_cargo_step test-rk-bridge test --manifest-path userspace/tools/rk_bridge/Cargo.toml
     run_cargo_step test-rk-cli test --manifest-path userspace/tools/rk_cli/Cargo.toml
+    run_step shrike-r04-board-profile bash -c \
+        'rustc --edition=2021 --test firmware/shrike/rp2040/host-tests/r04_board_profile.rs -o /tmp/r04-board-profile-test && /tmp/r04-board-profile-test'
     run_cargo_step clippy-rp2040-debug clippy --manifest-path firmware/shrike/rp2040/Cargo.toml \
         --target thumbv6m-none-eabi -- -D clippy::all
     run_cargo_step clippy-rp2040-release clippy --manifest-path firmware/shrike/rp2040/Cargo.toml \
