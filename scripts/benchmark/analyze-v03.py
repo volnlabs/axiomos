@@ -16,6 +16,23 @@ SERIAL_PATTERNS = {
     "M-C": re.compile(r"\[bench\]\s+M-C\s+edge->pwm-apply ch=\d+ val=\d+ latency_ns=(\d+)"),
 }
 
+KEYED_SERIAL_PATTERNS = {
+    "M-A": re.compile(r"PI5_MA\s+sample_id=(\d+)\s+monitor_ns=(\d+)"),
+    "M-B": re.compile(r"PI5_MB\s+sample_id=(\d+)\s+ns=(\d+)"),
+    "M-C": re.compile(r"PI5_MC\s+sample_id=(\d+)\s+ns=(\d+)"),
+}
+
+PAIR_PATTERN = re.compile(
+    r"PI5_PAIR\s+sample_id=(\d+)\s+baseline_ns=(\d+)\s+"
+    r"monitor_ns=(\d+)\s+added_ns=(-?\d+)"
+)
+ESTOP_REARM_PATTERN = re.compile(
+    r"PI5_ESTOP_REARM\s+sample_id=(\d+)\s+mode=gpio\s+code=(-?\d+)"
+)
+REFLEX_REARM_PATTERN = re.compile(
+    r"PI5_REFLEX_REARM\s+sample_id=(\d+)\s+mode=gpio\s+code=(-?\d+)"
+)
+
 LOGIC_ALIASES = {
     "time_s": ("time_s", "time", "time [s]", "time(s)", "seconds"),
     "input_gpio23": ("input_gpio23", "gpio23", "ch0", "channel 0", "input"),
@@ -25,6 +42,122 @@ LOGIC_ALIASES = {
 
 
 class AnalyzerSelfTest(unittest.TestCase):
+    def test_keyed_samples_and_overhead_pairs_are_correlated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            serial = Path(tmp) / "bench.log"
+            serial.write_text(
+                "\n".join(
+                    [
+                        "PI5_MA sample_id=7 monitor_ns=120",
+                        "PI5_MC sample_id=7 ns=210 kind=gpio ch=12 val=0",
+                        "PI5_PAIR sample_id=1 baseline_ns=80 monitor_ns=130 added_ns=50",
+                        "PI5_PAIR sample_id=2 baseline_ns=90 monitor_ns=125 added_ns=35",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            samples = parse_serial(serial)
+            self.assertEqual(samples["M-A"], [120])
+            self.assertEqual(samples["M-C"], [210])
+            self.assertEqual(samples["M-A-ids"], [7])
+            self.assertEqual(samples["M-C-ids"], [7])
+            self.assertEqual(validate_correlations(samples), [])
+            pairs = parse_pairs(serial)
+            self.assertEqual(pairs, [(1, 80, 130, 50), (2, 90, 125, 35)])
+            self.assertEqual(validate_pairs(pairs, min_count=2), [])
+
+    def test_overhead_pair_gate_uses_added_time_and_exact_count(self):
+        too_few = [(1, 80, 130, 50)]
+        self.assertEqual(validate_pairs(too_few, min_count=2), ["paired M-A count 1 < 2"])
+
+        too_slow = [(1, 80, 5080, 5000), (2, 90, 130, 40)]
+        self.assertEqual(
+            validate_pairs(too_slow, min_count=2),
+            ["paired M-A max added_ns 5000 >= 5000 ns"],
+        )
+
+    def test_overhead_pairs_reject_duplicate_or_inconsistent_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            duplicate = Path(tmp) / "duplicate.log"
+            duplicate.write_text(
+                "PI5_PAIR sample_id=1 baseline_ns=80 monitor_ns=130 added_ns=50\n"
+                "PI5_PAIR sample_id=1 baseline_ns=81 monitor_ns=131 added_ns=50\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "duplicate sample_id 1"):
+                parse_pairs(duplicate)
+
+            inconsistent = Path(tmp) / "inconsistent.log"
+            inconsistent.write_text(
+                "PI5_PAIR sample_id=1 baseline_ns=80 monitor_ns=130 added_ns=49\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "inconsistent added_ns"):
+                parse_pairs(inconsistent)
+
+    def test_estop_rearms_match_every_nonfinal_press(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            serial = Path(tmp) / "estop.log"
+            serial.write_text(
+                "PI5_MB sample_id=2 ns=900\n"
+                "PI5_ESTOP_REARM sample_id=2 mode=gpio code=0\n"
+                "PI5_MB sample_id=4 ns=850\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(validate_estop_cycles(serial, expected_count=2), [])
+
+            serial.write_text(
+                "PI5_MB sample_id=2 ns=900\n"
+                "PI5_ESTOP_REARM sample_id=3 mode=gpio code=0\n"
+                "PI5_MB sample_id=4 ns=850\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                validate_estop_cycles(serial, expected_count=2),
+                ["e-stop re-arm IDs [3] do not match nonfinal press IDs [2]"],
+            )
+
+    def test_sensor_samples_reject_missing_or_duplicate_ids(self):
+        samples = {
+            "M-A-ids": [2, 4, 4],
+            "M-C-ids": [2, 5, 6],
+        }
+        self.assertEqual(
+            validate_correlations(samples),
+            [
+                "M-A sample IDs contain duplicates",
+                "M-A sample IDs are not increasing",
+                "M-A IDs [2, 4, 4] do not match M-C IDs [2, 5, 6]",
+            ],
+        )
+
+    def test_sensor_rearms_match_every_response(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            serial = Path(tmp) / "sensor.log"
+            serial.write_text(
+                "PI5_MA sample_id=2 monitor_ns=120\n"
+                "PI5_MC sample_id=2 ns=210 kind=gpio ch=12 val=0\n"
+                "PI5_REFLEX_REARM sample_id=2 mode=gpio code=0\n"
+                "PI5_MA sample_id=3 monitor_ns=125\n"
+                "PI5_MC sample_id=3 ns=220 kind=gpio ch=12 val=0\n"
+                "PI5_REFLEX_REARM sample_id=3 mode=gpio code=0\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(validate_sensor_cycles(serial, expected_count=2), [])
+
+            serial.write_text(
+                "PI5_MA sample_id=2 monitor_ns=120\n"
+                "PI5_MC sample_id=2 ns=210 kind=gpio ch=12 val=0\n"
+                "PI5_REFLEX_REARM sample_id=3 mode=gpio code=0\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                validate_sensor_cycles(serial, expected_count=1),
+                ["reflex re-arm IDs [3] do not match M-C IDs [2]"],
+            )
+
     def test_serial_stats_and_thresholds_pass(self):
         with tempfile.TemporaryDirectory() as tmp:
             serial = Path(tmp) / "bench.log"
@@ -74,14 +207,121 @@ class AnalyzerSelfTest(unittest.TestCase):
 
 
 def parse_serial(path: Path) -> dict[str, list[int]]:
-    samples: dict[str, list[int]] = {"M-A": [], "M-B": [], "M-C": []}
+    samples: dict[str, list[int]] = {
+        "M-A": [],
+        "M-B": [],
+        "M-C": [],
+        "M-A-ids": [],
+        "M-B-ids": [],
+        "M-C-ids": [],
+    }
     for line in path.read_text(encoding="utf-8").splitlines():
+        keyed = False
+        for name, pattern in KEYED_SERIAL_PATTERNS.items():
+            match = pattern.search(line)
+            if match:
+                samples[f"{name}-ids"].append(int(match.group(1)))
+                samples[name].append(int(match.group(2)))
+                keyed = True
+                break
+        if keyed:
+            continue
         for name, pattern in SERIAL_PATTERNS.items():
             match = pattern.search(line)
             if match:
                 samples[name].append(int(match.group(1)))
                 break
     return samples
+
+
+def parse_pairs(path: Path) -> list[tuple[int, int, int, int]]:
+    pairs: list[tuple[int, int, int, int]] = []
+    seen: set[int] = set()
+    for match in PAIR_PATTERN.finditer(path.read_text(encoding="utf-8")):
+        sample_id, baseline_ns, monitor_ns, added_ns = map(int, match.groups())
+        if sample_id in seen:
+            raise ValueError(f"duplicate sample_id {sample_id}")
+        expected_id = len(pairs) + 1
+        if sample_id != expected_id:
+            raise ValueError(f"sample_id {sample_id} out of order; expected {expected_id}")
+        if monitor_ns - baseline_ns != added_ns:
+            raise ValueError(f"sample_id {sample_id} has inconsistent added_ns")
+        seen.add(sample_id)
+        pairs.append((sample_id, baseline_ns, monitor_ns, added_ns))
+    return pairs
+
+
+def validate_pairs(
+    pairs: list[tuple[int, int, int, int]], min_count: int = 10_000
+) -> list[str]:
+    if len(pairs) < min_count:
+        return [f"paired M-A count {len(pairs)} < {min_count}"]
+    maximum = max(pair[3] for pair in pairs)
+    if maximum >= 5_000:
+        return [f"paired M-A max added_ns {maximum} >= 5000 ns"]
+    return []
+
+
+def validate_estop_cycles(path: Path, expected_count: int = 100) -> list[str]:
+    samples = parse_serial(path)
+    press_ids = samples["M-B-ids"]
+    errors: list[str] = []
+    if len(press_ids) != expected_count:
+        errors.append(f"e-stop press count {len(press_ids)} != {expected_count}")
+    if len(set(press_ids)) != len(press_ids):
+        errors.append("e-stop press IDs contain duplicates")
+    if press_ids != sorted(press_ids):
+        errors.append("e-stop press IDs are not increasing")
+
+    text = path.read_text(encoding="utf-8")
+    rearm_records = [(int(match.group(1)), int(match.group(2))) for match in ESTOP_REARM_PATTERN.finditer(text)]
+    failed_rearms = [sample_id for sample_id, code in rearm_records if code != 0]
+    if failed_rearms:
+        errors.append(f"e-stop re-arm failed for IDs {failed_rearms}")
+    rearm_ids = [sample_id for sample_id, _code in rearm_records]
+    expected_rearms = press_ids[:-1]
+    if rearm_ids != expected_rearms:
+        errors.append(
+            f"e-stop re-arm IDs {rearm_ids} do not match nonfinal press IDs {expected_rearms}"
+        )
+    return errors
+
+
+def validate_correlations(samples: dict[str, list[int]]) -> list[str]:
+    ma_ids = samples.get("M-A-ids", [])
+    mc_ids = samples.get("M-C-ids", [])
+    if not ma_ids and not mc_ids:
+        return []  # Historical logs predate keyed markers.
+
+    errors: list[str] = []
+    for name, sample_ids in (("M-A", ma_ids), ("M-C", mc_ids)):
+        if len(set(sample_ids)) != len(sample_ids):
+            errors.append(f"{name} sample IDs contain duplicates")
+        if sample_ids != sorted(set(sample_ids)):
+            errors.append(f"{name} sample IDs are not increasing")
+    if ma_ids != mc_ids:
+        errors.append(f"M-A IDs {ma_ids} do not match M-C IDs {mc_ids}")
+    return errors
+
+
+def validate_sensor_cycles(path: Path, expected_count: int = 10_000) -> list[str]:
+    samples = parse_serial(path)
+    mc_ids = samples["M-C-ids"]
+    errors = validate_correlations(samples)
+    if len(mc_ids) != expected_count:
+        errors.append(f"sensor response count {len(mc_ids)} != {expected_count}")
+
+    rearm_records = [
+        (int(match.group(1)), int(match.group(2)))
+        for match in REFLEX_REARM_PATTERN.finditer(path.read_text(encoding="utf-8"))
+    ]
+    failed_rearms = [sample_id for sample_id, code in rearm_records if code != 0]
+    if failed_rearms:
+        errors.append(f"reflex re-arm failed for IDs {failed_rearms}")
+    rearm_ids = [sample_id for sample_id, _code in rearm_records]
+    if rearm_ids != mc_ids:
+        errors.append(f"reflex re-arm IDs {rearm_ids} do not match M-C IDs {mc_ids}")
+    return errors
 
 
 def _nearest_rank(values: list[int], quantile: float) -> int:
@@ -201,6 +441,11 @@ def _format_stats(name: str, values: list[int]) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--serial", type=Path, help="serial log with [bench] lines")
+    parser.add_argument("--pairs", type=Path, help="serial log with PI5_PAIR records")
+    parser.add_argument("--estop", type=Path, help="serial log with keyed V03-D records")
+    parser.add_argument("--estop-count", type=int, default=100, help="expected V03-D press count")
+    parser.add_argument("--sensor", type=Path, help="serial log with keyed V03-B records")
+    parser.add_argument("--sensor-count", type=int, default=10_000, help="expected V03-B edge count")
     parser.add_argument("--logic", type=Path, help="logic-analyzer CSV")
     parser.add_argument("--self-test", action="store_true", help="run parser self-tests")
     args = parser.parse_args()
@@ -209,8 +454,8 @@ def main() -> int:
         result = unittest.main(argv=[__file__], exit=False)
         return 0 if result.result.wasSuccessful() else 1
 
-    if not args.serial and not args.logic:
-        parser.error("provide --serial, --logic, or --self-test")
+    if not args.serial and not args.logic and not args.pairs and not args.estop and not args.sensor:
+        parser.error("provide --serial, --pairs, --sensor, --estop, --logic, or --self-test")
 
     failures: list[str] = []
 
@@ -219,6 +464,7 @@ def main() -> int:
         for name in ("M-A", "M-B", "M-C"):
             print(_format_stats(name, samples[name]))
         failures.extend(validate_thresholds(samples))
+        failures.extend(validate_correlations(samples))
         mc_median = stats(samples["M-C"])["median"]
         if samples["M-C"] and mc_median >= 500 and mc_median < 1_000:
             print(f"M-C median {mc_median} ns misses 500 ns target; fallback claim applies")
@@ -236,6 +482,23 @@ def main() -> int:
             print(
                 f"logic median {stats(logic_latencies)['median']} ns misses 500 ns target; fallback claim applies"
             )
+
+    if args.pairs:
+        try:
+            pairs = parse_pairs(args.pairs)
+        except ValueError as error:
+            failures.append(str(error))
+        else:
+            print(_format_stats("M-A baseline", [pair[1] for pair in pairs]))
+            print(_format_stats("M-A monitor", [pair[2] for pair in pairs]))
+            print(_format_stats("M-A added", [pair[3] for pair in pairs]))
+            failures.extend(validate_pairs(pairs))
+
+    if args.estop:
+        failures.extend(validate_estop_cycles(args.estop, args.estop_count))
+
+    if args.sensor:
+        failures.extend(validate_sensor_cycles(args.sensor, args.sensor_count))
 
     if failures:
         print("FAIL:")

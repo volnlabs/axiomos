@@ -536,9 +536,21 @@ pub fn handle_interrupt() {
     // Get timestamp at interrupt entry for accurate timing
     let timestamp = counter_to_ns(read_timer_counter());
     // Bench (Task 11): stamp the cycle counter at IRQ entry so the actuation
-    // seam can report edge->actuate latency (M-C).
+    // seam can report edge->actuate latency (M-C). Two simultaneous bench
+    // sources cannot share one timestamp/sample ID, so fail the run explicitly.
     #[cfg(feature = "bench")]
-    crate::bench::mark_gpio_irq_entry();
+    {
+        let bench_mask =
+            (1u32 << crate::bench::REFLEX_SENSOR_PIN) | (1u32 << crate::bench::ESTOP_BUTTON_PIN);
+        match (pending_before & bench_mask).count_ones() {
+            1 => crate::bench::mark_gpio_irq_entry(),
+            count if count > 1 => crate::serial_println!(
+                "PI5_BENCH_FAIL stage=ambiguous_gpio_irq pending=0x{:08x}",
+                pending_before & bench_mask
+            ),
+            _ => {}
+        }
+    }
 
     let mut handled_events = 0u32;
     #[cfg(feature = "bench")]
@@ -623,7 +635,15 @@ pub fn handle_interrupt() {
             // 3. Execute the immutable route snapshot. Readers take no manager,
             // allocator, logger, or refcount path in this IRQ context.
             let fired = kernel_bpf::attach::GpioEdge::from_flags(edge);
-            let _ = crate::bpf::BpfManager::run_gpio_programs(0, pin, fired, &ctx);
+            let run_result = crate::bpf::BpfManager::run_gpio_programs(0, pin, fired, &ctx);
+            #[cfg(feature = "bench-reflex-rearm")]
+            if pin == crate::bench::REFLEX_SENSOR_PIN
+                && matches!(run_result, Ok(programs) if programs > 0)
+            {
+                crate::bench::rearm_reflex_after_sample();
+            }
+            #[cfg(not(feature = "bench-reflex-rearm"))]
+            let _ = run_result;
         }
     }
 

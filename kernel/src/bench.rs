@@ -75,6 +75,14 @@ fn arm_reflex_output() -> (&'static str, i64) {
 /// Cycle stamp captured at GPIO IRQ entry; read at the actuation apply point to
 /// compute edge->actuate latency (M-C). 0 means "no GPIO IRQ in flight".
 static GPIO_IRQ_ENTRY: AtomicU64 = AtomicU64::new(0);
+/// Boot-local monotonic identifier for correlating UART samples.
+static NEXT_SAMPLE_ID: AtomicU64 = AtomicU64::new(1);
+/// Identifier paired with `GPIO_IRQ_ENTRY`; zero means no IRQ is in flight.
+static GPIO_IRQ_SAMPLE_ID: AtomicU64 = AtomicU64::new(0);
+/// Press identifier retained until the matching e-stop release/re-arm.
+static ESTOP_SAMPLE_ID: AtomicU64 = AtomicU64::new(0);
+/// Sensor sample awaiting the feature-gated post-response re-arm.
+static REFLEX_SAMPLE_ID: AtomicU64 = AtomicU64::new(0);
 /// Ensures the physical route-proven marker is emitted at most once per boot.
 static GPIO_IRQ_PROVEN: AtomicBool = AtomicBool::new(false);
 /// Bound the per-entry handler census so a stuck source cannot flood serial.
@@ -127,14 +135,18 @@ pub fn cycles_to_ns(delta: u64) -> u64 {
 /// Stamp the counter at GPIO interrupt entry (start point for M-C and M-B).
 #[inline]
 pub fn mark_gpio_irq_entry() {
+    let sample_id = NEXT_SAMPLE_ID.fetch_add(1, Ordering::Relaxed);
     GPIO_IRQ_ENTRY.store(now_cycles(), Ordering::Relaxed);
+    GPIO_IRQ_SAMPLE_ID.store(sample_id, Ordering::Release);
 }
 
 /// Read and clear the GPIO IRQ-entry stamp (0 if none). Ensures the stamp is
 /// consumed exactly once so it can never leak into a later actuation's report.
 #[inline]
-pub fn take_gpio_irq_entry() -> u64 {
-    GPIO_IRQ_ENTRY.swap(0, Ordering::Relaxed)
+pub fn take_gpio_irq_entry() -> Option<(u64, u64)> {
+    let sample_id = GPIO_IRQ_SAMPLE_ID.swap(0, Ordering::AcqRel);
+    let entry = GPIO_IRQ_ENTRY.swap(0, Ordering::Relaxed);
+    (sample_id != 0 && entry != 0).then_some((sample_id, entry))
 }
 
 /// Report monitor decision overhead (M-A). Logged on every guarded actuation.
@@ -142,26 +154,51 @@ pub fn take_gpio_irq_entry() -> u64 {
 /// (`log::info` does not reach the Pi UART).
 #[inline]
 pub fn report_monitor_overhead(decide_cycles: u64) {
-    crate::serial_println!("PI5_MA ns={}", cycles_to_ns(decide_cycles));
+    let sample_id = GPIO_IRQ_SAMPLE_ID.load(Ordering::Acquire);
+    if sample_id != 0 {
+        crate::serial_println!(
+            "PI5_MA sample_id={} monitor_ns={}",
+            sample_id,
+            cycles_to_ns(decide_cycles)
+        );
+    }
 }
 
 /// Report edge->actuate latency for the GPIO IRQ currently in flight (M-C).
 /// No-op outside a GPIO IRQ (when no entry stamp is set); consumes the stamp so
 /// a later non-IRQ actuation cannot reuse it.
 pub fn report_edge_to_actuate(kind: &str, channel: u8, value: u32) {
-    let start = take_gpio_irq_entry();
-    if start == 0 {
+    let Some((sample_id, start)) = take_gpio_irq_entry() else {
         return;
-    }
+    };
     let ns = cycles_to_ns(now_cycles().wrapping_sub(start));
+    REFLEX_SAMPLE_ID.store(sample_id, Ordering::Release);
     // Compact serial marker for the V03-B latency distribution (edge -> actuate,
     // M-C). One line per sensor edge; the host reducer parses `ns=`.
     crate::serial_println!(
-        "PI5_MC ns={} kind={} ch={} val={}",
+        "PI5_MC sample_id={} ns={} kind={} ch={} val={}",
+        sample_id,
         ns,
         kind,
         channel,
         value
+    );
+}
+
+/// Re-arm only after the correlated sensor response completed and released the
+/// actuation lock. This is excluded from production and non-HIL images.
+#[cfg(feature = "bench-reflex-rearm")]
+pub fn rearm_reflex_after_sample() {
+    let sample_id = REFLEX_SAMPLE_ID.swap(0, Ordering::AcqRel);
+    if sample_id == 0 {
+        return;
+    }
+    let (mode, code) = arm_reflex_output();
+    crate::serial_println!(
+        "PI5_REFLEX_REARM sample_id={} mode={} code={}",
+        sample_id,
+        mode,
+        code
     );
 }
 
@@ -176,12 +213,13 @@ pub fn handle_estop_button(pressed: bool) {
     let entry = take_gpio_irq_entry();
     if pressed {
         crate::actuation::operator_estop(EstopAction::Trigger);
-        if entry != 0 {
+        if let Some((sample_id, entry)) = entry {
+            ESTOP_SAMPLE_ID.store(sample_id, Ordering::Release);
             let ns = cycles_to_ns(now_cycles().wrapping_sub(entry));
             log::info!("[bench] M-B estop irq-entry->safe latency_ns={}", ns);
             // Emit only after operator_estop(Trigger) has applied every safe
             // drive and returned, so this is the physical press -> safe latency.
-            crate::serial_println!("PI5_MB ns={}", ns);
+            crate::serial_println!("PI5_MB sample_id={} ns={}", sample_id, ns);
         }
     } else {
         let release_code = crate::actuation::operator_estop(EstopAction::Release);
@@ -191,13 +229,19 @@ pub fn handle_estop_button(pressed: bool) {
         // bench and production builds, never runs for the boot-time state check
         // (which has entry == 0), and still passes through the monitor guards.
         #[cfg(feature = "bench-estop-rearm")]
-        if entry != 0 && release_code == 0 {
+        if entry.is_some() && release_code == 0 {
+            let sample_id = ESTOP_SAMPLE_ID.swap(0, Ordering::AcqRel);
             let (mode, arm_code) = arm_reflex_output();
-            crate::serial_println!("PI5_ESTOP_REARM mode={} code={}", mode, arm_code);
+            crate::serial_println!(
+                "PI5_ESTOP_REARM sample_id={} mode={} code={}",
+                sample_id,
+                mode,
+                arm_code
+            );
         }
 
         #[cfg(not(feature = "bench-estop-rearm"))]
-        let _ = release_code;
+        let _ = (entry, release_code);
     }
 }
 
@@ -332,6 +376,30 @@ pub fn run_containment_corpus() {
     );
 }
 
+#[cfg(all(
+    target_arch = "aarch64",
+    feature = "rpi5",
+    feature = "bench-paired-overhead"
+))]
+fn run_paired_overhead() {
+    const N: u64 = 10_000;
+    crate::serial_println!("PI5_V03A_BEGIN count={} output=gpio12-safe-low", N);
+    for sample_id in 1..=N {
+        let (baseline_cycles, monitor_cycles) = crate::actuation::bench_measure_gpio_pair();
+        let baseline_ns = cycles_to_ns(baseline_cycles);
+        let monitor_ns = cycles_to_ns(monitor_cycles);
+        let added_ns = i128::from(monitor_ns) - i128::from(baseline_ns);
+        crate::serial_println!(
+            "PI5_PAIR sample_id={} baseline_ns={} monitor_ns={} added_ns={}",
+            sample_id,
+            baseline_ns,
+            monitor_ns,
+            added_ns
+        );
+    }
+    crate::serial_println!("PI5_V03A_DONE count={}", N);
+}
+
 /// Boot-time bench setup (Pi 5 only): arm the sensor + button pin IRQs and
 /// auto-load the reflex program attached to the sensor's rising edge.
 #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
@@ -367,6 +435,9 @@ pub fn init() -> bool {
         ReflexOutput::Gpio => gpio.configure_output(BENCH_PWM_PIN, false),
         ReflexOutput::Pwm => gpio.configure_peripheral_output(BENCH_PWM_PIN, GpioFunction::Alt0),
     }
+
+    #[cfg(feature = "bench-paired-overhead")]
+    run_paired_overhead();
 
     // Pad-driver self-test: force the pad high then low via the CTRL override,
     // bypassing PWM. If this toggles the read-back level but the PWM duty test
@@ -477,6 +548,11 @@ pub fn init() -> bool {
             );
             #[cfg(feature = "bench-estop-rearm")]
             crate::serial_println!("PI5_V03D_READY output={} auto_rearm=true", mode);
+            #[cfg(feature = "bench-reflex-rearm")]
+            crate::serial_println!(
+                "PI5_V03B_READY output={} sample_ids=true auto_rearm=true",
+                mode
+            );
             if BENCH_REFLEX_OUTPUT == ReflexOutput::Pwm {
                 use crate::arch::aarch64::platform::rpi5::pwm::{
                     pwm0_clock_ctrl, pwm0_clock_div, PWM0,

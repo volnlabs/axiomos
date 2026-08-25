@@ -33,10 +33,15 @@ PULSE_COUNT="${PULSE_COUNT:-5}"
 PULSE_HIGH_MS="${PULSE_HIGH_MS:-800}"
 PULSE_LOW_MS="${PULSE_LOW_MS:-800}"
 
-EXPECTED=(PI5_BENCH_READY PI5_GPIO_IRQ_PROVEN)
+EXPECTED=(PI5_BENCH_READY PI5_V03B_READY PI5_GPIO_IRQ_PROVEN)
 FORBIDDEN=(PI5_BENCH_FAIL panic fatal watchdog)
 
 mkdir -p "$RUN_DIR"
+
+if [ "${ACTUATORS_MOTORS_DISCONNECTED:-}" != "YES" ]; then
+    echo "ABORT: disconnect all actuators and motors, then set ACTUATORS_MOTORS_DISCONNECTED=YES." >&2
+    exit 1
+fi
 
 idx=0
 for f in "$RUN_DIR"/shrike-gpio23-pulse-*; do
@@ -157,8 +162,13 @@ until rg -aq 'PI5_BENCH_READY' "$UART_LOG" 2>/dev/null; do
 done
 
 echo "PI5_BENCH_READY seen; the built-in reflex is attached."
+if ! rg -aq 'PI5_V03B_READY output=gpio sample_ids=true auto_rearm=true' "$UART_LOG"; then
+    echo "FAIL: image lacks the bench-reflex-rearm diagnostic feature" >&2
+    exit 1
+fi
 echo "Sending $PULSE_COUNT Shrike GPIO22 pulses..."
-timeout --signal=INT --kill-after=2s 20s \
+PULSE_TIMEOUT_SECONDS=$(((PULSE_COUNT * (PULSE_HIGH_MS + PULSE_LOW_MS)) / 1000 + 15))
+timeout --signal=INT --kill-after=2s "${PULSE_TIMEOUT_SECONDS}s" \
   sigrok-cli \
     -d "$LOGIC_CONN" \
     -c "samplerate=$SAMPLERATE" \
@@ -171,7 +181,8 @@ timeout --signal=INT --kill-after=2s 20s \
 LOGIC_PID=$!
 
 sleep 1
-mpremote connect "$SHRIKE_UART" exec \
+timeout --signal=INT --kill-after=2s "${PULSE_TIMEOUT_SECONDS}s" \
+  mpremote connect "$SHRIKE_UART" exec \
   "from machine import Pin; import time; p=Pin(22, Pin.OUT); p.value(0); time.sleep_ms(500); print('MULTIPULSE_START')
 for _ in range($PULSE_COUNT): p.value(1); time.sleep_ms($PULSE_HIGH_MS); p.value(0); time.sleep_ms($PULSE_LOW_MS)
 print('MULTIPULSE_DONE')"
@@ -230,7 +241,7 @@ elif rising == 0:
 fi
 
 echo
-rg -a -n 'PI5_BENCH_READY|PI5_GPIO_IRQ_DIAG|PI5_GPIO_IRQ_PROVEN|SIGNED_BPF_(LOAD_OK|INPUT_MISSING)|PI5_BENCH_FAIL|panic|fatal|watchdog' \
+rg -a -n 'PI5_BENCH_READY|PI5_V03B_READY|PI5_MA|PI5_MC|PI5_REFLEX_REARM|PI5_GPIO_IRQ_DIAG|PI5_GPIO_IRQ_PROVEN|SIGNED_BPF_(LOAD_OK|INPUT_MISSING)|PI5_BENCH_FAIL|panic|fatal|watchdog' \
   "$UART_LOG" || true
 
 # Handler-entry vs pulse-count census. PI5_GPIO_IRQ_PROVEN latches once per boot,
@@ -263,6 +274,11 @@ done
 
 if [ "$LOGIC_STATUS" != 0 ] || [ "${LOGIC_ANALYSIS_OK:-0}" != 1 ]; then
     echo "LOGIC_CAPTURE_INCOMPLETE"
+    ok=0
+fi
+
+if ! python3 -B "$REPO/scripts/benchmark/analyze-v03.py" \
+    --sensor "$UART_LOG" --sensor-count "$PULSE_COUNT"; then
     ok=0
 fi
 

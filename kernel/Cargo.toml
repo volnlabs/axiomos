@@ -110,3 +110,11 @@ bench = []
 # release IRQ, re-arm the bench reflex output through the monitored guard path.
 # Never enable this in production; it implies `bench` but is otherwise opt-in.
 bench-estop-rearm = ["bench"]
+
+# Unloaded-HIL-only diagnostic: re-arm GPIO12 after each correlated GPIO23
+# response so every external edge produces one independently measurable sample.
+bench-reflex-rearm = ["bench"]
+
+# Unloaded-HIL-only diagnostic: emit 10,000 same-image direct-MMIO versus
+# monitor+MMIO timing pairs while GPIO12 is physically disconnected.
+bench-paired-overhead = ["bench"]

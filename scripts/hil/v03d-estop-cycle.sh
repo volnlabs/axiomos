@@ -249,14 +249,8 @@ for marker in "${FORBIDDEN[@]}"; do
     fi
 done
 
-mb_count="$(rg -ac 'PI5_MB' "$UART_LOG" 2>/dev/null || echo 0)"
-rearm_count="$(rg -ac 'PI5_ESTOP_REARM' "$UART_LOG" 2>/dev/null || echo 0)"
-rearm_ok_count="$(rg -ac 'PI5_ESTOP_REARM mode=gpio code=0' "$UART_LOG" 2>/dev/null || echo 0)"
-echo "PI5_MB count: $mb_count (need >= $PRESS_COUNT)"
-echo "successful PI5_ESTOP_REARM count: $rearm_ok_count (need >= $((PRESS_COUNT - 1)))"
-if [ "$mb_count" -lt "$PRESS_COUNT" ] ||
-   [ "$rearm_ok_count" -lt "$((PRESS_COUNT - 1))" ] ||
-   [ "$rearm_count" -ne "$rearm_ok_count" ]; then
+if ! python3 -B "$REPO/scripts/benchmark/analyze-v03.py" \
+    --estop "$UART_LOG" --estop-count "$PRESS_COUNT"; then
     ok=0
 fi
 

@@ -5,7 +5,7 @@ This ledger turns every first-party Rust `unsafe` syntax site into an owned revi
 
 Run `cargo xtask check unsafe` before review. Run `python3 scripts/verify/unsafe-ledger.py --list` for the site-level TSV containing location, construct, owner, invariant, callers, tests, priority, and review date. Update [ledger.toml](ledger.toml) when an invariant, owner, or baseline changes, then run `python3 scripts/verify/unsafe-ledger.py --write`.
 
-Current snapshot: **687 sites in 121 files** (attribute 146, block 432, extern 25, function 62, impl 21, trait 1). Inventory fingerprint: `sha256:1799294942f7007af86c02ae66343a4ddc69d231fec649a58e38a04be0bbc598`. All sites are classified by the obligations below.
+Current snapshot: **687 sites in 121 files** (attribute 146, block 432, extern 25, function 62, impl 21, trait 1). Inventory fingerprint: `sha256:bef2e368b96f1609cdff6bbe0b2b046426b48181145e295c57b3962bacc67277`. All sites are classified by the obligations below.
 
 | Obligation | Sites | Scope | Owner | Priority | Required invariant | Principal callers | Executable evidence | Reviewed |
 |---|---:|---|---|---|---|---|---|---|

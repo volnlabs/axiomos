@@ -109,6 +109,39 @@ fn apply_gpio_value(pin: u8, value: u32) {
     let _ = (pin, value);
 }
 
+/// Measure identical direct-MMIO and monitor+MMIO safe-low writes for the
+/// feature-gated, physically disconnected V03-A bench image.
+#[cfg(all(feature = "bench", feature = "bench-paired-overhead"))]
+pub(crate) fn bench_measure_gpio_pair() -> (u64, u64) {
+    with_apply_lock(|| {
+        let pin = crate::bench::BENCH_PWM_PIN;
+        let level = 0; // Direct bypass is permanently restricted to safe-low.
+        let baseline_start = crate::bench::now_cycles();
+        apply_gpio_value(pin, level);
+        let baseline_cycles = crate::bench::now_cycles().wrapping_sub(baseline_start);
+
+        let monitor_start = crate::bench::now_cycles();
+        let ch = ChannelId {
+            kind: ActuationKind::GpioLevel,
+            chip: 0,
+            channel: pin,
+        };
+        let now = crate::time::get_kernel_time_ns();
+        let (value, _) = ACTUATION_MONITOR
+            .lock()
+            .decide(
+                ActuationRequest { ch, value: level },
+                Authority::Learned,
+                AuditSource::LearnedBehavior,
+                now,
+            )
+            .apply();
+        apply_gpio_value(pin, value);
+        let monitor_cycles = crate::bench::now_cycles().wrapping_sub(monitor_start);
+        (baseline_cycles, monitor_cycles)
+    })
+}
+
 /// Push an e-stop command over the Shrike link so link-owned motors (driven by
 /// the RP2040, not local PWM) mirror the ARM-A latch state. If the link TX ring
 /// is full, the control-link poller retries before sending further setpoints.

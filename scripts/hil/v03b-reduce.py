@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Reduce V03-B latency markers from a Pi UART log into a distribution.
 
-Parses `PI5_MC ns=<n>` (edge->actuate, M-C) and `PI5_MA ns=<n>` (monitor
-overhead, M-A) lines and reports count + min/median/p95/p99/p99.9/max.
+Parses legacy and keyed `PI5_MC`/`PI5_MA` lines and reports count +
+min/median/p95/p99/p99.9/max. Use `scripts/benchmark/analyze-v03.py --pairs`
+for the merge-gating paired M-A result.
 
 Usage: v03b-reduce.py [--warmup N] <uart-log> [uart-log ...]
 
@@ -13,8 +14,8 @@ import math
 import re
 import sys
 
-MC = re.compile(rb"PI5_MC ns=(\d+)")
-MA = re.compile(rb"PI5_MA ns=(\d+)")
+MC = re.compile(rb"PI5_MC(?: sample_id=\d+)? ns=(\d+)")
+MA = re.compile(rb"PI5_MA(?: sample_id=\d+ monitor_)?ns=(\d+)")
 
 
 def pct(xs, p):
