@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[4]
 CHECK = ROOT / "firmware/shrike/rp2040/verify_flash_contract.py"
 FLASH = ROOT / "firmware/shrike/rp2040/flash-uf2.sh"
+BUILD = ROOT / "firmware/shrike/rp2040/build-uf2.sh"
 FLASH_START = 0x10000000
 FPGA_START = 0x10200000
 
@@ -104,6 +105,23 @@ class FlashContractTests(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("UF2 hash sidecar", result.stderr)
+            self.assertFalse((mount / image.name).exists())
+
+    def test_build_sidecar_accepts_documented_relative_uf2_path(self) -> None:
+        subprocess.run([str(BUILD)], cwd=ROOT, check=True)
+        image = Path("firmware/shrike/rp2040/target/thumbv6m-none-eabi/release/shrike_rp2040.uf2")
+        with tempfile.TemporaryDirectory() as directory:
+            mount = Path(directory) / "RPI-RP2"
+            mount.mkdir()
+            result = subprocess.run(
+                [str(FLASH), str(image), str(mount)],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("NOT READY", result.stderr)
             self.assertFalse((mount / image.name).exists())
 
     def test_rejects_a_uf2_block_in_the_reserved_fpga_region(self) -> None:

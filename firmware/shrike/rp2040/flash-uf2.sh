@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly UF2="${1:?usage: flash-uf2.sh custom.uf2 RPI-RP2-mountpoint}"
+readonly UF2="$(realpath -- "${1:?usage: flash-uf2.sh custom.uf2 RPI-RP2-mountpoint}")"
 readonly MOUNT="${2:?usage: flash-uf2.sh custom.uf2 RPI-RP2-mountpoint}"
 readonly SIDECAR="$UF2.sha256"
 
