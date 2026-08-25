@@ -73,6 +73,9 @@ class FlashContractTests(unittest.TestCase):
             mount = Path(directory) / "RPI-RP2"
             mount.mkdir()
             image.write_bytes(uf2_block(FLASH_START))
+            image.with_suffix(".uf2.sha256").write_text(
+                subprocess.check_output(["sha256sum", str(image)], text=True)
+            )
             result = subprocess.run(
                 [str(FLASH), str(image), str(mount)],
                 text=True,
@@ -81,6 +84,26 @@ class FlashContractTests(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("NOT READY", result.stderr)
+            self.assertFalse((mount / image.name).exists())
+
+    def test_flash_script_rejects_a_modified_in_range_uf2_before_copying(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "custom.uf2"
+            mount = Path(directory) / "RPI-RP2"
+            mount.mkdir()
+            image.write_bytes(uf2_block(FLASH_START))
+            sidecar = image.with_suffix(".uf2.sha256")
+            digest = subprocess.check_output(["sha256sum", str(image)], text=True)
+            sidecar.write_text(digest)
+            image.write_bytes(image.read_bytes()[:-5] + b"\x01" + image.read_bytes()[-4:])
+            result = subprocess.run(
+                [str(FLASH), str(image), str(mount)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("UF2 hash sidecar", result.stderr)
             self.assertFalse((mount / image.name).exists())
 
     def test_rejects_a_uf2_block_in_the_reserved_fpga_region(self) -> None:
