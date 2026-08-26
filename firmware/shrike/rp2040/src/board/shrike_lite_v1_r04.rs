@@ -11,12 +11,20 @@ pub const MCU_LED: u8 = 4;
 pub const MOTOR_DIRECTION: [u8; 4] = [6, 7, 8, 9];
 pub const ULTRASONIC: [u8; 2] = [10, 11]; // trigger, echo
 pub const PI_UART: [u8; 2] = [16, 17]; // RP2040 TX, RX
-pub const UNLOADED_PWM: [u8; 2] = [18, 19];
 pub const ESTOP_OBSERVE: u8 = 5;
 
-const ASSIGNED: [u8; 20] = [
-    0, 1, 2, 3, 12, 13, 14, 15, 4, 5, 6, 7, 8, 9, 10, 11, 16, 17, 18, 19,
-];
+const ASSIGNED: [u8; 18] = [0, 1, 2, 3, 12, 13, 14, 15, 4, 5, 6, 7, 8, 9, 10, 11, 16, 17];
+
+pub const fn pin_is_assigned(pin: u8) -> bool {
+    let mut i = 0;
+    while i < ASSIGNED.len() {
+        if ASSIGNED[i] == pin {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
 
 pub const fn assignments_are_unique() -> bool {
     let mut i = 0;

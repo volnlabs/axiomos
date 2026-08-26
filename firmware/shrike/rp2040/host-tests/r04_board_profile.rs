@@ -11,6 +11,7 @@ fn r04_assignments_match_the_vendor_interconnect_and_do_not_overlap() {
     assert_eq!(profile::MOTOR_DIRECTION, [6, 7, 8, 9]);
     assert_eq!(profile::ULTRASONIC, [10, 11]);
     assert_eq!(profile::PI_UART, [16, 17]);
-    assert_eq!(profile::UNLOADED_PWM, [18, 19]);
+    assert!(!profile::pin_is_assigned(18));
+    assert!(!profile::pin_is_assigned(19));
     assert!(profile::assignments_are_unique());
 }

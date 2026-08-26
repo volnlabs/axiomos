@@ -185,6 +185,8 @@ jobs:
             cargo test -p kernel_bpf --no-default-features --features cloud-profile --test profile_contracts $PROFILE_FLAG
             cargo test -p kernel_bpf --no-default-features --features embedded-profile $PROFILE_FLAG
             cargo test -p shrike_link $PROFILE_FLAG
+            cargo test -p shrike_control $PROFILE_FLAG
+            cargo test -p shrike_rp2040_host_sim $PROFILE_FLAG
   test-standalone-workspaces:
     name: "Test (standalone workspaces)"
     runs-on: ubuntu-latest
