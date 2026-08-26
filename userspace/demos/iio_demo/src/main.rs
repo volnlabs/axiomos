@@ -5,7 +5,7 @@ use kernel_abi::{
     BpfAttr, BPF_ATTACH_TYPE_IIO as ATTACH_TYPE_IIO,
     BPF_HELPER_RINGBUF_OUTPUT as HELPER_RINGBUF_OUTPUT,
 };
-use minilib::{bpf, clock_gettime, exit, msleep, timespec, write};
+use minilib::{bpf, exit, msleep, write};
 
 #[repr(C)]
 struct BpfInsn {
@@ -176,7 +176,7 @@ pub extern "C" fn _start() -> ! {
         ..Default::default()
     };
 
-    v04_behavior("load");
+    // Fixture-only demo: it intentionally carries no v0.4 campaign identity.
     let prog_id = bpf(
         5, // BPF_PROG_LOAD
         &load_attr as *const BpfAttr as *const u8,
@@ -187,9 +187,6 @@ pub extern "C" fn _start() -> ! {
         print("Error: Failed to load BPF program\n");
         exit(1);
     }
-    // BPF_PROG_LOAD returns only after the kernel verified and admitted it.
-    v04_behavior("verify");
-    v04_behavior("admit");
 
     print("Program loaded. ID: ");
     print_num(prog_id as u64);
@@ -215,8 +212,6 @@ pub extern "C" fn _start() -> ! {
         print("Error: Failed to attach BPF program\n");
         exit(1);
     }
-    v04_behavior("attach");
-    v04_behavior("active");
 
     print("Success! BPF filter program attached to IIO.\n");
     print("Filter range: ");
@@ -314,19 +309,6 @@ fn print_num(mut n: u64) {
         j += 1;
     }
     write(1, &buf[..i]);
-}
-
-fn v04_behavior(stage: &str) {
-    let mut ts = timespec::default();
-    let _ = clock_gettime(kernel_abi::CLOCK_MONOTONIC, &mut ts);
-    let ns = (ts.tv_sec as u64)
-        .saturating_mul(1_000_000_000)
-        .saturating_add(ts.tv_nsec as u64);
-    print("V04_BEHAVIOR sample_id=1 behavior=iio-filter stage=");
-    print(stage);
-    print(" ts_ns=");
-    print_num(ns);
-    print("\n");
 }
 
 #[cfg(not(test))]

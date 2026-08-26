@@ -58,6 +58,7 @@ const ULTRASONIC_CHANNEL: u32 = 0; // proximity / range
 static CONTROL_LINK: OnceCell<Mutex<ControlLink>> = OnceCell::uninit();
 static NEXT_SENSOR_SAMPLE_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_EVENT_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_CHUNK_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Map an actuation `(chip, channel)` to the wheel it drives, if it is a
 /// link-owned motor. Unmapped channels keep local RP1 PWM.
@@ -90,14 +91,31 @@ fn now_ns() -> u64 {
 }
 
 /// What a decode pass produced that must be acted on OUTSIDE the lock.
-#[derive(Default, Clone, Copy)]
+#[derive(Clone, Copy)]
 struct PollOutcome {
     /// Hardware e-stop line asserted in an inbound Sensor frame.
     estop: bool,
     /// Latest ultrasonic echo time (µs), if a Sensor frame arrived.
-    sensor: Option<(u64, u16)>,
-    heartbeat_seq: Option<u16>,
+    sensors: [Option<(u64, u16)>; RX_PER_POLL],
+    sensor_count: usize,
+    heartbeats: [Option<u16>; RX_PER_POLL],
+    heartbeat_count: usize,
+    overflowed: bool,
     link_loss: bool,
+}
+
+impl Default for PollOutcome {
+    fn default() -> Self {
+        Self {
+            estop: false,
+            sensors: [None; RX_PER_POLL],
+            sensor_count: 0,
+            heartbeats: [None; RX_PER_POLL],
+            heartbeat_count: 0,
+            overflowed: false,
+            link_loss: false,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -150,14 +168,24 @@ impl ControlLink {
                     ..
                 } = msg
                 {
-                    out.sensor = Some((
-                        NEXT_SENSOR_SAMPLE_ID.fetch_add(1, Ordering::Relaxed),
-                        ultrasonic_echo_us,
-                    ));
+                    if out.sensor_count == RX_PER_POLL {
+                        out.overflowed = true;
+                    } else {
+                        out.sensors[out.sensor_count] = Some((
+                            NEXT_SENSOR_SAMPLE_ID.fetch_add(1, Ordering::Relaxed),
+                            ultrasonic_echo_us,
+                        ));
+                        out.sensor_count += 1;
+                    }
                     out.estop |= estop_line;
                 }
                 if let Msg::HeartbeatToPi { seq } = msg {
-                    out.heartbeat_seq = Some(seq);
+                    if out.heartbeat_count == RX_PER_POLL {
+                        out.overflowed = true;
+                    } else {
+                        out.heartbeats[out.heartbeat_count] = Some(seq);
+                        out.heartbeat_count += 1;
+                    }
                 }
             }
         }
@@ -302,29 +330,48 @@ pub fn service() {
         return; // link not up
     };
 
+    let chunk_id = NEXT_CHUNK_ID.fetch_add(1, Ordering::Relaxed);
+    crate::serial_println!("V04_CHUNK chunk_id={} stage=start ts_ns={}", chunk_id, now);
     // Side-effects OUTSIDE the CONTROL_LINK lock (thread context).
+    if out.overflowed {
+        // Unknown V04 markers are reducer failures; do not pretend a partial
+        // bounded decode batch is a complete measurement population.
+        crate::serial_println!("V04_INPUT_OVERFLOW ts_ns={}", now);
+    }
     if out.estop {
         crate::actuation::watchdog_estop_trigger();
     }
-    if let Some(seq) = out.heartbeat_seq {
-        crate::serial_println!("V04_HEARTBEAT seq={} ts_ns={}", seq, now);
+    for seq in out.heartbeats[..out.heartbeat_count].iter().flatten() {
+        crate::serial_println!("V04_HEARTBEAT seq={} ts_ns={}", seq, now_ns());
     }
     if out.link_loss {
+        let timestamp = now_ns();
         crate::serial_println!(
             "V04_LINK_LOSS event_id={} reason=timeout ts_ns={}",
             NEXT_EVENT_ID.fetch_add(1, Ordering::Relaxed),
-            now
+            timestamp
+        );
+        crate::serial_println!(
+            "V04_ESTOP event_id={} source=link stage=assert ts_ns={}",
+            NEXT_EVENT_ID.fetch_add(1, Ordering::Relaxed),
+            timestamp
         );
     }
-    if let Some((sample_id, echo)) = out.sensor {
+    for (sample_id, echo) in out.sensors[..out.sensor_count].iter().flatten() {
+        let timestamp = now_ns();
         crate::serial_println!(
             "V04_ECHO_DONE sample_id={} echo_us={} ts_ns={}",
             sample_id,
             echo,
-            now
+            timestamp
         );
-        dispatch_ultrasonic(now, echo, sample_id);
+        dispatch_ultrasonic(timestamp, *echo, *sample_id);
     }
+    crate::serial_println!(
+        "V04_CHUNK chunk_id={} stage=end ts_ns={}",
+        chunk_id,
+        now_ns()
+    );
 }
 
 /// Inject an ultrasonic reading as a synthetic IIO event so `ATTACH_TYPE_IIO`
@@ -341,7 +388,9 @@ fn dispatch_ultrasonic(now: u64, echo_us: u16, sample_id: u64) {
             offset: 0,
             reserved: 0,
         };
-        mgr.lock().dispatch_v04_event(event, sample_id);
+        if !mgr.lock().dispatch_v04_event(event, sample_id) {
+            crate::serial_println!("V04_INPUT_OVERFLOW ts_ns={}", now);
+        }
     }
 }
 
@@ -411,7 +460,7 @@ pub fn send_motor(side: MotorSide, value: u32) -> bool {
         if !l.set_motor(side, permille) {
             return false;
         }
-        if let Some(sample_id) = crate::driver::iio::active_v04_sample_id() {
+        if let Some(sample_id) = crate::driver::iio::take_v04_motor_sample_id() {
             crate::serial_println!(
                 "V04_MOTOR_CMD sample_id={} seq={} left={} right={} ts_ns={}",
                 sample_id,

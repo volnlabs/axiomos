@@ -62,9 +62,14 @@ pub static IIO_MANAGER: OnceCell<Mutex<IioManager>> = OnceCell::uninit();
 // Synchronous control-link dispatch gives this serial-only tag a bounded scope.
 static V04_ACTIVE_SAMPLE_ID: AtomicU64 = AtomicU64::new(0);
 
-pub fn active_v04_sample_id() -> Option<u64> {
+/// Consume the one benchmark motor marker allowed for the active IIO dispatch.
+pub fn take_v04_motor_sample_id() -> Option<u64> {
     let sample_id = V04_ACTIVE_SAMPLE_ID.load(Ordering::Acquire);
-    (sample_id != 0).then_some(sample_id)
+    (sample_id != 0
+        && V04_ACTIVE_SAMPLE_ID
+            .compare_exchange(sample_id, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok())
+    .then_some(sample_id)
 }
 
 /// Initialize the IIO subsystem
@@ -104,8 +109,15 @@ impl IioManager {
         let _ = crate::bpf::BpfManager::run_hook_programs(crate::bpf::ATTACH_TYPE_IIO, &ctx, "iio");
     }
 
-    pub fn dispatch_v04_event(&self, event: IioEvent, sample_id: u64) {
-        V04_ACTIVE_SAMPLE_ID.store(sample_id, Ordering::Release);
+    pub fn dispatch_v04_event(&self, event: IioEvent, sample_id: u64) -> bool {
+        // IIO_MANAGER serializes dispatches. Reject re-entry rather than
+        // overwriting the only correlation context.
+        if V04_ACTIVE_SAMPLE_ID
+            .compare_exchange(0, sample_id, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
         crate::serial_println!(
             "V04_HOOK_ENTRY sample_id={} ts_ns={}",
             sample_id,
@@ -113,6 +125,7 @@ impl IioManager {
         );
         self.dispatch_event(event);
         V04_ACTIVE_SAMPLE_ID.store(0, Ordering::Release);
+        true
     }
 }
 

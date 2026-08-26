@@ -264,9 +264,24 @@ pub fn guard_gpio_with(pin: u8, level: u32, authority: Authority, source: AuditS
 pub fn trigger_estop(source: AuditSource) -> i64 {
     with_apply_lock(|| {
         let now = crate::time::get_kernel_time_ns();
-        let drives = ACTUATION_MONITOR.lock().estop_trigger(source, now);
+        let mut monitor = ACTUATION_MONITOR.lock();
+        let transition = !monitor.is_latched();
+        let drives = monitor.estop_trigger(source, now);
+        drop(monitor);
         for drive in drives.iter() {
             apply_safe_drive(drive);
+        }
+        if transition && matches!(source, AuditSource::Operator | AuditSource::Watchdog) {
+            crate::serial_println!(
+                "V04_ESTOP event_id={} source={} stage=assert ts_ns={}",
+                NEXT_V04_ESTOP_EVENT.fetch_add(1, Ordering::Relaxed),
+                match source {
+                    AuditSource::Operator => "operator",
+                    AuditSource::Watchdog => "watchdog",
+                    _ => unreachable!(),
+                },
+                now
+            );
         }
         notify_link_estop(true);
         0
@@ -276,26 +291,33 @@ pub fn trigger_estop(source: AuditSource) -> i64 {
 pub fn operator_estop(action: EstopAction) -> i64 {
     with_apply_lock(|| {
         let now = crate::time::get_kernel_time_ns();
-        let result = ACTUATION_MONITOR.lock().operator_estop(action, now);
+        let mut monitor = ACTUATION_MONITOR.lock();
+        let was_latched = monitor.is_latched();
+        let result = monitor.operator_estop(action, now);
+        drop(monitor);
         match result {
             EstopCommandResult::Triggered(drives) => {
                 for drive in drives.iter() {
                     apply_safe_drive(drive);
                 }
-                crate::serial_println!(
-                    "V04_ESTOP event_id={} source=operator stage=assert ts_ns={}",
-                    NEXT_V04_ESTOP_EVENT.fetch_add(1, Ordering::Relaxed),
-                    now
-                );
+                if !was_latched {
+                    crate::serial_println!(
+                        "V04_ESTOP event_id={} source=operator stage=assert ts_ns={}",
+                        NEXT_V04_ESTOP_EVENT.fetch_add(1, Ordering::Relaxed),
+                        now
+                    );
+                }
                 notify_link_estop(true);
                 0
             }
             EstopCommandResult::Released => {
-                crate::serial_println!(
-                    "V04_ESTOP event_id={} source=operator stage=release ts_ns={}",
-                    NEXT_V04_ESTOP_EVENT.fetch_add(1, Ordering::Relaxed),
-                    now
-                );
+                if was_latched {
+                    crate::serial_println!(
+                        "V04_ESTOP event_id={} source=operator stage=release ts_ns={}",
+                        NEXT_V04_ESTOP_EVENT.fetch_add(1, Ordering::Relaxed),
+                        now
+                    );
+                }
                 notify_link_estop(false);
                 0
             }
@@ -307,15 +329,20 @@ pub fn operator_estop(action: EstopAction) -> i64 {
 pub fn watchdog_estop_trigger() -> i64 {
     with_apply_lock(|| {
         let now = crate::time::get_kernel_time_ns();
-        let drives = ACTUATION_MONITOR.lock().watchdog_estop_trigger(now);
+        let mut monitor = ACTUATION_MONITOR.lock();
+        let transition = !monitor.is_latched();
+        let drives = monitor.watchdog_estop_trigger(now);
+        drop(monitor);
         for drive in drives.iter() {
             apply_safe_drive(drive);
         }
-        crate::serial_println!(
-            "V04_ESTOP event_id={} source=watchdog stage=assert ts_ns={}",
-            NEXT_V04_ESTOP_EVENT.fetch_add(1, Ordering::Relaxed),
-            now
-        );
+        if transition {
+            crate::serial_println!(
+                "V04_ESTOP event_id={} source=watchdog stage=assert ts_ns={}",
+                NEXT_V04_ESTOP_EVENT.fetch_add(1, Ordering::Relaxed),
+                now
+            );
+        }
         notify_link_estop(true);
         0
     })
@@ -324,11 +351,19 @@ pub fn watchdog_estop_trigger() -> i64 {
 pub fn release_estop(authority: Authority, source: AuditSource) -> i64 {
     with_apply_lock(|| {
         let now = crate::time::get_kernel_time_ns();
-        match ACTUATION_MONITOR
-            .lock()
-            .estop_release(authority, source, now)
-        {
+        let mut monitor = ACTUATION_MONITOR.lock();
+        let was_latched = monitor.is_latched();
+        let result = monitor.estop_release(authority, source, now);
+        drop(monitor);
+        match result {
             ReleaseResult::Released => {
+                if was_latched {
+                    crate::serial_println!(
+                        "V04_ESTOP event_id={} source=operator stage=release ts_ns={}",
+                        NEXT_V04_ESTOP_EVENT.fetch_add(1, Ordering::Relaxed),
+                        now
+                    );
+                }
                 notify_link_estop(false);
                 0
             }
