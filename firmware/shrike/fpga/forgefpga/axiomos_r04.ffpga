@@ -680,9 +680,10 @@
             <placement-constraints/>
         </modules>
         <io-spec-tool>
-            <!-- Internal R0.4 bindings are schematic-proven. External GPIO7/8/9
-                 candidates and rst_n remain deliberately unbound until the
-                 ForgeFPGA I/O planner and powered-off continuity review. -->
+            <!-- SPI and GPIO18 bindings come from the pinned scaffold/R0.4 net.
+                 The hand-added GPIO17 xy[31:5] coordinate is PROVISIONAL until
+                 ForgeFPGA I/O-planner export confirms it. External GPIO7/8/9
+                 candidates and rst_n also remain deliberately unbound. -->
             <records filter="50">
                 <record id="CLK_t[0:0]_W_in0">
                     <port-name>clk</port-name>
@@ -709,6 +710,7 @@
                     <port-name>left_pwm_in</port-name>
                 </record>
                 <record id="IOB_t[0:0]_xy[31:5]_in0">
+                    <!-- PROVISIONAL: schematic proves GPIO17, not xy[31:5]. -->
                     <port-name>right_pwm_in</port-name>
                 </record>
             </records>

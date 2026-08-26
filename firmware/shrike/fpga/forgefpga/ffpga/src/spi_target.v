@@ -10,6 +10,7 @@ module spi_target (
     input wire i_mosi,
     output wire o_miso,
     output wire o_miso_oe,
+    output wire o_sample_pulse,
     output reg [7:0] o_rx_data,
     output reg o_rx_data_valid,
     input wire [7:0] i_tx_data
@@ -29,6 +30,7 @@ module spi_target (
                         | ((bit_count == 3'd0) & sck_fall);
     assign o_miso = miso_data[7];
     assign o_miso_oe = ~ss_n_sync[2];
+    assign o_sample_pulse = sck_rise;
 
     always @(posedge i_clk or negedge i_rst_n) begin
         if (!i_rst_n) begin

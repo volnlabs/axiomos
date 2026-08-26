@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 module tb_axiomos_r04_top;
+    localparam integer WATCHDOG_CYCLES = 2048;
+    localparam integer TIGHT_HALF_PERIOD_NS = 60;
+
     reg clk;
     reg rst_n;
     reg spi_ss_n;
@@ -17,9 +20,10 @@ module tb_axiomos_r04_top;
     wire left_pwm_out_en;
     wire right_pwm_out;
     wire right_pwm_out_en;
+    reg [7:0] last_status;
     integer failures;
 
-    top dut (
+    top #(.COMMAND_TIMEOUT_CYCLES(WATCHDOG_CYCLES)) dut (
         .clk(clk),
         .clk_en(clk_en),
         .rst_n(rst_n),
@@ -50,14 +54,53 @@ module tb_axiomos_r04_top;
         end
     endtask
 
-    task send_byte;
+    task transfer_byte;
         input [7:0] value;
+        input integer half_period_ns;
+        output [7:0] received;
         integer bit_index;
+        reg sampled_before_edge;
         begin
+            received = 8'h00;
             for (bit_index = 7; bit_index >= 0; bit_index = bit_index - 1) begin
                 spi_mosi = value[bit_index];
-                #100 spi_sck = 1'b1;
+                #(half_period_ns - 1);
+                sampled_before_edge = spi_miso;
+                spi_sck = 1'b1;
+                #1;
+                if (spi_miso !== sampled_before_edge) begin
+                    failures = failures + 1;
+                    $display("FAIL: MISO changed on the mode-0 sampling edge");
+                end
+                if (spi_miso_en !== 1'b1) begin
+                    failures = failures + 1;
+                    $display("FAIL: MISO output enable dropped while selected");
+                end
+                received = {received[6:0], spi_miso};
+                #(half_period_ns - 1) spi_sck = 1'b0;
+                #1;
+            end
+        end
+    endtask
+
+    task send_byte;
+        input [7:0] value;
+        reg [7:0] ignored;
+        begin
+            transfer_byte(value, 100, ignored);
+        end
+    endtask
+
+    task send_partial_byte;
+        input [7:0] value;
+        input integer bit_count;
+        integer bit_index;
+        begin
+            for (bit_index = 7; bit_index >= 8 - bit_count; bit_index = bit_index - 1) begin
+                spi_mosi = value[bit_index];
+                #99 spi_sck = 1'b1;
                 #100 spi_sck = 1'b0;
+                #1;
             end
         end
     endtask
@@ -88,7 +131,7 @@ module tb_axiomos_r04_top;
         input [7:0] crc_hi;
         begin
             begin_frame;
-            send_byte(8'h7e);
+            transfer_byte(8'h7e, 100, last_status);
             send_byte(version);
             send_byte(msg_type);
             send_byte(length);
@@ -101,6 +144,33 @@ module tb_axiomos_r04_top;
             send_byte(crc_lo);
             send_byte(crc_hi);
             end_frame;
+        end
+    endtask
+
+    task send_command_tight;
+        input [7:0] sequence;
+        input [15:0] left;
+        input [15:0] right;
+        input [7:0] crc_lo;
+        input [7:0] crc_hi;
+        reg [7:0] ignored;
+        begin
+            spi_ss_n = 1'b0;
+            #TIGHT_HALF_PERIOD_NS;
+            transfer_byte(8'h7e, TIGHT_HALF_PERIOD_NS, last_status);
+            transfer_byte(8'h01, TIGHT_HALF_PERIOD_NS, ignored);
+            transfer_byte(8'h01, TIGHT_HALF_PERIOD_NS, ignored);
+            transfer_byte(8'h06, TIGHT_HALF_PERIOD_NS, ignored);
+            transfer_byte(sequence, TIGHT_HALF_PERIOD_NS, ignored);
+            transfer_byte(left[7:0], TIGHT_HALF_PERIOD_NS, ignored);
+            transfer_byte(left[15:8], TIGHT_HALF_PERIOD_NS, ignored);
+            transfer_byte(right[7:0], TIGHT_HALF_PERIOD_NS, ignored);
+            transfer_byte(right[15:8], TIGHT_HALF_PERIOD_NS, ignored);
+            transfer_byte(8'h00, TIGHT_HALF_PERIOD_NS, ignored);
+            transfer_byte(crc_lo, TIGHT_HALF_PERIOD_NS, ignored);
+            transfer_byte(crc_hi, TIGHT_HALF_PERIOD_NS, ignored);
+            #TIGHT_HALF_PERIOD_NS spi_ss_n = 1'b1;
+            #TIGHT_HALF_PERIOD_NS;
         end
     endtask
 
@@ -131,6 +201,7 @@ module tb_axiomos_r04_top;
         left_pwm_in = 1'b1;
         right_pwm_in = 1'b1;
         failures = 0;
+        last_status = 8'h00;
 
         reset_dut;
         check(left_pwm_out === 1'b0 && right_pwm_out === 1'b0,
@@ -139,7 +210,10 @@ module tb_axiomos_r04_top;
         // Literal CRCs were independently generated from CRC16-CCITT/FALSE
         // over VER,TYPE,LEN,PAYLOAD. A frame is not visible before CRC_HI.
         begin_frame;
-        send_byte(8'h7e); send_byte(8'h01); send_byte(8'h01); send_byte(8'h06);
+        transfer_byte(8'h7e, 100, last_status);
+        check(last_status === 8'h80,
+              "status must shift READY first with valid/expired clear");
+        send_byte(8'h01); send_byte(8'h01); send_byte(8'h06);
         send_byte(8'h01); send_byte(8'h64); send_byte(8'h00);
         send_byte(8'h38); send_byte(8'hff); send_byte(8'h00); send_byte(8'h26);
         check(dut.command_valid === 1'b0 && dut.left_duty_permille === 12'sd0
@@ -155,12 +229,16 @@ module tb_axiomos_r04_top;
 
         send_command(8'h01, 8'h01, 8'h06, 8'h02, 16'd200, 16'd300,
                      8'h00, 8'he5, 8'h6f);
+        check(last_status === 8'hc0,
+              "selected status must report READY and prior command validity MSB-first");
         check(dut.command_valid === 1'b0 && left_pwm_out === 1'b0
               && right_pwm_out === 1'b0,
               "CRC corruption must invalidate both outputs");
 
         send_command(8'h01, 8'h01, 8'h06, 8'h03, 16'd50, 16'd60,
                      8'h00, 8'hee, 8'h23);
+        check(last_status === 8'h80,
+              "status after CRC fault must clear command-valid bit");
         check(dut.command_valid === 1'b1, "fresh valid frame must recover");
 
         send_command(8'h02, 8'h01, 8'h06, 8'h04, 16'd50, 16'd60,
@@ -233,6 +311,58 @@ module tb_axiomos_r04_top;
         send_command(8'h01, 8'h01, 8'h06, 8'h05, 16'd100, 16'd100,
                      8'h00, 8'hd7, 8'h81);
         check(dut.command_valid === 1'b1, "fresh clear-fault frame must recover");
+
+        begin_frame;
+        end_frame;
+        check(dut.command_valid === 1'b0 && left_pwm_out === 1'b0
+              && right_pwm_out === 1'b0,
+              "zero-byte selected transaction must invalidate prior command");
+
+        send_command(8'h01, 8'h01, 8'h06, 8'h06, 16'sd800, -16'sd800,
+                     8'h00, 8'hb3, 8'hfd);
+        check(last_status === 8'h80 && dut.command_valid === 1'b1
+              && dut.left_duty_permille === 12'sd800
+              && dut.right_duty_permille === -12'sd800,
+              "exact +800/-800 boundaries must be accepted");
+
+        begin_frame;
+        send_partial_byte(8'h7e, 3);
+        end_frame;
+        check(dut.command_valid === 1'b0 && left_pwm_out === 1'b0
+              && right_pwm_out === 1'b0,
+              "partial first byte must invalidate prior command");
+
+        send_command(8'h01, 8'h01, 8'h06, 8'h07, -16'sd800, 16'sd800,
+                     8'h00, 8'h00, 8'he5);
+        check(last_status === 8'h80 && dut.command_valid === 1'b1
+              && dut.left_duty_permille === -12'sd800
+              && dut.right_duty_permille === 12'sd800,
+              "exact -800/+800 boundaries must be accepted");
+
+        repeat (WATCHDOG_CYCLES + 2) @(posedge clk);
+        #1;
+        check(dut.command_valid === 1'b0 && dut.watchdog_expired === 1'b1
+              && left_pwm_out === 1'b0 && right_pwm_out === 1'b0,
+              "command watchdog silence must expire and fail both outputs low");
+
+        send_command(8'h01, 8'h01, 8'h06, 8'h08, 16'd100, 16'd100,
+                     8'h00, 8'h94, 8'hcf);
+        check(last_status === 8'ha0 && dut.command_valid === 1'b1
+              && dut.watchdog_expired === 1'b0,
+              "expired status must be exposed and fresh frame must recover");
+
+        send_command(8'h01, 8'h01, 8'h06, 8'h09, 16'd100, 16'd100,
+                     8'h80, 8'hbc, 8'h1b);
+        check(last_status === 8'hc0 && dut.command_valid === 1'b0,
+              "reserved nonzero flags must fail closed");
+
+        send_command_tight(8'h0a, 16'd123, -16'sd321, 8'hdc, 8'h80);
+        check(last_status === 8'h80 && dut.command_valid === 1'b1
+              && dut.left_duty_permille === 12'sd123
+              && dut.right_duty_permille === -12'sd321,
+              "tight legal CS/SCK phasing must preserve mode-0 frame and status");
+        check(spi_miso_en === 1'b1,
+              "MISO output enable must remain driven when CS returns idle");
 
         rst_n = 1'b0;
         #1;
