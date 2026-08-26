@@ -1,0 +1,4 @@
+artifact,derived_from,upstream_commit,license,status
+axiomos_r04.ffpga,examples/spi_loopback_led/spi_loopback_led.ffpga,763d0a7dd9ebdfc3f61de148457d5c34f112f61e,firmware/shrike/vendor/vicharak-shrike/763d0a7/LICENSE.md,DIRTY_SOURCE_PROJECT_NOT_SYNTHESIZED_OR_PROGRAMMED
+ffpga/src/spi_target.v,examples/spi_loopback_led/ffpga/src/spi_target.v,763d0a7dd9ebdfc3f61de148457d5c34f112f61e,firmware/shrike/vendor/vicharak-shrike/763d0a7/LICENSE.md,VERILOG_2005_SIMULATION_ONLY
+ffpga/src/top.v,examples/spi_loopback_led/ffpga/src/top.v,763d0a7dd9ebdfc3f61de148457d5c34f112f61e,firmware/shrike/vendor/vicharak-shrike/763d0a7/LICENSE.md,VERILOG_2005_SIMULATION_ONLY

@@ -1,0 +1,11 @@
+logical_signal,rp2040_gpio,fpga_gpio,package_pin,project_state,review_state
+spi_sck,2,3,16,assigned_from_pinned_scaffold,schematic_proven
+spi_ss_n,1,4,17,assigned_from_pinned_scaffold,schematic_proven
+spi_mosi,3,5,18,assigned_from_pinned_scaffold,schematic_proven
+spi_miso_ready,0,6,19,assigned_from_pinned_scaffold,schematic_proven
+left_pwm_in,14,18,9,assigned_from_r04_mapping,schematic_proven
+right_pwm_in,15,17,8,assigned_from_r04_mapping,schematic_proven
+rst_n,,device_nRST,11,unassigned,requires_forgefpga_reset_resource_review
+estop_n,,7,20,unassigned,PROVISIONAL_UNREVIEWED_PENDING_IO_PLANNER_AND_CONTINUITY
+left_pwm_out,,8,23,unassigned,PROVISIONAL_UNREVIEWED_PENDING_IO_PLANNER_AND_CONTINUITY
+right_pwm_out,,9,24,unassigned,PROVISIONAL_UNREVIEWED_PENDING_IO_PLANNER_AND_CONTINUITY
