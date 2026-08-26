@@ -28,6 +28,8 @@ struct MockFpga {
     statuses: Vec<Result<u8, &'static str>>,
     handoff: Result<(), &'static str>,
     runtime: Result<u8, &'static str>,
+    times_us: Vec<u64>,
+    next_time: usize,
 }
 
 impl MockFpga {
@@ -44,6 +46,8 @@ impl MockFpga {
             statuses: vec![Ok(STATUS_READY)],
             handoff: Ok(()),
             runtime: Ok(STATUS_READY | STATUS_COMMAND_VALID),
+            times_us: vec![0],
+            next_time: 0,
         }
     }
 
@@ -57,6 +61,17 @@ impl MockFpga {
 
 impl FpgaPlatform for MockFpga {
     type Error = &'static str;
+
+    fn now_us(&mut self) -> u64 {
+        let now = self
+            .times_us
+            .get(self.next_time)
+            .or_else(|| self.times_us.last())
+            .copied()
+            .unwrap_or(0);
+        self.next_time = self.next_time.saturating_add(1);
+        now
+    }
 
     fn force_safe(&mut self) {
         self.events.push(Event::Safe);
@@ -206,7 +221,7 @@ fn configuration_stream_ready_and_handoff_failures_all_return_safe() {
 }
 
 #[test]
-fn ready_must_be_positive_and_arrive_within_the_poll_bound() {
+fn ready_must_be_positive_and_arrive_before_the_elapsed_deadline() {
     let mut lifecycle = FpgaLifecycle::new(MockFpga::healthy());
     assert_eq!(
         lifecycle.configure(manifest(), 0),
@@ -217,10 +232,27 @@ fn ready_must_be_positive_and_arrive_within_the_poll_bound() {
 
     let mut fpga = MockFpga::healthy();
     fpga.statuses = vec![Ok(0), Ok(STATUS_READY)];
+    fpga.times_us = vec![0, 0, 1];
+    let mut lifecycle = FpgaLifecycle::new(fpga);
+    assert_eq!(lifecycle.configure(manifest(), 2), Ok(()));
+    assert!(lifecycle.runtime_ready());
+
+    let mut fpga = MockFpga::healthy();
+    fpga.statuses = vec![Ok(0), Ok(STATUS_READY)];
+    fpga.times_us = vec![5, 5, 15];
     let mut lifecycle = FpgaLifecycle::new(fpga);
     assert_eq!(
-        lifecycle.configure(manifest(), 1),
+        lifecycle.configure(manifest(), 10),
         Err(LifecycleError::ReadyTimeout)
+    );
+    assert_eq!(
+        lifecycle
+            .platform()
+            .events
+            .iter()
+            .filter(|event| **event == Event::Ready)
+            .count(),
+        1
     );
     lifecycle.platform().assert_safe();
 
@@ -264,6 +296,16 @@ fn spi_or_status_failure_during_runtime_forces_safe() {
     assert_eq!(
         lifecycle.runtime_command(1, 1, 1, 0),
         Err(LifecycleError::Platform("spi"))
+    );
+    lifecycle.platform().assert_safe();
+
+    let mut fpga = MockFpga::healthy();
+    fpga.runtime = Ok(STATUS_READY);
+    let mut lifecycle = FpgaLifecycle::new(fpga);
+    lifecycle.configure(manifest(), 1).unwrap();
+    assert_eq!(
+        lifecycle.runtime_command(1, 1, 1, 0),
+        Err(LifecycleError::BadStatus)
     );
     lifecycle.platform().assert_safe();
 

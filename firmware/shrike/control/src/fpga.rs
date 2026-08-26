@@ -6,7 +6,6 @@ pub const FPGA_STORAGE_END: u32 = 0x1040_0000;
 pub const STATUS_READY: u8 = 1 << 7;
 pub const STATUS_COMMAND_VALID: u8 = 1 << 6;
 pub const STATUS_WATCHDOG_EXPIRED: u8 = 1 << 5;
-const STATUS_RESERVED: u8 = 0x1f;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BitstreamManifest {
@@ -33,9 +32,12 @@ pub trait FpgaPlatform {
 
     /// Drive PWR/EN/PWM low and make CS inactive.
     fn force_safe(&mut self);
+    /// Nondecreasing monotonic time used to enforce the calibrated READY deadline.
+    fn now_us(&mut self) -> u64;
     fn bitstream_sha256(&mut self, offset: u32, length: u32) -> Result<[u8; 32], Self::Error>;
     fn begin_configuration(&mut self) -> Result<(), Self::Error>;
     fn stream_bitstream(&mut self, offset: u32, length: u32) -> Result<(), Self::Error>;
+    /// One nonblocking READY/status sample.
     fn ready_status(&mut self) -> Result<u8, Self::Error>;
     fn handoff_to_runtime(&mut self) -> Result<(), Self::Error>;
     fn runtime_transfer(&mut self, frame: &[u8; 12]) -> Result<u8, Self::Error>;
@@ -72,14 +74,14 @@ impl<P: FpgaPlatform> FpgaLifecycle<P> {
     pub fn configure(
         &mut self,
         manifest: BitstreamManifest,
-        ready_poll_limit: u32,
+        ready_timeout_us: u64,
     ) -> Result<(), LifecycleError<P::Error>> {
         self.platform.force_safe();
         self.runtime_ready = false;
         if !manifest.valid() {
             return Err(LifecycleError::InvalidManifest);
         }
-        if ready_poll_limit == 0 {
+        if ready_timeout_us == 0 {
             return Err(LifecycleError::InvalidReadyBound);
         }
 
@@ -103,7 +105,11 @@ impl<P: FpgaPlatform> FpgaLifecycle<P> {
             return self.abort(LifecycleError::Platform(error));
         }
 
-        for _ in 0..ready_poll_limit {
+        let ready_deadline = self.platform.now_us().saturating_add(ready_timeout_us);
+        loop {
+            if self.platform.now_us() >= ready_deadline {
+                return self.abort(LifecycleError::ReadyTimeout);
+            }
             let status = match self.platform.ready_status() {
                 Ok(status) => status,
                 Err(error) => return self.abort(LifecycleError::Platform(error)),
@@ -120,7 +126,6 @@ impl<P: FpgaPlatform> FpgaLifecycle<P> {
             self.runtime_ready = true;
             return Ok(());
         }
-        self.abort(LifecycleError::ReadyTimeout)
     }
 
     pub fn runtime_command(
@@ -143,10 +148,7 @@ impl<P: FpgaPlatform> FpgaLifecycle<P> {
             Ok(status) => status,
             Err(error) => return self.abort(LifecycleError::Platform(error)),
         };
-        if status & STATUS_READY == 0
-            || status & STATUS_WATCHDOG_EXPIRED != 0
-            || status & STATUS_RESERVED != 0
-        {
+        if status != STATUS_READY | STATUS_COMMAND_VALID {
             return self.abort(LifecycleError::BadStatus);
         }
         Ok(())

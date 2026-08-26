@@ -6,6 +6,11 @@
 #![no_std]
 #![no_main]
 
+#[cfg(feature = "fpga-runtime")]
+compile_error!(
+    "fpga-runtime is disabled until the generated artifact/timing and atomic control-loop adapter exist"
+);
+
 #[allow(dead_code)]
 mod board;
 
@@ -23,14 +28,10 @@ pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 
 const XTAL_HZ: u32 = 12_000_000;
 
-/// This can become `Some` only from a generated, validated build artifact.
-/// Keeping both fields inside the absent value avoids inventing a READY bound.
-struct ValidatedArtifact {
-    manifest: BitstreamManifest,
-    ready_poll_limit: u32,
-}
-
-const VALIDATED_FPGA_ARTIFACT: Option<ValidatedArtifact> = None;
+/// This can become `Some((manifest, ready_timeout_us))` only with the generated
+/// image and a calibrated device timing contract. Runtime is still compile-time
+/// disabled until its atomic control-loop adapter exists.
+const VALIDATED_FPGA_ARTIFACT: Option<(BitstreamManifest, u64)> = None;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConfigurationUnavailable {
@@ -64,6 +65,17 @@ where
         let _ = self.en.set_low();
         let _ = self.pwr.set_low();
         let _ = self.cs.set_high();
+    }
+
+    fn now_us(&mut self) -> u64 {
+        let timer = unsafe { &*pac::TIMER::ptr() };
+        loop {
+            let high = timer.timerawh().read().bits();
+            let low = timer.timerawl().read().bits();
+            if high == timer.timerawh().read().bits() {
+                return ((high as u64) << 32) | low as u64;
+            }
+        }
     }
 
     fn bitstream_sha256(&mut self, _: u32, _: u32) -> Result<[u8; 32], Self::Error> {
@@ -145,11 +157,12 @@ fn main() -> ! {
     };
     let mut lifecycle = FpgaLifecycle::new(platform);
 
-    if let Some(artifact) = VALIDATED_FPGA_ARTIFACT {
-        let _ = lifecycle.configure(artifact.manifest, artifact.ready_poll_limit);
-    } else {
-        lifecycle.fail_safe("missing validated FPGA artifact/timing");
-    }
+    // No operational `Some` path exists yet: enabling runtime requires one
+    // atomic adapter for the existing UART/watchdog/e-stop control loop, not
+    // two independent MotorChannel writes. The feature above fails at compile
+    // time until that adapter and the generated artifact contract are added.
+    let _ = VALIDATED_FPGA_ARTIFACT;
+    lifecycle.fail_safe("FPGA runtime integration/artifact unavailable");
 
     loop {
         cortex_m::asm::wfi();
