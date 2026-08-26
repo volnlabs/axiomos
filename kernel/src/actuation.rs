@@ -18,6 +18,10 @@ pub static ACTUATION_MONITOR: Mutex<Monitor<ActiveProfile>> = Mutex::new(Monitor
 static APPLY_LOCK: Mutex<()> = Mutex::new(());
 static NEXT_V04_ESTOP_EVENT: AtomicU64 = AtomicU64::new(1);
 
+pub(crate) fn next_v04_estop_event_id() -> u64 {
+    NEXT_V04_ESTOP_EVENT.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Run `f` holding APPLY_LOCK with IRQs masked. APPLY_LOCK is reached from BOTH
 /// thread context (syscalls, the control-link poller) AND IRQ context (a BPF
 /// hook firing in the timer/GPIO IRQ can call `bpf_pwm_write` -> `guard_pwm`).
@@ -274,7 +278,7 @@ pub fn trigger_estop(source: AuditSource) -> i64 {
         if transition && matches!(source, AuditSource::Operator | AuditSource::Watchdog) {
             crate::serial_println!(
                 "V04_ESTOP event_id={} source={} stage=assert ts_ns={}",
-                NEXT_V04_ESTOP_EVENT.fetch_add(1, Ordering::Relaxed),
+                next_v04_estop_event_id(),
                 match source {
                     AuditSource::Operator => "operator",
                     AuditSource::Watchdog => "watchdog",
@@ -303,7 +307,7 @@ pub fn operator_estop(action: EstopAction) -> i64 {
                 if !was_latched {
                     crate::serial_println!(
                         "V04_ESTOP event_id={} source=operator stage=assert ts_ns={}",
-                        NEXT_V04_ESTOP_EVENT.fetch_add(1, Ordering::Relaxed),
+                        next_v04_estop_event_id(),
                         now
                     );
                 }
@@ -314,7 +318,7 @@ pub fn operator_estop(action: EstopAction) -> i64 {
                 if was_latched {
                     crate::serial_println!(
                         "V04_ESTOP event_id={} source=operator stage=release ts_ns={}",
-                        NEXT_V04_ESTOP_EVENT.fetch_add(1, Ordering::Relaxed),
+                        next_v04_estop_event_id(),
                         now
                     );
                 }
@@ -339,7 +343,7 @@ pub fn watchdog_estop_trigger() -> i64 {
         if transition {
             crate::serial_println!(
                 "V04_ESTOP event_id={} source=watchdog stage=assert ts_ns={}",
-                NEXT_V04_ESTOP_EVENT.fetch_add(1, Ordering::Relaxed),
+                next_v04_estop_event_id(),
                 now
             );
         }
@@ -360,7 +364,7 @@ pub fn release_estop(authority: Authority, source: AuditSource) -> i64 {
                 if was_latched {
                     crate::serial_println!(
                         "V04_ESTOP event_id={} source=operator stage=release ts_ns={}",
-                        NEXT_V04_ESTOP_EVENT.fetch_add(1, Ordering::Relaxed),
+                        next_v04_estop_event_id(),
                         now
                     );
                 }

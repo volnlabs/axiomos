@@ -14,6 +14,8 @@ run_step documentation-links python3 -B scripts/verify/doc-links.py
 run_step product-naming-static python3 -B scripts/verify/product-naming.py
 run_step benchmark-provenance-static python3 -B scripts/verify/benchmark-provenance.py
 run_step v04-benchmark-reducer-self-test python3 -B scripts/benchmark/analyze-v04.py --self-test
+run_step v04-behavior-runner-smoke python3 -c \
+    'import subprocess,sys; runner=[sys.executable,"scripts/benchmark/v04-behavior-runner.py","--behavior","smoke","--sample-id","1"]; stages=["load","verify","admit","attach","active"]; ok=subprocess.run(runner+sum((["--"+stage,"true"] for stage in stages),[]),capture_output=True,text=True); lines=[line.split(" stage=",1)[1].split()[0] for line in ok.stdout.splitlines() if line.startswith("V04_BEHAVIOR")]; assert ok.returncode==0 and lines==stages, (ok.returncode,lines); bad=subprocess.run(runner+["--load","false"]+sum((["--"+stage,"true"] for stage in stages[1:]),[]),capture_output=True,text=True); assert bad.returncode != 0 and "V04_BEHAVIOR" not in bad.stdout, bad.stdout; bad=subprocess.run(runner+["--load","true","--verify","false"]+sum((["--"+stage,"true"] for stage in stages[2:]),[]),capture_output=True,text=True); assert bad.returncode != 0 and all("stage="+stage not in bad.stdout for stage in stages[2:]), bad.stdout'
 run_step command-smoke python3 -B scripts/verify/command-smoke.py
 run_step tooling-integration-tests python3 -B tests/scripts/test_xtask_cli.py
 run_step quality-boundary-static python3 -B scripts/verify/quality.py --check

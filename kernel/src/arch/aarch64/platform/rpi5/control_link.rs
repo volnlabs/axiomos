@@ -57,8 +57,10 @@ const ULTRASONIC_CHANNEL: u32 = 0; // proximity / range
 
 static CONTROL_LINK: OnceCell<Mutex<ControlLink>> = OnceCell::uninit();
 static NEXT_SENSOR_SAMPLE_ID: AtomicU64 = AtomicU64::new(1);
-static NEXT_EVENT_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_LINK_LOSS_EVENT_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_CHUNK_ID: AtomicU64 = AtomicU64::new(1);
+static LINK_UNINITIALIZED_REPORTED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 /// Map an actuation `(chip, channel)` to the wheel it drives, if it is a
 /// link-owned motor. Unmapped channels keep local RP1 PWM.
@@ -100,7 +102,7 @@ struct PollOutcome {
     sensor_count: usize,
     heartbeats: [Option<u16>; RX_PER_POLL],
     heartbeat_count: usize,
-    overflowed: bool,
+    overflow_count: usize,
     link_loss: bool,
 }
 
@@ -112,7 +114,7 @@ impl Default for PollOutcome {
             sensor_count: 0,
             heartbeats: [None; RX_PER_POLL],
             heartbeat_count: 0,
-            overflowed: false,
+            overflow_count: 0,
             link_loss: false,
         }
     }
@@ -138,6 +140,7 @@ pub struct ControlLink {
     motor_right: i16,
     motor_seq: u8,
     pending_estop: Option<PendingEstop>,
+    link_loss_reported: bool,
 }
 
 impl ControlLink {
@@ -162,6 +165,7 @@ impl ControlLink {
         while let Some(b) = self.rx.pop() {
             if let Some(Ok(msg)) = self.dec.push(b) {
                 self.session.on_inbound(now);
+                self.link_loss_reported = false;
                 if let Msg::Sensor {
                     ultrasonic_echo_us,
                     estop_line,
@@ -169,7 +173,7 @@ impl ControlLink {
                 } = msg
                 {
                     if out.sensor_count == RX_PER_POLL {
-                        out.overflowed = true;
+                        out.overflow_count += 1;
                     } else {
                         out.sensors[out.sensor_count] = Some((
                             NEXT_SENSOR_SAMPLE_ID.fetch_add(1, Ordering::Relaxed),
@@ -181,7 +185,7 @@ impl ControlLink {
                 }
                 if let Msg::HeartbeatToPi { seq } = msg {
                     if out.heartbeat_count == RX_PER_POLL {
-                        out.overflowed = true;
+                        out.overflow_count += 1;
                     } else {
                         out.heartbeats[out.heartbeat_count] = Some(seq);
                         out.heartbeat_count += 1;
@@ -200,9 +204,12 @@ impl ControlLink {
                     let _ = self.enqueue(&Msg::HeartbeatToShrike { seq });
                 }
                 LinkAction::SafeStop => {
+                    if !self.link_loss_reported {
+                        out.link_loss = true;
+                        self.link_loss_reported = true;
+                    }
                     if self.request_estop(true) {
                         self.session.estop_sent();
-                        out.link_loss = true;
                     }
                 }
                 LinkAction::Idle => {}
@@ -327,16 +334,31 @@ fn with_link<R>(f: impl FnOnce(&mut ControlLink) -> R) -> Option<R> {
 pub fn service() {
     let now = now_ns();
     let Some(out) = with_link(|l| l.poll_decode(now)) else {
-        return; // link not up
+        if !LINK_UNINITIALIZED_REPORTED.swap(true, Ordering::AcqRel) {
+            let chunk_id = NEXT_CHUNK_ID.fetch_add(1, Ordering::Relaxed);
+            crate::serial_println!("V04_CHUNK chunk_id={} stage=start ts_ns={}", chunk_id, now);
+            crate::serial_println!(
+                "V04_FAILURE reason=link_uninitialized count=1 ts_ns={}",
+                now
+            );
+            crate::serial_println!(
+                "V04_CHUNK chunk_id={} stage=end ts_ns={}",
+                chunk_id,
+                now_ns()
+            );
+        }
+        return;
     };
 
     let chunk_id = NEXT_CHUNK_ID.fetch_add(1, Ordering::Relaxed);
     crate::serial_println!("V04_CHUNK chunk_id={} stage=start ts_ns={}", chunk_id, now);
     // Side-effects OUTSIDE the CONTROL_LINK lock (thread context).
-    if out.overflowed {
-        // Unknown V04 markers are reducer failures; do not pretend a partial
-        // bounded decode batch is a complete measurement population.
-        crate::serial_println!("V04_INPUT_OVERFLOW ts_ns={}", now);
+    if out.overflow_count != 0 {
+        crate::serial_println!(
+            "V04_FAILURE reason=input_overflow count={} ts_ns={}",
+            out.overflow_count,
+            now
+        );
     }
     if out.estop {
         crate::actuation::watchdog_estop_trigger();
@@ -348,12 +370,12 @@ pub fn service() {
         let timestamp = now_ns();
         crate::serial_println!(
             "V04_LINK_LOSS event_id={} reason=timeout ts_ns={}",
-            NEXT_EVENT_ID.fetch_add(1, Ordering::Relaxed),
+            NEXT_LINK_LOSS_EVENT_ID.fetch_add(1, Ordering::Relaxed),
             timestamp
         );
         crate::serial_println!(
             "V04_ESTOP event_id={} source=link stage=assert ts_ns={}",
-            NEXT_EVENT_ID.fetch_add(1, Ordering::Relaxed),
+            crate::actuation::next_v04_estop_event_id(),
             timestamp
         );
     }
@@ -389,7 +411,7 @@ fn dispatch_ultrasonic(now: u64, echo_us: u16, sample_id: u64) {
             reserved: 0,
         };
         if !mgr.lock().dispatch_v04_event(event, sample_id) {
-            crate::serial_println!("V04_INPUT_OVERFLOW ts_ns={}", now);
+            crate::serial_println!("V04_FAILURE reason=context_reentry count=1 ts_ns={}", now);
         }
     }
 }
@@ -398,6 +420,7 @@ fn dispatch_ultrasonic(now: u64, echo_us: u16, sample_id: u64) {
 /// early boot. No-op if already initialized.
 fn init() {
     CONTROL_LINK.init_once(|| {
+        LINK_UNINITIALIZED_REPORTED.store(false, Ordering::Release);
         // SAFETY: RP1_UART0 is a mapped RP1 peripheral on the Pi5; single owner.
         let mut uart = unsafe { Pl011::new(RP1_UART0_BASE) };
         uart.init(LINK_BAUD, DEFAULT_UART_CLK_HZ);
@@ -412,6 +435,7 @@ fn init() {
             motor_right: 0,
             motor_seq: 0,
             pending_estop: None,
+            link_loss_reported: false,
         })
     });
 }

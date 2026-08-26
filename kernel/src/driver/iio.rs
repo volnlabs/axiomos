@@ -59,14 +59,30 @@ pub enum IioInitError {
 /// Global IIO manager instance
 pub static IIO_MANAGER: OnceCell<Mutex<IioManager>> = OnceCell::uninit();
 
-// Synchronous control-link dispatch gives this serial-only tag a bounded scope.
-static V04_ACTIVE_SAMPLE_ID: AtomicU64 = AtomicU64::new(0);
+const V04_CONTEXT_CPUS: usize = 4;
+// A hook executes synchronously on one CPU. The dispatch masks local IRQs;
+// other CPUs use separate slots, so an unrelated motor write cannot consume it.
+static V04_ACTIVE_SAMPLE_IDS: [AtomicU64; V04_CONTEXT_CPUS] =
+    [const { AtomicU64::new(0) }; V04_CONTEXT_CPUS];
+
+fn v04_cpu_id() -> Option<usize> {
+    #[cfg(target_arch = "aarch64")]
+    {
+        (crate::arch::aarch64::cpu::cpu_id() < V04_CONTEXT_CPUS)
+            .then(|| crate::arch::aarch64::cpu::cpu_id())
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        Some(0)
+    }
+}
 
 /// Consume the one benchmark motor marker allowed for the active IIO dispatch.
 pub fn take_v04_motor_sample_id() -> Option<u64> {
-    let sample_id = V04_ACTIVE_SAMPLE_ID.load(Ordering::Acquire);
+    let slot = V04_ACTIVE_SAMPLE_IDS.get(v04_cpu_id()?)?;
+    let sample_id = slot.load(Ordering::Acquire);
     (sample_id != 0
-        && V04_ACTIVE_SAMPLE_ID
+        && slot
             .compare_exchange(sample_id, 0, Ordering::AcqRel, Ordering::Acquire)
             .is_ok())
     .then_some(sample_id)
@@ -110,22 +126,66 @@ impl IioManager {
     }
 
     pub fn dispatch_v04_event(&self, event: IioEvent, sample_id: u64) -> bool {
-        // IIO_MANAGER serializes dispatches. Reject re-entry rather than
-        // overwriting the only correlation context.
-        if V04_ACTIVE_SAMPLE_ID
-            .compare_exchange(0, sample_id, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return false;
+        #[cfg(target_arch = "aarch64")]
+        let interrupts_enabled = {
+            use crate::arch::aarch64::Aarch64;
+            use crate::arch::traits::Architecture;
+            let enabled = Aarch64::are_interrupts_enabled();
+            if enabled {
+                Aarch64::disable_interrupts();
+            }
+            enabled
+        };
+        let result = (|| {
+            let Some(cpu) = v04_cpu_id() else {
+                return false;
+            };
+            let Some(slot) = V04_ACTIVE_SAMPLE_IDS.get(cpu) else {
+                return false;
+            };
+            // IRQ masking makes the per-core context a synchronous scope;
+            // compare_exchange still rejects direct/re-entrant dispatch.
+            if slot
+                .compare_exchange(0, sample_id, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                return false;
+            }
+            crate::serial_println!(
+                "V04_HOOK_ENTRY sample_id={} ts_ns={}",
+                sample_id,
+                event.timestamp
+            );
+            self.dispatch_event(event);
+            slot.store(0, Ordering::Release);
+            true
+        })();
+        #[cfg(target_arch = "aarch64")]
+        if interrupts_enabled {
+            use crate::arch::aarch64::Aarch64;
+            use crate::arch::traits::Architecture;
+            Aarch64::enable_interrupts();
         }
-        crate::serial_println!(
-            "V04_HOOK_ENTRY sample_id={} ts_ns={}",
-            sample_id,
-            event.timestamp
-        );
-        self.dispatch_event(event);
-        V04_ACTIVE_SAMPLE_ID.store(0, Ordering::Release);
-        true
+        result
+    }
+}
+
+#[cfg(test)]
+mod v04_tests {
+    use super::*;
+
+    #[test]
+    fn v04_context_rejects_reentry_and_consumes_one_motor_marker() {
+        let slot = &V04_ACTIVE_SAMPLE_IDS[0];
+        slot.store(0, Ordering::Release);
+        assert!(slot
+            .compare_exchange(0, 7, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok());
+        assert!(slot
+            .compare_exchange(0, 8, Ordering::AcqRel, Ordering::Acquire)
+            .is_err());
+        assert_eq!(take_v04_motor_sample_id(), Some(7));
+        assert_eq!(take_v04_motor_sample_id(), None);
     }
 }
 

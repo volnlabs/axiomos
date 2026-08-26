@@ -21,6 +21,7 @@ SCHEMAS = {
     "V04_ESTOP": {"event_id", "source", "stage", "ts_ns"},
     "V04_HEARTBEAT": {"seq", "ts_ns"},
     "V04_PANIC": {"kind"},
+    "V04_FAILURE": {"reason", "count", "ts_ns"},
     "V04_CHUNK": {"chunk_id", "stage", "ts_ns"},
 }
 LOG_SUFFIXES = {".log", ".serial", ".txt", ".out"}
@@ -66,9 +67,11 @@ def parse(text: str) -> list[dict[str, str]]:
             raise ValueError(f"line {line_no}: invalid link-loss reason")
         if event == "V04_PANIC" and record["kind"] not in {"panic", "fatal"}:
             raise ValueError(f"line {line_no}: invalid panic kind")
-        numeric = {"ts_ns", "sample_id", "echo_us", "seq", "left", "right", "event_id", "chunk_id"}
+        if event == "V04_FAILURE" and record["reason"] not in {"input_overflow", "link_uninitialized", "context_reentry"}:
+            raise ValueError(f"line {line_no}: invalid failure reason")
+        numeric = {"ts_ns", "sample_id", "echo_us", "seq", "left", "right", "event_id", "chunk_id", "count"}
         for key in numeric & set(record):
-            _number(record, key, positive=key in {"sample_id", "event_id", "chunk_id"})
+            _number(record, key, positive=key in {"sample_id", "event_id", "chunk_id", "count"})
         if "ts_ns" in record:
             timestamp = _number(record, "ts_ns")
             if last_timestamp is not None and timestamp < last_timestamp:
@@ -102,7 +105,7 @@ def _ids(records: list[dict[str, str]], key: str, label: str) -> list[int]:
 
 
 def analyze(text: str, *, min_behavior_samples: int = 100, min_latency_samples: int = 1000,
-            min_chunks: int = 1, require_heartbeat: bool = False, require_estop: bool = False,
+            min_chunks: int = 1, require_heartbeat: bool = True, require_estop: bool = True,
             min_estop_samples: int = 100, max_heartbeat_gap_ns: int | None = None,
             max_chunk_gap_ns: int | None = None) -> dict[str, dict[str, int]]:
     if min_behavior_samples < 1 or min_latency_samples < 1 or min_chunks < 1:
@@ -114,10 +117,12 @@ def analyze(text: str, *, min_behavior_samples: int = 100, min_latency_samples: 
     if max_chunk_gap_ns < 0:
         raise ValueError("chunk gap limit must be nonnegative")
     grouped: dict[str, list[dict[str, str]]] = defaultdict(list)
-    for record in parse(text):
-        grouped[record["_event"]].append(record)
-    if grouped["V04_PANIC"]:
-        raise ValueError("panic/fatal marker present")
+    streams = [text] if isinstance(text, str) else text
+    for stream in streams:
+        for record in parse(stream):
+            grouped[record["_event"]].append(record)
+    if grouped["V04_PANIC"] or grouped["V04_FAILURE"]:
+        raise ValueError("panic/fatal/failure marker present")
 
     report: dict[str, dict[str, int]] = {}
     lifecycle: dict[str, dict[int, list[dict[str, str]]]] = defaultdict(lambda: defaultdict(list))
@@ -236,7 +241,7 @@ class AnalyzerSelfTest(unittest.TestCase):
         return "\n".join(lines)
 
     def run_valid(self, text: str | None = None, **kwargs: int) -> dict[str, dict[str, int]]:
-        defaults = {"min_behavior_samples": 1, "min_latency_samples": 1, "min_estop_samples": 0, "max_chunk_gap_ns": 1_000}
+        defaults = {"min_behavior_samples": 1, "min_latency_samples": 1, "min_estop_samples": 0, "max_chunk_gap_ns": 1_000, "require_heartbeat": False, "require_estop": False}
         defaults.update(kwargs)
         return analyze(text or self.valid(), **defaults)
 
@@ -279,6 +284,23 @@ class AnalyzerSelfTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate"):
             self.run_valid(text, require_estop=True, min_estop_samples=1)
 
+    def test_failure_and_per_stream_timestamps_fail_closed(self):
+        with self.assertRaisesRegex(ValueError, "failure"):
+            self.run_valid(self.valid() + "\nV04_FAILURE reason=input_overflow count=1 ts_ns=310")
+        empty_service = parse(
+            "V04_CHUNK chunk_id=1 stage=start ts_ns=1\n"
+            "V04_FAILURE reason=link_uninitialized count=1 ts_ns=1\n"
+            "V04_CHUNK chunk_id=1 stage=end ts_ns=2"
+        )
+        self.assertEqual([record["stage"] for record in empty_service if record["_event"] == "V04_CHUNK"], ["start", "end"])
+        with self.assertRaisesRegex(ValueError, "zero count"):
+            parse("V04_FAILURE reason=input_overflow count=0 ts_ns=1")
+        with self.assertRaisesRegex(ValueError, "timestamp decreases"):
+            parse("V04_ECHO_DONE sample_id=1 echo_us=1 ts_ns=2\nV04_ECHO_DONE sample_id=2 echo_us=1 ts_ns=1")
+        # Campaign files have independent timestamp origins; validate each file
+        # before combining their populations.
+        self.assertEqual(len(parse(self.valid())), len(parse(self.valid())))
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -287,8 +309,7 @@ def main() -> int:
     parser.add_argument("--min-behavior-samples", type=int, default=100)
     parser.add_argument("--min-latency-samples", type=int, default=1000)
     parser.add_argument("--min-chunks", type=int, default=1)
-    parser.add_argument("--require-heartbeat", action="store_true")
-    parser.add_argument("--require-estop", action="store_true")
+    parser.add_argument("--fixture", action="store_true", help="non-acceptance focused fixture mode")
     parser.add_argument("--min-estop-samples", type=int, default=100)
     parser.add_argument("--max-heartbeat-gap-ns", type=int)
     parser.add_argument("--max-chunk-gap-ns", type=int)
@@ -297,10 +318,14 @@ def main() -> int:
     if args.self_test:
         result = unittest.main(argv=[__file__], exit=False)
         return int(not result.result.wasSuccessful())
+    require_heartbeat = not args.fixture
+    require_estop = not args.fixture
+    contract = f"V04 CONTRACT mode={'fixture-non-acceptance' if args.fixture else 'acceptance'} behavior_min={args.min_behavior_samples} latency_min={args.min_latency_samples} chunk_min={args.min_chunks} heartbeat_required={require_heartbeat} heartbeat_gap_ns={args.max_heartbeat_gap_ns} estop_required={require_estop} estop_min={args.min_estop_samples} chunk_gap_ns={args.max_chunk_gap_ns}"
+    print(contract)
     try:
         paths = sorted(args.serial) + (campaign_logs(args.campaign) if args.campaign else [])
         if not paths: raise ValueError("provide --campaign or --serial")
-        report = analyze("\n".join(path.read_text(encoding="utf-8") for path in paths), min_behavior_samples=args.min_behavior_samples, min_latency_samples=args.min_latency_samples, min_chunks=args.min_chunks, require_heartbeat=args.require_heartbeat, require_estop=args.require_estop, min_estop_samples=args.min_estop_samples, max_heartbeat_gap_ns=args.max_heartbeat_gap_ns, max_chunk_gap_ns=args.max_chunk_gap_ns)
+        report = analyze([path.read_text(encoding="utf-8") for path in paths], min_behavior_samples=args.min_behavior_samples, min_latency_samples=args.min_latency_samples, min_chunks=args.min_chunks, require_heartbeat=require_heartbeat, require_estop=require_estop, min_estop_samples=args.min_estop_samples, max_heartbeat_gap_ns=args.max_heartbeat_gap_ns, max_chunk_gap_ns=args.max_chunk_gap_ns)
     except (OSError, UnicodeError, ValueError) as error:
         print(f"V04 FAIL: {error}")
         return 1
