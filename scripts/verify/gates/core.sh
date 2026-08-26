@@ -13,6 +13,7 @@ run_step generated-docs cargo xtask docs --check
 run_step documentation-links python3 -B scripts/verify/doc-links.py
 run_step product-naming-static python3 -B scripts/verify/product-naming.py
 run_step benchmark-provenance-static python3 -B scripts/verify/benchmark-provenance.py
+run_step v04-benchmark-reducer-self-test python3 -B scripts/benchmark/analyze-v04.py --self-test
 run_step command-smoke python3 -B scripts/verify/command-smoke.py
 run_step tooling-integration-tests python3 -B tests/scripts/test_xtask_cli.py
 run_step quality-boundary-static python3 -B scripts/verify/quality.py --check

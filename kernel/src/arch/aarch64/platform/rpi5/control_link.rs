@@ -18,6 +18,7 @@
 //! poller. RP1 UART IRQ-driven RX is deferred (#65); the poller polls the FIFO.
 
 use alloc::boxed::Box;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use conquer_once::spin::OnceCell;
 use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
@@ -55,6 +56,8 @@ const ULTRASONIC_DEVICE_ID: u32 = 0x5072_0000; // "pr" + 0 (proximity dev)
 const ULTRASONIC_CHANNEL: u32 = 0; // proximity / range
 
 static CONTROL_LINK: OnceCell<Mutex<ControlLink>> = OnceCell::uninit();
+static NEXT_SENSOR_SAMPLE_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_EVENT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Map an actuation `(chip, channel)` to the wheel it drives, if it is a
 /// link-owned motor. Unmapped channels keep local RP1 PWM.
@@ -92,7 +95,9 @@ struct PollOutcome {
     /// Hardware e-stop line asserted in an inbound Sensor frame.
     estop: bool,
     /// Latest ultrasonic echo time (µs), if a Sensor frame arrived.
-    sensor_echo_us: Option<u16>,
+    sensor: Option<(u64, u16)>,
+    heartbeat_seq: Option<u16>,
+    link_loss: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -145,8 +150,14 @@ impl ControlLink {
                     ..
                 } = msg
                 {
-                    out.sensor_echo_us = Some(ultrasonic_echo_us);
+                    out.sensor = Some((
+                        NEXT_SENSOR_SAMPLE_ID.fetch_add(1, Ordering::Relaxed),
+                        ultrasonic_echo_us,
+                    ));
                     out.estop |= estop_line;
+                }
+                if let Msg::HeartbeatToPi { seq } = msg {
+                    out.heartbeat_seq = Some(seq);
                 }
             }
         }
@@ -163,6 +174,7 @@ impl ControlLink {
                 LinkAction::SafeStop => {
                     if self.request_estop(true) {
                         self.session.estop_sent();
+                        out.link_loss = true;
                     }
                 }
                 LinkAction::Idle => {}
@@ -294,14 +306,30 @@ pub fn service() {
     if out.estop {
         crate::actuation::watchdog_estop_trigger();
     }
-    if let Some(echo) = out.sensor_echo_us {
-        dispatch_ultrasonic(now, echo);
+    if let Some(seq) = out.heartbeat_seq {
+        crate::serial_println!("V04_HEARTBEAT seq={} ts_ns={}", seq, now);
+    }
+    if out.link_loss {
+        crate::serial_println!(
+            "V04_LINK_LOSS event_id={} reason=timeout ts_ns={}",
+            NEXT_EVENT_ID.fetch_add(1, Ordering::Relaxed),
+            now
+        );
+    }
+    if let Some((sample_id, echo)) = out.sensor {
+        crate::serial_println!(
+            "V04_ECHO_DONE sample_id={} echo_us={} ts_ns={}",
+            sample_id,
+            echo,
+            now
+        );
+        dispatch_ultrasonic(now, echo, sample_id);
     }
 }
 
 /// Inject an ultrasonic reading as a synthetic IIO event so `ATTACH_TYPE_IIO`
 /// BPF behaviors see it (bypasses the stub `IioAttach::attach`).
-fn dispatch_ultrasonic(now: u64, echo_us: u16) {
+fn dispatch_ultrasonic(now: u64, echo_us: u16, sample_id: u64) {
     use kernel_bpf::attach::IioEvent;
     if let Some(mgr) = crate::driver::iio::IIO_MANAGER.get() {
         let event = IioEvent {
@@ -313,7 +341,7 @@ fn dispatch_ultrasonic(now: u64, echo_us: u16) {
             offset: 0,
             reserved: 0,
         };
-        mgr.lock().dispatch_event(event);
+        mgr.lock().dispatch_v04_event(event, sample_id);
     }
 }
 
@@ -379,7 +407,23 @@ pub fn link_alive() -> bool {
 /// ARM-A-clamped duty.
 pub fn send_motor(side: MotorSide, value: u32) -> bool {
     let permille = duty_to_permille(value, ActiveProfile::ACT_DUTY_MAX);
-    with_link(|l| l.set_motor(side, permille)).unwrap_or(false)
+    with_link(|l| {
+        if !l.set_motor(side, permille) {
+            return false;
+        }
+        if let Some(sample_id) = crate::driver::iio::active_v04_sample_id() {
+            crate::serial_println!(
+                "V04_MOTOR_CMD sample_id={} seq={} left={} right={} ts_ns={}",
+                sample_id,
+                l.motor_seq,
+                l.motor_left,
+                l.motor_right,
+                now_ns()
+            );
+        }
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// Command the RP2040 e-stop latch. Returns true if all pending e-stop commands

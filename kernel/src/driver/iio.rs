@@ -17,6 +17,7 @@ use alloc::vec::Vec;
     all(target_arch = "aarch64", not(feature = "rpi5"))
 ))]
 use core::ffi::c_void;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use conquer_once::spin::OnceCell;
 use kernel_bpf::attach::{IioChannel, IioEvent};
@@ -58,6 +59,14 @@ pub enum IioInitError {
 /// Global IIO manager instance
 pub static IIO_MANAGER: OnceCell<Mutex<IioManager>> = OnceCell::uninit();
 
+// Synchronous control-link dispatch gives this serial-only tag a bounded scope.
+static V04_ACTIVE_SAMPLE_ID: AtomicU64 = AtomicU64::new(0);
+
+pub fn active_v04_sample_id() -> Option<u64> {
+    let sample_id = V04_ACTIVE_SAMPLE_ID.load(Ordering::Acquire);
+    (sample_id != 0).then_some(sample_id)
+}
+
 /// Initialize the IIO subsystem
 pub fn init() {
     IIO_MANAGER.init_once(|| Mutex::new(IioManager::new()));
@@ -93,6 +102,17 @@ impl IioManager {
         let ctx = BpfContext::from_struct(&event);
 
         let _ = crate::bpf::BpfManager::run_hook_programs(crate::bpf::ATTACH_TYPE_IIO, &ctx, "iio");
+    }
+
+    pub fn dispatch_v04_event(&self, event: IioEvent, sample_id: u64) {
+        V04_ACTIVE_SAMPLE_ID.store(sample_id, Ordering::Release);
+        crate::serial_println!(
+            "V04_HOOK_ENTRY sample_id={} ts_ns={}",
+            sample_id,
+            event.timestamp
+        );
+        self.dispatch_event(event);
+        V04_ACTIVE_SAMPLE_ID.store(0, Ordering::Release);
     }
 }
 

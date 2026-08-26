@@ -342,6 +342,7 @@ fn handle_panic(info: &PanicInfo) {
         (0xFFFF_8010_7D00_1000 as *mut u32).write_volatile(0x21); // '!'
     }
 
+    kernel::serial_println!("V04_PANIC kind=panic");
     if let Some(location) = info.location() {
         kernel::serial_println!(
             "kernel panicked at {}:{}:{}:",

@@ -4,6 +4,8 @@
 //! `kernel_bpf::actuation` (pure, host-tested); this file only owns the global
 //! monitor and the MMIO application.
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use kernel_bpf::actuation::{
     ActuationKind, ActuationRequest, AuditSource, Authority, ChannelId, EstopAction,
     EstopCommandResult, Monitor, ReleaseResult, SafeDrive,
@@ -14,6 +16,7 @@ use spin::Mutex;
 /// The single global actuation reference monitor.
 pub static ACTUATION_MONITOR: Mutex<Monitor<ActiveProfile>> = Mutex::new(Monitor::new());
 static APPLY_LOCK: Mutex<()> = Mutex::new(());
+static NEXT_V04_ESTOP_EVENT: AtomicU64 = AtomicU64::new(1);
 
 /// Run `f` holding APPLY_LOCK with IRQs masked. APPLY_LOCK is reached from BOTH
 /// thread context (syscalls, the control-link poller) AND IRQ context (a BPF
@@ -279,10 +282,20 @@ pub fn operator_estop(action: EstopAction) -> i64 {
                 for drive in drives.iter() {
                     apply_safe_drive(drive);
                 }
+                crate::serial_println!(
+                    "V04_ESTOP event_id={} source=operator stage=assert ts_ns={}",
+                    NEXT_V04_ESTOP_EVENT.fetch_add(1, Ordering::Relaxed),
+                    now
+                );
                 notify_link_estop(true);
                 0
             }
             EstopCommandResult::Released => {
+                crate::serial_println!(
+                    "V04_ESTOP event_id={} source=operator stage=release ts_ns={}",
+                    NEXT_V04_ESTOP_EVENT.fetch_add(1, Ordering::Relaxed),
+                    now
+                );
                 notify_link_estop(false);
                 0
             }
@@ -298,6 +311,11 @@ pub fn watchdog_estop_trigger() -> i64 {
         for drive in drives.iter() {
             apply_safe_drive(drive);
         }
+        crate::serial_println!(
+            "V04_ESTOP event_id={} source=watchdog stage=assert ts_ns={}",
+            NEXT_V04_ESTOP_EVENT.fetch_add(1, Ordering::Relaxed),
+            now
+        );
         notify_link_estop(true);
         0
     })
