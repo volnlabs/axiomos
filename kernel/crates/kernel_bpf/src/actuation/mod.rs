@@ -992,6 +992,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn signed_motor_magnitude_uses_monitor_clamp_and_rejects_unknown_channel() {
+        let mut monitor = Monitor::<EmbeddedProfile>::new();
+        let reverse = (-200i32).unsigned_abs();
+        assert_eq!(
+            monitor.decide(
+                pwm(0, 1, reverse),
+                Authority::Operator,
+                AuditSource::SyscallPwm,
+                T0,
+            ),
+            Decision::Clamp(90)
+        );
+        let unknown = monitor.decide(
+            pwm(0, 3, (-200i32).unsigned_abs()),
+            Authority::Operator,
+            AuditSource::SyscallPwm,
+            T0,
+        );
+        assert_eq!(unknown.apply(), (0, -1));
+    }
+
     fn pwm(chip: u8, channel: u8, value: u32) -> ActuationRequest {
         ActuationRequest {
             ch: ChannelId {
