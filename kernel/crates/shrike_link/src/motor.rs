@@ -39,6 +39,19 @@ pub fn duty_to_permille(value: u32, duty_max: u32) -> i16 {
     ((v * DUTY_FULL_SCALE as u64) / duty_max as u64) as i16
 }
 
+/// Map a signed monitor-approved duty to the signed wire setpoint. The monitor
+/// still bounds the magnitude; this preserves only its direction on the link.
+#[must_use]
+pub fn signed_duty_to_permille(value: i32, duty_max: u32) -> i16 {
+    let magnitude = value.unsigned_abs().min(duty_max);
+    let permille = duty_to_permille(magnitude, duty_max);
+    if value < 0 {
+        -permille
+    } else {
+        permille
+    }
+}
+
 /// Split a signed per-mille `duty` into `(direction, pwm_magnitude)`, where the
 /// magnitude is scaled to `0..=pwm_max`.
 ///
@@ -100,6 +113,13 @@ mod tests {
         assert_eq!(duty_to_permille(45, 90), 500);
         assert_eq!(duty_to_permille(200, 90), 1000); // saturates at duty_max
         assert_eq!(duty_to_permille(50, 0), 0); // guard
+    }
+
+    #[test]
+    fn signed_duty_to_permille_preserves_reverse_direction() {
+        assert_eq!(signed_duty_to_permille(-45, 90), -500);
+        assert_eq!(signed_duty_to_permille(45, 90), 500);
+        assert_eq!(signed_duty_to_permille(i32::MIN, 90), -1000);
     }
 
     #[test]

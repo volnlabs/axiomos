@@ -8,6 +8,10 @@ use shrike_link::{encode, Decoder, Msg, MAX_FRAME};
 
 use crate::motor::MotorChannel;
 
+/// Keep serial input from monopolizing one control-loop iteration when the
+/// UART is continuously ready; watchdog, motors, and telemetry get service.
+const RX_BYTES_PER_ITERATION: usize = 64;
+
 /// Non-blocking byte transport (the UART to the Pi5).
 pub trait ByteIo {
     /// Next received byte, or `None` if none ready.
@@ -120,7 +124,8 @@ where
         }
 
         // 2. Drain the UART, feeding decoded Pi5 messages to the watchdog.
-        while let Some(b) = io.read() {
+        for _ in 0..RX_BYTES_PER_ITERATION {
+            let Some(b) = io.read() else { break };
             if let Some(Ok(msg)) = dec.push(b) {
                 wd.on_msg(&msg, now);
             }
@@ -247,6 +252,24 @@ mod tests {
             let byte = self.input.get(self.next).copied();
             self.next = self.next.saturating_add(1);
             byte
+        }
+
+        fn write(&mut self, bytes: &[u8]) {
+            self.output.borrow_mut().extend_from_slice(bytes);
+        }
+    }
+
+    struct ContinuousIo<'a> {
+        input: &'a [u8],
+        next: usize,
+        output: &'a RefCell<ByteCapture>,
+    }
+
+    impl<'a> ByteIo for ContinuousIo<'a> {
+        fn read(&mut self) -> Option<u8> {
+            let byte = self.input.get(self.next).copied().unwrap_or(0);
+            self.next = self.next.saturating_add(1);
+            Some(byte)
         }
 
         fn write(&mut self, bytes: &[u8]) {
@@ -465,6 +488,45 @@ mod tests {
         assert_eq!(summary.motor_coast_calls, 2);
         assert_eq!(left.borrow().as_slice(), [400, 0]);
         assert_eq!(right.borrow().as_slice(), [-250, 0]);
+    }
+
+    #[test]
+    fn continuous_rx_still_services_motor_and_heartbeat() {
+        let mut frame = [0; MAX_FRAME];
+        let frame_len = encode(
+            &Msg::MotorSetpoint {
+                seq: 1,
+                left: -400,
+                right: 250,
+            },
+            &mut frame,
+        )
+        .unwrap();
+        let output = RefCell::new(ByteCapture::new());
+        let triggers = Cell::new(0);
+        let left = RefCell::new(MotorLog::new());
+        let right = RefCell::new(MotorLog::new());
+
+        let summary = run(
+            ContinuousIo {
+                input: &frame[..frame_len],
+                next: 0,
+                output: &output,
+            },
+            SequenceClock::new(&[1, 2]),
+            TestUltrasonic::new(&[None, None], &triggers),
+            TestEstop::new(&[false, false]),
+            TestMotor { log: &left },
+            TestMotor { log: &right },
+            config(100, u64::MAX, 1),
+            Some(2),
+        )
+        .unwrap();
+
+        assert_eq!(summary.motor_drive_calls, 4);
+        assert!(summary.bytes_written > 0);
+        assert_eq!(left.borrow().as_slice()[0], -400);
+        assert_eq!(right.borrow().as_slice()[0], 250);
     }
 
     #[test]

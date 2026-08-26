@@ -22,7 +22,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use conquer_once::spin::OnceCell;
 use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
-use shrike_link::motor::{duty_to_permille, MotorSide};
+use shrike_link::motor::{signed_duty_to_permille, MotorSide};
 use shrike_link::ring::RingBuf;
 use shrike_link::session::{LinkAction, LinkSession};
 use shrike_link::{encode, Decoder, Msg, MAX_FRAME};
@@ -476,10 +476,10 @@ pub fn link_alive() -> bool {
 }
 
 /// Route a monitor-clamped motor duty to the link as a `MotorSetpoint`. Returns
-/// true if the setpoint was enqueued. Forward-only (v0.4); `value` must be the
-/// ARM-A-clamped duty.
-pub fn send_motor(side: MotorSide, value: u32) -> bool {
-    let permille = duty_to_permille(value, ActiveProfile::ACT_DUTY_MAX);
+/// true if the setpoint was enqueued. `value` is a monitor-approved signed
+/// magnitude/direction command.
+pub fn send_motor(side: MotorSide, value: i32) -> bool {
+    let permille = signed_duty_to_permille(value, ActiveProfile::ACT_DUTY_MAX);
     with_link(|l| {
         if !l.set_motor(side, permille) {
             return false;

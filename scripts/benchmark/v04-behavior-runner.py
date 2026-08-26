@@ -29,6 +29,12 @@ def main() -> int:
         command = shlex.split(getattr(args, stage))
         if not command:
             parser.error(f"--{stage} must name a command")
+        if stage == "load":
+            print(
+                f"V04_BEHAVIOR sample_id={args.sample_id} behavior={args.behavior} "
+                f"stage=load_request ts_ns={time.monotonic_ns()}",
+                flush=True,
+            )
         result = subprocess.run(command, check=False)
         if result.returncode:
             print(f"V04_BENCH_FAIL behavior={args.behavior} stage={stage} code={result.returncode}", file=sys.stderr)

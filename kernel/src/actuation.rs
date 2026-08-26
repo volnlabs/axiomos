@@ -76,7 +76,7 @@ fn apply_pwm_value(chip: u8, channel: u8, value: u32) {
 /// link-mapped channel that is dead or whose setpoint can't be enqueued is
 /// REFUSED (-1) and never driven locally — the RP2040 watchdog fails it safe.
 #[allow(unused_variables)]
-fn apply_pwm_routed(chip: u8, channel: u8, value: u32, code: i64) -> (bool, i64) {
+fn apply_pwm_routed(chip: u8, channel: u8, value: u32, sign: i32, code: i64) -> (bool, i64) {
     #[cfg(all(target_arch = "aarch64", feature = "rpi5", feature = "bench"))]
     if crate::bench::is_bench_pwm_output(chip, channel) {
         // Task 11 measures the RP1 PWM edge directly, not the Shrike UART path.
@@ -89,7 +89,12 @@ fn apply_pwm_routed(chip: u8, channel: u8, value: u32, code: i64) -> (bool, i64)
         use crate::arch::aarch64::platform::rpi5::control_link;
         if let Some(side) = control_link::motor_side(chip, channel) {
             // Link owns this motor — never drive local PWM for it.
-            if !control_link::link_alive() || !control_link::send_motor(side, value) {
+            let signed_value = if sign < 0 {
+                -(value.min(i32::MAX as u32) as i32)
+            } else {
+                value.min(i32::MAX as u32) as i32
+            };
+            if !control_link::link_alive() || !control_link::send_motor(side, signed_value) {
                 return (false, -1); // dead link or TX full: refuse (peer fails safe)
             }
             return (true, code);
@@ -173,10 +178,11 @@ fn apply_safe_drive(drive: SafeDrive) {
 /// Route a PWM-duty request through ARM-A and apply the result to RP1 MMIO.
 /// Returns 0 when motion proceeds (Allow/Clamp), -1 when policy intervened or
 /// the request was invalid (Safe/Reject). The only *monitored* writer of PWM duty.
-pub fn guard_pwm_with(
+fn guard_pwm_value_with(
     chip: u8,
     channel: u8,
     duty: u32,
+    sign: i32,
     authority: Authority,
     source: AuditSource,
 ) -> i64 {
@@ -201,7 +207,7 @@ pub fn guard_pwm_with(
         #[cfg(feature = "bench")]
         crate::bench::report_monitor_overhead(crate::bench::now_cycles().wrapping_sub(bench_t0));
 
-        let (applied, code) = apply_pwm_routed(chip, channel, value, code);
+        let (applied, code) = apply_pwm_routed(chip, channel, value, sign, code);
         if !applied {
             if let (Some(before), Some(after)) = (before, after) {
                 let mut monitor = ACTUATION_MONITOR.lock();
@@ -217,6 +223,45 @@ pub fn guard_pwm_with(
 
         code
     })
+}
+
+pub fn guard_pwm_with(
+    chip: u8,
+    channel: u8,
+    duty: u32,
+    authority: Authority,
+    source: AuditSource,
+) -> i64 {
+    guard_pwm_value_with(chip, channel, duty, 1, authority, source)
+}
+
+/// Route a signed motor setpoint through the same monitor magnitude guard as
+/// PWM, retaining its sign only at the shared link actuation route.
+pub fn guard_motor_with(
+    chip: u8,
+    channel: u8,
+    setpoint: i32,
+    authority: Authority,
+    source: AuditSource,
+) -> i64 {
+    guard_pwm_value_with(
+        chip,
+        channel,
+        setpoint.unsigned_abs(),
+        if setpoint < 0 { -1 } else { 1 },
+        authority,
+        source,
+    )
+}
+
+pub fn guard_motor(chip: u8, channel: u8, setpoint: i32) -> i64 {
+    guard_motor_with(
+        chip,
+        channel,
+        setpoint,
+        Authority::Learned,
+        AuditSource::LearnedBehavior,
+    )
 }
 
 pub fn guard_pwm(chip: u8, channel: u8, duty: u32) -> i64 {

@@ -10,7 +10,8 @@
 //!
 //! Pin assignments (BCM/GPIO numbering, i.e. the numbers the kernel uses):
 //!   - GPIO23 = sensor trigger (reflex fires on its rising edge)
-//!   - GPIO24 = e-stop button (external 10k pull-up to 3V3; press pulls to GND)
+//!   - GPIO24 = e-stop button (NC contact holds high; 10k pull-down makes an
+//!     open/pressed/broken contact low)
 //!   - GPIO12 = PWM0 channel 1 physical output to motor-A speed/enable
 //!   - PWM0 channel 1 = motor-A speed/enable (driver enable pin)
 
@@ -18,7 +19,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Sensor pin: the reflex fires on this pin's rising edge.
 pub const REFLEX_SENSOR_PIN: u8 = 23;
-/// E-stop button pin (external pull-up; press pulls to GND -> falling edge).
+/// E-stop button pin (NC-held-high; open/press/broken wire pulls low).
 pub const ESTOP_BUTTON_PIN: u8 = 24;
 /// PWM controller the reflex and demo drive (PWM0).
 /// Reflex-output PWM carrier. At 100% duty this holds GPIO12 high until the
@@ -284,7 +285,8 @@ pub fn report_gpio_irq_probe(
 /// applied value outside the channel's envelope, or any unknown-channel request
 /// that did not drive the universal safe value 0. Runs the monitor logic only
 /// (no MMIO), and avoids the bench's own channels so it cannot disturb the
-/// reflex arm. Emits `PI5_V03C n=.. escapes=.. rejects=.. clamps=.. seed=..`.
+/// reflex arm. Emits one correlated `PI5_V03C` record per request plus a retained
+/// aggregate `PI5_V03C_SUMMARY` record.
 #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
 pub fn run_containment_corpus() {
     use kernel_bpf::actuation::{
@@ -304,9 +306,10 @@ pub fn run_containment_corpus() {
     let now = crate::time::get_kernel_time_ns();
     let mut escapes = 0u32;
     let mut safed = 0u32;
+    let mut clamps = 0u32;
 
     let mut mon = crate::actuation::ACTUATION_MONITOR.lock();
-    for _ in 0..N {
+    for sample_id in 1..=N {
         let r = next();
         let kind = if r & 1 == 0 {
             ActuationKind::PwmDuty
@@ -343,14 +346,32 @@ pub fn run_containment_corpus() {
             chip: 0,
             channel,
         };
-        let (applied, code) = mon
-            .decide(
-                ActuationRequest { ch, value },
-                Authority::Learned,
-                AuditSource::LearnedBehavior,
-                now,
-            )
-            .apply();
+        let decision = mon.decide(
+            ActuationRequest { ch, value },
+            Authority::Learned,
+            AuditSource::LearnedBehavior,
+            now,
+        );
+        let (applied, code) = decision.apply();
+        let decision_name = match decision {
+            kernel_bpf::actuation::Decision::Allow(_) => "allow",
+            kernel_bpf::actuation::Decision::Clamp(_) => "clamp",
+            kernel_bpf::actuation::Decision::Safe(_) => "safe",
+            kernel_bpf::actuation::Decision::Reject(_) => "reject",
+        };
+        crate::serial_println!(
+            "PI5_V03C sample_id={} kind={} channel={} requested={} decision={} applied={} physical_output={}",
+            sample_id,
+            match kind {
+                ActuationKind::PwmDuty => "pwm",
+                ActuationKind::GpioLevel => "gpio",
+            },
+            channel,
+            value,
+            decision_name,
+            applied,
+            applied
+        );
         // Containment invariant: a known channel must apply within [min,max];
         // an unknown channel must apply the universal safe value 0.
         let contained = match mon.cached_envelope(ch) {
@@ -364,14 +385,18 @@ pub fn run_containment_corpus() {
         if code < 0 {
             safed += 1;
         }
+        if matches!(decision, kernel_bpf::actuation::Decision::Clamp(_)) {
+            clamps += 1;
+        }
     }
     drop(mon);
 
     crate::serial_println!(
-        "PI5_V03C n={} escapes={} safed={} seed=0x{:016x}",
+        "PI5_V03C_SUMMARY n={} escapes={} safed={} clamps={} seed=0x{:016x}",
         N,
         escapes,
         safed,
+        clamps,
         SEED
     );
 }

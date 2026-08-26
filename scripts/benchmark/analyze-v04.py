@@ -10,7 +10,9 @@ from unittest import mock
 from collections import defaultdict
 from pathlib import Path
 
-STAGES = ("load", "verify", "admit", "attach", "active")
+# `load_request` is emitted before invoking the loader; it is the honest start
+# boundary for V04-A rather than pretending the load duration starts on return.
+STAGES = ("load_request", "load", "verify", "admit", "attach", "active")
 STAT_KEYS = ("count", "min", "median", "p95", "p99", "p99.9", "max")
 SCHEMAS = {
     "V04_BEHAVIOR": {"sample_id", "behavior", "stage", "ts_ns"},
@@ -27,11 +29,19 @@ SCHEMAS = {
 LOG_SUFFIXES = {".log", ".serial", ".txt", ".out"}
 
 
-def _number(record: dict[str, str], key: str, *, positive: bool = False) -> int:
+def _number(record: dict[str, str], key: str, *, positive: bool = False, signed_i16: bool = False) -> int:
     value = record[key]
-    if not value.isdecimal():
+    if signed_i16:
+        try:
+            number = int(value, 10)
+        except ValueError:
+            raise ValueError(f"{record['_event']} has invalid {key}={value!r}") from None
+        if not -32768 <= number <= 32767:
+            raise ValueError(f"{record['_event']} has out-of-range {key}={value!r}")
+    elif not value.isdecimal():
         raise ValueError(f"{record['_event']} has invalid {key}={value!r}")
-    number = int(value)
+    else:
+        number = int(value)
     if positive and number == 0:
         raise ValueError(f"{record['_event']} has zero {key}")
     return number
@@ -71,7 +81,12 @@ def parse(text: str) -> list[dict[str, str]]:
             raise ValueError(f"line {line_no}: invalid failure reason")
         numeric = {"ts_ns", "sample_id", "echo_us", "seq", "left", "right", "event_id", "chunk_id", "count"}
         for key in numeric & set(record):
-            _number(record, key, positive=key in {"sample_id", "event_id", "chunk_id", "count"})
+            _number(
+                record,
+                key,
+                positive=key in {"sample_id", "event_id", "chunk_id", "count"},
+                signed_i16=key in {"left", "right"},
+            )
         if "ts_ns" in record:
             timestamp = _number(record, "ts_ns")
             if last_timestamp is not None and timestamp < last_timestamp:
@@ -237,7 +252,7 @@ class AnalyzerSelfTest(unittest.TestCase):
         lines = ["V04_CHUNK chunk_id=1 stage=start ts_ns=1"]
         for base, name in ((100, "stop"), (150, "drive")):
             lines += [f"V04_BEHAVIOR sample_id=1 behavior={name} stage={stage} ts_ns={base + i * 10}" for i, stage in enumerate(STAGES)]
-        lines += ["V04_ECHO_DONE sample_id=1 echo_us=10 ts_ns=210", "V04_HOOK_ENTRY sample_id=1 ts_ns=220", "V04_MOTOR_CMD sample_id=1 seq=1 left=0 right=0 ts_ns=230", "V04_CHUNK chunk_id=1 stage=end ts_ns=300"]
+        lines += ["V04_ECHO_DONE sample_id=1 echo_us=10 ts_ns=210", "V04_HOOK_ENTRY sample_id=1 ts_ns=220", "V04_MOTOR_CMD sample_id=1 seq=1 left=-32768 right=32767 ts_ns=230", "V04_CHUNK chunk_id=1 stage=end ts_ns=300"]
         return "\n".join(lines)
 
     def run_valid(self, text: str | None = None, **kwargs: int) -> dict[str, dict[str, int]]:
@@ -252,7 +267,7 @@ class AnalyzerSelfTest(unittest.TestCase):
         self.assertEqual(stats([1, 2, 3, 4, 5]), {"count": 5, "min": 1, "median": 3, "p95": 5, "p99": 5, "p99.9": 5, "max": 5})
 
     def test_missing_duplicate_and_out_of_order_lifecycle_fail(self):
-        for old, new in (("stage=admit", "stage=nope"), ("stage=admit", "stage=verify"), ("stage=verify ts_ns=110", "stage=verify ts_ns=140")):
+        for old, new in (("stage=admit", "stage=nope"), ("stage=admit", "stage=verify"), ("stage=verify ts_ns=120", "stage=verify ts_ns=140")):
             with self.subTest(new=new), self.assertRaises(ValueError): self.run_valid(self.valid().replace(old, new, 1))
 
     def test_required_populations_and_limits_fail(self):
@@ -265,7 +280,7 @@ class AnalyzerSelfTest(unittest.TestCase):
     def test_source_order_schemas_chunks_and_heartbeat_fail(self):
         with self.assertRaisesRegex(ValueError, "timestamp decreases"): self.run_valid(self.valid().replace("ts_ns=230", "ts_ns=205"))
         with self.assertRaisesRegex(ValueError, "unknown"): self.run_valid(self.valid() + "\nV04_UNKNOWN ts_ns=400")
-        with self.assertRaisesRegex(ValueError, "schema"): self.run_valid(self.valid().replace("seq=1 left=0 right=0 ", ""))
+        with self.assertRaisesRegex(ValueError, "schema"): self.run_valid(self.valid().replace("seq=1 left=-32768 right=32767 ", ""))
         with self.assertRaisesRegex(ValueError, "chunk_id"): self.run_valid(self.valid().replace("chunk_id=1 stage=end", "chunk_id=2 stage=end"))
         beats = "\nV04_HEARTBEAT seq=65535 ts_ns=310\nV04_HEARTBEAT seq=0 ts_ns=320"
         self.run_valid(self.valid() + beats, require_heartbeat=True, max_heartbeat_gap_ns=10)
@@ -283,6 +298,14 @@ class AnalyzerSelfTest(unittest.TestCase):
         text = self.valid() + "\nV04_ESTOP event_id=1 source=operator stage=assert ts_ns=310\nV04_ESTOP event_id=1 source=operator stage=assert ts_ns=320"
         with self.assertRaisesRegex(ValueError, "duplicate"):
             self.run_valid(text, require_estop=True, min_estop_samples=1)
+
+    def test_motor_values_are_signed_i16_and_range_checked(self):
+        records = parse(self.valid())
+        motor = next(record for record in records if record["_event"] == "V04_MOTOR_CMD")
+        self.assertEqual(motor["left"], "-32768")
+        for value in ("-32769", "32768"):
+            with self.assertRaisesRegex(ValueError, "left"):
+                parse(self.valid().replace("left=-32768", f"left={value}"))
 
     def test_failure_and_per_stream_timestamps_fail_closed(self):
         with self.assertRaisesRegex(ValueError, "failure"):

@@ -32,6 +32,15 @@ ESTOP_REARM_PATTERN = re.compile(
 REFLEX_REARM_PATTERN = re.compile(
     r"PI5_REFLEX_REARM\s+sample_id=(\d+)\s+mode=gpio\s+code=(-?\d+)"
 )
+CONTAINMENT_RECORD_PATTERN = re.compile(
+    r"PI5_V03C\s+sample_id=(\d+)\s+kind=(pwm|gpio)\s+channel=(\d+)\s+"
+    r"requested=(\d+)\s+decision=(allow|clamp|safe|reject)\s+"
+    r"applied=(\d+)\s+physical_output=(\d+)"
+)
+CONTAINMENT_SUMMARY_PATTERN = re.compile(
+    r"PI5_V03C_SUMMARY\s+n=(\d+)\s+escapes=(\d+)\s+safed=(\d+)\s+"
+    r"clamps=(\d+)\s+seed=(0x[0-9a-fA-F]+)"
+)
 
 LOGIC_ALIASES = {
     "time_s": ("time_s", "time", "time [s]", "time(s)", "seconds"),
@@ -204,6 +213,58 @@ class AnalyzerSelfTest(unittest.TestCase):
             latencies = parse_logic(logic)
             self.assertEqual(latencies, [320, 410])
             self.assertEqual(stats(latencies)["median"], 365)
+
+    def test_logic_edges_reject_missing_duplicate_or_out_of_order_responses(self):
+        header = "time_s,input_gpio23,pwm_ena_gpio12,estop_gpio24"
+        cases = {
+            "missing": [
+                "0,0,1,1", "1e-6,1,1,1", "2e-6,0,1,1",
+                "3e-6,1,1,1", "3.4e-6,1,0,1",
+            ],
+            "duplicate": [
+                "0,0,1,1", "1e-6,1,1,1", "1.2e-6,1,0,1",
+                "1.5e-6,1,1,1", "1.7e-6,1,0,1",
+            ],
+            "out-of-order": [
+                "0,0,1,1", "1e-6,1,1,1", "2e-6,0,1,1",
+                "2.5e-6,1,1,1", "2.6e-6,0,1,1", "2.7e-6,1,0,1",
+            ],
+        }
+        for name, rows in cases.items():
+            with tempfile.TemporaryDirectory() as tmp:
+                logic = Path(tmp) / f"{name}.csv"
+                logic.write_text("\n".join([header, *rows]) + "\n", encoding="utf-8")
+                with self.subTest(name=name), self.assertRaisesRegex(ValueError, "edge"):
+                    parse_logic(logic)
+
+    def test_containment_records_are_correlated_and_exact(self):
+        text = (
+            "PI5_V03C sample_id=1 kind=pwm channel=2 requested=200 "
+            "decision=clamp applied=90 physical_output=90\n"
+            "PI5_V03C sample_id=2 kind=gpio channel=99 requested=1 "
+            "decision=reject applied=0 physical_output=0\n"
+            "PI5_V03C_SUMMARY n=2 escapes=0 safed=1 clamps=1 seed=0x1\n"
+        )
+        records = parse_containment(text, expected_count=2)
+        self.assertEqual([record["sample_id"] for record in records], [1, 2])
+        summary = parse_containment_summary(text)
+        self.assertEqual(validate_containment(records, summary), [])
+
+    def test_containment_records_reject_missing_duplicate_or_mismatch(self):
+        base = (
+            "PI5_V03C sample_id=1 kind=pwm channel=2 requested=200 "
+            "decision=clamp applied=90 physical_output=90\n"
+            "PI5_V03C sample_id=2 kind=gpio channel=99 requested=1 "
+            "decision=reject applied=0 physical_output=0\n"
+        )
+        for malformed in (
+            base.replace("sample_id=2", "sample_id=1"),
+            base.replace("sample_id=2", "sample_id=3"),
+        ):
+            with self.subTest(malformed=malformed), self.assertRaises(ValueError):
+                parse_containment(malformed, expected_count=2)
+        records = parse_containment(base, expected_count=2)
+        self.assertTrue(validate_containment([records[1].copy() | {"physical_output": 1}]))
 
 
 def parse_serial(path: Path) -> dict[str, list[int]]:
@@ -388,25 +449,96 @@ def parse_logic(path: Path) -> list[int]:
             for row in reader
         ]
 
-    latencies: list[int] = []
-    search_from = 1
+    input_edges: list[tuple[float, int]] = []
+    response_edges: list[tuple[float, int]] = []
     for i in range(1, len(rows)):
         prev_t, prev_input, _prev_pwm = rows[i - 1]
         t, input_level, _pwm = rows[i]
-        if prev_input != 0 or input_level != 1:
-            continue
+        if prev_input == 0 and input_level == 1:
+            input_edges.append((t, i))
+        if rows[i - 1][2] == 1 and rows[i][2] == 0:
+            response_edges.append((t, i))
 
-        search_from = max(search_from, i + 1)
-        for j in range(search_from, len(rows)):
-            prev_pwm = rows[j - 1][2]
-            pwm = rows[j][2]
-            if prev_pwm == 1 and pwm == 0:
-                latency_ns = int(round((rows[j][0] - t) * 1_000_000_000))
-                if latency_ns >= 0:
-                    latencies.append(latency_ns)
-                search_from = j + 1
-                break
+    if len(input_edges) != len(response_edges):
+        raise ValueError(
+            f"edge population mismatch: {len(input_edges)} input edges, "
+            f"{len(response_edges)} response edges"
+        )
+    latencies: list[int] = []
+    for index, ((input_t, _input_row), (response_t, _response_row)) in enumerate(
+        zip(input_edges, response_edges)
+    ):
+        next_input_t = input_edges[index + 1][0] if index + 1 < len(input_edges) else None
+        if response_t < input_t:
+            raise ValueError(f"edge response {index + 1} precedes its input")
+        if next_input_t is not None and response_t >= next_input_t:
+            raise ValueError(f"edge response {index + 1} occurs after the next input")
+        latencies.append(int(round((response_t - input_t) * 1_000_000_000)))
     return latencies
+
+
+def parse_containment(source: Path | str, expected_count: int = 1_000) -> list[dict[str, int | str]]:
+    text = source.read_text(encoding="utf-8") if isinstance(source, Path) else source
+    records: list[dict[str, int | str]] = []
+    for line_no, line in enumerate(text.splitlines(), 1):
+        if not line.startswith("PI5_V03C "):
+            continue
+        match = CONTAINMENT_RECORD_PATTERN.fullmatch(line)
+        if match is None:
+            raise ValueError(f"line {line_no}: malformed containment record")
+        sample_id, kind, channel, requested, decision, applied, output = match.groups()
+        if int(sample_id) != len(records) + 1:
+            raise ValueError(f"containment sample_id {sample_id} out of order; expected {len(records) + 1}")
+        records.append({
+            "sample_id": int(sample_id),
+            "kind": kind,
+            "channel": int(channel),
+            "requested": int(requested),
+            "decision": decision,
+            "applied": int(applied),
+            "physical_output": int(output),
+        })
+    if len(records) != expected_count:
+        raise ValueError(f"containment record count {len(records)} != {expected_count}")
+    return records
+
+
+def validate_containment(
+    records: list[dict[str, int | str]], summary: dict[str, int] | None = None
+) -> list[str]:
+    errors: list[str] = []
+    for record in records:
+        if record["applied"] != record["physical_output"]:
+            errors.append(f"containment sample_id {record['sample_id']} applied/output mismatch")
+        if record["decision"] == "reject" and record["applied"] != 0:
+            errors.append(f"containment sample_id {record['sample_id']} reject escaped safe-low")
+    if summary is not None:
+        if summary["n"] != len(records):
+            errors.append(f"containment summary n {summary['n']} != {len(records)}")
+        safed = sum(record["decision"] in {"safe", "reject"} for record in records)
+        clamps = sum(record["decision"] == "clamp" for record in records)
+        if summary["safed"] != safed:
+            errors.append(f"containment summary safed {summary['safed']} != {safed}")
+        if summary["clamps"] != clamps:
+            errors.append(f"containment summary clamps {summary['clamps']} != {clamps}")
+        if summary["escapes"] != 0:
+            errors.append(f"containment escapes={summary['escapes']}")
+    return errors
+
+
+def parse_containment_summary(source: Path | str) -> dict[str, int]:
+    text = source.read_text(encoding="utf-8") if isinstance(source, Path) else source
+    matches = CONTAINMENT_SUMMARY_PATTERN.findall(text)
+    if len(matches) != 1:
+        raise ValueError(f"containment summary count {len(matches)} != 1")
+    n, escapes, safed, clamps, seed = matches[0]
+    return {
+        "n": int(n),
+        "escapes": int(escapes),
+        "safed": int(safed),
+        "clamps": int(clamps),
+        "seed": int(seed, 16),
+    }
 
 
 def validate_thresholds(samples: dict[str, list[int]], min_mc_count: int = 10_000) -> list[str]:
@@ -446,6 +578,8 @@ def main() -> int:
     parser.add_argument("--estop-count", type=int, default=100, help="expected V03-D press count")
     parser.add_argument("--sensor", type=Path, help="serial log with keyed V03-B records")
     parser.add_argument("--sensor-count", type=int, default=10_000, help="expected V03-B edge count")
+    parser.add_argument("--containment", type=Path, help="serial log with correlated V03-C records")
+    parser.add_argument("--containment-count", type=int, default=1_000, help="expected V03-C request count")
     parser.add_argument("--logic", type=Path, help="logic-analyzer CSV")
     parser.add_argument("--self-test", action="store_true", help="run parser self-tests")
     args = parser.parse_args()
@@ -454,8 +588,8 @@ def main() -> int:
         result = unittest.main(argv=[__file__], exit=False)
         return 0 if result.result.wasSuccessful() else 1
 
-    if not args.serial and not args.logic and not args.pairs and not args.estop and not args.sensor:
-        parser.error("provide --serial, --pairs, --sensor, --estop, --logic, or --self-test")
+    if not args.serial and not args.logic and not args.pairs and not args.estop and not args.sensor and not args.containment:
+        parser.error("provide --serial, --pairs, --sensor, --estop, --containment, --logic, or --self-test")
 
     failures: list[str] = []
 
@@ -470,18 +604,22 @@ def main() -> int:
             print(f"M-C median {mc_median} ns misses 500 ns target; fallback claim applies")
 
     if args.logic:
-        logic_latencies = parse_logic(args.logic)
-        print(_format_stats("logic input->pwm", logic_latencies))
-        if len(logic_latencies) < 10_000:
-            failures.append(f"logic count {len(logic_latencies)} < 10000")
-        elif stats(logic_latencies)["median"] >= 1_000:
-            failures.append(
-                f"logic median {stats(logic_latencies)['median']} ns >= 1000 ns fallback"
-            )
-        elif stats(logic_latencies)["median"] >= 500:
-            print(
-                f"logic median {stats(logic_latencies)['median']} ns misses 500 ns target; fallback claim applies"
-            )
+        try:
+            logic_latencies = parse_logic(args.logic)
+        except ValueError as error:
+            failures.append(str(error))
+        else:
+            print(_format_stats("logic input->pwm", logic_latencies))
+            if len(logic_latencies) < 10_000:
+                failures.append(f"logic count {len(logic_latencies)} < 10000")
+            elif stats(logic_latencies)["median"] >= 1_000:
+                failures.append(
+                    f"logic median {stats(logic_latencies)['median']} ns >= 1000 ns fallback"
+                )
+            elif stats(logic_latencies)["median"] >= 500:
+                print(
+                    f"logic median {stats(logic_latencies)['median']} ns misses 500 ns target; fallback claim applies"
+                )
 
     if args.pairs:
         try:
@@ -499,6 +637,20 @@ def main() -> int:
 
     if args.sensor:
         failures.extend(validate_sensor_cycles(args.sensor, args.sensor_count))
+
+    if args.containment:
+        try:
+            records = parse_containment(args.containment, args.containment_count)
+        except ValueError as error:
+            failures.append(str(error))
+        else:
+            try:
+                summary = parse_containment_summary(args.containment)
+            except ValueError as error:
+                failures.append(str(error))
+            else:
+                failures.extend(validate_containment(records, summary))
+            print(f"V03-C containment: count={len(records)}")
 
     if failures:
         print("FAIL:")
