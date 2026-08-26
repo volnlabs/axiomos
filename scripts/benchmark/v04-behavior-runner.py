@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import re
 import shlex
 import subprocess
 import sys
 import time
 
 STAGES = ("load", "verify", "admit", "attach", "active")
+BEHAVIOR = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\Z")
 
 
 def main() -> int:
@@ -21,6 +23,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.sample_id < 1:
         parser.error("--sample-id must be positive")
+    if not BEHAVIOR.fullmatch(args.behavior):
+        parser.error("--behavior must be a marker-safe identifier")
     for stage in STAGES:
         command = shlex.split(getattr(args, stage))
         if not command:

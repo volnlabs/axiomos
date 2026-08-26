@@ -88,6 +88,57 @@ pub fn take_v04_motor_sample_id() -> Option<u64> {
     .then_some(sample_id)
 }
 
+struct V04DispatchGuard<'a> {
+    slot: &'a AtomicU64,
+    interrupts_enabled: bool,
+}
+
+impl<'a> V04DispatchGuard<'a> {
+    fn new(slot: &'a AtomicU64, sample_id: u64) -> Option<Self> {
+        #[cfg(target_arch = "aarch64")]
+        let interrupts_enabled = {
+            use crate::arch::aarch64::Aarch64;
+            use crate::arch::traits::Architecture;
+            let enabled = Aarch64::are_interrupts_enabled();
+            if enabled {
+                Aarch64::disable_interrupts();
+            }
+            enabled
+        };
+        #[cfg(not(target_arch = "aarch64"))]
+        let interrupts_enabled = false;
+
+        if slot
+            .compare_exchange(0, sample_id, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            #[cfg(target_arch = "aarch64")]
+            if interrupts_enabled {
+                use crate::arch::aarch64::Aarch64;
+                use crate::arch::traits::Architecture;
+                Aarch64::enable_interrupts();
+            }
+            return None;
+        }
+        Some(Self {
+            slot,
+            interrupts_enabled,
+        })
+    }
+}
+
+impl Drop for V04DispatchGuard<'_> {
+    fn drop(&mut self) {
+        self.slot.store(0, Ordering::Release);
+        #[cfg(target_arch = "aarch64")]
+        if self.interrupts_enabled {
+            use crate::arch::aarch64::Aarch64;
+            use crate::arch::traits::Architecture;
+            Aarch64::enable_interrupts();
+        }
+    }
+}
+
 /// Initialize the IIO subsystem
 pub fn init() {
     IIO_MANAGER.init_once(|| Mutex::new(IioManager::new()));
@@ -126,52 +177,34 @@ impl IioManager {
     }
 
     pub fn dispatch_v04_event(&self, event: IioEvent, sample_id: u64) -> bool {
-        #[cfg(target_arch = "aarch64")]
-        let interrupts_enabled = {
-            use crate::arch::aarch64::Aarch64;
-            use crate::arch::traits::Architecture;
-            let enabled = Aarch64::are_interrupts_enabled();
-            if enabled {
-                Aarch64::disable_interrupts();
-            }
-            enabled
+        let Some(cpu) = v04_cpu_id() else {
+            return false;
         };
-        let result = (|| {
-            let Some(cpu) = v04_cpu_id() else {
-                return false;
-            };
-            let Some(slot) = V04_ACTIVE_SAMPLE_IDS.get(cpu) else {
-                return false;
-            };
-            // IRQ masking makes the per-core context a synchronous scope;
-            // compare_exchange still rejects direct/re-entrant dispatch.
-            if slot
-                .compare_exchange(0, sample_id, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
-            {
-                return false;
-            }
-            crate::serial_println!(
-                "V04_HOOK_ENTRY sample_id={} ts_ns={}",
-                sample_id,
-                event.timestamp
-            );
-            self.dispatch_event(event);
-            slot.store(0, Ordering::Release);
-            true
-        })();
-        #[cfg(target_arch = "aarch64")]
-        if interrupts_enabled {
-            use crate::arch::aarch64::Aarch64;
-            use crate::arch::traits::Architecture;
-            Aarch64::enable_interrupts();
-        }
-        result
+        let Some(slot) = V04_ACTIVE_SAMPLE_IDS.get(cpu) else {
+            return false;
+        };
+        // The guard makes this synchronous context unwind-safe; its CAS also
+        // rejects direct/re-entrant dispatch while the slot is occupied.
+        let Some(_guard) = V04DispatchGuard::new(slot, sample_id) else {
+            return false;
+        };
+        crate::serial_println!(
+            "V04_HOOK_ENTRY sample_id={} ts_ns={}",
+            sample_id,
+            event.timestamp
+        );
+        self.dispatch_event(event);
+        true
     }
 }
 
 #[cfg(test)]
 mod v04_tests {
+    #[cfg(not(target_os = "none"))]
+    extern crate std;
+    #[cfg(not(target_os = "none"))]
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
     use super::*;
 
     #[test]
@@ -186,6 +219,27 @@ mod v04_tests {
             .is_err());
         assert_eq!(take_v04_motor_sample_id(), Some(7));
         assert_eq!(take_v04_motor_sample_id(), None);
+    }
+
+    #[test]
+    fn v04_context_guard_clears_slot_on_drop() {
+        let slot = &V04_ACTIVE_SAMPLE_IDS[0];
+        slot.store(0, Ordering::Release);
+        drop(V04DispatchGuard::new(slot, 8).unwrap());
+        assert_eq!(slot.load(Ordering::Acquire), 0);
+    }
+
+    #[cfg(not(target_os = "none"))]
+    #[test]
+    fn v04_context_guard_clears_slot_during_unwind() {
+        let slot = &V04_ACTIVE_SAMPLE_IDS[0];
+        slot.store(0, Ordering::Release);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = V04DispatchGuard::new(slot, 9).unwrap();
+            panic!("exercise dispatch cleanup");
+        }));
+        assert!(result.is_err());
+        assert_eq!(slot.load(Ordering::Acquire), 0);
     }
 }
 
