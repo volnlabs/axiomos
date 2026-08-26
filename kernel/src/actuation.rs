@@ -18,6 +18,21 @@ pub static ACTUATION_MONITOR: Mutex<Monitor<ActiveProfile>> = Mutex::new(Monitor
 static APPLY_LOCK: Mutex<()> = Mutex::new(());
 static NEXT_V04_ESTOP_EVENT: AtomicU64 = AtomicU64::new(1);
 
+/// Whether the reviewed PWM channel is owned by the signed motor link.
+#[inline]
+pub fn is_motor_channel(chip: u8, channel: u8) -> bool {
+    #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+    {
+        return crate::arch::aarch64::platform::rpi5::control_link::motor_side(chip, channel)
+            .is_some();
+    }
+    #[cfg(not(all(target_arch = "aarch64", feature = "rpi5")))]
+    {
+        let _ = (chip, channel);
+        false
+    }
+}
+
 pub(crate) fn next_v04_estop_event_id() -> u64 {
     NEXT_V04_ESTOP_EVENT.fetch_add(1, Ordering::Relaxed)
 }

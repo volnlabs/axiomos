@@ -283,10 +283,11 @@ pub fn report_gpio_irq_probe(
 /// out-of-envelope actuation requests through the REAL ARM-A monitor decision
 /// (the same `decide().apply()` the guards use) and count "escapes" — any
 /// applied value outside the channel's envelope, or any unknown-channel request
-/// that did not drive the universal safe value 0. Runs the monitor logic only
+/// that did not produce the universal safe value 0. Runs the monitor logic only
 /// (no MMIO), and avoids the bench's own channels so it cannot disturb the
-/// reflex arm. Emits one correlated `PI5_V03C` record per request plus a retained
-/// aggregate `PI5_V03C_SUMMARY` record.
+/// reflex arm. Emits one correlated `PI5_V03C` record per request with an
+/// intended output plus a retained `PI5_V03C_SUMMARY` record; physical output
+/// evidence remains a hardware campaign result.
 #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
 pub fn run_containment_corpus() {
     use kernel_bpf::actuation::{
@@ -360,7 +361,7 @@ pub fn run_containment_corpus() {
             kernel_bpf::actuation::Decision::Reject(_) => "reject",
         };
         crate::serial_println!(
-            "PI5_V03C sample_id={} kind={} channel={} requested={} decision={} applied={} physical_output={}",
+            "PI5_V03C sample_id={} kind={} channel={} requested={} decision={} applied={} intended_output={}",
             sample_id,
             match kind {
                 ActuationKind::PwmDuty => "pwm",

@@ -35,7 +35,7 @@ REFLEX_REARM_PATTERN = re.compile(
 CONTAINMENT_RECORD_PATTERN = re.compile(
     r"PI5_V03C\s+sample_id=(\d+)\s+kind=(pwm|gpio)\s+channel=(\d+)\s+"
     r"requested=(\d+)\s+decision=(allow|clamp|safe|reject)\s+"
-    r"applied=(\d+)\s+physical_output=(\d+)"
+    r"applied=(\d+)\s+intended_output=(\d+)"
 )
 CONTAINMENT_SUMMARY_PATTERN = re.compile(
     r"PI5_V03C_SUMMARY\s+n=(\d+)\s+escapes=(\d+)\s+safed=(\d+)\s+"
@@ -48,6 +48,11 @@ LOGIC_ALIASES = {
     "pwm_ena_gpio12": ("pwm_ena_gpio12", "gpio12", "ch1", "channel 1", "pwm", "ena"),
     "estop_gpio24": ("estop_gpio24", "gpio24", "ch2", "channel 2", "estop"),
 }
+
+# Locked embedded-profile envelopes used by the on-device corpus.
+PWM_DUTY_MAX = 90
+GPIO_LEVEL_MAX = 1
+GPIO_PIN_MAX = 27
 
 
 class AnalyzerSelfTest(unittest.TestCase):
@@ -237,12 +242,24 @@ class AnalyzerSelfTest(unittest.TestCase):
                 with self.subTest(name=name), self.assertRaisesRegex(ValueError, "edge"):
                     parse_logic(logic)
 
+    def test_logic_edges_reject_nonmonotonic_timestamps_and_same_row_response(self):
+        header = "time_s,input_gpio23,pwm_ena_gpio12,estop_gpio24"
+        for rows in (
+            ["0,0,1,1", "2e-6,1,1,1", "1e-6,1,0,1", "3e-6,0,1,1"],
+            ["0,0,1,1", "1e-6,1,0,1", "2e-6,0,1,1"],
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                logic = Path(tmp) / "ordering.csv"
+                logic.write_text("\n".join([header, *rows]) + "\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "(timestamp|row|edge)"):
+                    parse_logic(logic)
+
     def test_containment_records_are_correlated_and_exact(self):
         text = (
             "PI5_V03C sample_id=1 kind=pwm channel=2 requested=200 "
-            "decision=clamp applied=90 physical_output=90\n"
+            "decision=clamp applied=90 intended_output=90\n"
             "PI5_V03C sample_id=2 kind=gpio channel=99 requested=1 "
-            "decision=reject applied=0 physical_output=0\n"
+            "decision=reject applied=0 intended_output=0\n"
             "PI5_V03C_SUMMARY n=2 escapes=0 safed=1 clamps=1 seed=0x1\n"
         )
         records = parse_containment(text, expected_count=2)
@@ -253,9 +270,9 @@ class AnalyzerSelfTest(unittest.TestCase):
     def test_containment_records_reject_missing_duplicate_or_mismatch(self):
         base = (
             "PI5_V03C sample_id=1 kind=pwm channel=2 requested=200 "
-            "decision=clamp applied=90 physical_output=90\n"
+            "decision=clamp applied=90 intended_output=90\n"
             "PI5_V03C sample_id=2 kind=gpio channel=99 requested=1 "
-            "decision=reject applied=0 physical_output=0\n"
+            "decision=reject applied=0 intended_output=0\n"
         )
         for malformed in (
             base.replace("sample_id=2", "sample_id=1"),
@@ -264,7 +281,8 @@ class AnalyzerSelfTest(unittest.TestCase):
             with self.subTest(malformed=malformed), self.assertRaises(ValueError):
                 parse_containment(malformed, expected_count=2)
         records = parse_containment(base, expected_count=2)
-        self.assertTrue(validate_containment([records[1].copy() | {"physical_output": 1}]))
+        self.assertTrue(validate_containment([records[1].copy() | {"intended_output": 1}]))
+        self.assertTrue(validate_containment([records[0].copy() | {"applied": 999, "intended_output": 999}]))
 
 
 def parse_serial(path: Path) -> dict[str, list[int]]:
@@ -449,6 +467,10 @@ def parse_logic(path: Path) -> list[int]:
             for row in reader
         ]
 
+    for row_index in range(1, len(rows)):
+        if rows[row_index][0] <= rows[row_index - 1][0]:
+            raise ValueError(f"logic timestamp at row {row_index + 1} is not strictly increasing")
+
     input_edges: list[tuple[float, int]] = []
     response_edges: list[tuple[float, int]] = []
     for i in range(1, len(rows)):
@@ -465,12 +487,14 @@ def parse_logic(path: Path) -> list[int]:
             f"{len(response_edges)} response edges"
         )
     latencies: list[int] = []
-    for index, ((input_t, _input_row), (response_t, _response_row)) in enumerate(
+    for index, ((input_t, input_row), (response_t, response_row)) in enumerate(
         zip(input_edges, response_edges)
     ):
         next_input_t = input_edges[index + 1][0] if index + 1 < len(input_edges) else None
         if response_t < input_t:
             raise ValueError(f"edge response {index + 1} precedes its input")
+        if response_row <= input_row:
+            raise ValueError(f"edge response {index + 1} is not after its input row")
         if next_input_t is not None and response_t >= next_input_t:
             raise ValueError(f"edge response {index + 1} occurs after the next input")
         latencies.append(int(round((response_t - input_t) * 1_000_000_000)))
@@ -496,7 +520,7 @@ def parse_containment(source: Path | str, expected_count: int = 1_000) -> list[d
             "requested": int(requested),
             "decision": decision,
             "applied": int(applied),
-            "physical_output": int(output),
+            "intended_output": int(output),
         })
     if len(records) != expected_count:
         raise ValueError(f"containment record count {len(records)} != {expected_count}")
@@ -508,10 +532,26 @@ def validate_containment(
 ) -> list[str]:
     errors: list[str] = []
     for record in records:
-        if record["applied"] != record["physical_output"]:
-            errors.append(f"containment sample_id {record['sample_id']} applied/output mismatch")
-        if record["decision"] == "reject" and record["applied"] != 0:
-            errors.append(f"containment sample_id {record['sample_id']} reject escaped safe-low")
+        if record["applied"] != record["intended_output"]:
+            errors.append(f"containment sample_id {record['sample_id']} applied/intended mismatch")
+        kind, channel = record["kind"], record["channel"]
+        if kind == "pwm":
+            envelope = (0, PWM_DUTY_MAX) if channel in {1, 2} else None
+        else:
+            envelope = (0, GPIO_LEVEL_MAX) if 0 <= channel <= GPIO_PIN_MAX else None
+        decision = record["decision"]
+        requested, applied = record["requested"], record["applied"]
+        if requested > 0xFFFF_FFFF:
+            errors.append(f"containment sample_id {record['sample_id']} requested value out of range")
+        if envelope is None:
+            if decision != "reject" or applied != 0:
+                errors.append(f"containment sample_id {record['sample_id']} invalid channel escaped reject")
+        elif not envelope[0] <= applied <= envelope[1]:
+            errors.append(f"containment sample_id {record['sample_id']} applied value outside envelope")
+        elif decision == "allow" and (requested > envelope[1] or applied != requested):
+            errors.append(f"containment sample_id {record['sample_id']} invalid allow decision")
+        elif decision == "reject":
+            errors.append(f"containment sample_id {record['sample_id']} rejected known channel")
     if summary is not None:
         if summary["n"] != len(records):
             errors.append(f"containment summary n {summary['n']} != {len(records)}")

@@ -209,7 +209,8 @@ pub extern "C" fn bpf_gpio_set_output(pin: u32, initial_high: u32) -> i64 {
 /// Arguments:
 /// - pwm_id: 0 or 1
 /// - channel: 1 or 2
-/// - duty_percent: 0-100
+/// - duty_percent: unsigned for ordinary PWM; signed i32 representation for
+///   link-owned motor channels
 ///
 /// Returns 0 on success, -1 on error.
 ///
@@ -224,7 +225,15 @@ pub extern "C" fn bpf_pwm_write(pwm_id: u32, channel: u32, duty_percent: u32) ->
         return -1;
     }
 
-    crate::actuation::guard_pwm(pwm_id as u8, channel as u8, duty_percent)
+    let chip = pwm_id as u8;
+    let channel = channel as u8;
+    if crate::actuation::is_motor_channel(chip, channel) {
+        // Motor channels use the existing signed i32-in-u32 representation;
+        // non-motor PWM keeps its unsigned ABI unchanged.
+        crate::actuation::guard_motor(chip, channel, duty_percent as i32)
+    } else {
+        crate::actuation::guard_pwm(chip, channel, duty_percent)
+    }
 }
 
 /// # Safety
