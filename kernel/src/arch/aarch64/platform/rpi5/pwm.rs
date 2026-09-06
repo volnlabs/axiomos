@@ -15,14 +15,10 @@
 //! Register map cross-checked against Linux `drivers/pwm/pwm-rp1.c` (rpi-6.12.y).
 //! On Pi 5, GPIO12 funcsel 0 (Alt0) routes to PWM0 **channel 0**.
 
-use kernel_bpf::attach::PwmEvent;
-use kernel_bpf::execution::BpfContext;
 use spin::Mutex;
 
 use super::memory_map::{RP1_PERIPHERAL_BASE, RP1_PWM0_BASE, RP1_PWM1_BASE};
 use super::mmio::MmioReg;
-use crate::bpf::ATTACH_TYPE_PWM;
-use crate::BPF_MANAGER;
 
 /// RP1 CLOCKS block (RP1-internal offset 0x18000) and the PWM0 clock registers.
 /// Register map and bit fields cross-checked against Linux `drivers/clk/clk-rp1.c`.
@@ -209,7 +205,6 @@ impl Rp1Pwm {
         let g = self.reg_global().read();
         self.reg_global()
             .write(g | gctl::chan_enable(ch) | gctl::SET_UPDATE);
-        self.trigger_event(channel, true);
     }
 
     /// Disable a PWM channel.
@@ -218,7 +213,6 @@ impl Rp1Pwm {
         let g = self.reg_global().read();
         self.reg_global()
             .write((g & !gctl::chan_enable(hw(channel))) | gctl::SET_UPDATE);
-        self.trigger_event(channel, false);
     }
 
     /// Set the range (period, in PWM clock cycles) for a channel.
@@ -242,7 +236,6 @@ impl Rp1Pwm {
         }
         let range = RP1_PWM_CLOCK_HZ / freq_hz;
         self.set_range(channel, range);
-        self.trigger_event(channel, true);
     }
 
     /// Set duty cycle as a percentage (0-100). RANGE must be set first.
@@ -253,7 +246,6 @@ impl Rp1Pwm {
         let data = ((range as u64 * percent.min(100) as u64) / 100) as u32;
         self.reg(reg::chan_duty(ch)).write(data);
         self.commit();
-        self.trigger_event(channel, true);
     }
 
     /// Read back (GLOBAL_CTRL, CHAN_CTRL, RANGE, DUTY) for a channel. Bring-up
@@ -273,42 +265,6 @@ impl Rp1Pwm {
     fn commit(&self) {
         let g = self.reg_global().read();
         self.reg_global().write(g | gctl::SET_UPDATE);
-    }
-
-    // Helper to get period in nanoseconds
-    fn get_period_ns(&self, channel: u8) -> u32 {
-        if !valid(channel) {
-            return 0;
-        }
-        let range = self.reg(reg::chan_range(hw(channel))).read();
-        ((range as u64 * 1_000_000_000u64) / RP1_PWM_CLOCK_HZ as u64) as u32
-    }
-
-    // Helper to get duty cycle in nanoseconds
-    fn get_duty_ns(&self, channel: u8) -> u32 {
-        if !valid(channel) {
-            return 0;
-        }
-        let data = self.reg(reg::chan_duty(hw(channel))).read();
-        ((data as u64 * 1_000_000_000u64) / RP1_PWM_CLOCK_HZ as u64) as u32
-    }
-
-    // Trigger BPF event
-    fn trigger_event(&self, channel: u8, enabled: bool) {
-        if BPF_MANAGER.get().is_some() {
-            let event = PwmEvent {
-                timestamp: crate::time::get_kernel_time_ns(),
-                chip_id: if self.base == RP1_PWM0_BASE { 0 } else { 1 },
-                channel: channel as u32,
-                period_ns: self.get_period_ns(channel),
-                duty_ns: self.get_duty_ns(channel),
-                polarity: 0, // Simplified for now
-                enabled: if enabled { 1 } else { 0 },
-            };
-
-            let ctx = BpfContext::from_struct(&event);
-            let _ = crate::bpf::BpfManager::run_hook_programs(ATTACH_TYPE_PWM, &ctx, "pwm");
-        }
     }
 
     // Register accessors

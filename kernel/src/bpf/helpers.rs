@@ -236,6 +236,14 @@ pub extern "C" fn bpf_pwm_write(pwm_id: u32, channel: u32, duty_percent: u32) ->
     }
 }
 
+/// Experimental v1 BPF helper: queue one complete signed rover command.
+/// Values are per-mille and the monitor clamps them to its shared electrical
+/// and slew envelope. Success means queued for Shrike transport, not applied.
+#[unsafe(no_mangle)]
+pub extern "C" fn bpf_motor_pair_v1(left_permille: i32, right_permille: i32) -> i64 {
+    crate::actuation::guard_motor_pair(left_permille, right_permille)
+}
+
 /// # Safety
 ///
 /// This function is an entry point for BPF programs. The verifier ensures that the

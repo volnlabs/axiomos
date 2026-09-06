@@ -12,6 +12,7 @@ fn main() {
 
     // Handle embedded disk image for rpi5
     if std::env::var("CARGO_FEATURE_RPI5").is_ok() {
+        println!("cargo:rerun-if-env-changed=AXIOM_DISK_IMAGE");
         let out_dir = std::env::var("OUT_DIR").unwrap();
 
         if let Ok(disk_path) = std::env::var("AXIOM_DISK_IMAGE") {

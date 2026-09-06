@@ -6,6 +6,8 @@ pub const FPGA_STORAGE_END: u32 = 0x1040_0000;
 pub const STATUS_READY: u8 = 1 << 7;
 pub const STATUS_COMMAND_VALID: u8 = 1 << 6;
 pub const STATUS_WATCHDOG_EXPIRED: u8 = 1 << 5;
+/// Separate read-only SPI transaction, after the motor transaction CS rises.
+pub const RUNTIME_STATUS_REQUEST: [u8; 2] = [0xa5, 0x00];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BitstreamManifest {
@@ -40,7 +42,12 @@ pub trait FpgaPlatform {
     /// One nonblocking READY/status sample.
     fn ready_status(&mut self) -> Result<u8, Self::Error>;
     fn handoff_to_runtime(&mut self) -> Result<(), Self::Error>;
+    /// Send a complete motor transaction and deassert CS. Returned status is
+    /// the prior state and MUST NOT be treated as acceptance of this command.
     fn runtime_transfer(&mut self, frame: &[u8; 12]) -> Result<u8, Self::Error>;
+    /// Separate bounded transaction using [`RUNTIME_STATUS_REQUEST`]. Returns
+    /// a coherent `[status, last_accepted_sequence]` snapshot after commit.
+    fn read_runtime_status(&mut self) -> Result<[u8; 2], Self::Error>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,14 +148,17 @@ impl<P: FpgaPlatform> FpgaLifecycle<P> {
         if !(-800..=800).contains(&left) || !(-800..=800).contains(&right) || flags != 0 {
             return self.abort(LifecycleError::InvalidCommand);
         }
-        let status = match self
+        if let Err(error) = self
             .platform
             .runtime_transfer(&runtime_frame(seq, left, right, flags))
         {
-            Ok(status) => status,
+            return self.abort(LifecycleError::Platform(error));
+        }
+        let [status, accepted_sequence] = match self.platform.read_runtime_status() {
+            Ok(ack) => ack,
             Err(error) => return self.abort(LifecycleError::Platform(error)),
         };
-        if status != STATUS_READY | STATUS_COMMAND_VALID {
+        if status != STATUS_READY | STATUS_COMMAND_VALID || accepted_sequence != seq {
             return self.abort(LifecycleError::BadStatus);
         }
         Ok(())

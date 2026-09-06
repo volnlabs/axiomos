@@ -43,6 +43,38 @@ pub struct ActuationRequest {
     pub value: u32,
 }
 
+/// Result of deciding one complete signed rover command, in per-mille.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MotorPairDecision {
+    Allow { left: i16, right: i16 },
+    Clamp { left: i16, right: i16 },
+    Safe { left: i16, right: i16 },
+}
+
+impl MotorPairDecision {
+    pub const fn apply(self) -> (i16, i16, i64) {
+        match self {
+            Self::Allow { left, right } | Self::Clamp { left, right } => (left, right, 0),
+            Self::Safe { left, right } => (left, right, -1),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MotorPairState {
+    pub left: i16,
+    pub right: i16,
+    pub last_update_ns: u64,
+}
+
+impl MotorPairState {
+    const STOPPED: Self = Self {
+        left: 0,
+        right: 0,
+        last_update_ns: 0,
+    };
+}
+
 /// Trusted authority stamped by kernel call-sites.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Authority {
@@ -499,6 +531,7 @@ pub struct Monitor<P: PhysicalProfile> {
     pwm: [[ChannelState; 2]; 2],
     /// `[pin 0..28]`.
     gpio: [ChannelState; GPIO_PINS],
+    motor_pair: MotorPairState,
     known_pwm: [[bool; PWM_CHANNELS]; PWM_CHIPS],
     pwm_safe: [[u32; PWM_CHANNELS]; PWM_CHIPS],
     known_gpio: [bool; GPIO_PINS],
@@ -516,6 +549,7 @@ impl<P: PhysicalProfile> Monitor<P> {
         Self {
             pwm: [[ChannelState::DEFAULT; 2]; 2],
             gpio: [ChannelState::DEFAULT; GPIO_PINS],
+            motor_pair: MotorPairState::STOPPED,
             known_pwm: [[false; PWM_CHANNELS]; PWM_CHIPS],
             pwm_safe: [[0; PWM_CHANNELS]; PWM_CHIPS],
             known_gpio: [false; GPIO_PINS],
@@ -597,6 +631,173 @@ impl<P: PhysicalProfile> Monitor<P> {
             safe_hold: snapshot.safe_hold,
         };
         true
+    }
+
+    pub fn snapshot_motor_pair_state(&self) -> MotorPairState {
+        self.motor_pair
+    }
+
+    pub fn restore_motor_pair_state(&mut self, state: MotorPairState) {
+        self.motor_pair = state;
+    }
+
+    /// Decide one complete signed motor command. Elapsed allowance is
+    /// proportional and capped at one window; reversals coast through zero.
+    pub fn decide_motor_pair(
+        &mut self,
+        left: i32,
+        right: i32,
+        authority: Authority,
+        source: AuditSource,
+        now_ns: u64,
+    ) -> MotorPairDecision {
+        let left_ch = ChannelId {
+            kind: ActuationKind::PwmDuty,
+            chip: 0,
+            channel: 1,
+        };
+        let right_ch = ChannelId {
+            kind: ActuationKind::PwmDuty,
+            chip: 0,
+            channel: 2,
+        };
+        let left_entry = self
+            .envelope_entry(left_ch)
+            .expect("motor channel is in the envelope");
+        let right_entry = self
+            .envelope_entry(right_ch)
+            .expect("motor channel is in the envelope");
+        let env = Envelope {
+            min: 0,
+            max: left_entry.max.min(right_entry.max),
+            max_step: left_entry.max_step.min(right_entry.max_step),
+            window_ns: left_entry.window_ns.max(right_entry.window_ns),
+        };
+        let held = self
+            .snapshot_channel_state(left_ch)
+            .is_some_and(|state| state.safe_hold)
+            || self
+                .snapshot_channel_state(right_ch)
+                .is_some_and(|state| state.safe_hold);
+        if self.latched
+            || held
+            || authority
+                < left_entry
+                    .required_authority()
+                    .max(right_entry.required_authority())
+        {
+            self.motor_pair = MotorPairState {
+                last_update_ns: now_ns,
+                ..MotorPairState::STOPPED
+            };
+            self.audit_decision(
+                ActuationRequest {
+                    ch: left_ch,
+                    value: left.unsigned_abs(),
+                },
+                authority,
+                source,
+                now_ns,
+                Decision::Safe(0),
+            );
+            self.audit_decision(
+                ActuationRequest {
+                    ch: right_ch,
+                    value: right.unsigned_abs(),
+                },
+                authority,
+                source,
+                now_ns,
+                Decision::Safe(0),
+            );
+            return MotorPairDecision::Safe { left: 0, right: 0 };
+        }
+        let max = env.max.saturating_mul(10).min(800) as i32;
+        let requested_left = left.clamp(-max, max);
+        let requested_right = right.clamp(-max, max);
+        // A defensive backward timestamp must not rewind the credit origin and
+        // create extra allowance on a later request.
+        let effective_now = now_ns.max(self.motor_pair.last_update_ns);
+        let elapsed = effective_now.saturating_sub(self.motor_pair.last_update_ns);
+        let credited_elapsed = elapsed.min(env.window_ns);
+        let step = u64::from(env.max_step.saturating_mul(10))
+            .saturating_mul(credited_elapsed)
+            .checked_div(env.window_ns)
+            .unwrap_or(i32::MAX as u64)
+            .min(i32::MAX as u64) as i32;
+        let limit = |current: i16, requested: i32| {
+            let current = i32::from(current);
+            let target = if current != 0 && requested != 0 && current.signum() != requested.signum()
+            {
+                0
+            } else {
+                requested
+            };
+            target.clamp(current.saturating_sub(step), current.saturating_add(step)) as i16
+        };
+        let next_left = limit(self.motor_pair.left, requested_left);
+        let next_right = limit(self.motor_pair.right, requested_right);
+        let movement = (i32::from(next_left) - i32::from(self.motor_pair.left))
+            .unsigned_abs()
+            .max((i32::from(next_right) - i32::from(self.motor_pair.right)).unsigned_abs());
+        let last_update_ns = if env.window_ns == 0 || env.max_step == 0 {
+            effective_now
+        } else {
+            let step_per_window = u64::from(env.max_step.saturating_mul(10));
+            let consumed = u64::from(movement)
+                .saturating_mul(env.window_ns)
+                .div_ceil(step_per_window);
+            effective_now
+                .saturating_sub(credited_elapsed)
+                .saturating_add(consumed.min(credited_elapsed))
+        };
+        self.motor_pair = MotorPairState {
+            left: next_left,
+            right: next_right,
+            last_update_ns,
+        };
+        let decision = if i32::from(next_left) == left && i32::from(next_right) == right {
+            MotorPairDecision::Allow {
+                left: next_left,
+                right: next_right,
+            }
+        } else {
+            MotorPairDecision::Clamp {
+                left: next_left,
+                right: next_right,
+            }
+        };
+        let audit_decision = match decision {
+            MotorPairDecision::Allow { .. } => Decision::Allow(next_left.unsigned_abs() as u32),
+            MotorPairDecision::Clamp { .. } => Decision::Clamp(next_left.unsigned_abs() as u32),
+            MotorPairDecision::Safe { .. } => unreachable!(),
+        };
+        self.audit_decision(
+            ActuationRequest {
+                ch: left_ch,
+                value: left.unsigned_abs(),
+            },
+            authority,
+            source,
+            now_ns,
+            audit_decision,
+        );
+        let right_audit = match decision {
+            MotorPairDecision::Allow { .. } => Decision::Allow(next_right.unsigned_abs() as u32),
+            MotorPairDecision::Clamp { .. } => Decision::Clamp(next_right.unsigned_abs() as u32),
+            MotorPairDecision::Safe { .. } => unreachable!(),
+        };
+        self.audit_decision(
+            ActuationRequest {
+                ch: right_ch,
+                value: right.unsigned_abs(),
+            },
+            authority,
+            source,
+            now_ns,
+            right_audit,
+        );
+        decision
     }
 
     fn registered_safe_value(&self, ch: ChannelId, fallback: u32) -> u32 {
@@ -771,6 +972,10 @@ impl<P: PhysicalProfile> Monitor<P> {
 
     pub fn estop_trigger(&mut self, source: AuditSource, now_ns: u64) -> SafeDriveSet {
         self.latched = true;
+        self.motor_pair = MotorPairState {
+            last_update_ns: now_ns,
+            ..MotorPairState::STOPPED
+        };
         self.latch_epoch = self.latch_epoch.wrapping_add(1);
         let drive = self.known_channels();
         self.audit.emit(AuditRecord {
@@ -1327,6 +1532,174 @@ mod tests {
         assert_eq!(decide(&mut m, pwm(0, 1, 10), T0), Decision::Allow(10));
         // now_ns moves backward: elapsed saturates to 0 (< window) -> slew clamp applies
         assert_eq!(decide(&mut m, pwm(0, 1, 80), T0 - 1), Decision::Clamp(30));
+    }
+
+    #[test]
+    fn motor_pair_is_complete_signed_and_rate_limited_through_zero() {
+        let mut m = Monitor::<EmbeddedProfile>::new();
+        assert_eq!(
+            m.decide_motor_pair(
+                600,
+                400,
+                Authority::Learned,
+                AuditSource::LearnedBehavior,
+                T0
+            ),
+            MotorPairDecision::Clamp {
+                left: 200,
+                right: 200
+            }
+        );
+        assert_eq!(
+            m.decide_motor_pair(
+                -600,
+                -400,
+                Authority::Learned,
+                AuditSource::LearnedBehavior,
+                T0
+            ),
+            MotorPairDecision::Clamp {
+                left: 200,
+                right: 200
+            }
+        );
+        assert_eq!(
+            m.decide_motor_pair(
+                -600,
+                -400,
+                Authority::Learned,
+                AuditSource::LearnedBehavior,
+                T0 + 1_000_000
+            ),
+            MotorPairDecision::Clamp { left: 0, right: 0 }
+        );
+        assert_eq!(
+            m.decide_motor_pair(
+                -600,
+                -400,
+                Authority::Learned,
+                AuditSource::LearnedBehavior,
+                T0 + 2_000_000
+            ),
+            MotorPairDecision::Clamp {
+                left: -200,
+                right: -200
+            }
+        );
+    }
+
+    #[test]
+    fn substep_motor_requests_accumulate_slew_credit() {
+        let mut m = Monitor::<EmbeddedProfile>::new();
+        let _ = m.decide_motor_pair(
+            200,
+            200,
+            Authority::Learned,
+            AuditSource::LearnedBehavior,
+            T0,
+        );
+        for offset in [1_000, 2_000, 3_000, 4_000, 5_000] {
+            let _ = m.decide_motor_pair(
+                400,
+                400,
+                Authority::Learned,
+                AuditSource::LearnedBehavior,
+                T0 + offset,
+            );
+        }
+        assert_eq!(m.snapshot_motor_pair_state().left, 201);
+    }
+
+    #[test]
+    fn motor_pair_honors_safe_hold_on_either_wheel() {
+        for channel in [1, 2] {
+            let mut m = Monitor::<EmbeddedProfile>::new();
+            m.hold_safe(ChannelId {
+                kind: ActuationKind::PwmDuty,
+                chip: 0,
+                channel,
+            });
+            assert_eq!(
+                m.decide_motor_pair(
+                    400,
+                    -400,
+                    Authority::Learned,
+                    AuditSource::LearnedBehavior,
+                    T0,
+                ),
+                MotorPairDecision::Safe { left: 0, right: 0 }
+            );
+        }
+    }
+
+    #[test]
+    fn backward_motor_time_does_not_create_future_slew_credit() {
+        let mut m = Monitor::<EmbeddedProfile>::new();
+        let _ = m.decide_motor_pair(
+            200,
+            200,
+            Authority::Learned,
+            AuditSource::LearnedBehavior,
+            T0,
+        );
+        let _ = m.decide_motor_pair(
+            800,
+            800,
+            Authority::Learned,
+            AuditSource::LearnedBehavior,
+            T0 - 1,
+        );
+        let _ = m.decide_motor_pair(
+            800,
+            800,
+            Authority::Learned,
+            AuditSource::LearnedBehavior,
+            T0 + 5_000,
+        );
+        assert_eq!(m.snapshot_motor_pair_state().left, 201);
+    }
+
+    #[test]
+    fn stopped_motor_pair_does_not_resurrect_after_release() {
+        let mut m = Monitor::<EmbeddedProfile>::new();
+        assert_eq!(
+            m.decide_motor_pair(
+                100,
+                100,
+                Authority::Learned,
+                AuditSource::LearnedBehavior,
+                T0
+            ),
+            MotorPairDecision::Allow {
+                left: 100,
+                right: 100
+            }
+        );
+        m.estop_trigger(AuditSource::Watchdog, T0 + 1);
+        assert_eq!(
+            m.decide_motor_pair(
+                100,
+                100,
+                Authority::Learned,
+                AuditSource::LearnedBehavior,
+                T0 + 2
+            ),
+            MotorPairDecision::Safe { left: 0, right: 0 }
+        );
+        assert_eq!(
+            m.estop_release(Authority::Operator, AuditSource::Operator, T0 + 3),
+            ReleaseResult::Released
+        );
+        assert_eq!(
+            m.decide_motor_pair(
+                100,
+                100,
+                Authority::Learned,
+                AuditSource::LearnedBehavior,
+                T0 + 3
+            ),
+            MotorPairDecision::Clamp { left: 0, right: 0 }
+        );
     }
 
     #[test]

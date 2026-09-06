@@ -3,8 +3,8 @@
 //! These are the three v0.4 demo behaviors — forward-drive, obstacle-stop, and
 //! wall-follow — authored as BPF programs and proven to pass the verifier
 //! ([`crate::verifier`]) under [`ActiveProfile`]. They drive motors through the
-//! `bpf_pwm_write` helper, which the kernel routes via ARM-A to the Shrike link
-//! (mapped channels) or local PWM. Sensor-reactive behaviors read the ultrasonic
+//! experimental `bpf_motor_pair_v1` helper, which routes one complete signed
+//! pair through ARM-A to the Shrike link. Sensor-reactive behaviors read the ultrasonic
 //! echo from the IIO event's `value` field via the `ctx.data` pointer.
 //!
 //! Loading these onto a robot is hardware bring-up (M5); here they are the
@@ -16,16 +16,10 @@ use alloc::vec::Vec;
 use crate::bytecode::insn::BpfInsn;
 use crate::verifier::helpers::HelperId;
 
-// Actuation channels (must match control_link::motor_side: chip 0, L=1, R=2).
-const CHIP: i32 = 0;
-const LEFT: i32 = 1;
-const RIGHT: i32 = 2;
-
 // Registers.
 const R0: u8 = 0;
 const R1: u8 = 1;
 const R2: u8 = 2;
-const R3: u8 = 3;
 const R6: u8 = 6; // ctx.data pointer (callee-saved)
 const R7: u8 = 7; // left duty (callee-saved across helper calls)
 const R8: u8 = 8; // right duty (callee-saved)
@@ -41,14 +35,14 @@ const JGT_K: u8 = 0x25; // if r_dst >  imm (unsigned)
 /// `ctx.data`. Mirrors `IioEvent { timestamp:u64, device_id, channel, value@16 }`.
 const IIO_VALUE_OFF: i16 = 16;
 
-const PWM: i32 = HelperId::PwmWrite as i32;
+const MOTOR_PAIR: i32 = HelperId::MotorPairV1 as i32;
 
-/// `pwm_write(CHIP, channel, duty_reg)` — channel/chip immediate, duty from a reg.
-fn pwm_write_reg(out: &mut Vec<BpfInsn>, channel: i32, duty_reg: u8) {
-    out.push(BpfInsn::mov64_imm(R1, CHIP));
-    out.push(BpfInsn::mov64_imm(R2, channel));
-    out.push(BpfInsn::mov64_reg(R3, duty_reg));
-    out.push(BpfInsn::call(PWM));
+fn motor_pair_reg(out: &mut Vec<BpfInsn>, left_reg: u8, right_reg: u8) {
+    out.push(BpfInsn::mov64_reg(R1, left_reg));
+    out.push(BpfInsn::mov64_reg(R2, right_reg));
+    out.push(BpfInsn::mul64_imm(R1, 10));
+    out.push(BpfInsn::mul64_imm(R2, 10));
+    out.push(BpfInsn::call(MOTOR_PAIR));
 }
 
 /// Load the ultrasonic echo (`IioEvent.value`) into `dst`: deref `ctx.data`
@@ -62,14 +56,10 @@ fn load_echo(out: &mut Vec<BpfInsn>, dst: u8) {
 #[must_use]
 pub fn forward_drive(duty: i32) -> Vec<BpfInsn> {
     let mut p = Vec::new();
-    let mut drive = |ch: i32| {
-        p.push(BpfInsn::mov64_imm(R1, CHIP));
-        p.push(BpfInsn::mov64_imm(R2, ch));
-        p.push(BpfInsn::mov64_imm(R3, duty));
-        p.push(BpfInsn::call(PWM));
-    };
-    drive(LEFT);
-    drive(RIGHT);
+    let permille = duty.saturating_mul(10);
+    p.push(BpfInsn::mov64_imm(R1, permille));
+    p.push(BpfInsn::mov64_imm(R2, permille));
+    p.push(BpfInsn::call(MOTOR_PAIR));
     p.push(BpfInsn::mov64_imm(R0, 0));
     p.push(BpfInsn::exit());
     p
@@ -86,8 +76,7 @@ pub fn obstacle_stop(threshold: i32, duty: i32) -> Vec<BpfInsn> {
     // if echo >= threshold (clear) skip the stop; else r7 = 0.
     p.push(BpfInsn::new(JGE_K, R2, 0, 1, threshold));
     p.push(BpfInsn::mov64_imm(R7, 0)); // obstacle: stop
-    pwm_write_reg(&mut p, LEFT, R7);
-    pwm_write_reg(&mut p, RIGHT, R7);
+    motor_pair_reg(&mut p, R7, R7);
     p.push(BpfInsn::mov64_imm(R0, 0));
     p.push(BpfInsn::exit());
     p
@@ -119,8 +108,7 @@ pub fn wall_follow(target: i32, band: i32, fast: i32, slow: i32) -> Vec<BpfInsn>
     p.push(BpfInsn::mov64_imm(R7, slow)); // too far -> left slow (turn toward)
 
     // drive both wheels.
-    pwm_write_reg(&mut p, LEFT, R7);
-    pwm_write_reg(&mut p, RIGHT, R8);
+    motor_pair_reg(&mut p, R7, R8);
     p.push(BpfInsn::mov64_imm(R0, 0));
     p.push(BpfInsn::exit());
     p
@@ -172,8 +160,18 @@ mod tests {
 
     #[test]
     fn forward_drive_shape() {
-        // 2 motor writes (4 insns each) + mov r0 + exit = 10.
-        assert_eq!(forward_drive(60).len(), 10);
+        // One complete pair helper + mov r0 + exit.
+        assert_eq!(forward_drive(60).len(), 5);
+    }
+
+    #[test]
+    fn motor_pair_helper_requires_explicit_authority() {
+        let result = Verifier::<ActiveProfile>::verify_with_config(
+            BpfProgType::SocketFilter,
+            &forward_drive(60),
+            VerifyConfig::default(),
+        );
+        assert!(result.is_err());
     }
 
     // ---- semantic tests: run the bytecode and observe motor commands ----
@@ -208,11 +206,11 @@ mod tests {
     fn obstacle_stop_drives_when_clear_stops_when_close() {
         let prog = obstacle_stop(1500, 60);
         // echo >= threshold -> clear -> drive both at 60
-        assert_eq!(run_with_echo(&prog, 2000), (60, 60));
+        assert_eq!(run_with_echo(&prog, 2000), (600, 600));
         // echo < threshold -> obstacle -> stop both
         assert_eq!(run_with_echo(&prog, 1000), (0, 0));
         // exactly at threshold counts as clear (>=)
-        assert_eq!(run_with_echo(&prog, 1500), (60, 60));
+        assert_eq!(run_with_echo(&prog, 1500), (600, 600));
     }
 
     #[test]
@@ -220,10 +218,10 @@ mod tests {
         // target=1500, band=300 -> in-range [1500, 1800]; fast=60, slow=30.
         let prog = wall_follow(1500, 300, 60, 30);
         // too close (echo < target): turn away -> left fast, right slow
-        assert_eq!(run_with_echo(&prog, 1000), (60, 30));
+        assert_eq!(run_with_echo(&prog, 1000), (600, 300));
         // in band: straight -> both fast
-        assert_eq!(run_with_echo(&prog, 1650), (60, 60));
+        assert_eq!(run_with_echo(&prog, 1650), (600, 600));
         // too far (echo > target+band): turn toward -> left slow, right fast
-        assert_eq!(run_with_echo(&prog, 2500), (30, 60));
+        assert_eq!(run_with_echo(&prog, 2500), (300, 600));
     }
 }

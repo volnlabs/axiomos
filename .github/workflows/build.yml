@@ -47,6 +47,16 @@ env:
 
 jobs:
 
+  aarch64-exception-context:
+    name: "AArch64 exception register canaries"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install emulator and cross assembler
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu qemu-system-arm
+      - name: Execute production exception vectors
+        run: python3 -B scripts/verify/aarch64-exception-context.py
+
   lint:
     name: "Lint (root workspace)"
     runs-on: ubuntu-latest
@@ -184,6 +194,7 @@ jobs:
             cargo test -p kernel_bpf --no-default-features --features cloud-profile $PROFILE_FLAG
             cargo test -p kernel_bpf --no-default-features --features cloud-profile --test profile_contracts $PROFILE_FLAG
             cargo test -p kernel_bpf --no-default-features --features embedded-profile $PROFILE_FLAG
+            EMBEDDED_DISK_PATH=/dev/null cargo test --locked -p kernel --lib --features embedded-profile pwm_observation_attach_is_rejected_without_publication $PROFILE_FLAG
             cargo test -p shrike_link $PROFILE_FLAG
             cargo test -p shrike_control $PROFILE_FLAG
             cargo test -p shrike_rp2040_host_sim $PROFILE_FLAG
@@ -345,6 +356,8 @@ jobs:
       - name: Build (x86_64)
         run: |
           cargo build --release
+      - name: Verify rootfs selection and clean fallback
+        run: python3 -B scripts/verify/rootfs-selection.py
       - name: Build (AArch64)
         run: |
           cargo build --release --target aarch64-unknown-none --no-default-features --features aarch64_deps

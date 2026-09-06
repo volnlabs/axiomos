@@ -101,6 +101,10 @@ where
     fn runtime_transfer(&mut self, _: &[u8; 12]) -> Result<u8, Self::Error> {
         Err(ConfigurationUnavailable::MissingValidatedArtifact)
     }
+
+    fn read_runtime_status(&mut self) -> Result<[u8; 2], Self::Error> {
+        Err(ConfigurationUnavailable::MissingValidatedArtifact)
+    }
 }
 
 #[entry]

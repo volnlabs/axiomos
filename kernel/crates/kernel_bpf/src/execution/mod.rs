@@ -172,6 +172,15 @@ pub mod helpers_stub {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "C" fn bpf_motor_pair_v1(left: i32, right: i32) -> i64 {
+        if RECORDING.load(Ordering::Relaxed) {
+            PWM_CH1.store(left as i64, Ordering::Relaxed);
+            PWM_CH2.store(right as i64, Ordering::Relaxed);
+        }
+        0
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "C" fn bpf_timeseries_push(_map_id: u32, _key: *const u8, _value: *const u8) -> i64 {
         0
     }

@@ -72,8 +72,8 @@ pub struct RunSummary {
 
 /// Run the control loop.
 ///
-/// - When `max_iterations` is `None`, the loop runs forever (production
-///   behavior used by `firmware/shrike/rp2040/src/main.rs`).
+/// - When `max_iterations` is `None`, this legacy direct-motor loop runs forever.
+///   The FPGA-owner entry point remains disabled pending its hardware adapter.
 /// - When `max_iterations` is `Some(n)`, the loop returns after `n`
 ///   iterations with a `RunSummary`. The host simulation crate uses this
 ///   bounded form to exercise the production control loop under mocks.
@@ -100,7 +100,6 @@ where
     let mut last_ping: u64 = 0;
     let mut last_peer_heartbeat: u64 = 0;
     let mut peer_heartbeat_seq: u16 = 0;
-    let mut prev_estop = false;
     let mut summary = RunSummary::default();
 
     loop {
@@ -108,20 +107,13 @@ where
 
         let now = clock.now_us();
 
-        // 1. Mirror the hardware e-stop line's EDGES into the watchdog, so a
-        //    hard e-stop disarms it exactly like a soft Estop: setpoints that
-        //    arrive while the line is asserted cannot arm motion, and after
-        //    release a FRESH setpoint is required before driving resumes (no
-        //    stale-command restart). Edge-triggered, not every loop, so a held
-        //    e-stop never refreshes link liveness and mask a dead link.
+        // 1. Hardware stop is a separate cause: releasing it cannot clear an
+        // operator/timeout latch. Sampling never refreshes command lifetime.
         let hw_estop = estop.asserted();
         if hw_estop {
             summary.estop_asserts = summary.estop_asserts.wrapping_add(1);
         }
-        if hw_estop != prev_estop {
-            wd.on_msg(&Msg::Estop { assert: hw_estop }, now);
-            prev_estop = hw_estop;
-        }
+        wd.set_hardware_estop(hw_estop);
 
         // 2. Drain the UART, feeding decoded Pi5 messages to the watchdog.
         for _ in 0..RX_BYTES_PER_ITERATION {
@@ -134,7 +126,7 @@ where
         }
 
         // 3. Decide. The hardware line also dominates directly (defense in
-        //    depth — independent of the edge-mirror above); the watchdog
+        //    depth — independent of the sampled latch above); the watchdog
         //    independently stays disarmed until a fresh post-release setpoint.
         let out = if hw_estop {
             Output::SafeStop
@@ -632,6 +624,40 @@ mod tests {
         assert_eq!(summary.estop_asserts, 2);
         assert_eq!(summary.motor_drive_calls, 0);
         assert_eq!(summary.motor_coast_calls, 6);
+        assert_eq!(left.borrow().as_slice(), [0, 0, 0]);
+        assert_eq!(right.borrow().as_slice(), [0, 0, 0]);
+    }
+
+    #[test]
+    fn hardware_release_cannot_clear_an_operator_stop() {
+        // One RX batch per iteration. Soft stop at t=1, physical stop at t=2,
+        // then a new motor command alongside physical release at t=3.
+        let mut input = [0u8; RX_BYTES_PER_ITERATION * 3];
+        encode(&Msg::Estop { assert: true }, &mut input).unwrap();
+        encode(
+            &Msg::MotorSetpoint {
+                seq: 1,
+                left: 400,
+                right: 400,
+            },
+            &mut input[RX_BYTES_PER_ITERATION * 2..],
+        )
+        .unwrap();
+        let output = RefCell::new(ByteCapture::new());
+        let triggers = Cell::new(0);
+        let left = RefCell::new(MotorLog::new());
+        let right = RefCell::new(MotorLog::new());
+        run(
+            TestIo::new(&input, &output),
+            SequenceClock::new(&[1, 2, 3]),
+            TestUltrasonic::new(&[None, None, None], &triggers),
+            TestEstop::new(&[false, true, false]),
+            TestMotor { log: &left },
+            TestMotor { log: &right },
+            config(100, u64::MAX, 0),
+            Some(3),
+        )
+        .unwrap();
         assert_eq!(left.borrow().as_slice(), [0, 0, 0]);
         assert_eq!(right.borrow().as_slice(), [0, 0, 0]);
     }

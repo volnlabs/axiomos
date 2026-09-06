@@ -19,6 +19,7 @@ module spi_target (
     reg [2:0] sck_sync;
     reg [2:0] bit_count;
     reg [7:0] miso_data;
+    reg tx_reload_pending;
 
     wire sck_rise;
     wire sck_fall;
@@ -72,11 +73,20 @@ module spi_target (
     end
 
     always @(posedge i_clk or negedge i_rst_n) begin
-        if (!i_rst_n)
+        if (!i_rst_n) begin
             miso_data <= 8'h00;
-        else if (tx_data_hold)
+            tx_reload_pending <= 1'b0;
+        end else if (tx_reload_pending) begin
+            // top snapshots status on the synchronized CS edge; reload one
+            // clock later, before the protocol's first permitted SCK edge.
             miso_data <= i_tx_data;
-        else if (sck_fall)
+            tx_reload_pending <= 1'b0;
+        end else if (tx_data_hold) begin
+            miso_data <= i_tx_data;
+            tx_reload_pending <= ss_n_sync[2] & ~ss_n_sync[1];
+        end else if (sck_fall) begin
             miso_data <= {miso_data[6:0], 1'b0};
+            tx_reload_pending <= 1'b0;
+        end
     end
 endmodule

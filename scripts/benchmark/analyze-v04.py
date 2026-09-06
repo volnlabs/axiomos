@@ -13,12 +13,13 @@ from pathlib import Path
 # `load_request` is emitted before invoking the loader; it is the honest start
 # boundary for V04-A rather than pretending the load duration starts on return.
 STAGES = ("load_request", "load", "verify", "admit", "attach", "active")
+V04A_MAX_LOAD_TO_ATTACH_NS = 100_000_000
 STAT_KEYS = ("count", "min", "median", "p95", "p99", "p99.9", "max")
 SCHEMAS = {
     "V04_BEHAVIOR": {"sample_id", "behavior", "stage", "ts_ns"},
     "V04_ECHO_DONE": {"sample_id", "echo_us", "ts_ns"},
     "V04_HOOK_ENTRY": {"sample_id", "ts_ns"},
-    "V04_MOTOR_CMD": {"sample_id", "seq", "left", "right", "ts_ns"},
+    "V04_MOTOR_QUEUED": {"sample_id", "left", "right", "ts_ns"},
     "V04_LINK_LOSS": {"event_id", "reason", "ts_ns"},
     "V04_ESTOP": {"event_id", "source", "stage", "ts_ns"},
     "V04_HEARTBEAT": {"seq", "ts_ns"},
@@ -154,18 +155,24 @@ def analyze(text: str, *, min_behavior_samples: int = 100, min_latency_samples: 
             if sample_id != expected:
                 raise ValueError(f"behavior {behavior} sample_id {sample_id} out of order; expected {expected}")
         latencies = []
+        load_to_attach = []
         for sample_id in behavior_ids[behavior]:
             records = samples[sample_id]
             if [record["stage"] for record in records] != list(STAGES):
                 raise ValueError(f"behavior {behavior} sample_id {sample_id} lifecycle is incomplete or out of order")
             latencies.append(_number(records[-1], "ts_ns") - _number(records[0], "ts_ns"))
+            load_to_attach.append(_number(records[4], "ts_ns") - _number(records[0], "ts_ns"))
         if len(latencies) < min_behavior_samples:
             raise ValueError(f"behavior {behavior} count {len(latencies)} < {min_behavior_samples}")
         report[f"behavior:{behavior}"] = stats(latencies)
+        load_to_attach_stats = stats(load_to_attach)
+        if load_to_attach_stats["max"] >= V04A_MAX_LOAD_TO_ATTACH_NS:
+            raise ValueError(f"behavior {behavior} load-to-attach maximum {load_to_attach_stats['max']} ns is not < {V04A_MAX_LOAD_TO_ATTACH_NS} ns")
+        report[f"behavior:{behavior}:load_to_attach_ns"] = load_to_attach_stats
 
-    sensor_events = ("V04_ECHO_DONE", "V04_HOOK_ENTRY", "V04_MOTOR_CMD")
+    sensor_events = ("V04_ECHO_DONE", "V04_HOOK_ENTRY", "V04_MOTOR_QUEUED")
     if any(not grouped[event] for event in sensor_events):
-        raise ValueError("missing echo/hook/motor population")
+        raise ValueError("missing echo/hook/motor-queue population")
     sensor = {event: grouped[event] for event in sensor_events}
     ids = _ids(sensor["V04_ECHO_DONE"], "sample_id", "echo")
     for event in sensor_events[1:]:
@@ -175,13 +182,13 @@ def analyze(text: str, *, min_behavior_samples: int = 100, min_latency_samples: 
         raise ValueError(f"sensor latency count {len(ids)} < {min_latency_samples}")
     echo = { _number(record, "sample_id", positive=True): record for record in sensor["V04_ECHO_DONE"] }
     hook = { _number(record, "sample_id", positive=True): record for record in sensor["V04_HOOK_ENTRY"] }
-    motor = { _number(record, "sample_id", positive=True): record for record in sensor["V04_MOTOR_CMD"] }
+    motor = { _number(record, "sample_id", positive=True): record for record in sensor["V04_MOTOR_QUEUED"] }
     triples = [(_number(echo[i], "ts_ns"), _number(hook[i], "ts_ns"), _number(motor[i], "ts_ns")) for i in ids]
     if any(not first <= second <= third for first, second, third in triples):
         raise ValueError("echo/hook/motor timestamps are out of order")
     report["echo_to_hook_ns"] = stats([second - first for first, second, _ in triples])
-    report["hook_to_motor_ns"] = stats([third - second for _, second, third in triples])
-    report["echo_to_motor_ns"] = stats([third - first for first, _, third in triples])
+    report["hook_to_motor_queue_ns"] = stats([third - second for _, second, third in triples])
+    report["echo_to_motor_queue_ns"] = stats([third - first for first, _, third in triples])
 
     chunks = grouped["V04_CHUNK"]
     if not chunks:
@@ -199,12 +206,15 @@ def analyze(text: str, *, min_behavior_samples: int = 100, min_latency_samples: 
     if len(chunk_order) < min_chunks:
         raise ValueError(f"chunk count {len(chunk_order)} < {min_chunks}")
     previous_end = None
+    capture_start = None
     durations = []
     for chunk_id in chunk_order:
         pair = chunk_pairs[chunk_id]
         if [record["stage"] for record in pair] != ["start", "end"]:
             raise ValueError(f"chunk_id {chunk_id} must have one ordered start/end pair")
         start, end = (_number(record, "ts_ns") for record in pair)
+        if capture_start is None:
+            capture_start = start
         if end < start or previous_end is not None and start < previous_end:
             raise ValueError(f"chunk_id {chunk_id} is non-monotonic")
         if previous_end is not None and start - previous_end > max_chunk_gap_ns:
@@ -212,6 +222,7 @@ def analyze(text: str, *, min_behavior_samples: int = 100, min_latency_samples: 
         previous_end = end
         durations.append(end - start)
     report["chunk_duration_ns"] = stats(durations)
+    capture_end = previous_end
 
     heartbeats = grouped["V04_HEARTBEAT"]
     if require_heartbeat and not heartbeats:
@@ -222,7 +233,9 @@ def analyze(text: str, *, min_behavior_samples: int = 100, min_latency_samples: 
         times = [_number(record, "ts_ns") for record in heartbeats]
         if any(later <= earlier for earlier, later in zip(times, times[1:])):
             raise ValueError("heartbeat timestamps are not strictly increasing")
-        gaps = [later - earlier for earlier, later in zip(times, times[1:])]
+        if times[0] < capture_start or times[-1] > capture_end:
+            raise ValueError("heartbeat lies outside capture boundaries")
+        gaps = [times[0] - capture_start, *[later - earlier for earlier, later in zip(times, times[1:])], capture_end - times[-1]]
         if any(gap > max_heartbeat_gap_ns for gap in gaps):
             raise ValueError(f"heartbeat gap {max(gaps)} > {max_heartbeat_gap_ns} ns")
         report["heartbeat_gap_ns"] = stats(gaps or [0])
@@ -234,9 +247,10 @@ def analyze(text: str, *, min_behavior_samples: int = 100, min_latency_samples: 
     if require_estop and not estops:
         raise ValueError("missing e-stop population")
     if estops:
-        if len(estops) < min_estop_samples:
-            raise ValueError(f"e-stop count {len(estops)} < {min_estop_samples}")
-        report["e_stop_events"] = stats([_number(record, "ts_ns") for record in estops])
+        assertions = [record for record in estops if record["stage"] == "assert"]
+        if len(assertions) < min_estop_samples:
+            raise ValueError(f"e-stop assertion count {len(assertions)} < {min_estop_samples}")
+        report["e_stop_assertions"] = stats([_number(record, "ts_ns") for record in assertions])
     return report
 
 
@@ -252,7 +266,7 @@ class AnalyzerSelfTest(unittest.TestCase):
         lines = ["V04_CHUNK chunk_id=1 stage=start ts_ns=1"]
         for base, name in ((100, "stop"), (150, "drive")):
             lines += [f"V04_BEHAVIOR sample_id=1 behavior={name} stage={stage} ts_ns={base + i * 10}" for i, stage in enumerate(STAGES)]
-        lines += ["V04_ECHO_DONE sample_id=1 echo_us=10 ts_ns=210", "V04_HOOK_ENTRY sample_id=1 ts_ns=220", "V04_MOTOR_CMD sample_id=1 seq=1 left=-32768 right=32767 ts_ns=230", "V04_CHUNK chunk_id=1 stage=end ts_ns=300"]
+        lines += ["V04_ECHO_DONE sample_id=1 echo_us=10 ts_ns=210", "V04_HOOK_ENTRY sample_id=1 ts_ns=220", "V04_MOTOR_QUEUED sample_id=1 left=-32768 right=32767 ts_ns=230", "V04_CHUNK chunk_id=1 stage=end ts_ns=300"]
         return "\n".join(lines)
 
     def run_valid(self, text: str | None = None, **kwargs: int) -> dict[str, dict[str, int]]:
@@ -263,7 +277,7 @@ class AnalyzerSelfTest(unittest.TestCase):
     def test_valid_lifecycle_correlation_and_nearest_rank(self):
         report = self.run_valid()
         self.assertEqual(set(report["behavior:stop"]), set(STAT_KEYS))
-        self.assertEqual(report["echo_to_motor_ns"]["max"], 20)
+        self.assertEqual(report["echo_to_motor_queue_ns"]["max"], 20)
         self.assertEqual(stats([1, 2, 3, 4, 5]), {"count": 5, "min": 1, "median": 3, "p95": 5, "p99": 5, "p99.9": 5, "max": 5})
 
     def test_missing_duplicate_and_out_of_order_lifecycle_fail(self):
@@ -280,11 +294,11 @@ class AnalyzerSelfTest(unittest.TestCase):
     def test_source_order_schemas_chunks_and_heartbeat_fail(self):
         with self.assertRaisesRegex(ValueError, "timestamp decreases"): self.run_valid(self.valid().replace("ts_ns=230", "ts_ns=205"))
         with self.assertRaisesRegex(ValueError, "unknown"): self.run_valid(self.valid() + "\nV04_UNKNOWN ts_ns=400")
-        with self.assertRaisesRegex(ValueError, "schema"): self.run_valid(self.valid().replace("seq=1 left=-32768 right=32767 ", ""))
+        with self.assertRaisesRegex(ValueError, "schema"): self.run_valid(self.valid().replace("left=-32768 right=32767 ", ""))
         with self.assertRaisesRegex(ValueError, "chunk_id"): self.run_valid(self.valid().replace("chunk_id=1 stage=end", "chunk_id=2 stage=end"))
-        beats = "\nV04_HEARTBEAT seq=65535 ts_ns=310\nV04_HEARTBEAT seq=0 ts_ns=320"
-        self.run_valid(self.valid() + beats, require_heartbeat=True, max_heartbeat_gap_ns=10)
-        with self.assertRaisesRegex(ValueError, "heartbeat gap"): self.run_valid(self.valid() + beats, max_heartbeat_gap_ns=9)
+        with_beats = self.valid().replace("V04_CHUNK chunk_id=1 stage=end", "V04_HEARTBEAT seq=65535 ts_ns=280\nV04_HEARTBEAT seq=0 ts_ns=290\nV04_CHUNK chunk_id=1 stage=end")
+        self.run_valid(with_beats, require_heartbeat=True, max_heartbeat_gap_ns=300)
+        with self.assertRaisesRegex(ValueError, "heartbeat gap"): self.run_valid(with_beats, max_heartbeat_gap_ns=9)
 
     def test_sensor_ids_panic_and_campaign_discovery_fail(self):
         with self.assertRaisesRegex(ValueError, "out of order"):
@@ -299,9 +313,39 @@ class AnalyzerSelfTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate"):
             self.run_valid(text, require_estop=True, min_estop_samples=1)
 
+    def test_v04a_load_to_attach_maximum_is_strictly_below_100ms(self):
+        def capture(duration: int) -> str:
+            attach = 100 + duration
+            lines = ["V04_CHUNK chunk_id=1 stage=start ts_ns=1"]
+            times = [100, 101, 102, 103, attach, attach + 1]
+            lines += [f"V04_BEHAVIOR sample_id=1 behavior=stop stage={stage} ts_ns={ts}" for stage, ts in zip(STAGES, times)]
+            base = attach + 2
+            lines += [f"V04_BEHAVIOR sample_id=1 behavior=drive stage={stage} ts_ns={base + i}" for i, stage in enumerate(STAGES)]
+            lines += [f"V04_ECHO_DONE sample_id=1 echo_us=10 ts_ns={base + 6}", f"V04_HOOK_ENTRY sample_id=1 ts_ns={base + 7}", f"V04_MOTOR_QUEUED sample_id=1 left=0 right=0 ts_ns={base + 8}", f"V04_CHUNK chunk_id=1 stage=end ts_ns={base + 9}"]
+            return "\n".join(lines)
+
+        self.run_valid(capture(99_999_999), max_chunk_gap_ns=200_000_000)
+        boundary = capture(100_000_000)
+        with self.assertRaisesRegex(ValueError, "load-to-attach maximum"):
+            self.run_valid(boundary, max_chunk_gap_ns=200_000_000)
+
+    def test_heartbeat_gap_includes_capture_boundaries(self):
+        text = self.valid().replace("V04_CHUNK chunk_id=1 stage=end", "V04_HEARTBEAT seq=1 ts_ns=250\nV04_CHUNK chunk_id=1 stage=end")
+        with self.assertRaisesRegex(ValueError, "heartbeat gap"):
+            self.run_valid(text, require_heartbeat=True, max_heartbeat_gap_ns=100)
+
+    def test_estop_minimum_counts_assertions_not_both_edges(self):
+        transitions = []
+        for event_id in range(1, 101):
+            stage = "assert" if event_id % 2 else "release"
+            transitions.append(f"V04_ESTOP event_id={event_id} source=operator stage={stage} ts_ns={300 + event_id}")
+        text = self.valid() + "\n" + "\n".join(transitions)
+        with self.assertRaisesRegex(ValueError, "e-stop assertion count 50 < 100"):
+            self.run_valid(text, require_estop=True, min_estop_samples=100)
+
     def test_motor_values_are_signed_i16_and_range_checked(self):
         records = parse(self.valid())
-        motor = next(record for record in records if record["_event"] == "V04_MOTOR_CMD")
+        motor = next(record for record in records if record["_event"] == "V04_MOTOR_QUEUED")
         self.assertEqual(motor["left"], "-32768")
         for value in ("-32769", "32768"):
             with self.assertRaisesRegex(ValueError, "left"):
@@ -343,7 +387,7 @@ def main() -> int:
         return int(not result.result.wasSuccessful())
     require_heartbeat = not args.fixture
     require_estop = not args.fixture
-    contract = f"V04 CONTRACT mode={'fixture-non-acceptance' if args.fixture else 'acceptance'} behavior_min={args.min_behavior_samples} latency_min={args.min_latency_samples} chunk_min={args.min_chunks} heartbeat_required={require_heartbeat} heartbeat_gap_ns={args.max_heartbeat_gap_ns} estop_required={require_estop} estop_min={args.min_estop_samples} chunk_gap_ns={args.max_chunk_gap_ns}"
+    contract = f"V04 CONTRACT mode={'fixture-non-acceptance' if args.fixture else 'serial-diagnostic'} behavior_min={args.min_behavior_samples} latency_min={args.min_latency_samples} chunk_min={args.min_chunks} heartbeat_required={require_heartbeat} heartbeat_gap_ns={args.max_heartbeat_gap_ns} estop_required={require_estop} estop_min={args.min_estop_samples} chunk_gap_ns={args.max_chunk_gap_ns}"
     print(contract)
     try:
         paths = sorted(args.serial) + (campaign_logs(args.campaign) if args.campaign else [])
@@ -353,7 +397,7 @@ def main() -> int:
         print(f"V04 FAIL: {error}")
         return 1
     for name, values in report.items(): print(name + ": " + " ".join(f"{key}={values[key]}" for key in STAT_KEYS))
-    print("V04 PASS: serial boundaries only; debug-GPIO/FPGA physical latency remains pending")
+    print("V04 DIAGNOSTIC PASS: serial queue boundaries only; this is not physical acceptance")
     return 0
 
 

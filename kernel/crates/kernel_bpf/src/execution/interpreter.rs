@@ -44,6 +44,7 @@ unsafe extern "C" {
     fn bpf_gpio_read(pin: u32) -> i64;
     fn bpf_gpio_write(pin: u32, value: u32) -> i64;
     fn bpf_pwm_write(pwm_id: u32, channel: u32, duty: u32) -> i64;
+    fn bpf_motor_pair_v1(left_permille: i32, right_permille: i32) -> i64;
 }
 
 /// BPF bytecode interpreter.
@@ -340,6 +341,9 @@ impl<P: PhysicalProfile> Interpreter<P> {
 
                 RuntimeHelper::PwmWrite => {
                     Ok(bpf_pwm_write(args[0] as u32, args[1] as u32, args[2] as u32) as u64)
+                }
+                RuntimeHelper::MotorPairV1 => {
+                    Ok(bpf_motor_pair_v1(args[0] as i32, args[1] as i32) as u64)
                 }
             }
         }

@@ -690,7 +690,7 @@ def main() -> int:
                 failures.append(str(error))
             else:
                 failures.extend(validate_containment(records, summary))
-            print(f"V03-C containment: count={len(records)}")
+            print(f"V03-C decision model: count={len(records)}; live helper routing and physical output are not tested")
 
     if failures:
         print("FAIL:")

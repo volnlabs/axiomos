@@ -4,6 +4,7 @@
 module tb_axiomos_r04_top;
     localparam integer WATCHDOG_CYCLES = 2048;
     localparam integer TIGHT_HALF_PERIOD_NS = 60;
+    localparam integer PWM_PERIOD_CYCLES = 20;
 
     reg clk;
     reg rst_n;
@@ -20,10 +21,14 @@ module tb_axiomos_r04_top;
     wire left_pwm_out_en;
     wire right_pwm_out;
     wire right_pwm_out_en;
+    wire left_direction_out, left_direction_out_en;
+    wire right_direction_out, right_direction_out_en;
     reg [7:0] last_status;
+    reg [7:0] accepted_sequence;
     integer failures;
 
-    top #(.COMMAND_TIMEOUT_CYCLES(WATCHDOG_CYCLES)) dut (
+    top #(.COMMAND_TIMEOUT_CYCLES(WATCHDOG_CYCLES),
+          .CLOCK_HZ(1000), .PWM_CARRIER_HZ(50)) dut (
         .clk(clk),
         .clk_en(clk_en),
         .rst_n(rst_n),
@@ -38,7 +43,11 @@ module tb_axiomos_r04_top;
         .left_pwm_out(left_pwm_out),
         .left_pwm_out_en(left_pwm_out_en),
         .right_pwm_out(right_pwm_out),
-        .right_pwm_out_en(right_pwm_out_en)
+        .right_pwm_out_en(right_pwm_out_en),
+        .left_direction_out(left_direction_out),
+        .left_direction_out_en(left_direction_out_en),
+        .right_direction_out(right_direction_out),
+        .right_direction_out_en(right_direction_out_en)
     );
 
     always #10 clk = ~clk;
@@ -51,6 +60,38 @@ module tb_axiomos_r04_top;
                 failures = failures + 1;
                 $display("FAIL: %0s", message);
             end
+        end
+    endtask
+
+    task read_runtime_status;
+        output [7:0] status_byte;
+        output [7:0] accepted_sequence;
+        begin
+            begin_frame;
+            transfer_byte(8'ha5, 100, status_byte);
+            transfer_byte(8'h00, 100, accepted_sequence);
+            end_frame;
+        end
+    endtask
+
+    task check_pwm_period;
+        input integer expected_left_high;
+        input integer expected_right_high;
+        input [8*80-1:0] message;
+        integer cycle;
+        integer left_high;
+        integer right_high;
+        begin
+            left_high = 0;
+            right_high = 0;
+            @(negedge clk);
+            for (cycle = 0; cycle < PWM_PERIOD_CYCLES; cycle = cycle + 1) begin
+                @(posedge clk); #1;
+                if (left_pwm_out) left_high = left_high + 1;
+                if (right_pwm_out) right_high = right_high + 1;
+            end
+            check(left_high == expected_left_high && right_high == expected_right_high,
+                  message);
         end
     endtask
 
@@ -170,7 +211,7 @@ module tb_axiomos_r04_top;
             transfer_byte(crc_lo, TIGHT_HALF_PERIOD_NS, ignored);
             transfer_byte(crc_hi, TIGHT_HALF_PERIOD_NS, ignored);
             #TIGHT_HALF_PERIOD_NS spi_ss_n = 1'b1;
-            #TIGHT_HALF_PERIOD_NS;
+            #(2 * TIGHT_HALF_PERIOD_NS);
         end
     endtask
 
@@ -220,16 +261,30 @@ module tb_axiomos_r04_top;
               && dut.right_duty_permille === 12'sd0,
               "duties must not change before CRC_HI");
         send_byte(8'haf);
+        check(dut.command_valid === 1'b0 && dut.left_duty_permille === 12'sd0
+              && dut.right_duty_permille === 12'sd0,
+              "CRC alone must not publish before exact transaction length is known");
+        end_frame;
         check(dut.command_valid === 1'b1 && dut.left_duty_permille === 12'sd100
               && dut.right_duty_permille === -12'sd200,
-              "valid CRC must atomically commit both signed duties");
+              "exact valid frame must atomically commit both signed duties");
+        left_pwm_in = 1'b0;
+        right_pwm_in = 1'b1;
+        check_pwm_period(2, 4,
+              "FPGA must generate 10/20 percent duty independent of input PWM pins");
+
+        begin_frame;
+        send_byte(8'h7e); send_byte(8'h01); send_byte(8'h01); send_byte(8'h06);
+        send_byte(8'h02); send_byte(8'hc8); send_byte(8'h00);
+        send_byte(8'h2c); send_byte(8'h01); send_byte(8'h00);
+        send_byte(8'he5); send_byte(8'h6e); send_byte(8'h00);
         end_frame;
-        check(left_pwm_out === 1'b1 && right_pwm_out === 1'b1,
-              "valid in-range command must pass both PWM inputs");
+        check(dut.command_valid === 1'b0 && dut.left_duty_permille === 12'sd100,
+              "overlong frame must not publish validated prefix duties");
 
         send_command(8'h01, 8'h01, 8'h06, 8'h02, 16'd200, 16'd300,
                      8'h00, 8'he5, 8'h6f);
-        check(last_status === 8'hc0,
+        check(last_status === 8'h80,
               "selected status must report READY and prior command validity MSB-first");
         check(dut.command_valid === 1'b0 && left_pwm_out === 1'b0
               && right_pwm_out === 1'b0,
@@ -294,22 +349,71 @@ module tb_axiomos_r04_top;
                      8'h00, 8'h36, 8'h0c);
         check(dut.command_valid === 1'b1, "valid frame after range faults must recover");
 
+        begin_frame;
+        send_byte(8'h7e); send_byte(8'h01); send_byte(8'h01); send_byte(8'h06);
+        send_byte(8'h04);
+        estop_n = 1'b0; #1;
+        estop_n = 1'b1; repeat (3) @(posedge clk);
+        send_byte(8'h64); send_byte(8'h00); send_byte(8'h64); send_byte(8'h00);
+        send_byte(8'h00); send_byte(8'h77); send_byte(8'hc4); end_frame;
+        check(dut.command_valid === 1'b0 && dut.last_sequence === 8'h03,
+              "frame begun before e-stop must not complete after release");
+
+        begin_frame;
+        send_byte(8'h7e); send_byte(8'h01); send_byte(8'h01); send_byte(8'h06);
+        send_byte(8'h04); send_byte(8'h64); send_byte(8'h00);
+        send_byte(8'h64); send_byte(8'h00); send_byte(8'h00);
+        send_byte(8'h77); send_byte(8'hc4);
+        estop_n = 1'b0; #1;
+        estop_n = 1'b1; repeat (3) @(posedge clk); end_frame;
+        check(dut.command_valid === 1'b0 && dut.last_sequence === 8'h03,
+              "e-stop before command CS completion must cancel staged acceptance");
+
         estop_n = 1'b0;
         #1;
         check(left_pwm_out === 1'b0 && right_pwm_out === 1'b0,
               "physical e-stop must dominate asynchronously");
+        check(left_direction_out === 1'b0 && right_direction_out === 1'b0,
+              "physical e-stop must force direction outputs safe low");
         estop_n = 1'b1;
-        #1;
-        check(left_pwm_out === 1'b1 && right_pwm_out === 1'b1,
-              "e-stop release may pass the still-valid command");
+        repeat (3) @(posedge clk); #1;
+        check(left_pwm_out === 1'b0 && right_pwm_out === 1'b0,
+              "e-stop release without a fresh command must remain disabled");
 
         send_command(8'h01, 8'h01, 8'h06, 8'h04, 16'd100, 16'd100,
-                     8'h01, 8'h56, 8'hd4);
+                     8'h00, 8'h77, 8'hc4);
+        check(dut.command_valid === 1'b1,
+              "fresh full command after e-stop release must rearm motion");
+        // Exact minimum CS setup: synchronized snapshot occurs on edge three;
+        // the SPI shifter reloads it on edge four, before any physical SCK.
+        @(negedge clk); #1 spi_ss_n = 1'b0;
+        repeat (3) @(posedge clk); #1;
+        check(dut.runtime_spi.miso_data === 8'h80,
+              "status shifter must not expose the new snapshot before setup edge four");
+        @(posedge clk); #1;
+        check(dut.runtime_spi.miso_data === 8'hc0,
+              "four FPGA setup edges must load the coherent first status byte");
+        transfer_byte(8'ha5, 100, last_status);
+        transfer_byte(8'h00, 100, accepted_sequence);
+        end_frame;
+        check(last_status === 8'hc0 && accepted_sequence === 8'h04
+              && dut.command_valid === 1'b1,
+              "post-commit status read must return coherent validity and accepted sequence");
+        read_runtime_status(last_status, accepted_sequence);
+        check(last_status === 8'hc0 && accepted_sequence === 8'h04,
+              "repeated status read must be read-only");
+        begin_frame; send_byte(8'ha5); end_frame;
+        begin_frame; send_byte(8'ha5); send_byte(8'h00); send_byte(8'hff); end_frame;
+        check(dut.command_valid === 1'b1 && dut.last_sequence === 8'h04,
+              "short or long status reads must have no safety authority");
+
+        send_command(8'h01, 8'h01, 8'h06, 8'h05, 16'd100, 16'd100,
+                     8'h01, 8'hf6, 8'h91);
         check(dut.command_valid === 1'b0 && left_pwm_out === 1'b0
               && right_pwm_out === 1'b0,
               "explicit link-fault flag must invalidate both outputs");
-        send_command(8'h01, 8'h01, 8'h06, 8'h05, 16'd100, 16'd100,
-                     8'h00, 8'hd7, 8'h81);
+        send_command(8'h01, 8'h01, 8'h06, 8'h06, 16'd100, 16'd100,
+                     8'h00, 8'h37, 8'h4f);
         check(dut.command_valid === 1'b1, "fresh clear-fault frame must recover");
 
         begin_frame;
@@ -318,12 +422,14 @@ module tb_axiomos_r04_top;
               && right_pwm_out === 1'b0,
               "zero-byte selected transaction must invalidate prior command");
 
-        send_command(8'h01, 8'h01, 8'h06, 8'h06, 16'sd800, -16'sd800,
-                     8'h00, 8'hb3, 8'hfd);
+        send_command(8'h01, 8'h01, 8'h06, 8'h07, 16'sd800, -16'sd800,
+                     8'h00, 8'h13, 8'hb8);
         check(last_status === 8'h80 && dut.command_valid === 1'b1
               && dut.left_duty_permille === 12'sd800
               && dut.right_duty_permille === -12'sd800,
               "exact +800/-800 boundaries must be accepted");
+        check(left_direction_out === 1'b0 && right_direction_out === 1'b1,
+              "accepted +N/-N must drive independent directions");
 
         begin_frame;
         send_partial_byte(8'h7e, 3);
@@ -332,37 +438,47 @@ module tb_axiomos_r04_top;
               && right_pwm_out === 1'b0,
               "partial first byte must invalidate prior command");
 
-        send_command(8'h01, 8'h01, 8'h06, 8'h07, -16'sd800, 16'sd800,
-                     8'h00, 8'h00, 8'he5);
+        send_command(8'h01, 8'h01, 8'h06, 8'h08, -16'sd800, 16'sd800,
+                     8'h00, 8'h03, 8'h20);
         check(last_status === 8'h80 && dut.command_valid === 1'b1
               && dut.left_duty_permille === -12'sd800
               && dut.right_duty_permille === 12'sd800,
               "exact -800/+800 boundaries must be accepted");
+        check(left_direction_out === 1'b1 && right_direction_out === 1'b0,
+              "accepted -N/+N must drive independent directions");
 
-        repeat (WATCHDOG_CYCLES + 2) @(posedge clk);
+        repeat (WATCHDOG_CYCLES - 100) @(posedge clk);
+        read_runtime_status(last_status, accepted_sequence);
         #1;
+        check(last_status === 8'hc0 && accepted_sequence === 8'h08,
+              "status and sequence must remain one pre-expiry CS-start snapshot");
         check(dut.command_valid === 1'b0 && dut.watchdog_expired === 1'b1
               && left_pwm_out === 1'b0 && right_pwm_out === 1'b0,
-              "command watchdog silence must expire and fail both outputs low");
+              "status read must not refresh the command watchdog");
 
-        send_command(8'h01, 8'h01, 8'h06, 8'h08, 16'd100, 16'd100,
-                     8'h00, 8'h94, 8'hcf);
+        send_command(8'h01, 8'h01, 8'h06, 8'h09, 16'd100, 16'd100,
+                     8'h00, 8'h34, 8'h8a);
         check(last_status === 8'ha0 && dut.command_valid === 1'b1
               && dut.watchdog_expired === 1'b0,
               "expired status must be exposed and fresh frame must recover");
 
-        send_command(8'h01, 8'h01, 8'h06, 8'h09, 16'd100, 16'd100,
-                     8'h80, 8'hbc, 8'h1b);
+        send_command(8'h01, 8'h01, 8'h06, 8'h0a, 16'd100, 16'd100,
+                     8'h80, 8'h5c, 8'hd5);
         check(last_status === 8'hc0 && dut.command_valid === 1'b0,
               "reserved nonzero flags must fail closed");
 
-        send_command_tight(8'h0a, 16'd123, -16'sd321, 8'hdc, 8'h80);
+        send_command_tight(8'h0b, 16'd123, -16'sd321, 8'h7c, 8'hc5);
         check(last_status === 8'h80 && dut.command_valid === 1'b1
               && dut.left_duty_permille === 12'sd123
               && dut.right_duty_permille === -12'sd321,
               "tight legal CS/SCK phasing must preserve mode-0 frame and status");
         check(spi_miso_en === 1'b1,
               "MISO output enable must remain driven when CS returns idle");
+
+        send_command(8'h01, 8'h01, 8'h06, 8'h0c, 16'd0, 16'd0,
+                     8'h00, 8'h44, 8'h1e);
+        check(dut.command_valid === 1'b1, "zero command must be accepted");
+        check_pwm_period(0, 0, "zero command must produce no PWM pulses");
 
         rst_n = 1'b0;
         #1;

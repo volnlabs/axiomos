@@ -14,6 +14,7 @@ enum Event {
     Ready,
     Handoff,
     Runtime([u8; 12]),
+    RuntimeStatus,
 }
 
 struct MockFpga {
@@ -28,6 +29,8 @@ struct MockFpga {
     statuses: Vec<Result<u8, &'static str>>,
     handoff: Result<(), &'static str>,
     runtime: Result<u8, &'static str>,
+    post_status: Option<Result<[u8; 2], &'static str>>,
+    accepted_sequence: u8,
     times_us: Vec<u64>,
     next_time: usize,
 }
@@ -46,6 +49,8 @@ impl MockFpga {
             statuses: vec![Ok(STATUS_READY)],
             handoff: Ok(()),
             runtime: Ok(STATUS_READY | STATUS_COMMAND_VALID),
+            post_status: None,
+            accepted_sequence: 0,
             times_us: vec![0],
             next_time: 0,
         }
@@ -112,8 +117,57 @@ impl FpgaPlatform for MockFpga {
 
     fn runtime_transfer(&mut self, frame: &[u8; 12]) -> Result<u8, Self::Error> {
         self.events.push(Event::Runtime(*frame));
+        self.accepted_sequence = frame[4];
         self.runtime
     }
+
+    fn read_runtime_status(&mut self) -> Result<[u8; 2], Self::Error> {
+        self.events.push(Event::RuntimeStatus);
+        self.post_status.unwrap_or(Ok([
+            STATUS_READY | STATUS_COMMAND_VALID,
+            self.accepted_sequence,
+        ]))
+    }
+}
+
+#[test]
+fn first_command_does_not_need_same_transfer_acceptance() {
+    let mut fpga = MockFpga::healthy();
+    fpga.runtime = Ok(STATUS_READY); // Previous state: no command yet.
+    let mut lifecycle = FpgaLifecycle::new(fpga);
+    lifecycle.configure(manifest(), 1).unwrap();
+    assert_eq!(lifecycle.runtime_command(1, 400, -400, 0), Ok(()));
+    assert_eq!(
+        lifecycle.platform().events.last(),
+        Some(&Event::RuntimeStatus)
+    );
+}
+
+#[test]
+fn prior_command_status_cannot_acknowledge_a_new_command() {
+    let mut fpga = MockFpga::healthy();
+    fpga.post_status = Some(Ok([STATUS_READY | STATUS_COMMAND_VALID, 6]));
+    let mut lifecycle = FpgaLifecycle::new(fpga);
+    lifecycle.configure(manifest(), 1).unwrap();
+    assert_eq!(
+        lifecycle.runtime_command(7, 400, -400, 0),
+        Err(LifecycleError::BadStatus)
+    );
+    lifecycle.platform().assert_safe();
+    assert!(!lifecycle.runtime_ready());
+}
+
+#[test]
+fn post_command_status_io_failure_forces_safe() {
+    let mut fpga = MockFpga::healthy();
+    fpga.post_status = Some(Err("status spi"));
+    let mut lifecycle = FpgaLifecycle::new(fpga);
+    lifecycle.configure(manifest(), 1).unwrap();
+    assert_eq!(
+        lifecycle.runtime_command(7, 400, -400, 0),
+        Err(LifecycleError::Platform("status spi"))
+    );
+    lifecycle.platform().assert_safe();
 }
 
 fn manifest() -> BitstreamManifest {
@@ -272,7 +326,7 @@ fn runtime_faults_clear_handoff_and_stale_commands_cannot_resume() {
     lifecycle.configure(manifest(), 1).unwrap();
     lifecycle.runtime_command(7, 800, -800, 0).unwrap();
     assert_eq!(
-        lifecycle.platform().events.last(),
+        lifecycle.platform().events.iter().rev().nth(1),
         Some(&Event::Runtime(runtime_frame(7, 800, -800, 0)))
     );
 
@@ -300,7 +354,7 @@ fn spi_or_status_failure_during_runtime_forces_safe() {
     lifecycle.platform().assert_safe();
 
     let mut fpga = MockFpga::healthy();
-    fpga.runtime = Ok(STATUS_READY);
+    fpga.post_status = Some(Ok([STATUS_READY, 1]));
     let mut lifecycle = FpgaLifecycle::new(fpga);
     lifecycle.configure(manifest(), 1).unwrap();
     assert_eq!(
@@ -310,7 +364,7 @@ fn spi_or_status_failure_during_runtime_forces_safe() {
     lifecycle.platform().assert_safe();
 
     let mut fpga = MockFpga::healthy();
-    fpga.runtime = Ok(STATUS_READY | STATUS_WATCHDOG_EXPIRED);
+    fpga.post_status = Some(Ok([STATUS_READY | STATUS_WATCHDOG_EXPIRED, 1]));
     let mut lifecycle = FpgaLifecycle::new(fpga);
     lifecycle.configure(manifest(), 1).unwrap();
     assert_eq!(

@@ -4,10 +4,10 @@
 //! Pi5->Shrike messages into a motor [`Output`] that is **fail-safe by
 //! construction**:
 //!
-//! - **Link silence:** if no fresh Pi5 command/heartbeat arrives within
-//!   `timeout` ticks, the output is [`Output::SafeStop`]. Pi5 MUST send >=1
-//!   frame per timeout window (the hard liveness guarantee — the soft `seq`
-//!   check below never substitutes for it).
+//! - **Command silence:** if no fresh Pi5 motor command arrives within
+//!   `timeout` ticks, the output is [`Output::SafeStop`]. Heartbeats cannot
+//!   extend or restore motor authority. Expiry requires explicit release and
+//!   then a fresh motor command; peer liveness is a separate concern.
 //! - **E-stop latch:** a soft `Estop{assert:true}` latches `SafeStop` until an
 //!   explicit `Estop{assert:false}` — assert dominates everything, including a
 //!   simultaneously-fresh setpoint. (The hard e-stop is still the independent
@@ -38,6 +38,8 @@ pub enum Output {
 pub struct Watchdog {
     timeout: u64,
     deadline: u64,
+    // Physical stop disarming must not erase a pending command timeout.
+    command_deadline_active: bool,
     /// Have we ever accepted a setpoint? Gates the anti-replay seq compare and
     /// persists across an e-stop so a pre-estop seq cannot be replayed after.
     seq_valid: bool,
@@ -49,30 +51,40 @@ pub struct Watchdog {
     /// so releasing an e-stop never resumes a stale pre-estop command.
     setpoint_armed: bool,
     estop_latched: bool,
+    hardware_estop: bool,
 }
 
 impl Watchdog {
-    /// `timeout` = max ticks between fresh Pi5 frames before failing safe.
+    /// `timeout` = max ticks between fresh motor commands before failing safe.
     #[must_use]
     pub const fn new(timeout: u64) -> Self {
         Self {
             timeout,
             deadline: 0,
+            command_deadline_active: false,
             seq_valid: false,
             last_seq: 0,
             left: 0,
             right: 0,
             setpoint_armed: false,
             estop_latched: false,
+            hardware_estop: false,
         }
     }
 
     /// Feed one decoded Pi5->Shrike message observed at `now`.
     ///
-    /// Returns `true` if it was accepted as a fresh, liveness-refreshing frame
-    /// (setpoint, e-stop, or heartbeat). Shrike->Pi5 messages and stale/replayed
-    /// setpoints return `false` and change nothing.
+    /// Returns `true` for an accepted message (not proof of motor application).
+    /// Only a fresh setpoint refreshes the command deadline. Shrike->Pi5
+    /// messages and stale/replayed setpoints return `false`.
     pub fn on_msg(&mut self, msg: &Msg, now: u64) -> bool {
+        // Observe expiry before processing a new message: neither a heartbeat
+        // nor a delayed newer setpoint may silently resume timed-out motion.
+        if self.command_deadline_active && self.expired(now) {
+            self.command_deadline_active = false;
+            self.setpoint_armed = false;
+            self.estop_latched = true;
+        }
         match *msg {
             Msg::MotorSetpoint { seq, left, right } => {
                 if self.seq_valid && !seq_newer(seq, self.last_seq) {
@@ -85,34 +97,40 @@ impl Watchdog {
                 // Only a setpoint received while NOT latched arms driving; this
                 // is what forces a *fresh* setpoint after an e-stop release
                 // rather than resuming a possibly-ancient stored command.
-                self.setpoint_armed = !self.estop_latched;
-                self.refresh(now);
+                self.setpoint_armed = !self.estop_latched && !self.hardware_estop;
+                if self.setpoint_armed {
+                    self.refresh(now);
+                    self.command_deadline_active = true;
+                }
                 true
             }
             Msg::Estop { assert } => {
                 self.estop_latched = assert;
-                if assert {
-                    self.setpoint_armed = false;
-                }
-                // A deliberate e-stop frame (assert or release) is proof the
-                // link is alive, so it refreshes liveness.
-                self.refresh(now);
+                // Even a redundant release requires a new complete setpoint.
+                self.setpoint_armed = false;
+                self.command_deadline_active = false;
                 true
             }
-            Msg::HeartbeatToShrike { .. } => {
-                self.refresh(now);
-                true
-            }
+            Msg::HeartbeatToShrike { .. } => true,
             // Shrike->Pi5 telemetry is not a watchdog input.
             Msg::Sensor { .. } | Msg::HeartbeatToPi { .. } => false,
         }
     }
 
+    /// Sample physical stop independently of operator/timeout latches.
+    /// Neither edge clears an operator stop; either edge discards old motion.
+    pub fn set_hardware_estop(&mut self, asserted: bool) {
+        if asserted != self.hardware_estop || asserted {
+            self.setpoint_armed = false;
+        }
+        self.hardware_estop = asserted;
+    }
+
     /// The motor output at `now`. Fail-safe wins: e-stop latch, then arming,
-    /// then liveness.
+    /// then command age.
     #[must_use]
     pub fn output(&self, now: u64) -> Output {
-        if self.estop_latched || !self.setpoint_armed || self.expired(now) {
+        if self.estop_latched || self.hardware_estop || !self.setpoint_armed || self.expired(now) {
             Output::SafeStop
         } else {
             Output::Drive {
@@ -122,7 +140,7 @@ impl Watchdog {
         }
     }
 
-    /// True if the link has gone silent past the timeout as of `now`.
+    /// True if the motor command has expired as of `now`.
     #[must_use]
     pub fn expired(&self, now: u64) -> bool {
         now >= self.deadline
@@ -216,19 +234,74 @@ mod tests {
     }
 
     #[test]
-    fn heartbeat_refreshes_liveness_without_changing_setpoint() {
+    fn heartbeats_never_extend_motor_command_lifetime() {
         let mut wd = Watchdog::new(100);
         wd.on_msg(&sp(1, 50, 50), 0);
         assert!(wd.on_msg(&Msg::HeartbeatToShrike { seq: 7 }, 90));
-        // Without the heartbeat this would be stopped at 100; with it, alive.
+        assert_eq!(wd.output(100), Output::SafeStop);
+        assert!(wd.on_msg(&Msg::HeartbeatToShrike { seq: 7 }, 110));
+        assert_eq!(wd.output(110), Output::SafeStop);
+        assert!(wd.on_msg(&Msg::HeartbeatToShrike { seq: 8 }, 120));
+        assert_eq!(wd.output(120), Output::SafeStop);
+    }
+
+    #[test]
+    fn timeout_requires_release_then_a_fresh_command() {
+        let mut wd = Watchdog::new(100);
+        wd.on_msg(&sp(1, 50, 50), 0);
+        assert_eq!(wd.output(100), Output::SafeStop);
+        wd.on_msg(&sp(2, 60, 60), 101);
+        assert_eq!(wd.output(101), Output::SafeStop);
+        wd.on_msg(&Msg::Estop { assert: false }, 102);
+        assert_eq!(wd.output(102), Output::SafeStop);
+        wd.on_msg(&sp(3, 20, 20), 103);
         assert_eq!(
-            wd.output(150),
+            wd.output(103),
             Output::Drive {
-                left: 50,
-                right: 50
+                left: 20,
+                right: 20
             }
         );
-        assert_eq!(wd.output(190), Output::SafeStop);
+    }
+
+    #[test]
+    fn physical_stop_cycle_does_not_erase_timeout_rearm_requirement() {
+        for assert_at in [90, 100] {
+            let mut wd = Watchdog::new(100);
+            wd.on_msg(&sp(1, 50, 50), 0);
+            assert_eq!(
+                wd.output(assert_at),
+                if assert_at < 100 {
+                    Output::Drive {
+                        left: 50,
+                        right: 50,
+                    }
+                } else {
+                    Output::SafeStop
+                }
+            );
+            wd.set_hardware_estop(true);
+            wd.set_hardware_estop(false);
+            wd.on_msg(&sp(2, 60, 60), 101);
+            assert_eq!(wd.output(101), Output::SafeStop);
+            wd.on_msg(&Msg::Estop { assert: false }, 102);
+            wd.on_msg(&sp(3, 20, 20), 103);
+            assert_eq!(
+                wd.output(103),
+                Output::Drive {
+                    left: 20,
+                    right: 20
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn redundant_release_does_not_refresh_an_old_command() {
+        let mut wd = Watchdog::new(100);
+        wd.on_msg(&sp(1, 50, 50), 0);
+        wd.on_msg(&Msg::Estop { assert: false }, 90);
+        assert_eq!(wd.output(100), Output::SafeStop);
     }
 
     #[test]

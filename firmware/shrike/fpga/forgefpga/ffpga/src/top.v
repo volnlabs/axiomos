@@ -4,7 +4,9 @@
 (* top *) module top #(
     // Default: 50 ms at the scaffold's stated 50 MHz clock. Calibrate this
     // count against the measured Forge clock before hardware acceptance.
-    parameter integer COMMAND_TIMEOUT_CYCLES = 2500000
+    parameter integer COMMAND_TIMEOUT_CYCLES = 2500000,
+    parameter integer CLOCK_HZ = 50000000,
+    parameter integer PWM_CARRIER_HZ = 20000
 ) (
     (* iopad_external_pin, clkbuf_inhibit *) input clk,
     (* iopad_external_pin *) output clk_en,
@@ -20,7 +22,11 @@
     (* iopad_external_pin *) output left_pwm_out,
     (* iopad_external_pin *) output left_pwm_out_en,
     (* iopad_external_pin *) output right_pwm_out,
-    (* iopad_external_pin *) output right_pwm_out_en
+    (* iopad_external_pin *) output right_pwm_out_en,
+    (* iopad_external_pin *) output left_direction_out,
+    (* iopad_external_pin *) output left_direction_out_en,
+    (* iopad_external_pin *) output right_direction_out,
+    (* iopad_external_pin *) output right_direction_out_en
 );
     localparam [7:0] SYNC = 8'h7e;
     localparam [7:0] VERSION = 8'h01;
@@ -28,6 +34,7 @@
     localparam [7:0] PAYLOAD_LENGTH = 8'h06;
     // Bit 0 is explicit link fault. Reserved bits also fail closed.
     localparam [7:0] FLAGS_CLEAR = 8'h00;
+    localparam [7:0] STATUS_READ = 8'ha5;
 
     // Selected MISO status byte, shifted MSB first in SPI mode 0.
     localparam integer STATUS_READY_BIT = 7;
@@ -65,11 +72,18 @@
     reg [31:0] watchdog_count;
     reg signed [11:0] left_duty_permille;
     reg signed [11:0] right_duty_permille;
+    reg command_accept;
+    reg status_read_selected;
+    reg [7:0] status_snapshot;
+    reg [7:0] sequence_snapshot;
+    reg [1:0] estop_release_sync;
 
     assign clk_en = 1'b1;
     assign spi_miso_en = 1'b1;
     assign left_pwm_out_en = 1'b1;
     assign right_pwm_out_en = 1'b1;
+    assign left_direction_out_en = 1'b1;
+    assign right_direction_out_en = 1'b1;
     assign status[STATUS_READY_BIT] = rst_n;
     assign status[STATUS_COMMAND_VALID_BIT] = command_valid;
     assign status[STATUS_WATCHDOG_EXPIRED_BIT] = watchdog_expired;
@@ -119,7 +133,14 @@
             ss_n_sync <= {ss_n_sync[1:0], spi_ss_n};
     end
 
-    always @(posedge clk or negedge rst_n) begin
+    always @(posedge clk or negedge rst_n or negedge estop_n) begin
+        if (!rst_n || !estop_n)
+            estop_release_sync <= 2'b00;
+        else
+            estop_release_sync <= {estop_release_sync[0], 1'b1};
+    end
+
+    always @(posedge clk or negedge rst_n or negedge estop_n) begin
         if (!rst_n) begin
             byte_index <= 4'd0;
             transaction_selected <= 1'b0;
@@ -140,7 +161,32 @@
             watchdog_count <= 32'd0;
             left_duty_permille <= 12'sd0;
             right_duty_permille <= 12'sd0;
+            command_accept <= 1'b0;
+            status_read_selected <= 1'b0;
+            status_snapshot <= 8'h00;
+            sequence_snapshot <= 8'h00;
+        end else if (!estop_n) begin
+            byte_index <= 4'd0;
+            transaction_selected <= 1'b0;
+            transaction_accepted <= 1'b0;
+            transaction_end_pending <= 1'b0;
+            transaction_bit_count <= 7'd0;
+            frame_bad <= 1'b1;
+            crc <= 16'hffff;
+            crc_lo <= 8'h00;
+            frame_sequence <= 8'h00;
+            frame_left <= 16'sd0;
+            frame_right <= 16'sd0;
+            frame_flags <= 8'h00;
+            command_valid <= 1'b0;
+            watchdog_expired <= 1'b0;
+            watchdog_count <= 32'd0;
+            left_duty_permille <= 12'sd0;
+            right_duty_permille <= 12'sd0;
+            command_accept <= 1'b0;
+            status_read_selected <= 1'b0;
         end else begin
+            command_accept <= 1'b0;
             // Only a complete, fresh frame below resets this clock-derived
             // liveness bound. Traffic and rejected frames do not refresh it.
             if (command_valid) begin
@@ -160,10 +206,23 @@
             // Delay CS-end validation one clock so a tightly phased final SPI
             // byte can commit before the exact-96-bit transaction is judged.
             if (transaction_end_pending) begin
-                if (!(transaction_selected && transaction_accepted
-                      && transaction_bit_count == 7'd96))
+                if (status_read_selected) begin
+                    // Read-only status transactions never affect safety state.
+                end else if (transaction_selected && transaction_accepted
+                    && transaction_bit_count == 7'd96) begin
+                    left_duty_permille <= frame_left[11:0];
+                    right_duty_permille <= frame_right[11:0];
+                    last_sequence <= frame_sequence;
+                    sequence_valid <= 1'b1;
+                    command_valid <= 1'b1;
+                    watchdog_expired <= 1'b0;
+                    watchdog_count <= 32'd0;
+                    command_accept <= 1'b1;
+                end else begin
                     command_valid <= 1'b0;
+                end
                 transaction_selected <= 1'b0;
+                status_read_selected <= 1'b0;
                 transaction_accepted <= 1'b0;
                 transaction_end_pending <= 1'b0;
                 transaction_bit_count <= 7'd0;
@@ -172,20 +231,31 @@
                 crc <= 16'hffff;
             end
 
-            if (cs_fall) begin
+            if (cs_fall && estop_release_sync[1]) begin
+                status_snapshot <= status;
+                sequence_snapshot <= sequence_valid ? last_sequence : 8'h00;
                 transaction_selected <= 1'b1;
                 transaction_accepted <= 1'b0;
                 transaction_bit_count <= 7'd0;
                 byte_index <= 4'd0;
                 frame_bad <= 1'b0;
                 crc <= 16'hffff;
+                status_read_selected <= 1'b0;
             end
 
             if (rx_data_valid && transaction_selected) begin
+                if (status_read_selected) begin
+                    byte_index <= byte_index + 4'd1;
+                end else begin
                 case (byte_index)
                     4'd0: begin
-                        frame_bad <= (rx_data != SYNC);
-                        if (rx_data != SYNC)
+                        if (rx_data == STATUS_READ) begin
+                            status_read_selected <= 1'b1;
+                            frame_bad <= 1'b0;
+                        end else begin
+                            frame_bad <= (rx_data != SYNC);
+                        end
+                        if (rx_data != SYNC && rx_data != STATUS_READ)
                             command_valid <= 1'b0;
                     end
                     4'd1: begin
@@ -242,13 +312,6 @@
                             && (frame_flags == FLAGS_CLEAR)
                             && (!sequence_valid
                                 || sequence_is_newer(frame_sequence, last_sequence))) begin
-                            left_duty_permille <= frame_left[11:0];
-                            right_duty_permille <= frame_right[11:0];
-                            last_sequence <= frame_sequence;
-                            sequence_valid <= 1'b1;
-                            command_valid <= 1'b1;
-                            watchdog_expired <= 1'b0;
-                            watchdog_count <= 32'd0;
                             transaction_accepted <= 1'b1;
                         end else begin
                             command_valid <= 1'b0;
@@ -263,6 +326,7 @@
                 endcase
                 if (byte_index < 4'd11)
                     byte_index <= byte_index + 4'd1;
+                end
             end
 
             if (cs_rise)
@@ -282,17 +346,22 @@
         .o_sample_pulse(spi_sample_pulse),
         .o_rx_data(rx_data),
         .o_rx_data_valid(rx_data_valid),
-        .i_tx_data(status)
+        .i_tx_data(status_read_selected ? sequence_snapshot : status_snapshot)
     );
 
-    shrike_safety_gate final_gate (
+    shrike_safety_gate #(.CLOCK_HZ(CLOCK_HZ), .PWM_CARRIER_HZ(PWM_CARRIER_HZ)) final_gate (
+        .clk(clk),
+        .rst_n(rst_n),
         .command_valid(command_valid),
+        .command_accept(command_accept),
         .estop_n(estop_n),
         .left_duty_permille(left_duty_permille),
         .right_duty_permille(right_duty_permille),
         .left_pwm_in(left_pwm_in),
         .right_pwm_in(right_pwm_in),
         .left_pwm_out(left_pwm_out),
-        .right_pwm_out(right_pwm_out)
+        .right_pwm_out(right_pwm_out),
+        .left_direction_out(left_direction_out),
+        .right_direction_out(right_direction_out)
     );
 endmodule

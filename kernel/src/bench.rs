@@ -309,7 +309,10 @@ pub fn run_containment_corpus() {
     let mut safed = 0u32;
     let mut clamps = 0u32;
 
-    let mut mon = crate::actuation::ACTUATION_MONITOR.lock();
+    // This is a decision-model benchmark, not the live actuation path. A local
+    // monitor also prevents serial output from holding the IRQ-shared monitor.
+    let mut mon = kernel_bpf::actuation::Monitor::<kernel_bpf::profile::ActiveProfile>::new();
+    crate::serial_println!("PI5_V03C_SCOPE model_only=true physical_acceptance=false");
     for sample_id in 1..=N {
         let r = next();
         let kind = if r & 1 == 0 {
@@ -390,7 +393,6 @@ pub fn run_containment_corpus() {
             clamps += 1;
         }
     }
-    drop(mon);
 
     crate::serial_println!(
         "PI5_V03C_SUMMARY n={} escapes={} safed={} clamps={} seed=0x{:016x}",
