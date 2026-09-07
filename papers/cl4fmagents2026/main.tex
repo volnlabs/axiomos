@@ -49,7 +49,7 @@ An installation is $I=(h,e)$: a program handle and an epoch that increases on ev
 \begin{figure}[!ht]
 \centering
 \input{protocol-figure.tex}
-\caption{The gate and an overlap witness. QF-AP can publish B while A is live, then waits for predecessor readers before returning. GR rejects and requires a later retry. Panel (b) requires a hold extending across a successor dispatch; it is not a claim about every sweep schedule.}
+\caption{Bars show invocation lifetimes; shading marks overlap; dashed lines mark replacement attempts. Time runs left to right. QF-AP waits for A before returning. The depicted hold crosses a successor dispatch; not every sweep schedule overlaps.}
 \label{fig:protocol}
 \end{figure}
 

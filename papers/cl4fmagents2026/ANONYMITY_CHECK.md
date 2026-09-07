@@ -5,7 +5,7 @@
 - Ten pages: four body, one references, five appendix. US Letter; all fonts embedded; author metadata empty; creation date omitted; no acknowledgements, identifying repository URL, username or local path in the PDF.
 - All ten pages visually inspected by the lead and independent reviewers. The final citation/caption-only revision preserves the same layout and is rechecked by the PDF verifier.
 - The portable source bundle contains only the required LaTeX, bibliography, unmodified official style, generated tables, figure, Makefile and README. Third-party names/URLs in citations and the official template remain as attribution.
-- A clean source build produces the identical PDF: SHA-256 `dadc905ced1abb632758f6c40b1a636bb2322c7f964d222344d9e773c500f28e`.
+- A clean source build produces the identical PDF: SHA-256 `01b69c9783336e40d85a450b90327a61758c9b3fb05e91c0a1da6c96c13a861f`.
 
 ## Anonymous evidence archive
 
@@ -29,3 +29,5 @@ Automated direct-identifier checks are not a proof that source-code resemblance 
 PASS: the full tree and compressed-content scans completed successfully. The final archive is byte-identical to the independently written, clean-extracted archive; SHA-256 `ae2d25f63a054c1208f7745966c0a88f7ceb3bfa8fff3b98effc5d693054b55e`. Clean extraction regenerated all numeric inputs and passed manifest checks and eight Loom models. No unresolved direct-identifier finding remains.
 
 Editorial follow-up: the abstract and table-reference wording changed, and Appendix G now names both separate ZIPs. The evidence archive and its verified hash are unchanged. A fresh BibTeX-enabled source build reproduced the revised PDF byte-for-byte.
+
+Diagram follow-up: separate invocation tracks, aligned request positions and shaded overlap replace the prior figure. The caption defines the visual notation. The final PDF retains four body pages and five appendix pages; source ZIP hashes and its embedded PDF were checked. The evidence archive is unchanged.

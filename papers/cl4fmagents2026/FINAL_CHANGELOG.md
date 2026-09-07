@@ -20,3 +20,7 @@ One exclusive executor slot, stateless loaded candidates, existing manager check
 ## Editorial follow-up
 
 Clarified the abstract result and identified the origins of Tables 2, 6 and 7 explicitly. Appendix G distinguishes the full artifact-r3.zip from paper-source.zip. The evidence ZIP, runtime, experiments and numeric table inputs are unchanged; abstract wording was checked against the existing schedule and corrective analyses. The portable source README explicitly requires BibTeX. Previous delivered files remain preserved in the original final directory.
+
+## Diagram clarity revision
+
+Redrew Figure 1 with separated invocation lifetimes, aligned requests, shaded overlap and explicit Busy/retry events. Simplified gate return paths and grouped rejected operations by state. The caption defines the schematic timeline; no protocol, result or claim changed. Retained the four-page body, rebuilt the anonymous source ZIP and exported a standalone vector figure.
