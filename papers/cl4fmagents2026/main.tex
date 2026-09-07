@@ -28,7 +28,7 @@ Adaptation should not imply deployment: a better controller can still be install
 \label{sec:position}
 After a payload change, an agent revises a motor reflex. Its candidate passes isolated tests, but activation races an old invocation whose command arrives later. A stale recovery request may also replace a newer installation reusing the same program handle. These installation failures are independent of controller quality.
 
-Voyager grows executable skills through environmental feedback \citep{wang2023voyager}. Physical control adds restricted authority, deadlines, and irreversible effects. Our thesis is \emph{adaptation should not imply deployment}: candidates acquire authority through a transition with testable identity, concurrency, state, and accounting rules.
+Voyager grows executable skills through feedback \citep{wang2023voyager}. ABot-AgentOS gates memory-evolution assets above low-level controllers \citep{tian2026abot}. Physical control adds authority limits, deadlines, and irreversible effects. \emph{Adaptation should not imply deployment}: candidates need testable identity, concurrency, state, and accounting rules.
 
 Qin et al. govern capability versions through compatibility checks, staged evaluation, activation, and rollback \citep{qin2026governed}. LITHE swaps controller pointers at Spine-cycle boundaries, obtaining implicit quiescence \citep{lim2026lithe}; Kitsune supports state-preserving software updates \citep{hayden2014kitsune}. Action shielding \citep{alshiekh2018shielding} and Neural Simplex's runtime assurance and retraining \citep{phan2020neural} remain complementary: publication determines which installation may issue actions.
 
@@ -105,9 +105,9 @@ Real manager installations and guards select the gain; host code computes contro
 \input{adaptation.tex}
 \end{table}
 
-AP and GR both round to 0.974 post-shift RMSE, but AP admits one old/new invocation overlap and applies one retired predecessor command, while GR admits neither. At this reporting precision, aggregate task RMSE therefore hides the installation defect. For each updating protocol, only three of four activations improve paired-probe RMSE: correct installation does not imply useful adaptation.
+AP and GR both round to 0.974 post-shift RMSE, but AP admits one old/new invocation overlap and applies one retired predecessor command, while GR admits neither. At this precision, task RMSE hides the installation defect. Only three of four activations per updating protocol improve paired-probe RMSE: correct installation does not imply useful adaptation. This gives an executor-level instance of EmbodiedGovBench's separation of upgrade safety, recovery, and auditability from task success \citep{qin2026govbench}.
 
-The anonymous supplement uses the local revision label \texttt{artifact-r1}, with source, raw traces, derived tables, and hashes of the anonymized files.
+The anonymous supplement uses the local revision label \texttt{artifact-r2}, with source, raw traces, derived tables, and hashes of the anonymized files.
 
 \section{Scope and implications}
 \label{sec:limits}
@@ -122,4 +122,7 @@ The contract ends at the guarded invocation. Commands can outlive their installa
 \clearpage
 \bibliographystyle{plainnat}
 \bibliography{references}
+\clearpage
+\appendix
+\input{appendix.tex}
 \end{document}

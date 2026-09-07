@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 
 HERE = Path(__file__).resolve().parent
@@ -76,6 +77,10 @@ reference_pages = [i for i, page in enumerate(pages)
                    if re.search(r"^\s*\d*\s*References\s*$", page, re.M)]
 assert reference_pages, "Missing references section"
 assert 1 <= reference_pages[0] <= 4, f"Content exceeds four pages: {reference_pages[0]}"
+appendix_pages = [i for i, page in enumerate(pages)
+                  if re.search(r"^\s*\d*\s*A\s+Protocol API and state machine\s*$", page, re.M)]
+assert len(appendix_pages) == 1 and appendix_pages[0] > reference_pages[0], "Appendix must follow references"
+assert 3 <= len(pages) - appendix_pages[0] <= 5, "Appendix must occupy three to five pages"
 assert "case study is" not in pages[0].lower(), "Case study displaced the page-1 problem"
 
 metadata = output("pdfinfo", str(pdf))
@@ -90,13 +95,17 @@ assert "pending validation" not in text.lower(), "Experiment is not ready for su
 log = (HERE / "build/main.log").read_text()
 assert not re.search(r"Overfull|undefined|Citation .* undefined|Rerun to get", log)
 source = (HERE / "main.tex").read_text()
+assert source.index(r"\bibliography{references}") < source.index(r"\appendix")
+assert r"\input{appendix.tex}" in source
+source += "\n" + (HERE / "appendix.tex").read_text()
 assert r"\usepackage[dblblindworkshop]{neurips_2026}" in source
 assert "Workshop:" in pages[0] and "Foundation Models and Embodied Agents" in pages[0]
 assert "Short systems paper" in metadata and "CreationDate:" not in metadata
 assert r"\texttt{Reset}" not in source and r"\textsc{" not in source
 assert "Our contributions" in pages[0] or "We contribute" in pages[0], "Contributions moved off page one"
 for table in re.findall(r"\\begin\{table\}.*?\\end\{table\}", source, re.S):
-    assert table.index(r"\caption{") < table.index(r"\input{"), "Caption must precede table"
+    body = re.search(r"\\(?:input\{|begin\{tabular\})", table)
+    assert body and table.index(r"\caption{") < body.start(), "Caption must precede table"
 assert r"\resizebox" not in source
 evidence = Path(os.environ.get("UPDATE_PUBLICATION_EVIDENCE",
                 ROOT / "docs/performance/evidence/update-transaction-v2"))
@@ -132,18 +141,21 @@ with tempfile.TemporaryDirectory(prefix="adaptation-paper-check-") as directory:
 spec = importlib.util.spec_from_file_location("review_tables", HERE / "render_tables.py")
 renderer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(renderer)
+subprocess.run([sys.executable, HERE / "test_render_tables.py"], check=True, capture_output=True, text=True)
 with tempfile.TemporaryDirectory(prefix="review-table-check-") as directory:
     regenerated = Path(directory)
     rows = renderer.render(evidence, adaptation, regenerated)
     for local in (*rows, "cost-note.tex"):
         assert (HERE / local).read_bytes() == (regenerated / local).read_bytes(), local
         assert f"\\input{{{local}}}" in source
+    for local in ("appendix-analysis.json", "appendix-requests.csv", "appendix-runs.csv", "appendix-summary.csv", "appendix-latency-runs.csv"):
+        assert (HERE / local).read_bytes() == (regenerated / local).read_bytes(), local
     for local, table_rows in rows.items():
         for row in table_rows:
             # Wrapped label cells may straddle numeric rows in pdftotext.
             # Source/PDF build hashes bind the full table; check numeric cells too.
             values = row[1:]
-            if not all(re.fullmatch(r"[0-9./]+|--", value) for value in values):
+            if not all(re.fullmatch(r"[0-9./]+|--|AP|GR", value) for value in values):
                 continue
             pattern = r"\s+".join(r"(?:--|–|—)" if value == "--" else re.escape(value) for value in values)
             assert re.search(pattern, text), f"Generated values absent from PDF: {values}"
@@ -154,4 +166,4 @@ note = (HERE / "cost-note.tex").read_text().replace(r"\mu", "")
 note = re.sub(r"\\texttt\{([^{}]*)\}", r"\1", note)
 assert normalize(note) in normalize(prose), "Generated cost prose absent from PDF"
 
-print("PASS: at most four content pages; anonymous PDF; resolved build; verified provenance and trace-derived tables/prose.")
+print("PASS: four-page body limit; three-to-five-page appendix after references; anonymous PDF; verified provenance and trace-derived tables/prose.")

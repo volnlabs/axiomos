@@ -1,13 +1,13 @@
 # Who Guards the Update?
 
-Anonymous CL4FMAgents short paper: at most four content pages, followed by references.
+Anonymous CL4FMAgents short paper: at most four content pages, followed by references and a three-to-five-page technical appendix.
 
 ```sh
 make
 python3 verify.py
 ```
 
-Output: `who-guards-the-update.pdf`. Upload that PDF and the separately generated `artifact-r1.zip` supplement. The ignored `private/` directory and repository evidence contain author-facing information and are not anonymous review material. The paper reports software publication correctness, hosted costs, and a deterministic simulated control replay. It does not evaluate foundation-model learning or physical safety.
+Output: `who-guards-the-update.pdf`. Upload that PDF and the separately generated `artifact-r2.zip` supplement. The ignored `private/` directory and repository evidence contain author-facing information and are not anonymous review material. The paper reports software publication correctness, hosted costs, and a deterministic simulated control replay. It does not evaluate foundation-model learning or physical safety.
 
 The v1 campaign remains in `docs/performance/evidence/update-transaction`. The strengthened campaign uses a new directory, `update-transaction-v2`, and compares guarded replacement with a host-only atomic publication path sharing the same manager checks. Host callbacks retain real invocation guards but do not execute privileged bytecode.
 
@@ -30,3 +30,5 @@ To reproduce only the replay into a new directory:
 ```sh
 CARGO_TARGET_DIR=/home/utkarsh/Work/axiomOS/target python3 scripts/benchmark/reproduce-update-adaptation.py --output /tmp/update-adaptation-reproduction
 ```
+
+The technical appendix separates the nine paired AP/GR scenarios from retained integration-test assertions. It adds successful-call timing details and first-actual-call-to-success elapsed time derived from the original cost records; the six unfinished GR requests remain explicitly censored. `test_render_tables.py` checks this derivation. No new timing capture is used. `artifact-r2` includes the extended derived outputs, selected sanitized integration-test evidence, and recorded environment summary; the prior artifact-r1 remains unchanged.

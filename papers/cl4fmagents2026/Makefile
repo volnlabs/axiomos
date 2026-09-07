@@ -10,7 +10,7 @@ all:
 	python3 render_tables.py --publication "$(UPDATE_PUBLICATION_EVIDENCE)" --adaptation "$(UPDATE_ADAPTATION_EVIDENCE)" --output-dir .
 	sha256sum Makefile render_tables.py *.tex *.bib *.sty > $(OUT)/inputs.sha256
 	pdflatex -interaction=nonstopmode -halt-on-error -output-directory=$(OUT) main.tex > $(OUT)/compile.log
-	cd $(OUT) && BIBINPUTS=..: bibtex main >> compile.log
+	cd $(OUT) && BIBINPUTS="$(CURDIR):" bibtex main >> compile.log
 	pdflatex -interaction=nonstopmode -halt-on-error -output-directory=$(OUT) main.tex >> $(OUT)/compile.log
 	pdflatex -interaction=nonstopmode -halt-on-error -output-directory=$(OUT) main.tex >> $(OUT)/compile.log
 	cp $(OUT)/main.pdf $(PDF)

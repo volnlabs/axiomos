@@ -17,7 +17,7 @@ import zipfile
 from pathlib import Path
 
 
-ARTIFACT = "artifact-r1"
+ARTIFACT = "artifact-r2"
 ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 FILE_MODE = 0o644
 DIR_MODE = 0o755
@@ -39,6 +39,9 @@ SCRIPT_FILES = {
     "scripts/benchmark/analyze-update-adaptation.py":
         "scripts/analyze-adaptation.py",
     "papers/cl4fmagents2026/render_tables.py": "scripts/render_tables.py",
+}
+OPTIONAL_SCRIPT_FILES = {
+    "papers/cl4fmagents2026/test_render_tables.py": "scripts/test_render_tables.py",
 }
 HOST_TESTS = {
     "kernel/tests/bpf_update_transaction.rs":
@@ -196,6 +199,7 @@ for checksum in (publication / "SHA256SUMS", adaptation / "SHA256SUMS"):
     checksum.unlink(missing_ok=True)
 subprocess.run((sys.executable, str(root / "scripts/render_tables.py"),
                 "--publication", str(publication), "--adaptation", str(adaptation),
+                "--raw-cost", str(root / "raw/publication/cost-trace.jsonl"),
                 "--output-dir", str(root / "derived/review-tables")), check=True)
 '''
 
@@ -253,17 +257,34 @@ source files was removed.
 
 README = '''# Anonymous publication artifact
 
-Local artifact revision: `artifact-r1`.
+Local artifact revision: `artifact-r2`.
 
 This bundle contains the runtime publication source needed to inspect the
 reported mechanism, the four hosted campaign sources, retained raw traces, the
 three independent analyzers, and presentation-only table rendering. Numeric
 measurements and installation identities are unchanged.
 
+`raw/publication/recorded-environment.json` is an allowlisted summary of the
+retained capture record: processor model and topology, permitted and selected
+CPU affinity, governor and boost state, compiler version/date/LLVM version, and
+the release build flags used for the captured campaign. Machine names, paths,
+object identifiers, and source or executable digests are omitted.
+
+`raw/validation/publication-transaction.log` retains the result of the hosted
+manager integration test while omitting compiler warnings and build paths. Its
+single passing test executes the included source assertions for preparation,
+authority, budget, stale-identity and ABA rejection; rollback and concurrent
+proposers; accounting preservation; and guarded versus diagnostic atomic
+publication during a held invocation. The compact log does not report those
+assertions as separate tests and is not evidence of privileged execution.
+
 Run `python3 scripts/reproduce.py` from any directory to recompute `derived/`
 from `raw/`. Run `cargo test --manifest-path source/runtime-core/Cargo.toml
 --features loom-model,cloud-profile --test concurrency_model` to exercise the
 same publication and reclamation implementation under the model checker.
+The reproduction passes the retained cost trace directly to the table renderer,
+which writes its appendix analysis and presentation files under
+`derived/review-tables/`.
 
 `source/runtime-core` and `source/runtime-abi` form an independently buildable
 subset. `source/manager/bpf` and `source/host-tests` preserve the actual manager
@@ -278,6 +299,87 @@ identifiers. `MANIFEST.sha256` hashes the anonymized artifact files and excludes
 itself. Dependency resolution is intentionally not locked here because the
 private workspace lock contains repository locations and source checksums.
 '''
+
+
+def recorded_environment(repo: Path) -> str:
+    evidence = json.loads((repo / "docs/performance/evidence/update-transaction-v2/environment.json").read_text())
+    build = json.loads((repo / "docs/performance/evidence/update-transaction-v2/build-command.json").read_text())
+    host = evidence["host"]
+    model = re.search(r"^model name\s*:\s*(.+)$", host["cpuinfo"], re.M).group(1)
+    rustc = dict(line.split(": ", 1) for line in evidence["rustc"]["output"].splitlines()
+                 if ": " in line)
+    compiler_version = rustc["release"]
+    cargo_version = re.match(r"cargo\s+(\S+)", evidence["cargo"]["output"]).group(1)
+
+    def value_after(flag: str) -> str:
+        if flag in build:
+            return build[build.index(flag) + 1]
+        prefix = flag + "="
+        return next(item[len(prefix):] for item in build if item.startswith(prefix))
+
+    # The build record is a Cargo command, while affinity is retained in the
+    # capture command. Read only its two numeric flag values.
+    capture = evidence["command"]
+    selected = {
+        role: int(capture[capture.index(f"--{role}-cpu") + 1])
+        for role in ("dispatch", "update")
+    }
+    topology = {role: host["cpu_topology"][str(cpu)] for role, cpu in selected.items()}
+    cores = {(row["package"], row["core"]) for row in host["cpu_topology"].values()}
+    summary = {
+        "schema": 1,
+        "scope": evidence["claim_boundary"],
+        "records": evidence["trace_records"],
+        "platform": {
+            "system": evidence["platform"]["system"],
+            "release": evidence["platform"]["release"],
+            "machine": evidence["platform"]["machine"],
+        },
+        "processor": {
+            "model": model,
+            "logical_cpu_count": len(host["allowed_cpus"]),
+            "physical_core_count": len(cores),
+            "allowed_logical_cpus": host["allowed_cpus"],
+            "selected_affinity": selected,
+            "selected_topology": topology,
+            "boost_enabled": host["boost"] == "1",
+        },
+        "compiler": {
+            "rustc_release": compiler_version,
+            "compiler_date": rustc["commit-date"],
+            "llvm_version": rustc["LLVM version"],
+            "target": rustc["host"],
+            "cargo_release": cargo_version,
+        },
+        "captured_build": {
+            "subcommand": build[1],
+            "locked": "--locked" in build,
+            "profile": "release" if "--release" in build else "debug",
+            "no_run": "--no-run" in build,
+            "message_format": value_after("--message-format"),
+            "package": "anonymous_runtime",
+            "features": sanitized(value_after("--features")).split(","),
+            "tests": [
+                {"bpf_update_campaign": "publication_campaign",
+                 "bpf_update_measurements": "publication_measurements"}.get(
+                    build[index + 1], build[index + 1])
+                for index, item in enumerate(build) if item == "--test"
+            ],
+        },
+    }
+    return json.dumps(summary, indent=2, sort_keys=True) + "\n"
+
+
+def retained_validation_log(repo: Path) -> str:
+    source = repo / "docs/performance/evidence/update-transaction-v2/validation/atomic-baseline-transaction.log"
+    lines = source.read_text().splitlines()
+    start = next(index for index, line in enumerate(lines) if line.startswith("running "))
+    result = next(index for index, line in enumerate(lines[start:], start)
+                  if line.startswith("test result:"))
+    body = "\n".join(lines[start:result + 1])
+    return ("Retained hosted manager integration-test result (sanitized)\n"
+            "source: source/host-tests/publication_transaction.rs\n\n"
+            f"{sanitized(body)}\n")
 
 
 def reproduce(artifact: Path) -> str:
@@ -374,6 +476,9 @@ def build(repo: Path, output_root: Path) -> tuple[Path, Path, Path]:
             copy_text(repo / source, artifact / destination, artifact, mapping)
         for source, destination in SCRIPT_FILES.items():
             copy_text(repo / source, artifact / destination, artifact, mapping)
+        for source, destination in OPTIONAL_SCRIPT_FILES.items():
+            if (repo / source).is_file():
+                copy_text(repo / source, artifact / destination, artifact, mapping)
         for source, destination in RAW_FILES.items():
             copy_text(repo / source, artifact / destination, artifact, mapping)
 
@@ -382,6 +487,10 @@ def build(repo: Path, output_root: Path) -> tuple[Path, Path, Path]:
         write_text(artifact / "source/Cargo.toml", SOURCE_WORKSPACE)
         write_text(artifact / "source/DEPENDENCIES.md", THIRD_PARTY)
         write_text(artifact / "scripts/reproduce.py", REPRODUCE)
+        write_text(artifact / "raw/publication/recorded-environment.json",
+                   recorded_environment(repo))
+        write_text(artifact / "raw/validation/publication-transaction.log",
+                   retained_validation_log(repo))
         write_text(artifact / "README.md", README)
         write_text(artifact / "patch.diff", export_patch(
             repo / "docs/performance/evidence/update-transaction-v2/source.patch"))
@@ -421,7 +530,7 @@ def main() -> int:
     default_target = Path(os.environ.get("CARGO_TARGET_DIR", repo / "target"))
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", type=Path,
-                        default=default_target / "anonymous-publication")
+                        default=default_target / "update-publication-paper-appendix")
     args = parser.parse_args()
     artifact, archive, private_map = build(repo, args.output_root.resolve())
     print(f"PASS: built {artifact.name} ({len(artifact.joinpath('MANIFEST.sha256').read_text().splitlines())} files)")
