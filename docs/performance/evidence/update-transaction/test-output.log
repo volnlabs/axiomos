@@ -1,0 +1,81 @@
+warning: variant `KernelImage` is never constructed
+   --> kernel/src/bpf/mod.rs:330:5
+    |
+328 | enum LoadAuthentication {
+    |      ------------------ variant in this enum
+329 |     Runtime(AuthenticationProvenance),
+330 |     KernelImage,
+    |     ^^^^^^^^^^^
+    |
+    = note: `LoadAuthentication` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `load_kernel_builtin_program` is never used
+    --> kernel/src/bpf/mod.rs:1334:19
+     |
+ 604 | impl BpfManager {
+     | --------------- method in this implementation
+...
+1334 |     pub(crate) fn load_kernel_builtin_program(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `interrupts_enabled` is never read
+  --> kernel/src/driver/iio.rs:93:5
+   |
+91 | struct V04DispatchGuard<'a> {
+   |        ---------------- field in this struct
+92 |     slot: &'a AtomicU64,
+93 |     interrupts_enabled: bool,
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: method `subscribe` is never used
+   --> kernel/src/mcore/mtask/scheduler/wait_channel.rs:138:19
+    |
+ 99 | impl<W: WaiterSink> WaitChannel<W> {
+    | ---------------------------------- method in this implementation
+...
+138 |     pub(crate) fn subscribe(&self) -> WaitRegistration<'_, W> {
+    |                   ^^^^^^^^^
+
+warning: struct `WaitRegistration` is never constructed
+   --> kernel/src/mcore/mtask/scheduler/wait_channel.rs:178:12
+    |
+178 | pub struct WaitRegistration<'a, W: WaiterSink> {
+    |            ^^^^^^^^^^^^^^^^
+
+warning: method `park` is never used
+   --> kernel/src/mcore/mtask/scheduler/wait_channel.rs:184:12
+    |
+183 | impl<'a, W: WaiterSink> WaitRegistration<'a, W> {
+    | ----------------------------------------------- method in this implementation
+184 |     pub fn park(self, item: W::Item) {
+    |            ^^^^
+
+warning: `kernel` (lib) generated 6 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running tests/bpf_update_campaign.rs (/home/utkarsh/Work/axiomOS/target/debug/deps/bpf_update_campaign-0d722f42804112df)
+
+running 1 test
+UPDATE_TXN {"schema":1,"protocol":"transactional","scope":"bpf_manager","case":"interruption","request_id":0,"before":{"snapshot":[0],"installation":[0,1],"committed":337734000,"executing":[[0,1]],"guarded_handles":[0]},"observations":[],"after":{"snapshot":[1],"installation":[1,2],"committed":337734000,"executing":[[1,2]],"guarded_handles":[1]},"costs":{"0":582000,"1":582000},"ordinary_charge":337152000,"outcome":"Ok","expected":[0,1],"candidate":1,"skipped_dispatches":0}
+UPDATE_TXN {"schema":1,"protocol":"transactional","scope":"bpf_manager","case":"snapshot_prep_failure","request_id":1,"before":{"snapshot":[0],"installation":[0,3],"committed":337734000,"executing":[[0,3]],"guarded_handles":[0]},"observations":[],"after":{"snapshot":[0],"installation":[0,3],"committed":337734000,"executing":[[0,3]],"guarded_handles":[0]},"costs":{"0":582000,"1":582000},"ordinary_charge":337152000,"outcome":"SnapshotAllocationFailed","expected":[0,3],"candidate":1,"skipped_dispatches":0}
+UPDATE_TXN {"schema":1,"protocol":"transactional","scope":"bpf_manager","case":"budget_rejection","request_id":2,"before":{"snapshot":[0],"installation":[0,3],"committed":337734000,"executing":[[0,3]],"guarded_handles":[0]},"observations":[],"after":{"snapshot":[0],"installation":[0,3],"committed":337734000,"executing":[[0,3]],"guarded_handles":[0]},"costs":{"0":582000,"1":582000},"ordinary_charge":337152000,"outcome":"AdmissionRejected","expected":[0,3],"candidate":4,"skipped_dispatches":0}
+UPDATE_TXN {"schema":1,"protocol":"transactional","scope":"bpf_manager","case":"reader_busy","request_id":3,"before":{"snapshot":[0],"installation":[0,3],"committed":337734000,"executing":[[0,3]],"guarded_handles":[0]},"observations":[{"snapshot":[0],"installation":[0,3],"committed":337734000,"executing":[[0,3]],"guarded_handles":[0]}],"after":{"snapshot":[0],"installation":[0,3],"committed":337734000,"executing":[[0,3]],"guarded_handles":[0]},"costs":{"0":582000,"1":582000},"ordinary_charge":337152000,"outcome":"Busy","expected":[0,3],"candidate":1,"skipped_dispatches":1}
+UPDATE_TXN {"schema":1,"protocol":"transactional","scope":"bpf_manager","case":"success","request_id":4,"before":{"snapshot":[0],"installation":[0,3],"committed":337734000,"executing":[[0,3]],"guarded_handles":[0]},"observations":[],"after":{"snapshot":[1],"installation":[1,4],"committed":337734000,"executing":[[1,4]],"guarded_handles":[1]},"costs":{"0":582000,"1":582000},"ordinary_charge":337152000,"outcome":"Ok","expected":[0,3],"candidate":1,"skipped_dispatches":0}
+UPDATE_TXN {"schema":1,"protocol":"transactional","scope":"bpf_manager","case":"stale_expected","request_id":5,"before":{"snapshot":[1],"installation":[1,4],"committed":337734000,"executing":[[1,4]],"guarded_handles":[1]},"observations":[],"after":{"snapshot":[1],"installation":[1,4],"committed":337734000,"executing":[[1,4]],"guarded_handles":[1]},"costs":{"0":582000,"1":582000},"ordinary_charge":337152000,"outcome":"StaleInstallation { expected: InstallationId { program: 0, epoch: 3 }, current: Some(InstallationId { program: 1, epoch: 4 }) }","expected":[0,3],"candidate":0,"skipped_dispatches":0}
+UPDATE_TXN {"schema":1,"protocol":"transactional","scope":"bpf_manager","case":"completed_retry","request_id":7,"before":{"snapshot":[1],"installation":[1,4],"committed":337734000,"executing":[[1,4]],"guarded_handles":[1]},"observations":[],"after":{"snapshot":[1],"installation":[1,4],"committed":337734000,"executing":[[1,4]],"guarded_handles":[1]},"costs":{"0":582000,"1":582000},"ordinary_charge":337152000,"outcome":"StaleInstallation { expected: InstallationId { program: 0, epoch: 3 }, current: Some(InstallationId { program: 1, epoch: 4 }) }","expected":[0,3],"candidate":1,"skipped_dispatches":0}
+UPDATE_TXN {"schema":1,"protocol":"transactional","scope":"bpf_manager","case":"rollback","request_id":6,"before":{"snapshot":[1],"installation":[1,4],"committed":337734000,"executing":[[1,4]],"guarded_handles":[1]},"observations":[],"after":{"snapshot":[0],"installation":[0,5],"committed":337734000,"executing":[[0,5]],"guarded_handles":[0]},"costs":{"0":582000,"1":582000},"ordinary_charge":337152000,"outcome":"Ok","expected":[1,4],"candidate":0,"skipped_dispatches":0}
+UPDATE_TXN {"schema":1,"protocol":"attach_first","scope":"bpf_manager_ordinary","case":"interruption","request_id":0,"before":{"snapshot":[0],"installation":null,"committed":337734000,"executing":[],"guarded_handles":[0]},"observations":[],"after":{"snapshot":[0,1],"installation":null,"committed":338316000,"executing":[],"guarded_handles":[0,1]},"costs":{"0":582000,"1":582000},"ordinary_charge":337152000,"outcome":"Interrupted","expected":null,"candidate":1,"skipped_dispatches":0}
+UPDATE_TXN {"schema":1,"protocol":"attach_first","scope":"bpf_manager_ordinary","case":"success","request_id":1,"before":{"snapshot":[0],"installation":null,"committed":337734000,"executing":[],"guarded_handles":[0]},"observations":[{"snapshot":[0,1],"installation":null,"committed":338316000,"executing":[],"guarded_handles":[0,1]}],"after":{"snapshot":[1],"installation":null,"committed":337734000,"executing":[],"guarded_handles":[1]},"costs":{"0":582000,"1":582000},"ordinary_charge":337152000,"outcome":"Ok","expected":null,"candidate":1,"skipped_dispatches":0}
+UPDATE_TXN {"schema":1,"protocol":"attach_first","scope":"bpf_manager_ordinary","case":"budget_rejection","request_id":2,"before":{"snapshot":[0],"installation":null,"committed":337734000,"executing":[],"guarded_handles":[0]},"observations":[],"after":{"snapshot":[0],"installation":null,"committed":337734000,"executing":[],"guarded_handles":[0]},"costs":{"0":582000,"1":582000},"ordinary_charge":337152000,"outcome":"AdmissionRejected","expected":null,"candidate":4,"skipped_dispatches":0}
+UPDATE_TXN {"schema":1,"protocol":"attach_first","scope":"bpf_manager_ordinary","case":"snapshot_prep_failure","request_id":3,"before":{"snapshot":[0],"installation":null,"committed":337734000,"executing":[],"guarded_handles":[0]},"observations":[],"after":{"snapshot":[0],"installation":null,"committed":337734000,"executing":[],"guarded_handles":[0]},"costs":{"0":582000,"1":582000},"ordinary_charge":337152000,"outcome":"OutOfMemory","expected":null,"candidate":1,"skipped_dispatches":0}
+UPDATE_TXN {"schema":1,"protocol":"attach_first","scope":"bpf_manager_ordinary","case":"rollback","request_id":4,"before":{"snapshot":[1],"installation":null,"committed":337734000,"executing":[],"guarded_handles":[1]},"observations":[{"snapshot":[1,0],"installation":null,"committed":338316000,"executing":[],"guarded_handles":[1,0]}],"after":{"snapshot":[0],"installation":null,"committed":337734000,"executing":[],"guarded_handles":[0]},"costs":{"0":582000,"1":582000},"ordinary_charge":337152000,"outcome":"Ok","expected":null,"candidate":0,"skipped_dispatches":0}
+UPDATE_TXN {"schema":1,"protocol":"detach_first","scope":"bpf_manager_ordinary","case":"interruption","request_id":0,"before":{"snapshot":[0],"installation":null,"committed":337734000,"executing":[],"guarded_handles":[0]},"observations":[],"after":{"snapshot":[],"installation":null,"committed":337152000,"executing":[],"guarded_handles":[]},"costs":{"0":582000,"1":582000},"ordinary_charge":337152000,"outcome":"Interrupted","expected":null,"candidate":1,"skipped_dispatches":0}
+UPDATE_TXN {"schema":1,"protocol":"detach_first","scope":"bpf_manager_ordinary","case":"success","request_id":1,"before":{"snapshot":[0],"installation":null,"committed":337734000,"executing":[],"guarded_handles":[0]},"observations":[{"snapshot":[],"installation":null,"committed":337152000,"executing":[],"guarded_handles":[]}],"after":{"snapshot":[1],"installation":null,"committed":337734000,"executing":[],"guarded_handles":[1]},"costs":{"0":582000,"1":582000},"ordinary_charge":337152000,"outcome":"Ok","expected":null,"candidate":1,"skipped_dispatches":0}
+UPDATE_TXN {"schema":1,"protocol":"detach_first","scope":"bpf_manager_ordinary","case":"budget_rejection","request_id":2,"before":{"snapshot":[0],"installation":null,"committed":337734000,"executing":[],"guarded_handles":[0]},"observations":[],"after":{"snapshot":[],"installation":null,"committed":337152000,"executing":[],"guarded_handles":[]},"costs":{"0":582000,"1":582000},"ordinary_charge":337152000,"outcome":"AdmissionRejected","expected":null,"candidate":4,"skipped_dispatches":0}
+UPDATE_TXN {"schema":1,"protocol":"detach_first","scope":"bpf_manager_ordinary","case":"snapshot_prep_failure","request_id":3,"before":{"snapshot":[0],"installation":null,"committed":337734000,"executing":[],"guarded_handles":[0]},"observations":[],"after":{"snapshot":[],"installation":null,"committed":337152000,"executing":[],"guarded_handles":[]},"costs":{"0":582000,"1":582000},"ordinary_charge":337152000,"outcome":"OutOfMemory","expected":null,"candidate":1,"skipped_dispatches":0}
+UPDATE_TXN {"schema":1,"protocol":"detach_first","scope":"bpf_manager_ordinary","case":"rollback","request_id":4,"before":{"snapshot":[1],"installation":null,"committed":337734000,"executing":[],"guarded_handles":[1]},"observations":[{"snapshot":[],"installation":null,"committed":337152000,"executing":[],"guarded_handles":[]}],"after":{"snapshot":[0],"installation":null,"committed":337734000,"executing":[],"guarded_handles":[0]},"costs":{"0":582000,"1":582000},"ordinary_charge":337152000,"outcome":"Ok","expected":null,"candidate":0,"skipped_dispatches":0}
+UPDATE_TXN {"schema":1,"protocol":"atomic_publication","scope":"component_epoch_snapshot_accounting_unsupported","case":"outstanding_guards","request_id":0,"before":{"snapshot":[1],"installation":null,"committed":null,"executing":[],"guarded_handles":[1]},"observations":[{"snapshot":[2],"installation":null,"committed":null,"executing":[[1,1],[2,2]],"guarded_handles":[1,2]}],"after":{"snapshot":[2],"installation":null,"committed":null,"executing":[],"guarded_handles":[2]},"costs":{},"ordinary_charge":null,"outcome":"Ok","expected":null,"candidate":2,"skipped_dispatches":0}
+test emits_real_publication_traces ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.63s
+

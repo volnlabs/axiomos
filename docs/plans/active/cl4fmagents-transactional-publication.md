@@ -22,7 +22,7 @@ Tests first for primitive and accounting. Extend actual implementation's Loom co
 
 Enable a normal-library production-path host integration harness (not cfg(test) manager code which elides publication). Existing host blockers: kernel bin harness, bare-metal allocator and privileged ExecutionContext; keep hosted observation at real invocation-guard boundary. QEMU must exercise interpreter dispatch. Cross-check AArch64 compilation.
 
-Matched Rust-executed protocols: attach-first, detach-first, pointer swap + ordinary grace-period reclamation, guarded replacement. Python orchestrates/analyzes actual traces only. Separate snapshot cardinality from execution overlap. Report Busy/skipped invocations, preservation, accounting and stale acceptance with defined denominators, finite schedules and unsupported fields marked explicitly.
+Three real manager protocols: attach-first, detach-first, guarded replacement. A separate component ablation holds old and new EpochSnapshot guards across pointer publication; it has no manager accounting or activation contract. Compare identical supported manager scenarios and report extra protocol-specific checks separately. Python orchestrates/analyzes actual traces only. Separate snapshot cardinality from execution overlap. Report Busy/skipped invocations, preservation, accounting and stale acceptance with defined denominators, finite schedules and unsupported fields marked explicitly.
 
 Retain source revision+patch hash, exact commands, fixture hashes, raw JSONL, logs, environment, CSV, LaTeX table, SHA256SUMS. No invented timings or counts.
 
@@ -38,3 +38,14 @@ Four content pages maximum plus references; double blind. Preserve source draft.
 - Branch/worktree created; original checkout preserved; paper draft copied.
 - Baseline host library previously type-checked; existing host test link blockers are part of the planned harness work.
 - Account quota telemetry unavailable: unknown, maximum three worker agents.
+- Draft and plan committed as eaf15bd; no implementation merged into original branch.
+- Root added evidence runner and analyzer; two synthetic analyzer-oracle tests pass. These are not experiment results.
+- Temporary-files quota interrupted compilation. Removed only generated worktree target files; all subsequent Cargo builds use CARGO_TARGET_DIR=/home/utkarsh/Work/axiomOS/target.
+- Host campaign must use kernel_bpf/embedded-profile without the kernel rpi5 alias. Cloud profile has zero hook frequency and would make resource checks vacuous.
+- Primitive uses a single atomic Open/Active/Transition state, avoiding cross-atomic ordering dependencies. Same-source Loom validation passed (7 tests); admission tests passed (12).
+- Implementation committed as 2e5a9f4; campaign/oracle committed as a2ecd89.
+- Final campaign retained 19 requests: five matched scenarios per manager protocol, three extra TX checks, and one separate EpochSnapshot component ablation. TX had no cardinality/accounting/stale-acceptance violations; all five TX failures preserved snapshot, identity and ledger.
+- Full BPF library: 397 tests passed (including 12 admission tests). Loom: 7 tests passed. Hosted production-manager integration passed, including concurrent proposers, completed retry, ABA and owner teardown. AArch64 compile passed.
+- QEMU exercised interpreter dispatch after A→B→A and rejected stale identity. The diagnostic handle array initially caused a kernel stack overflow in ordinary snapshot preparation; fieldwise initialization in reserved heap storage fixed it. The final boot run passed replacement and later BPF smoke markers without panic.
+- Anonymous manuscript rebuilt: four content pages plus references; every generated result-table row checked against retained raw traces, citations resolved, all five rendered pages visually reviewed.
+- Evidence is in docs/performance/evidence/update-transaction; identifying developer evidence must not accompany the anonymous review PDF. No OpenReview submission receipt; submission remains external to this branch's completed implementation/paper work.

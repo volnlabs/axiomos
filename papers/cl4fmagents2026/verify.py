@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Check the actual review PDF, its build log, and its retained numeric source."""
+"""Check the review PDF and its table against the retained publication trace."""
+import importlib.util
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -15,29 +17,41 @@ def output(*args):
 pdf = HERE / "who-guards-the-update.pdf"
 text = output("pdftotext", "-layout", str(pdf), "-")
 pages = [page for page in text.split("\f") if page.strip()]
-assert len(pages) == 5, f"Expected 4 content pages + references, got {len(pages)}"
-assert re.search(r"^\s*\d*\s*References\s*$", pages[4], re.M)
-assert all(not re.search(r"^\s*\d*\s*References\s*$", p, re.M) for p in pages[:4])
+reference_pages = [i for i, page in enumerate(pages)
+                   if re.search(r"^\s*\d*\s*References\s*$", page, re.M)]
+assert reference_pages, "Missing references section"
+assert 1 <= reference_pages[0] <= 4, f"Content exceeds four pages: {reference_pages[0]}"
 assert "case study is" not in pages[0].lower(), "Case study displaced the page-1 problem"
 
 metadata = output("pdfinfo", str(pdf))
 assert re.search(r"^Author:\s*$", metadata, re.M), "Author metadata is not blank"
+assert "Transactional Publication Semantics" in metadata, "Stale PDF title"
 for identity in ("utkarsh", "maurya", "axiomos", "kernex", "/home/", "2ef74f0"):
     assert identity not in (text + metadata).lower(), f"Identifying material: {identity}"
 assert "Anonymous Author(s)" in pages[0]
 assert not re.search(r"\b(?:TODO|TBD)\b|\?\?", text)
+assert "pending validation" not in text.lower(), "Experiment is not ready for submission"
 
 log = (HERE / "build/main.log").read_text()
 assert not re.search(r"Overfull|undefined|Citation .* undefined|Rerun to get", log)
 source = (HERE / "main.tex").read_text()
 assert r"\usepackage[dblblindworkshop]{neurips_2026}" in source
-raw = (ROOT / "docs/performance/evidence/2ef74f0/verifier-host.log").read_text()
-for size, low, high in ((10, "3.1151", "3.1216"), (100, "31.437", "31.465"),
-                        (1000, "376.43", "379.28")):
-    section = raw.split(f"verifier/scaling/instructions/{size}\n", 1)[1]
-    interval = re.search(r"time:\s*\[([^]]+)\]", section).group(1)
-    numbers = re.findall(r"\d+\.\d+", interval)
-    assert (numbers[0], numbers[-1]) == (low, high)
-    assert re.search(re.escape(low) + r"\s*[-–]\s*" + re.escape(high), text)
+evidence = ROOT / "docs/performance/evidence/update-transaction"
+subprocess.run(["python3", str(ROOT / "scripts/benchmark/analyze-update-transaction.py"),
+                str(evidence / "trace.jsonl")], check=True, capture_output=True, text=True)
+records = [json.loads(line) for line in (evidence / "trace.jsonl").read_text().splitlines()]
+spec = importlib.util.spec_from_file_location(
+    "update_analysis", ROOT / "scripts/benchmark/analyze-update-transaction.py")
+analysis = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(analysis)
+assert analysis.analyze(records) == json.loads((evidence / "analysis.json").read_text())["summary"]
+assert (HERE / "results.tex").read_bytes() == (evidence / "result-table.tex").read_bytes()
+assert r"\input{results.tex}" in source, "PDF does not include the generated result table"
+for row in (HERE / "results.tex").read_text().splitlines():
+    if " & " in row and not row.startswith("Observation &"):
+        cells = row.removesuffix(r" \\").split(" & ")
+        pattern = r"\s+".join((r"(?:--|–|—)" if cell == "--" else re.escape(cell)) for cell in cells)
+        assert re.search(pattern, text), f"Generated table row absent from PDF: {cells}"
+assert "qin2026governed" in source and "lim2026lithe" in source
 
-print("PASS: 4 content pages + references; anonymous text/metadata; resolved build; exact retained intervals.")
+print("PASS: at most four content pages; anonymous text/metadata; resolved build; trace-derived table.")

@@ -1,0 +1,46 @@
+{
+  "revision": "a2ecd895bfb1db3bfc9684890414d798f4e18356",
+  "checks": [
+    {
+      "log": "bpf-library.log",
+      "command": "env CARGO_TARGET_DIR=/home/utkarsh/Work/axiomOS/target cargo test --locked -p kernel_bpf --features cloud-profile --lib",
+      "exit_code": 0
+    },
+    {
+      "log": "loom.log",
+      "command": "env CARGO_TARGET_DIR=/home/utkarsh/Work/axiomOS/target cargo test --locked -p kernel_bpf --features loom-model,cloud-profile --test concurrency_model",
+      "exit_code": 0
+    },
+    {
+      "log": "admission.log",
+      "command": "env CARGO_TARGET_DIR=/home/utkarsh/Work/axiomOS/target cargo test --locked -p kernel_bpf --features cloud-profile verifier::admission --lib",
+      "exit_code": 0
+    },
+    {
+      "log": "manager.log",
+      "command": "env CARGO_TARGET_DIR=/home/utkarsh/Work/axiomOS/target cargo test --locked -p kernel --test bpf_update_transaction --features bpf-unsigned-development,bpf-update-diagnostics,kernel_bpf/embedded-profile,verifier-cost",
+      "exit_code": 0
+    },
+    {
+      "log": "aarch64.log",
+      "command": "env CARGO_TARGET_DIR=/home/utkarsh/Work/axiomOS/target cargo check --locked -p kernel --lib --target aarch64-unknown-none --features embedded-profile,bpf-unsigned-development",
+      "exit_code": 0
+    },
+    {
+      "log": "qemu.log",
+      "command": "env CARGO_TARGET_DIR=/home/utkarsh/Work/axiomOS/target AXIOMOS_QEMU_AUDIT_NAME=axiomos-update-probe AXIOMOS_QEMU_DISABLE_MONITOR=1 timeout 55s cargo run --locked --release --features bpf-update-probe,audit-diagnostics -- --headless --smp 1 --mem 1G",
+      "exit_code": 124
+    }
+  ],
+  "qemu_required_markers": [
+    "QEMU_BOOT_OK",
+    "BPF_UPDATE_TRANSACTION_OK interpreter_a_b_a=true stale_rejected=true physical_output=false",
+    "BPF_HOOK_SNAPSHOT_SMP_OK",
+    "BPF_HANDLE_REUSE_OK",
+    "BPF_OWNER_EXIT_OK",
+    "BPF_UNPRIVILEGED_DENY_OK",
+    "BPF_UNPRIVILEGED_TIER_DENY_OK",
+    "BPF_ATTACH_DENY_OK"
+  ],
+  "qemu_timeout": "Intentional stop of idle kernel after 55 seconds; success determined by required markers and no panic/failure marker."
+}

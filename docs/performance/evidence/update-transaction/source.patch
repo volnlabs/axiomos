@@ -1,0 +1,311 @@
+diff --git c/docs/plans/active/cl4fmagents-transactional-publication.md w/docs/plans/active/cl4fmagents-transactional-publication.md
+index 1d4e281..5cec01c 100644
+--- c/docs/plans/active/cl4fmagents-transactional-publication.md
++++ w/docs/plans/active/cl4fmagents-transactional-publication.md
+@@ -22,7 +22,7 @@ Tests first for primitive and accounting. Extend actual implementation's Loom co
+ 
+ Enable a normal-library production-path host integration harness (not cfg(test) manager code which elides publication). Existing host blockers: kernel bin harness, bare-metal allocator and privileged ExecutionContext; keep hosted observation at real invocation-guard boundary. QEMU must exercise interpreter dispatch. Cross-check AArch64 compilation.
+ 
+-Matched Rust-executed protocols: attach-first, detach-first, pointer swap + ordinary grace-period reclamation, guarded replacement. Python orchestrates/analyzes actual traces only. Separate snapshot cardinality from execution overlap. Report Busy/skipped invocations, preservation, accounting and stale acceptance with defined denominators, finite schedules and unsupported fields marked explicitly.
++Three real manager protocols: attach-first, detach-first, guarded replacement. A separate component ablation holds old and new EpochSnapshot guards across pointer publication; it has no manager accounting or activation contract. Compare identical supported manager scenarios and report extra protocol-specific checks separately. Python orchestrates/analyzes actual traces only. Separate snapshot cardinality from execution overlap. Report Busy/skipped invocations, preservation, accounting and stale acceptance with defined denominators, finite schedules and unsupported fields marked explicitly.
+ 
+ Retain source revision+patch hash, exact commands, fixture hashes, raw JSONL, logs, environment, CSV, LaTeX table, SHA256SUMS. No invented timings or counts.
+ 
+@@ -38,3 +38,9 @@ Four content pages maximum plus references; double blind. Preserve source draft.
+ - Branch/worktree created; original checkout preserved; paper draft copied.
+ - Baseline host library previously type-checked; existing host test link blockers are part of the planned harness work.
+ - Account quota telemetry unavailable: unknown, maximum three worker agents.
++- Draft and plan committed as eaf15bd; no implementation merged into original branch.
++- Root added evidence runner and analyzer; two synthetic analyzer-oracle tests pass. These are not experiment results.
++- Temporary-files quota interrupted compilation. Removed only generated worktree target files; all subsequent Cargo builds use CARGO_TARGET_DIR=/home/utkarsh/Work/axiomOS/target.
++- Host campaign must use kernel_bpf/embedded-profile without the kernel rpi5 alias. Cloud profile has zero hook frequency and would make resource checks vacuous.
++- Primitive uses a single atomic Open/Active/Transition state, avoiding cross-atomic ordering dependencies. Same-source Loom validation passed (7 tests); admission tests passed (12).
++- Kernel integration, real host campaign, QEMU interpreter probe, and final empirical paper remain in progress. Current paper visibly marks measurements pending.
+diff --git c/papers/cl4fmagents2026/main.tex w/papers/cl4fmagents2026/main.tex
+index d2ba951..53945f8 100644
+--- c/papers/cl4fmagents2026/main.tex
++++ w/papers/cl4fmagents2026/main.tex
+@@ -3,136 +3,74 @@
+ \workshoptitle{Continual Learning in the Era of Foundation Models and Embodied Agents}
+ \usepackage[utf8]{inputenc}
+ \usepackage[T1]{fontenc}
+-\usepackage{amsmath,amssymb,booktabs,tabularx,microtype}
+-\usepackage{graphicx,tikz}
+-\usetikzlibrary{arrows.meta,positioning}
++\usepackage{amsmath,microtype,booktabs}
+ \usepackage[hidelinks]{hyperref}
+-\hypersetup{pdftitle={Who Guards the Update? Toward Transactional Runtime Evolution for Embodied Agents},pdfauthor={},pdfsubject={Position paper},pdfkeywords={continual learning, embodied agents, runtime assurance, dynamic software updating}}
++\hypersetup{pdftitle={Who Guards the Update? Transactional Publication Semantics for Continually Learning Embodied Agents},pdfauthor={},pdfsubject={Position paper},pdfkeywords={continual learning, embodied agents, transactional publication, runtime assurance}}
+ 
+-\title{Who Guards the Update? Toward Transactional\protect\\ Runtime Evolution for Embodied Agents}
++\title{Who Guards the Update? Transactional Publication Semantics for Continually Learning Embodied Agents}
+ \author{Anonymous Author(s)}
+ 
+ \begin{document}
+ \maketitle
+ 
+ \begin{abstract}
+-An embodied agent can improve how it generates behavior while remaining unreliable at installing that behavior. A candidate controller may be useful in isolation yet acquire excessive actuator authority, inherit incompatible state, or overlap with commands from its predecessor. Action-level runtime assurance does not, by itself, specify this installation lifecycle. Our position is that, for embodied agents, adaptation should not imply deployment: proposed behavior should acquire authority over physical actuators through an explicit transactional installation boundary. We formulate requirements for that boundary, distinguish it from transactional physical execution, and use an incomplete runtime-programmable kernel as a case study. A retained synthetic verifier campaign supplies limited implementation evidence. Our main contribution is an evaluation agenda separating adaptation quality from update-system correctness. We report no continual-learning experiment; this position paper defines the systems problem and an experimental agenda for measuring it.
++An embodied agent can improve a controller while remaining unreliable at installing it. A candidate can pass isolated checks yet overlap an invocation of its predecessor, inherit incompatible state, or be activated against a stale version. Existing work already governs capability lifecycles and atomically hot-swaps robotic control laws. We therefore make a narrower claim: a runtime that exposes replaceable executable hooks should specify publication semantics at the invocation boundary. We describe one opt-in kernel TIMER slot with nonblocking, fail-closed replacement, explicit installation identity, restricted state reset, and resource-accounting updates committed with publication. The accompanying evaluation separates adaptation quality from installation correctness and compares three manager replacement protocols, with a separate snapshot-component ablation. We do not evaluate learning quality, downstream command fencing, hardware reset, or physical safety. Experiment results are pending validation.
+ \end{abstract}
+ 
+-\section{Adaptation should not imply deployment}
++\section{The update is part of the execution contract}
+ \label{sec:position}
+-Consider an agent that revises a motor reflex after a change in payload. The new controller passes its isolated tests. During replacement, however, a queued command from the old controller reaches the motor after the new version becomes active. Alternatively, the new code interprets its predecessor's integrator state differently. Either failure can occur even if the generated controller is useful and every command satisfies a local output limit. These are \emph{hypothetical installation failures}, not findings from a deployed learning robot. They expose a question distinct from whether the agent generated a better policy: \emph{how did that proposal become authoritative?}
++Consider an agent that revises a motor reflex after a payload change. The new controller passes isolated tests, but activation races an invocation of the old controller. A queued command from that invocation may reach the motor after the new controller becomes current. Alternatively, a stale recovery request may replace a later installation that happens to reuse the same program handle. These are installation failures, independent of whether the candidate is a better controller.
+ 
+-Executable behavior is a concrete adaptation medium. Voyager grows a library of executable skills by refining candidate programs with environmental feedback in Minecraft \citep{wang2023voyager}. Physical control adds deadlines, restricted device access, and irreversible consequences to such a proposal loop. We focus on agents proposing bounded controller, reflex, or sensor-processing artifacts. We do not assume that foundation-model weights execute inside a small trusted runtime, or that verifying a program establishes the quality of the model that proposed it.
++Executable skills are one concrete adaptation medium: Voyager, for example, grows a library of programs using environmental feedback \citep{wang2023voyager}. Physical control adds restricted authority, deadlines, and effects that software rollback cannot undo. Our thesis is: \emph{adaptation should not imply deployment}. A candidate becomes authoritative only through a specified transition whose concurrency, identity, state, and accounting rules can be tested.
+ 
+-Our position concerns the \textbf{proposal $\rightarrow$ authority transition}. Generating an update must not itself authorize installation, broaden device rights, or modify the mechanism that checks subsequent actions. The installation boundary should make those decisions explicit and observable. Its implementation could live in middleware, a runtime, or a kernel; the position does not require a new operating system.
++This thesis complements established mechanisms at adjacent layers. Qin et al. treat a new capability version as a governed candidate and define compatibility checks, sandbox and shadow evaluation, gated activation, monitoring, rollback, and audit \citep{qin2026governed}. LITHE loads a new C++ controller off the real-time path, then atomically swaps its function pointer at the end of one Spine cycle, where the single Spine loop supplies implicit quiescence; controller state is deliberately kept in a persistent shared-memory block \citep{lim2026lithe}. Dynamic software updating also supplies state-preserving program replacement, as in Kitsune \citep{hayden2014kitsune}. We focus beneath lifecycle policy and beside these update mechanisms: what should an opt-in kernel hook guarantee when concurrent invocation, resource ownership, and stale replacement requests are visible at that boundary?
++
++Action-level assurance remains separate. Shielding can constrain learner actions \citep{alshiekh2018shielding}, and Neural Simplex combines runtime assurance with online controller retraining \citep{phan2020neural}. An action monitor asks whether a command may execute in the current state. Publication asks which program installation is allowed to issue the next command. Either layer may reveal a failure the other cannot, so evaluations should report both rather than treating one as a proxy for the other.
++
++\section{A narrow transactional publication primitive}
++\label{sec:semantics}
++Our case study is an anonymous bare-metal Rust research kernel with verifier-accepted runtime programs, authenticated load policy, capability checks, quotas, generation-tagged handles, and immutable hook snapshots. We add one opt-in exclusive TIMER slot; ordinary hooks retain their existing behavior. The word \emph{transactional} refers only to publication of software authority at this slot. It does not imply atomic physical effects, persistent logging, or a general dynamic-update subsystem.
++
++An installation is identified by
++\begin{equation}
++ I=(h,e), \qquad e\in\{1,\ldots,2^{64}-1\},
++\end{equation}
++where $h$ is a program handle and $e$ is a monotonically increasing installation epoch. Replacement is a compare-and-swap-style operation on the expected $I$, not just $h$. It publishes a fresh epoch at every successful replacement, including rollback, so removing and later reinstalling the same handle does not make an old request current (the ABA case). Epoch exhaustion rejects the transition. Bootstrap is a separate operation.
++
++Invocation and replacement share one atomic state: open, active, or transitioning. An invocation atomically claims the open state; a transitioning state returns \textsc{TransitionBusy}, and an active state returns \textsc{ExecutionBusy}. Both failures increment explicit skipped-invocation counters. The invocation holds the immutable snapshot guard throughout execution and drops that guard before reopening the slot. A replacement tries to change open to transitioning once. If an invocation is active, it returns \textsc{Busy} immediately and leaves the slot unchanged; it never waits for quiescence.
++
++The only supported state policy is \textsc{Reset}, and only for candidates whose verifier-produced \texttt{referenced\_map\_handles} is empty. Map-bearing candidates return \textsc{PersistentStateUnsupported} before gate acquisition, and transfer is rejected explicitly. Thus ``reset'' means that no runtime map state is inherited; it says nothing about physical, device, or external state.
++
++Once gated and quiescent, replacement rechecks expected installation identity, ownership, authenticated load policy, verifier authority, conflicts, and quota. Fallible snapshot preparation precedes live mutation. A final emergency-stop check uses the kernel's existing monitor serialization; stop state or lock contention rejects without change. The commit publishes one old-to-new snapshot and fresh epoch together with a receipt and an allocation-free CPU-admission ledger delta of $-\mathrm{cost}(A)+\mathrm{cost}(B)$. Resident-memory charges for both programs persist. The previous program therefore remains available for rollback, which is the same conditional replacement in the reverse direction with a fresh epoch.
++
++The primitive deliberately stops at the executor boundary. Receipts and dispatch traces carry installation identity, enabling tests to correlate decisions with invocations. Extending that identity through downstream command queues and actuation audit records is future work. The present scope does not establish command freshness after dispatch, hardware-stop timing, physical safety, controller stability, or state migration.
++
++\section{Prototype and fault-injected publication experiment}
++\label{sec:evaluation}
++\subsection{Separate evaluation axes}
++The evaluation unit is a candidate within a versioned sequence. The task axis asks whether activated candidates improve an independently declared task metric. The installation axis asks whether the publication contract holds. These axes form four possible outcomes: improvement with or without correct installation, and regression with or without correct installation. A useful candidate cannot excuse an installation defect; correct publication cannot establish adaptation quality.
++
++We use hand-written, map-free bytecode candidates in hosted tests of the production kernel library. Fixtures explicitly enable unsigned development loading; the experiment does not test authentication. The embedded admission profile assigns a nominal 1\,kHz hook frequency and a 500\,ms/s aggregate CPU budget. Two unrelated syscall-hook programs consume budget without changing TIMER cardinality. These are admission-model quantities, not measured execution times.
++
++We compare three manager protocols on the same supported scenarios: \textbf{attach-first} (AF), \textbf{detach-first} (DF), and \textbf{transactional replacement} (TX). Each scenario fixes its starting installation, candidate bytecode, and fault location. Interrupting after the first publication leaves a two-step request incomplete; the one-publication TX request has already completed. Snapshot-allocation failure is injected immediately before candidate snapshot preparation, after predecessor removal for DF. Additional TX-only cases test an outstanding invocation, retry, and stale expected identity; they are excluded from the matched table.
++
++A separate \textbf{component ablation} publishes B through the existing epoch snapshot while retaining an A reader, then acquires a B reader before dropping A. It tests whether single-pointer publication alone prevents overlapping guards; it supplies neither manager accounting nor installation receipts. Host observations hold real production snapshot/invocation guards but do not execute privileged bytecode. We therefore report outstanding guards, not simultaneous motor commands. A QEMU probe separately exercises interpreter dispatch through A--B--A.
++
++Python analyzes Rust-emitted observations. Snapshot cardinality counts published program handles; accounting compares the observed ledger against independently calibrated fixture charges plus unrelated reservations. A failed request preserves its predecessor only if snapshot, installation identity, and ledger all remain unchanged. Table observations consist of actual intermediate snapshots and the final snapshot for each matched request; setup and restoration are excluded. These finite, deliberately adversarial schedules expose contract failures, not population failure rates.
+ 
+ \begin{center}
+-\fbox{\parbox{0.94\linewidth}{\textbf{Transactional update.} A software publication protocol in which a candidate is admitted, staged, atomically made authoritative, and retained or replaced according to explicit failure rules. This does \emph{not} imply transactional physical execution: motion that already occurred cannot be rolled back.}}
++\fbox{\parbox{0.92\linewidth}{\centering\textit{Experiment results pending validation.} No timing, count, rate, or comparative outcome is claimed in this draft.}}
+ \end{center}
+ 
+-The claim is testable: under matched candidate sequences and action assurance, installation controls should eliminate specified authority, version, state-transition, and resource failures. If an existing assurance stack already excludes these failures, or the controls add cost without improving the specified correctness measures, the additional boundary has not justified itself in that setting.
++The artifact retains the source revision and patch, commands, source hashes, raw JSONL, test logs, environment, derived CSV, and checksums. Additional tests cover authority expansion, map-bearing reset and unsupported transfer, candidate aliases, emergency-stop rejection, concurrent proposers, ABA recovery, epoch exhaustion, and owner teardown. Same-source Loom models check the invocation/transition race and guard lifetime. Cross-compilation and emulator dispatch are software checks; neither establishes physical safety or continual-learning performance.
+ 
+-\section{Two complementary assurance timescales}
+-\label{sec:requirements}
+-\paragraph{Actions and installations.}
+-Shielding can restrict or correct learner actions to satisfy a specification \citep{alshiekh2018shielding}. Neural Simplex combines runtime assurance with online retraining of a neural controller \citep{phan2020neural}. Safety layers have also been applied to robot foundation-model actions \citep{tolle2025safe}. We do not claim that learning and runtime safety have previously been disconnected. Action-level and update-level assurance can be complementary: one asks whether an action may execute in the current state; the other asks whether a particular artifact, with particular rights and state, may become active. Some systems can implement both. The distinction is an evaluation obligation, not an exclusive taxonomy of prior work.
++\section{Limits and research agenda}
++\label{sec:limits}
++The guarded protocol trades availability for an explicit failure mode: an invocation may be skipped during a transition, and a replacement may have to retry rather than wait. Whether that trade is acceptable depends on the slot period and the controller above it. Likewise, retaining both programs consumes memory, and rejecting map-bearing candidates excludes useful stateful updates. These are visible limits rather than silent state-transfer assumptions.
+ 
+-Dynamic software updating supplies a second lineage. Kitsune supports updating running C programs and transforming their state \citep{hayden2014kitsune}. Live replacement and state migration are therefore not new ideas. Our proposed research agenda brings them together with agent-originated candidates, explicit actuator authority, continuing action assurance, and recovery that respects physical irreversibility. These requirements may also apply to human-authored updates; autonomous generation makes their repeated evaluation especially relevant.
++The manager campaign and component ablation can test exclusivity, freshness, fail-closed behavior, and accounting, but it cannot support claims about physical safety. A command already dispatched downstream may outlive the installation that produced it. Closing that gap requires carrying installation identity into command and actuation records and defining where stale commands are rejected. Hardware experiments must separately validate emergency-stop timing, plant assumptions, and safe re-arming.
+ 
+-\paragraph{A candidate is a request, not a grant.}
+-Represent a proposed update as
+-\begin{equation}
+- u_i=(id_i,\,artifact_i,\,authority_i,\,state_i,\,constraints_i).
+-\end{equation}
+-The identity binds immutable artifact bytes; authority denotes \emph{requested} rights, checked against the proposing principal's existing rights. State denotes an explicit reset or transfer policy, not a snapshot of the physical world. Constraints declare bounds that the receiving platform must validate. Authentication identifies bytes and their signer; it does not establish intent, controller stability, or permission to activate them.
+-
+-We propose five lifecycle obligations. \textbf{Admission} checks artifact validity, permissions, and resource requirements before granting active authority. \textbf{Staging} holds a candidate without enabling its outputs and accounts for coexistence with the current version. \textbf{Activation} has one declared publication point for an exclusive control slot; old invocations and queued commands cannot silently act as the new version. \textbf{State and recovery} specify reset or validated transfer, a failure detector, and bounded return to a declared operating state. Selecting prior code creates a fresh installation whose state and commands must be reconsidered. \textbf{Attribution} connects candidate identity, decisions, active version, and observed outcomes, with explicit missing-record reporting.
+-
+-Here atomicity concerns software authority at a defined executor boundary. It does not promise zero activation time, persistent storage, bumpless physical transfer, or database-style atomicity of effects. A trusted request monitor and a stop path must continue to constrain execution during changes. Their physical guarantees depend on the declared plant model, wiring, timing, and failure assumptions; these cannot be inferred from the installation protocol.
+-
+-\section{An incomplete case study and limited measurements}
+-\label{sec:prototype}
+-Our case study is an anonymized bare-metal Rust research kernel that admits verifier-accepted eBPF programs at runtime. It contains an authentication and authorization pipeline, verifier-produced executable objects, resource quotas, generation-tagged object handles, and immutable hook snapshots. Process capabilities can be restricted but not expanded through their capability interface. Actuation requests pass through an authority-aware monitor that can allow, clamp, force safe output, or reject. These are \textbf{implemented components}, not a demonstration of a continually learning agent.
+-
+-\begin{figure}[t]
+-\centering
+-\begin{tikzpicture}[>=Latex,box/.style={draw,rounded corners=1pt,align=center,font=\scriptsize,minimum height=9mm,text width=22mm},node distance=3mm]
+-\node[box] (auth) {Authentication\\and capabilities};
+-\node[box,right=of auth] (verify) {Verification\\and resources};
+-\node[box,right=of verify] (pub) {Current hook\\publication};
+-\node[box,right=of pub] (monitor) {Request-level\\monitor};
+-\node[box,right=of monitor] (output) {Platform\\output path};
+-\draw[->] (auth)--(verify); \draw[->] (verify)--(pub); \draw[->] (pub)--(monitor); \draw[->] (monitor)--(output);
+-\node[draw,dashed,align=center,font=\scriptsize,text width=102mm,below=5mm of pub] (proposal) {\textbf{Proposed lifecycle integration:} staging and version identity; exclusive activation;\\state policy and recovery; version-correlated lifecycle records};
+-\draw[dashed,->] (proposal.north)--(pub.south);
+-\end{tikzpicture}
+-\caption{Existing component path (solid) and proposed lifecycle integration (dashed). Candidates enter from an external proposer. Current hook publication is not exclusive controller replacement. The figure does not claim independently validated physical-stop behavior.}
+-\label{fig:boundary}
+-\end{figure}
+-
+-An existing bounded, overwrite-oldest RAM ring records request source, channel, authority, requested value, decision, reason, sequence, and timestamp. It is not a persistent lifecycle recorder or evidence that a physical output occurred. Likewise, generation-tagged handles and snapshot publication are useful primitives, but do not establish exclusive old-to-new controller activation. Coherent staging, state policy, recovery, and version-correlated lifecycle records remain \textbf{proposed}. End-to-end physical-stop independence remains unvalidated.
+-
+-\begin{table}[t]
+-\centering
+-\caption{Measured cost per verifier invocation for synthetic straight-line programs. Intervals describe the time estimate reported by Criterion 0.5.1, not execution or installation latency.}
+-\label{tab:verifier}
+-\begin{tabular}{lr}
+-\toprule
+-Instructions & Reported 95\% confidence interval ($\mu$s)\\
+-\midrule
+-10 & 3.1151--3.1216\\
+-100 & 31.437--31.465\\
+-1,000 & 376.43--379.28\\
+-\bottomrule
+-\end{tabular}
+-\end{table}
+-
+-Table~\ref{tab:verifier} reports retained measurements from a \textbf{single unpinned developer-host campaign on synthetic verifier workloads}: AMD Ryzen 7 7735HS, Linux x86\_64, Rust nightly 2026-07-02, and 100 Criterion samples per group after warm-up. These are reported 95\% intervals for Criterion's typical per-invocation time estimate. Raw console output and source/artifact hashes are retained; identifying provenance is withheld for review. The three rows are selected program sizes from its scaling workload. They are not independent deployment trials, a latency service-level objective, a cross-machine comparison, or measurements of agent-generated code. They show the cost of these verification cases only. No physical-actuation measurements, task improvements, or complete installation results are claimed.
+-
+-\section{Evaluate adaptation and installation separately}
+-\label{sec:evaluation}
+-The evaluation unit should be a candidate \emph{within a versioned sequence}, not merely an isolated successful load. Record a timestamped lifecycle trace for each $u_i$: proposal, rejection or staging, activation if it occurs, observation, retention or recovery, and recovery completion or failure. Include the active artifact identity at each relevant event. Stage, activate, and recover are not mutually exclusive outcomes. Missing events and interrupted runs must remain visible.
+-
+-\begin{table}[t]
+-\centering
+-\caption{Task quality and lifecycle correctness are separate axes. Correct installation does not imply that a task regression is detectable or recoverable.}
+-\label{tab:axes}
+-\small
+-\begin{tabularx}{\linewidth}{@{}lXX@{}}
+-\toprule
+-Task outcome & Lifecycle contract respected & Lifecycle contract violated\\
+-\midrule
+-Improvement & Intended result & Improvement masks an installation defect\\
+-Regression & Task regression despite correct installation & Compounded task and installation failure\\
+-\bottomrule
+-\end{tabularx}
+-\end{table}
+-
+-\paragraph{Two hypothetical scenarios.}
+-In \textbf{motor-reflex adaptation}, an agent proposes bounded controller revisions after a payload or friction change. Include candidates that exceed requested authority or available resources, and inject activation failures, delayed old-version commands, and recovery requests. In \textbf{sensor-processing adaptation}, the agent revises a filter or classifier after distribution shift. Exercise incompatible state layouts, reset policies, exhausted staging budgets, and stale references. This second scenario tests whether the abstraction protects a changing processing pipeline as well as actuator access. Neither experiment has been performed in the case-study system.
+-
+-\paragraph{Comparisons and independent labels.}
+-First replay the same ordered candidate artifacts and fault schedule against (i) frozen behavior, (ii) updates with the chosen action-assurance baseline, and (iii) that baseline plus lifecycle controls. Frozen behavior anchors task performance and availability; it is not an update-admission baseline. Match initial plant state, exogenous inputs or simulator seeds, and action-assurance configuration. This controlled replay tests installation effects; later plant states may diverge because installation decisions differ. Proposal generation is fixed.
+-
+-A subsequent adaptive campaign should hold initial agents, task streams, and budgets fixed while permitting installation outcomes to affect later proposals; resulting proposal sequences may legitimately diverge. Unsafe ablations belong in simulation, not on unprotected hardware.
+-
+-Label admissibility independently against explicit authority, validity, state, and resource contracts. Assign one terminal admission decision per candidate; account separately for pending decisions and timeouts. Report rejected inadmissible candidates divided by all labeled inadmissible candidates, accepted inadmissible candidates with the same denominator, and rejected admissible candidates divided by all labeled admissible candidates. A syntactically valid but unauthorized program is not a false rejection. Keep unresolved labels separate; rejection rate alone is not a safety score.
+-
+-\paragraph{Measurements that distinguish the axes.}
+-Measure verification start-to-decision, activation request-to-first-authoritative invocation, and recovery request-to-declared-ready state, retaining failures and timeouts. Retain raw counts and report state-policy violations per activation, stale-command executions per executed command, and safety violations per unit of service time. Compare task performance before and after updates and against frozen behavior; preregister the loss threshold and observation window defining a catastrophic regression. Report these regressions per activated update and service-ready time per scheduled evaluation time. Report the fraction of activated updates that improve the task alongside false rejection and availability; use undefined, not zero, for empty denominators. Preserve candidate and version identities, requested and applied actions where observable, reason codes, uncertainty, and gaps. Repeat independent runs and summarize both per-run and pooled results without treating correlated control cycles as independent trials.
+-
+-\section{Counterarguments, limitations, and research agenda}
+-\paragraph{A shield may be enough.}
+-This is a hypothesis to test. If the baseline already enforces version, state, authority, and resource transitions, a separate lifecycle component may be redundant. The relevant comparison is the contracts actually provided, not whether a system calls itself a shield or an updater.
+-
+-\paragraph{The boundary may belong in middleware.}
+-A kernel is one design point, not the conclusion. Middleware with sufficiently restricted output access, explicit publication semantics, and a trusted downstream monitor may satisfy the same obligations. Compare assurance assumptions and measured costs, rather than attributing safety to implementation location.
+-
+-\paragraph{Conservative admission can harm adaptation.}
+-Rejecting every proposal trivially avoids some update failures while preventing improvement. Useful evaluation must expose this tradeoff. Moreover, valid code can implement an unstable or ineffective controller; a correct installation lifecycle does not remove model uncertainty, guarantee detection of task regression, or make previous code safe in a changed environment. Recovery needs its own state, command-freshness, and re-arming conditions.
+-
+-The present prototype establishes components and limited verification costs, not the proposed transaction or its benefits. The next evidence should be a matched, fault-injected update campaign measuring both axes, followed by closed-loop adaptation and attributable physical validation. The research question is whether explicit installation contracts add independently measurable protection at an acceptable cost. \textbf{For embodied agents, adaptation should not imply deployment.} Controlling how a proposal becomes authoritative is a systems problem that continual-learning evaluations should make visible.
++Adaptation quality also remains unevaluated. Two follow-up scenarios are motor-reflex adaptation after a payload change and sensor-processing adaptation after distribution shift. The former tests actuator authority; the latter tests resource bounds and state compatibility without reducing the problem to an actuator filter. A later learning experiment should hold task streams, budgets, and action-assurance configuration fixed while reporting task outcomes independently from installation outcomes. Candidate generation may then respond to prior activations, so proposal sequences can diverge and must remain attributable. The immediate contribution is smaller: a testable publication contract for one exclusive runtime slot, situated beneath existing lifecycle governance and alongside existing atomic controller-swap systems. For continually learning embodied agents, who guards the update is a question about the execution substrate as well as the learner.
+ 
+ \clearpage
+ \bibliographystyle{plainnat}
+diff --git c/papers/cl4fmagents2026/references.bib w/papers/cl4fmagents2026/references.bib
+index ee6244b..475e56b 100644
+--- c/papers/cl4fmagents2026/references.bib
++++ w/papers/cl4fmagents2026/references.bib
+@@ -2,7 +2,7 @@
+   title={Safe Reinforcement Learning via Shielding},
+   author={Alshiekh, Mohammed and Bloem, Roderick and Ehlers, R{\"u}diger and K{\"o}nighofer, Bettina and Niekum, Scott and Topcu, Ufuk},
+   booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},
+-  volume={32}, number={1}, pages={2669--2678}, year={2018},
++  volume={32}, pages={2669--2678}, year={2018},
+   doi={10.1609/aaai.v32i1.11797}
+ }
+ @inproceedings{phan2020neural,
+@@ -31,3 +31,20 @@
+   journal={arXiv preprint arXiv:2503.07404}, year={2025},
+   url={https://arxiv.org/abs/2503.07404}
+ }
++@article{qin2026governed,
++  title={Governed Capability Evolution: Lifecycle-Time Compatibility Checking and Rollback for {AI}-Component-Based Systems, with Embodied Agents as Case Study},
++  author={Qin, Xue and Luan, Simin and See, John and Boukhers, Zeyd and Yang, Cong and Li, Zhijun},
++  journal={arXiv preprint arXiv:2604.08059},
++  year={2026},
++  note={Version 5},
++  doi={10.48550/arXiv.2604.08059},
++  url={https://arxiv.org/abs/2604.08059v5}
++}
++@article{lim2026lithe,
++  title={{LITHE}: Bridging Best-Effort {Python} and Real-Time {C++} for Hot-Swapping Robotic Control Laws on Commodity {Linux}},
++  author={Lim, He Kai and Clites, Tyler R.},
++  journal={arXiv preprint arXiv:2603.07442},
++  year={2026},
++  doi={10.48550/arXiv.2603.07442},
++  url={https://arxiv.org/abs/2603.07442}
++}
+diff --git c/papers/cl4fmagents2026/verify.py w/papers/cl4fmagents2026/verify.py
+index 100c5a7..6b29bde 100644
+--- c/papers/cl4fmagents2026/verify.py
++++ w/papers/cl4fmagents2026/verify.py
+@@ -1,5 +1,7 @@
+ #!/usr/bin/env python3
+-"""Check the actual review PDF, its build log, and its retained numeric source."""
++"""Check the review PDF and its table against the retained publication trace."""
++import importlib.util
++import json
+ from pathlib import Path
+ import re
+ import subprocess
+@@ -15,29 +17,39 @@ def output(*args):
+ pdf = HERE / "who-guards-the-update.pdf"
+ text = output("pdftotext", "-layout", str(pdf), "-")
+ pages = [page for page in text.split("\f") if page.strip()]
+-assert len(pages) == 5, f"Expected 4 content pages + references, got {len(pages)}"
+-assert re.search(r"^\s*\d*\s*References\s*$", pages[4], re.M)
+-assert all(not re.search(r"^\s*\d*\s*References\s*$", p, re.M) for p in pages[:4])
++reference_pages = [i for i, page in enumerate(pages)
++                   if re.search(r"^\s*\d*\s*References\s*$", page, re.M)]
++assert reference_pages, "Missing references section"
++assert 1 <= reference_pages[0] <= 4, f"Content exceeds four pages: {reference_pages[0]}"
+ assert "case study is" not in pages[0].lower(), "Case study displaced the page-1 problem"
+ 
+ metadata = output("pdfinfo", str(pdf))
+ assert re.search(r"^Author:\s*$", metadata, re.M), "Author metadata is not blank"
++assert "Transactional Publication Semantics" in metadata, "Stale PDF title"
+ for identity in ("utkarsh", "maurya", "axiomos", "kernex", "/home/", "2ef74f0"):
+     assert identity not in (text + metadata).lower(), f"Identifying material: {identity}"
+ assert "Anonymous Author(s)" in pages[0]
+ assert not re.search(r"\b(?:TODO|TBD)\b|\?\?", text)
++assert "pending validation" not in text.lower(), "Experiment is not ready for submission"
+ 
+ log = (HERE / "build/main.log").read_text()
+ assert not re.search(r"Overfull|undefined|Citation .* undefined|Rerun to get", log)
+ source = (HERE / "main.tex").read_text()
+ assert r"\usepackage[dblblindworkshop]{neurips_2026}" in source
+-raw = (ROOT / "docs/performance/evidence/2ef74f0/verifier-host.log").read_text()
+-for size, low, high in ((10, "3.1151", "3.1216"), (100, "31.437", "31.465"),
+-                        (1000, "376.43", "379.28")):
+-    section = raw.split(f"verifier/scaling/instructions/{size}\n", 1)[1]
+-    interval = re.search(r"time:\s*\[([^]]+)\]", section).group(1)
+-    numbers = re.findall(r"\d+\.\d+", interval)
+-    assert (numbers[0], numbers[-1]) == (low, high)
+-    assert re.search(re.escape(low) + r"\s*[-–]\s*" + re.escape(high), text)
++evidence = ROOT / "docs/performance/evidence/update-transaction"
++records = [json.loads(line) for line in (evidence / "trace.jsonl").read_text().splitlines()]
++spec = importlib.util.spec_from_file_location(
++    "update_analysis", ROOT / "scripts/benchmark/analyze-update-transaction.py")
++analysis = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(analysis)
++assert analysis.analyze(records) == json.loads((evidence / "analysis.json").read_text())["summary"]
++assert (HERE / "results.tex").read_bytes() == (evidence / "result-table.tex").read_bytes()
++assert r"\input{results.tex}" in source, "PDF does not include the generated result table"
++for row in (HERE / "results.tex").read_text().splitlines():
++    if " & " in row and not row.startswith("Observation &"):
++        cells = row.removesuffix(r" \\").split(" & ")
++        pattern = r"\s+".join((r"(?:--|–|—)" if cell == "--" else re.escape(cell)) for cell in cells)
++        assert re.search(pattern, text), f"Generated table row absent from PDF: {cells}"
++assert "qin2026governed" in source and "lim2026lithe" in source
+ 
+-print("PASS: 4 content pages + references; anonymous text/metadata; resolved build; exact retained intervals.")
++print("PASS: at most four content pages; anonymous text/metadata; resolved build; trace-derived table.")

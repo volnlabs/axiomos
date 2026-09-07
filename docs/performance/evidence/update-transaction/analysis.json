@@ -1,0 +1,184 @@
+{
+  "cases": {
+    "atomic_publication": [
+      "outstanding_guards"
+    ],
+    "attach_first": [
+      "budget_rejection",
+      "interruption",
+      "rollback",
+      "snapshot_prep_failure",
+      "success"
+    ],
+    "detach_first": [
+      "budget_rejection",
+      "interruption",
+      "rollback",
+      "snapshot_prep_failure",
+      "success"
+    ],
+    "transactional": [
+      "budget_rejection",
+      "completed_retry",
+      "interruption",
+      "reader_busy",
+      "rollback",
+      "snapshot_prep_failure",
+      "stale_expected",
+      "success"
+    ]
+  },
+  "denominator": "emitted intermediate observations plus each request's final observation",
+  "scope": {
+    "atomic_publication": [
+      "component_epoch_snapshot_accounting_unsupported"
+    ],
+    "attach_first": [
+      "bpf_manager_ordinary"
+    ],
+    "detach_first": [
+      "bpf_manager_ordinary"
+    ],
+    "transactional": [
+      "bpf_manager"
+    ]
+  },
+  "shared_manager_cases": [
+    "budget_rejection",
+    "interruption",
+    "rollback",
+    "snapshot_prep_failure",
+    "success"
+  ],
+  "summary": {
+    "atomic_publication": {
+      "accounting_checks": 0,
+      "accounting_mismatches": 0,
+      "dual_snapshots": 0,
+      "empty_snapshots": 0,
+      "execution_checks": 1,
+      "execution_overlap": 1,
+      "expected_requests": 0,
+      "failed_preserved": 0,
+      "failed_requests": 0,
+      "installation_violations": 0,
+      "requests": 1,
+      "single_snapshots": 2,
+      "skipped_dispatches": 0,
+      "snapshots": 2,
+      "stale_acceptances": 0,
+      "unsupported_cases": 0
+    },
+    "attach_first": {
+      "accounting_checks": 7,
+      "accounting_mismatches": 0,
+      "dual_snapshots": 3,
+      "empty_snapshots": 0,
+      "execution_checks": 0,
+      "execution_overlap": 0,
+      "expected_requests": 0,
+      "failed_preserved": 2,
+      "failed_requests": 3,
+      "installation_violations": 0,
+      "requests": 5,
+      "single_snapshots": 4,
+      "skipped_dispatches": 0,
+      "snapshots": 7,
+      "stale_acceptances": 0,
+      "unsupported_cases": 0
+    },
+    "detach_first": {
+      "accounting_checks": 7,
+      "accounting_mismatches": 0,
+      "dual_snapshots": 0,
+      "empty_snapshots": 5,
+      "execution_checks": 0,
+      "execution_overlap": 0,
+      "expected_requests": 0,
+      "failed_preserved": 0,
+      "failed_requests": 3,
+      "installation_violations": 0,
+      "requests": 5,
+      "single_snapshots": 2,
+      "skipped_dispatches": 0,
+      "snapshots": 7,
+      "stale_acceptances": 0,
+      "unsupported_cases": 0
+    },
+    "transactional": {
+      "accounting_checks": 9,
+      "accounting_mismatches": 0,
+      "dual_snapshots": 0,
+      "empty_snapshots": 0,
+      "execution_checks": 9,
+      "execution_overlap": 0,
+      "expected_requests": 8,
+      "failed_preserved": 5,
+      "failed_requests": 5,
+      "installation_violations": 0,
+      "requests": 8,
+      "single_snapshots": 9,
+      "skipped_dispatches": 1,
+      "snapshots": 9,
+      "stale_acceptances": 0,
+      "unsupported_cases": 0
+    }
+  },
+  "table_summary": {
+    "attach_first": {
+      "accounting_checks": 7,
+      "accounting_mismatches": 0,
+      "dual_snapshots": 3,
+      "empty_snapshots": 0,
+      "execution_checks": 0,
+      "execution_overlap": 0,
+      "expected_requests": 0,
+      "failed_preserved": 2,
+      "failed_requests": 3,
+      "installation_violations": 0,
+      "requests": 5,
+      "single_snapshots": 4,
+      "skipped_dispatches": 0,
+      "snapshots": 7,
+      "stale_acceptances": 0,
+      "unsupported_cases": 0
+    },
+    "detach_first": {
+      "accounting_checks": 7,
+      "accounting_mismatches": 0,
+      "dual_snapshots": 0,
+      "empty_snapshots": 5,
+      "execution_checks": 0,
+      "execution_overlap": 0,
+      "expected_requests": 0,
+      "failed_preserved": 0,
+      "failed_requests": 3,
+      "installation_violations": 0,
+      "requests": 5,
+      "single_snapshots": 2,
+      "skipped_dispatches": 0,
+      "snapshots": 7,
+      "stale_acceptances": 0,
+      "unsupported_cases": 0
+    },
+    "transactional": {
+      "accounting_checks": 5,
+      "accounting_mismatches": 0,
+      "dual_snapshots": 0,
+      "empty_snapshots": 0,
+      "execution_checks": 5,
+      "execution_overlap": 0,
+      "expected_requests": 5,
+      "failed_preserved": 2,
+      "failed_requests": 2,
+      "installation_violations": 0,
+      "requests": 5,
+      "single_snapshots": 5,
+      "skipped_dispatches": 0,
+      "snapshots": 5,
+      "stale_acceptances": 0,
+      "unsupported_cases": 0
+    }
+  },
+  "trace_sha256": "b9c3a9cd3302dc452a725de164d9e446c24dc048397cd2a7467f4145e3faddf3"
+}

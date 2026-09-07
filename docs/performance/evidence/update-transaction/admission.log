@@ -1,0 +1,20 @@
+   Compiling kernel_bpf v0.1.0 (/tmp/axiomos-cl4fmagents-transactional-publication/kernel/crates/kernel_bpf)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.81s
+     Running unittests src/lib.rs (/home/utkarsh/Work/axiomOS/target/debug/deps/kernel_bpf-d2f7519fe66a6f5e)
+
+running 12 tests
+test verifier::admission::tests::cycle_unit_scales_contribution ... ok
+test verifier::admission::tests::admits_until_utilization_budget_then_rejects ... ok
+test verifier::admission::tests::exclusive_preflight_and_commit_reject_stale_or_overflowed_deltas ... ok
+test verifier::admission::tests::exclusive_replacement_charges_only_the_resource_delta ... ok
+test verifier::admission::tests::exclusive_quota_rejection_preserves_current_charge ... ok
+test verifier::admission::tests::exclusive_token_cannot_cross_ledger_configuration ... ok
+test verifier::admission::tests::existing_hook_reservation_failure_preserves_published_programs ... ok
+test verifier::admission::tests::new_hook_reservation_failure_rolls_back_admission_and_key ... ok
+test verifier::admission::tests::re_admitting_same_attachment_does_not_double_count ... ok
+test verifier::admission::tests::release_frees_utilization ... ok
+test verifier::admission::tests::repeated_commit_does_not_reserve_publish_or_charge_twice ... ok
+test verifier::admission::tests::utilization_sums_across_hooks_one_core ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 385 filtered out; finished in 0.00s
+
