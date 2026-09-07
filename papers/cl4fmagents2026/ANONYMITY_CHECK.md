@@ -5,7 +5,7 @@
 - Ten pages: four body, one references, five appendix. US Letter; all fonts embedded; author metadata empty; creation date omitted; no acknowledgements, identifying repository URL, username or local path in the PDF.
 - All ten pages visually inspected by the lead and independent reviewers. The final citation/caption-only revision preserves the same layout and is rechecked by the PDF verifier.
 - The portable source bundle contains only the required LaTeX, bibliography, unmodified official style, generated tables, figure, Makefile and README. Third-party names/URLs in citations and the official template remain as attribution.
-- A clean source build produces the identical PDF: SHA-256 `01b69c9783336e40d85a450b90327a61758c9b3fb05e91c0a1da6c96c13a861f`.
+- A clean source build produces the identical PDF: SHA-256 `c2734cf251bccc113c74122a74d1471965731a3d8248992e4949a8737d8674c0`.
 
 ## Anonymous evidence archive
 
@@ -31,3 +31,5 @@ PASS: the full tree and compressed-content scans completed successfully. The fin
 Editorial follow-up: the abstract and table-reference wording changed, and Appendix G now names both separate ZIPs. The evidence archive and its verified hash are unchanged. A fresh BibTeX-enabled source build reproduced the revised PDF byte-for-byte.
 
 Diagram follow-up: separate invocation tracks, aligned request positions and shaded overlap replace the prior figure. The caption defines the visual notation. The final PDF retains four body pages and five appendix pages; source ZIP hashes and its embedded PDF were checked. The evidence archive is unchanged.
+
+Submission availability correction: the live OpenReview invitation was rechecked and contains only a PDF file field. Appendix G explicitly states that the retained reproduction package is not included. Removed archive filenames and commands addressed to reviewers. Pages 1–7 and 9 render identically; revised pages 8 and 10 were visually checked. The refreshed source archive builds the identical final PDF and passes its manifest and direct-identifier scans.

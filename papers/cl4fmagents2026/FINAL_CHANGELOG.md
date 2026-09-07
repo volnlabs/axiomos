@@ -24,3 +24,7 @@ Clarified the abstract result and identified the origins of Tables 2, 6 and 7 ex
 ## Diagram clarity revision
 
 Redrew Figure 1 with separated invocation lifetimes, aligned requests, shaded overlap and explicit Busy/retry events. Simplified gate return paths and grouped rejected operations by state. The caption defines the schematic timeline; no protocol, result or claim changed. Retained the four-page body, rebuilt the anonymous source ZIP and exported a standalone vector figure.
+
+## Submission availability correction
+
+Verified the official four-page limit excluding references/appendix and the live OpenReview invitation. Replaced Appendix G delivery wording with explicit retained-but-not-submitted package status; removed undeliverable ZIP names and reviewer reproduction instructions. Clarified the retained-package reference in Appendix D. No experimental data, protocol, headline claim or figure changed. Four body pages, one reference page and five appendix pages remain.

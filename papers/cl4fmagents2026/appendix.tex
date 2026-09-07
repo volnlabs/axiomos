@@ -105,7 +105,7 @@ For first scheduled release $s$, first API-call entry $a$ (the called timestamp)
 \input{latency-thresholds.tex}
 \end{table}
 
-Raw schema 3 records full installation identity before and after every timed call, sampled outside its latency interval. Busy must preserve identity; successful epochs advance once. An earlier timing-only capture is retained separately and is not pooled: recapture added these observed identities, without selecting schedules or outcomes. The two complete replay captures are byte-identical; the package stores one copy.
+Raw schema 3 records full installation identity before and after every timed call, sampled outside its latency interval. Busy must preserve identity; successful epochs advance once. An earlier timing-only capture is retained separately and is not pooled: recapture added these observed identities, without selecting schedules or outcomes. The two complete replay captures are byte-identical; the retained package stores one copy.
 
 \input{hosted-cost-note.tex}
 
@@ -157,6 +157,4 @@ Qin's lifecycle governs whether a version should advance; the exact-incumbent co
 
 \section{Reproducibility and evidence availability}
 \label{app:artifact}
-The separate anonymous evidence archive, \texttt{artifact-r3.zip}, contains source, raw traces, derived tables, reproduction scripts and \texttt{MANIFEST.sha256}. The companion \texttt{paper-source.zip} contains only the manuscript and its build inputs. Its revision denotes exported content, not a public Git identifier. Run \texttt{python3 scripts/reproduce.py} in a clean extraction to regenerate every table; verify the manifest before and after. The source subset supports the documented standalone Loom test. Full manager/campaign recapture needs the research checkout's omitted platform/boot modules; the subset does not pretend otherwise.
-
-Supplement delivery requires a venue-supported channel; the PDF alone does not imply separate artifact delivery. Raw JSONL stays outside the PDF.
+We retain an anonymized reproduction package containing source, raw traces, derived tables, reproduction scripts and a checksum manifest. The current submission form provides no supplementary-file upload, so this package is not included with the submitted PDF. The source subset supports independent table regeneration and the documented standalone Loom tests; complete manager and campaign recapture requires additional platform and boot dependencies. Raw traces remain outside the PDF.
