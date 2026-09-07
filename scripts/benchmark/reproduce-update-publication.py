@@ -5,7 +5,6 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 
@@ -72,17 +71,23 @@ def main():
     run(runner)
     (destination / "build-command.json").write_text(json.dumps(command) + "\n")
     (destination / "build-artifacts.jsonl").write_text(build.stdout)
+    validation = destination / "validation"
+    validation.mkdir()
+    validation_command = ["cargo", "test", "--locked", "--release", "-p", "kernel",
+                          "--features", FEATURES, "--test", "bpf_update_transaction",
+                          "--", "--test-threads=1"]
+    with (validation / "publication-transaction.log").open("w") as log:
+        run(validation_command, stdout=log, stderr=subprocess.STDOUT)
+    if collector.source_manifest(destination)[3] != build_source_digest:
+        raise RuntimeError("source changed before validation completed")
+    (validation / "command.json").write_text(json.dumps(validation_command) + "\n")
     run([sys.executable, ROOT / "scripts/benchmark/analyze-update-transaction.py",
          destination / "trace.jsonl", "--write-artifacts"])
     run([sys.executable, ROOT / "scripts/benchmark/analyze-update-cost.py",
          destination / "cost-trace.jsonl"])
     paper = ROOT / "papers/cl4fmagents2026"
-    shutil.copyfile(destination / "result-table.tex", paper / "results.tex")
-    shutil.copyfile(destination / "cost-table.tex", paper / "costs.tex")
-    shutil.copyfile(destination / "cost-note.tex", paper / "cost-note.tex")
     run([sys.executable, ROOT / "scripts/benchmark/reproduce-update-adaptation.py",
          "--output", adaptation])
-    shutil.copyfile(adaptation / "adaptation-table.tex", paper / "adaptation.tex")
     run(["make", "-C", paper], env={**os.environ, "UPDATE_PUBLICATION_EVIDENCE": str(destination),
                                         "UPDATE_ADAPTATION_EVIDENCE": str(adaptation)})
     run([sys.executable, paper / "verify.py"],

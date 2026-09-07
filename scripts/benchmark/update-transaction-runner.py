@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import hashlib
 from datetime import datetime, timezone
 import json
@@ -18,6 +19,33 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MARKERS = {"UPDATE_TXN": "trace.jsonl", "UPDATE_COST": "cost-trace.jsonl", "UPDATE_ADAPT": "adaptation-trace.jsonl"}
+
+
+def file_sha256(path: Path) -> str:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def extract_records(log: Path, destination: Path, markers: list[str]):
+    """Retain every record without keeping a complete sweep in memory."""
+    counts = dict.fromkeys(markers, 0)
+    malformed = []
+    with ExitStack() as stack:
+        outputs = {marker: stack.enter_context((destination / MARKERS[marker]).open("w"))
+                   for marker in markers}
+        source = stack.enter_context(log.open())
+        for number, line in enumerate(source, 1):
+            for marker in markers:
+                prefix, found, payload = line.partition(marker + " ")
+                if found and (not prefix or (prefix.startswith("test ") and prefix.endswith(" ... "))):
+                    try:
+                        record = json.loads(payload)
+                    except json.JSONDecodeError as error:
+                        malformed.append({"line": number, "marker": marker, "error": str(error)})
+                    else:
+                        outputs[marker].write(json.dumps(record, sort_keys=True) + "\n")
+                        counts[marker] += 1
+    return counts, malformed
 
 
 def git(*args: str) -> bytes:
@@ -39,7 +67,7 @@ def source_manifest(destination: Path):
     for name in sorted(set(tracked + untracked) - {""}):
         path = ROOT / name
         if path.is_file() and not path.is_symlink() and destination not in path.parents:
-            hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+            hashes[name] = file_sha256(path)
     digest = hashlib.sha256(json.dumps({"revision": revision, "sources": hashes},
                                       sort_keys=True).encode()).hexdigest()
     return revision, hashes, untracked, digest
@@ -66,7 +94,7 @@ def main() -> int:
     if args.expected_source_digest and args.expected_source_digest != digest:
         parser.error("source changed between build and evidence capture")
     markers = args.marker or ["UPDATE_TXN"]
-    executable_hashes = {str(path.resolve()): hashlib.sha256(path.read_bytes()).hexdigest()
+    executable_hashes = {str(path.resolve()): file_sha256(path)
                          for path in args.measured_executable}
     destination.mkdir(parents=True, exist_ok=False)
     patch = git("diff", "--binary", "HEAD")
@@ -85,6 +113,11 @@ def main() -> int:
         "cwd": str(ROOT),
         "platform": platform.uname()._asdict(),
         "python": sys.version,
+        "build_environment": {key: os.environ.get(key) for key in (
+            "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTUP_TOOLCHAIN", "CARGO_BUILD_TARGET",
+            "CARGO_PROFILE_RELEASE_OPT_LEVEL", "CARGO_PROFILE_RELEASE_LTO",
+            "CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "CARGO_PROFILE_RELEASE_DEBUG",
+            "CARGO_PROFILE_RELEASE_PANIC")},
         "source_sha256": source_hashes,
         "source_digest": digest,
         "build_source_digest": args.expected_source_digest,
@@ -139,32 +172,20 @@ def main() -> int:
     manifest["finished_utc"] = datetime.now(timezone.utc).isoformat()
     manifest["host"]["loadavg_end"] = read_host_file("/proc/loadavg")
     manifest["changed_sources_during_run"] = [name for name, digest in source_hashes.items()
-        if not (ROOT / name).is_file() or hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != digest]
+        if not (ROOT / name).is_file() or file_sha256(ROOT / name) != digest]
     _, final_sources, _, final_digest = source_manifest(destination)
     manifest["changed_sources_during_run"] += sorted(set(final_sources) - set(source_hashes))
     manifest["finished_source_digest"] = final_digest
-    records = {marker: [] for marker in markers}
-    malformed = []
-    for number, line in enumerate((destination / "test-output.log").read_text().splitlines(), 1):
-        for marker in markers:
-            prefix, found, payload = line.partition(marker + " ")
-            # libtest may print the first marker after its unfinished test-name line.
-            if found and (not prefix or (prefix.startswith("test ") and prefix.endswith(" ... "))):
-                try:
-                    records[marker].append(json.loads(payload))
-                except json.JSONDecodeError as error:
-                    malformed.append({"line": number, "marker": marker, "error": str(error)})
+    counts, malformed = extract_records(destination / "test-output.log", destination, markers)
     manifest["malformed_records"] = malformed
-    for marker, values in records.items():
-        (destination / MARKERS[marker]).write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in values))
-    manifest["trace_records"] = {marker: len(values) for marker, values in records.items()}
+    manifest["trace_records"] = counts
     manifest["changed_executables_during_run"] = [name for name, digest in executable_hashes.items()
-        if not Path(name).is_file() or hashlib.sha256(Path(name).read_bytes()).hexdigest() != digest]
+        if not Path(name).is_file() or file_sha256(Path(name)) != digest]
     (destination / "environment.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     checksums = []
     for path in sorted(destination.rglob("*")):
         if path.is_file():
-            checksums.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(destination)}\n")
+            checksums.append(f"{file_sha256(path)}  {path.relative_to(destination)}\n")
     (destination / "SHA256SUMS").write_text("".join(checksums))
     if code:
         return code
@@ -175,7 +196,7 @@ def main() -> int:
             or final_digest != manifest["source_digest"]):
         print("FAIL: source or measured executable changed while collecting evidence", file=sys.stderr)
         return 1
-    if any(not values for values in records.values()):
+    if any(not count for count in counts.values()):
         print("FAIL: command passed but a requested marker emitted no evidence", file=sys.stderr)
         return 1
     print(f"Retained {manifest['trace_records']} records in {destination}")

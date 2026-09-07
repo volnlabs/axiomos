@@ -69,7 +69,196 @@ def fixture(protocol="guarded"):
     return records
 
 
+def v2_fixture(protocol="guarded"):
+    records = fixture(protocol)
+    for record in records:
+        record["schema"] = 2
+        if record["kind"] == "update":
+            record["called_offset_ns"] = record["started_offset_ns"] + 5
+            record["post_swap_observed_offset_ns"] = (
+                record["started_offset_ns"] + record["latency_ns"] // 2
+                if record["outcome"] == "Ok" else None
+            )
+    return records
+
+
+def v3_fixture(protocol="guarded"):
+    records = v2_fixture(protocol)
+    current = [0, 1]
+    for record in records:
+        record["schema"] = 3
+        if record["kind"] == "update":
+            record["before_installation"] = list(current)
+            if record["outcome"] == "Ok":
+                current = [1 - current[0], current[1] + 1]
+            record["after_installation"] = list(current)
+    return records
+
+
 class UpdateCostAnalysisTest(unittest.TestCase):
+    def test_v3_validates_full_identity_continuity_without_changing_logical_schema(self):
+        analyzer = load_analyzer()
+        report = analyzer.analyze(v3_fixture(), expected_attempts=3, expected_runs=1,
+                                  expected_holds=(10,), expected_protocols=("guarded",))
+
+        self.assertEqual(report["schema"], 2)
+        self.assertEqual(report["raw_schema"], 3)
+        self.assertIn("before_installation", report["raw_identity"])
+        self.assertEqual(report["logical_aggregates"][0]["completed"], 2)
+
+    def test_v3_rejects_identity_discontinuity_and_outcome_mutation(self):
+        analyzer = load_analyzer()
+        cases = (
+            (1, "before_installation", [9, 9], "identity continuity"),
+            (0, "after_installation", [1, 2], "Busy update changed installation"),
+            (1, "after_installation", [1, 9], "successful update identity"),
+        )
+        for index, field, value, message in cases:
+            with self.subTest(index=index, field=field):
+                records = v3_fixture()
+                updates = [record for record in records if record["kind"] == "update"]
+                updates[index][field] = value
+                with self.assertRaisesRegex(ValueError, message):
+                    analyzer.analyze(records, expected_attempts=3, expected_runs=1,
+                                     expected_holds=(10,), expected_protocols=("guarded",))
+
+    def test_v2_logical_latency_includes_busy_retry_gap(self):
+        analyzer = load_analyzer()
+        report = analyzer.analyze(v2_fixture(), expected_attempts=3, expected_runs=1,
+                                  expected_holds=(10,), expected_protocols=("guarded",))
+
+        first = report["logical_requests"][0]
+        self.assertEqual(first["busy_attempts"], 1)
+        self.assertEqual(first["first_attempt_to_publication_ns"], 1_137_041)
+        self.assertEqual(first["scheduled_to_publication_ns"], 1_137_050)
+        self.assertEqual(first["first_attempt_to_return_ns"], 1_137_091)
+        self.assertEqual(first["scheduled_to_return_ns"], 1_137_100)
+        aggregate = report["logical_aggregates"][0]
+        self.assertEqual(aggregate["retried_successes"], 1)
+        self.assertIn("immediately before", report["logical_metric"]["first_attempt_start"])
+        self.assertIn("before pre-call", report["logical_metric"]["attempt_started"])
+        self.assertEqual(
+            aggregate["latency_ns"]["first_attempt_to_publication"]["median_of_run_p95s"],
+            1_137_041,
+        )
+
+    def test_v2_thresholds_distinguish_known_miss_from_censored_unknown(self):
+        analyzer = load_analyzer()
+        records = v2_fixture()
+        updates = [record for record in records if record["kind"] == "update"]
+        updates[-1].update(outcome="Busy", post_swap_observed_offset_ns=None)
+        report = analyzer.analyze(records, expected_attempts=3, expected_runs=1,
+                                  expected_holds=(10,), expected_protocols=("guarded",))
+
+        aggregate = report["logical_aggregates"][0]
+        threshold = aggregate["thresholds"]["first_attempt_to_publication"]["1ms"]
+        self.assertEqual(threshold, {
+            "denominator": 2,
+            "known_met": 0,
+            "known_missed": 1,
+            "unknown": 1,
+            "lower_rate": 0.0,
+            "upper_rate": 0.5,
+        })
+        self.assertEqual(aggregate["completed"], 1)
+        self.assertEqual(aggregate["censored"], 1)
+
+    def test_v2_requires_one_bounded_publication_marker_on_success_only(self):
+        analyzer = load_analyzer()
+        cases = (
+            (1, 1, "successful update has invalid post-swap timestamp"),
+            (1, None, "successful update has invalid post-swap timestamp"),
+            (0, 100, "Busy update has a post-swap timestamp"),
+        )
+        for index, value, message in cases:
+            with self.subTest(index=index, value=value):
+                records = v2_fixture()
+                records[next(i for i, row in enumerate(records)
+                             if row["kind"] == "update") + index][
+                                 "post_swap_observed_offset_ns"
+                             ] = value
+                with self.assertRaisesRegex(ValueError, message):
+                    analyzer.analyze(records, expected_attempts=3, expected_runs=1,
+                                     expected_holds=(10,), expected_protocols=("guarded",))
+
+    def test_v2_rejects_failed_post_commit_clock_read_sentinel(self):
+        analyzer = load_analyzer()
+        records = v2_fixture()
+        update = next(record for record in records if record["kind"] == "update")
+        update["latency_ns"] = 0
+        with self.assertRaisesRegex(ValueError, "invalid zero latency sentinel"):
+            analyzer.analyze(records, expected_attempts=3, expected_runs=1,
+                             expected_holds=(10,), expected_protocols=("guarded",))
+
+    def test_v2_rejects_overlapping_serialized_update_calls(self):
+        analyzer = load_analyzer()
+        records = v2_fixture()
+        first = next(record for record in records if record["kind"] == "update")
+        first["latency_ns"] = 2_000_000
+        with self.assertRaisesRegex(ValueError, "serialized update calls overlap"):
+            analyzer.analyze(records, expected_attempts=3, expected_runs=1,
+                             expected_holds=(10,), expected_protocols=("guarded",))
+
+    def test_v2_writes_one_logical_csv_row_per_metric(self):
+        analyzer = load_analyzer()
+        report = analyzer.analyze(v2_fixture(), expected_attempts=3, expected_runs=1,
+                                  expected_holds=(10,), expected_protocols=("guarded",))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            analyzer.write_outputs(report, root)
+            lines = (root / "cost-logical-latency.csv").read_text().splitlines()
+            checksums = (root / "SHA256SUMS").read_text()
+
+        self.assertEqual(len(lines), 5)
+        self.assertIn("median_of_run_p95s_ns", lines[0])
+        self.assertIn("1ms_known_missed", lines[0])
+        self.assertIn("cost-logical-latency.csv", checksums)
+
+    def test_v1_output_files_remain_byte_identical(self):
+        analyzer = load_analyzer()
+        report = analyzer.analyze(fixture(), expected_attempts=3, expected_runs=1,
+                                  expected_holds=(10,), expected_protocols=("guarded",))
+        expected = {
+            "SHA256SUMS": "83a4fede75bae7a75bd14340562948153f315e960dfd8488bcde8fb34d3cdaa9",
+            "cost-analysis.json": "08bd5c9382a0b89ca43ddd0b91f90875be4d7b39a7528a78b00b668ad489439a",
+            "cost-contention-table.tex": "59839917b1a5dfca2429f794534a74ab4339ab50c60911345665dcead6b59c66",
+            "cost-note.tex": "c3a1424248e04f8d74cab87a6f9cf15ea30ce0ff66a0887c5007b7209460d933",
+            "cost-runs.csv": "d68581dfd0a4f3cc94382314b8529d305e15d88f0490963efdfb101f6c8d37e1",
+            "cost-summary.csv": "52f06aa275dae31037d840bd45b36138019877b7b2efb347fc859cebe0e8380b",
+            "cost-table.tex": "7063555a94c97a3dd43842cd662694d009e03ad13e2751bfcd38539cdecaf6ae",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            analyzer.write_outputs(report, root)
+            actual = {
+                path.name: __import__("hashlib").sha256(path.read_bytes()).hexdigest()
+                for path in root.iterdir()
+            }
+        self.assertEqual(actual, expected)
+
+    def test_v2_output_files_remain_byte_identical(self):
+        analyzer = load_analyzer()
+        report = analyzer.analyze(v2_fixture(), expected_attempts=3, expected_runs=1,
+                                  expected_holds=(10,), expected_protocols=("guarded",))
+        expected = {
+            "SHA256SUMS": "28b40d12ef435a67699815c294172fd1132870e772d76abb5ae2c770ac51cb3c",
+            "cost-analysis.json": "d424627df5128eb54dfab68551ec0018e0d7effe22b32729ed965af1895433c1",
+            "cost-contention-table.tex": "59839917b1a5dfca2429f794534a74ab4339ab50c60911345665dcead6b59c66",
+            "cost-logical-latency.csv": "f45a9676d3d2c5cd528b9d0d6ab88181f7dfce38ccd2806435b1b5cc86020c40",
+            "cost-note.tex": "c3a1424248e04f8d74cab87a6f9cf15ea30ce0ff66a0887c5007b7209460d933",
+            "cost-runs.csv": "d68581dfd0a4f3cc94382314b8529d305e15d88f0490963efdfb101f6c8d37e1",
+            "cost-summary.csv": "52f06aa275dae31037d840bd45b36138019877b7b2efb347fc859cebe0e8380b",
+            "cost-table.tex": "7063555a94c97a3dd43842cd662694d009e03ad13e2751bfcd38539cdecaf6ae",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            analyzer.write_outputs(report, root)
+            actual = {
+                path.name: __import__("hashlib").sha256(path.read_bytes()).hexdigest()
+                for path in root.iterdir()
+            }
+        self.assertEqual(actual, expected)
+
     def test_reports_outcome_specific_populations_and_denominators(self):
         analyzer = load_analyzer()
         report = analyzer.analyze(fixture(), expected_attempts=3, expected_runs=1,
@@ -111,6 +300,23 @@ class UpdateCostAnalysisTest(unittest.TestCase):
         records = fixture()
         next(r for r in records if r.get("phase") == "after_replace")["program_bytes"] = 48
         with self.assertRaisesRegex(ValueError, "resident program accounting changed"):
+            analyzer.analyze(records, expected_attempts=3, expected_runs=1,
+                             expected_holds=(10,), expected_protocols=("guarded",))
+
+    def test_duplicate_resource_phase_is_rejected(self):
+        analyzer = load_analyzer()
+        records = fixture()
+        resource = next(record for record in records if record.get("phase") == "one_program")
+        records.append(dict(resource))
+        with self.assertRaisesRegex(ValueError, "resource observations"):
+            analyzer.analyze(records, expected_attempts=3, expected_runs=1,
+                             expected_holds=(10,), expected_protocols=("guarded",))
+
+    def test_boolean_update_identity_is_rejected(self):
+        analyzer = load_analyzer()
+        records = fixture()
+        next(record for record in records if record.get("attempt") == 0)["attempt"] = False
+        with self.assertRaisesRegex(ValueError, "invalid attempt identity"):
             analyzer.analyze(records, expected_attempts=3, expected_runs=1,
                              expected_holds=(10,), expected_protocols=("guarded",))
 

@@ -162,6 +162,13 @@ impl<T> EpochSnapshot<T> {
         self.replace(Box::into_raw(next));
     }
 
+    /// Publish and run an infallible host diagnostic after the new pointer and
+    /// reader epoch are visible, but before waiting for old readers.
+    #[cfg(all(feature = "host-update-diagnostics", not(target_os = "none")))]
+    pub fn publish_observed_for_diagnostics(&self, next: Box<T>, post_swap: impl FnOnce()) {
+        self.replace_with(Box::into_raw(next), post_swap);
+    }
+
     /// Remove the published value. Only the exclusive-slot transition wrapper
     /// exposes this operation, after it has excluded all readers.
     pub(super) fn clear(&self) {
@@ -169,6 +176,10 @@ impl<T> EpochSnapshot<T> {
     }
 
     fn replace(&self, next: *mut T) {
+        self.replace_with(next, || {});
+    }
+
+    fn replace_with(&self, next: *mut T, post_swap: impl FnOnce()) {
         let _writer = WriterGuard::acquire(&self.writer);
         let previous_epoch = self.epoch.load(Ordering::SeqCst) & 1;
         let previous = self.current.swap(next, Ordering::SeqCst);
@@ -176,6 +187,7 @@ impl<T> EpochSnapshot<T> {
         // Readers which start after this point use the other counter. Readers
         // already committed to previous_epoch keep the replaced pointer alive.
         self.epoch.store(previous_epoch ^ 1, Ordering::SeqCst);
+        post_swap();
         while self.readers[previous_epoch].load(Ordering::SeqCst) != 0 {
             cpu_relax();
         }

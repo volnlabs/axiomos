@@ -147,6 +147,19 @@ impl<T> ExclusiveSlot<T> {
     pub fn publish_without_quiescence_for_diagnostics(&self, next: Box<T>) {
         self.snapshot.publish(next);
     }
+
+    /// Publish for the host baseline and observe the completed pointer/epoch
+    /// exchange before reclamation waits for predecessor readers.
+    #[cfg(all(feature = "host-update-diagnostics", not(target_os = "none")))]
+    #[doc(hidden)]
+    pub fn publish_without_quiescence_observed_for_diagnostics(
+        &self,
+        next: Box<T>,
+        post_swap: impl FnOnce(),
+    ) {
+        self.snapshot
+            .publish_observed_for_diagnostics(next, post_swap);
+    }
 }
 
 /// The slot's only active invocation.
@@ -195,6 +208,19 @@ impl<T> ExclusiveTransitionGuard<'_, T> {
         assert!(!self.mutated, "exclusive transition already mutated");
         drop(self.current.take());
         self.slot.snapshot.publish(next);
+        self.mutated = true;
+    }
+
+    /// Publish with a host-only observation between pointer/epoch exchange and
+    /// predecessor reclamation.
+    #[cfg(all(feature = "host-update-diagnostics", not(target_os = "none")))]
+    #[doc(hidden)]
+    pub fn publish_observed_for_diagnostics(&mut self, next: Box<T>, post_swap: impl FnOnce()) {
+        assert!(!self.mutated, "exclusive transition already mutated");
+        drop(self.current.take());
+        self.slot
+            .snapshot
+            .publish_observed_for_diagnostics(next, post_swap);
         self.mutated = true;
     }
 

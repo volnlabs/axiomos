@@ -3,6 +3,7 @@
 
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import sys
@@ -23,8 +24,14 @@ def digest(path):
 
 def main():
     repo = SCRIPT.resolve().parents[2]
+    try:
+        packager.scan_stream("chunk boundary", io.StringIO(" " * (1024 * 1024 - 3) + "axiomos"))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("identity split across scan chunks was missed")
     environment = json.loads(packager.recorded_environment(repo))
-    assert packager.ARTIFACT == "artifact-r2"
+    assert packager.ARTIFACT == "artifact-r3"
     assert environment["processor"]["model"] == "AMD Ryzen 7 7735HS with Radeon Graphics"
     assert environment["processor"]["selected_affinity"] == {"dispatch": 12, "update": 14}
     assert environment["processor"]["boost_enabled"] is True
@@ -45,9 +52,9 @@ def main():
     packager.scan_text("retained validation", validation)
     assert '"--raw-cost"' in packager.REPRODUCE
     if "--helpers-only" in sys.argv:
-        print("PASS: r2 environment and validation exports are identity-clean")
+        print("PASS: r3 environment and validation exports are identity-clean")
         return
-    target = Path(os.environ["CARGO_TARGET_DIR"]) / "anonymous-publication-r2-check"
+    target = Path(os.environ["CARGO_TARGET_DIR"]) / "anonymous-publication-r3-check"
     target.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=target) as first, tempfile.TemporaryDirectory(dir=target) as second:
         a = packager.build(repo, Path(first))

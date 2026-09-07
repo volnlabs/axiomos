@@ -3,6 +3,7 @@
     feature = "bpf-unsigned-development"
 ))]
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Barrier, Mutex};
 
 use kernel::bpf::{
@@ -178,16 +179,19 @@ fn replacement_rejections_preserve_publication_accounting_and_aba_identity() {
             ),
             Err(InstallError::PersistentStateUnsupported)
         );
+        let published = AtomicBool::new(false);
         assert_eq!(
-            manager.try_replace_exclusive_for(
+            manager.try_replace_exclusive_observed_for_diagnostics(
                 owner,
                 ControlSlot::Timer,
                 installed.installed,
                 b,
-                StatePolicy::Reset
+                StatePolicy::Reset,
+                || published.store(true, Ordering::SeqCst),
             ),
             Err(InstallError::Busy)
         );
+        assert!(!published.load(Ordering::SeqCst));
         assert!(!manager.reclaim_owner_for_diagnostics(owner));
         unchanged(&manager, installed.installed, a_charge, installed);
         assert!(manager.reclaim_owner_for_diagnostics(8));
@@ -555,19 +559,27 @@ fn replacement_rejections_preserve_publication_accounting_and_aba_identity() {
             .unwrap();
         });
         a_entered_rx.recv().unwrap();
-        let writer = scope.spawn(|| {
-            manager.try_replace_atomic_without_quiescence_for(
+        let post_swap_observed = Arc::new(AtomicBool::new(false));
+        let writer_observed = Arc::clone(&post_swap_observed);
+        let writer_manager = &mut manager;
+        let writer = scope.spawn(move || {
+            writer_manager.try_replace_atomic_without_quiescence_observed_for_diagnostics(
                 owner,
                 ControlSlot::Timer,
                 atomic_a.installed,
                 next_candidate,
                 StatePolicy::Reset,
+                || writer_observed.store(true, Ordering::SeqCst),
             )
         });
         loop {
             let observed = BpfManager::observe_timer_atomic_without_quiescence(|id| id).unwrap();
             if observed.program == next_candidate {
                 assert_eq!(observed.epoch, atomic_a.installed.epoch + 1);
+                assert!(
+                    post_swap_observed.load(Ordering::SeqCst),
+                    "post-swap observer must run before B is observed"
+                );
                 assert!(
                     !writer.is_finished(),
                     "writer returned before A guard drained"

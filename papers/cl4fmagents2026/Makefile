@@ -1,8 +1,8 @@
 OUT := build
 PDF := who-guards-the-update.pdf
 
-UPDATE_PUBLICATION_EVIDENCE ?= ../../docs/performance/evidence/update-transaction-v2
-UPDATE_ADAPTATION_EVIDENCE ?= ../../docs/performance/evidence/update-adaptation-v1
+UPDATE_PUBLICATION_EVIDENCE ?= ../../target/cl4fmagents-v3/capture-r3
+UPDATE_ADAPTATION_EVIDENCE ?= ../../target/cl4fmagents-v3/capture-r3-adaptation
 
 .PHONY: all
 all:

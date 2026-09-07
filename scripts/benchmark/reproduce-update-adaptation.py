@@ -58,8 +58,8 @@ def main():
         sys.executable, ROOT / "scripts/benchmark/update-transaction-runner.py",
         "--output", destination, "--marker", "UPDATE_ADAPT",
         "--measured-executable", executable,
-        "--expected-source-digest", source_digest, "--timeout-seconds", "120",
-        "--", executable, "--nocapture", "--test-threads=1",
+        "--expected-source-digest", source_digest, "--timeout-seconds", "600",
+        "--", executable, "--nocapture", "--include-ignored", "--test-threads=1",
     ])
     (destination / "build-command.json").write_text(json.dumps(command) + "\n")
     (destination / "build-artifacts.jsonl").write_text(build.stdout)

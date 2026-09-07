@@ -9,7 +9,7 @@ from pathlib import Path
 import subprocess
 
 PROTOCOLS = ("atomic", "guarded")
-HOLDS_US = (0, 10, 100, 500)
+HOLDS_US = (0, 10, 100, 500, 900, 1100)
 
 
 def main() -> int:

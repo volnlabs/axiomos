@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 import csv
 import hashlib
 import json
@@ -13,11 +14,705 @@ from pathlib import Path
 PROTOCOLS = ("frozen", "atomic", "guarded")
 KINDS = {"config", "candidate", "attempt", "control", "invocation", "completion", "summary"}
 PROPOSAL_TIMES_US = (4_250_000, 4_500_000, 4_750_000, 5_000_000)
+GRID_PROTOCOLS = ("atomic", "guarded")
+GRID_HOLDS_US = (0, 100, 500, 900, 1100)
+GRID_PHASES_US = tuple(range(0, 1000, 20))
+
+
+def file_digest(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def close(actual, expected, label):
     if not math.isclose(actual, expected, rel_tol=1e-9, abs_tol=1e-10):
         raise ValueError(f"{label}: got {actual}, expected {expected}")
+
+
+def conditional_rate(numerator, denominator):
+    return None if denominator == 0 else numerator / denominator
+
+
+def _nonnegative(record, key):
+    value = record.get(key)
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{record.get('kind')} has invalid {key}")
+    return value
+
+
+def _one(records, kind):
+    selected = [record for record in records if record.get("kind") == kind]
+    if len(selected) != 1:
+        raise ValueError(f"expected one {kind} record")
+    return selected[0]
+
+
+def _recompute_schedule(start, records, attempts):
+    hold = start["hold_us"]
+    phase = start["phase_us"]
+    duration = start.get("duration_us")
+    if (duration != 8_000_000 or start.get("step_max_us") != 100
+            or start.get("control_period_us") != 1000
+            or start.get("mass_change_us") != 4_000_000
+            or start.get("initial_gain") != 1):
+        raise ValueError("schedule-grid plant configuration mismatch")
+    current = identity(start.get("initial_installation"), "grid initial")
+    gains = {current[0]: start["initial_gain"]}
+    publications = {}
+    manager_current = current
+    for attempt in sorted(attempts, key=lambda row: row["scheduled_us"]):
+        before = identity(attempt["before_installation"], "grid attempt before")
+        after = identity(attempt["after_installation"], "grid attempt after")
+        expected = identity(attempt.get("expected"), "grid attempt expected")
+        if before != manager_current or attempt.get("before_committed") != start["initial_committed"]:
+            raise ValueError("schedule-grid attempt manager history mismatch")
+        if expected != before:
+            raise ValueError("schedule-grid attempt expected identity is stale")
+        candidate = attempt.get("candidate_handle")
+        candidate_gain = attempt.get("candidate_gain")
+        if (type(candidate) is not int or candidate == current[0]
+                or type(candidate_gain) is not int):
+            raise ValueError("schedule-grid candidate is malformed")
+        if candidate in gains and gains[candidate] != candidate_gain:
+            raise ValueError("schedule-grid candidate gain changed")
+        gains[candidate] = candidate_gain
+        if attempt["outcome"] == "Busy":
+            if (after != before or attempt.get("after_committed") != start["initial_committed"]
+                    or attempt.get("published_us") is not None or attempt.get("receipt") is not None):
+                raise ValueError("schedule-grid Busy attempt mutated publication")
+        elif attempt["outcome"] == "Ok":
+            receipt = attempt.get("receipt")
+            if (receipt is None or identity(receipt.get("previous"), "grid receipt previous") != before
+                    or identity(receipt.get("installed"), "grid receipt installed") != after
+                    or after != (candidate, before[1] + 1)
+                    or attempt.get("after_committed") != start["initial_committed"]
+                    or receipt.get("admission_delta") != 0
+                    or receipt.get("committed") != start["initial_committed"]):
+                raise ValueError("schedule-grid receipt history mismatch")
+            when = attempt.get("published_us")
+            if type(when) is not int or when != attempt.get("scheduled_us"):
+                raise ValueError("schedule-grid publication timestamp mismatch")
+            if when in publications:
+                raise ValueError("duplicate schedule-grid publication timestamp")
+            publications[when] = after
+            manager_current = after
+        else:
+            raise ValueError("unexpected schedule-grid attempt outcome")
+
+    dispatch_records = [record for record in records if record.get("kind") == "dispatch"]
+    dispatches = {record.get("scheduled_us"): record for record in dispatch_records}
+    if (len(dispatch_records) != 8000 or len(dispatches) != len(dispatch_records)
+            or set(dispatches) != set(range(0, duration, 1000))):
+        raise ValueError("schedule-grid dispatch coverage mismatch")
+    completions_by_time = defaultdict(list)
+    seen_completions = set()
+    for record in records:
+        if record.get("kind") == "completion":
+            invocation = record.get("invocation")
+            if type(invocation) is not int or invocation in seen_completions:
+                raise ValueError("duplicate or malformed schedule-grid completion")
+            seen_completions.add(invocation)
+            completions_by_time[record["completion_us"]].append(record)
+    mesh = set(range(0, duration + 1, 100))
+    mesh.update(tick + hold for tick in range(0, duration, 1000))
+    for base in start["proposal_bases_us"]:
+        primary = base + phase
+        ordinal = 0
+        while True:
+            scheduled = (primary if ordinal == 0 else base + ordinal * 1000
+                         + (phase + start["retry_phase_step_us"] * ordinal) % 1000)
+            if scheduled >= primary + start["retry_deadline_us"]:
+                break
+            mesh.add(scheduled)
+            ordinal += 1
+
+    velocity = 0.0
+    held_command = 0.0
+    prior = 0
+    current_snapshot = current
+    active = {}
+    pre_errors, post_errors = [], []
+    command_integral = 0.0
+    max_command = 0.0
+    max_error = 0.0
+    saturated = violations = overlaps = retired = completed = 0
+    transition = execution = empty = 0
+    for time_us in sorted(mesh):
+        if prior < duration:
+            end = min(time_us, duration)
+            delta = end - prior
+            command_integral += abs(held_command) * delta
+            if delta:
+                mass = 1.0 if prior < 4_000_000 else 2.0
+                velocity += (delta / 1_000_000.0) * (held_command - velocity) / mass
+        prior = time_us
+        for completion in sorted(completions_by_time.get(time_us, []),
+                                 key=lambda row: row["invocation"]):
+            if hold == 0:
+                continue
+            invocation = completion["invocation"]
+            dispatch = active.pop(invocation, None)
+            if dispatch is None:
+                raise ValueError("schedule-grid completion lacks a started dispatch")
+            captured = identity(completion["captured_installation"], "grid completion")
+            if captured != identity(dispatch["captured_installation"], "grid dispatch"):
+                raise ValueError("schedule-grid completion identity changed")
+            if completion.get("gain") != dispatch.get("gain"):
+                raise ValueError("schedule-grid completion gain changed")
+            command_value = completion.get("command")
+            close(command_value, dispatch["command"], "grid completion command")
+            is_retired = captured != current_snapshot
+            if completion.get("retired_after_publication") != is_retired:
+                raise ValueError("schedule-grid retired completion classification mismatch")
+            if identity(completion.get("published_installation"),
+                        "grid completion publication") != current_snapshot:
+                raise ValueError("schedule-grid completion publication mismatch")
+            retired += is_retired
+            completed += 1
+            held_command = command_value
+            max_command = max(max_command, abs(command_value))
+            saturated += abs(command_value) == 4.0
+            violations += abs(command_value) > start.get("command_bound", 4.0)
+        if time_us in publications:
+            current_snapshot = publications[time_us]
+        if time_us < duration and time_us % 1000 == 0:
+            dispatch = dispatches[time_us]
+            reference = reference_at(time_us)
+            error = reference - velocity
+            (pre_errors if time_us < 4_000_000 else post_errors).append(error * error)
+            max_error = max(max_error, abs(error))
+            close(dispatch.get("velocity"), velocity, "schedule-grid plant evolution")
+            close(dispatch.get("reference"), reference, "schedule-grid reference")
+            outcome = dispatch.get("outcome")
+            if outcome == "Started":
+                captured = identity(dispatch["captured_installation"], "grid dispatch")
+                if captured != current_snapshot:
+                    raise ValueError("schedule-grid dispatch captured stale publication")
+                if dispatch.get("gain") != gains.get(captured[0]):
+                    raise ValueError("schedule-grid dispatch gain/identity mismatch")
+                expected_command = command_for(dispatch["gain"], reference, velocity)
+                close(dispatch.get("command"), expected_command, "schedule-grid command")
+                if dispatch.get("completion_us") != time_us + hold:
+                    raise ValueError("schedule-grid completion timestamp mismatch")
+                overlaps += sum(identity(prior_dispatch["captured_installation"], "active grid dispatch")
+                                != captured for prior_dispatch in active.values())
+                if hold != 0:
+                    active[dispatch["tick"]] = dispatch
+            elif outcome == "TransitionBusy":
+                transition += 1
+            elif outcome == "ExecutionBusy":
+                execution += 1
+            elif outcome == "Empty":
+                empty += 1
+            else:
+                raise ValueError("unexpected schedule-grid dispatch outcome")
+        if hold == 0:
+            for completion in completions_by_time.get(time_us, []):
+                dispatch = dispatches.get(time_us)
+                if dispatch is None or completion["invocation"] != dispatch["tick"]:
+                    raise ValueError("zero-hold completion lacks its dispatch")
+                if dispatch.get("outcome") != "Started":
+                    raise ValueError("zero-hold completion follows skipped dispatch")
+                captured = identity(completion["captured_installation"], "grid completion")
+                if captured != current_snapshot:
+                    raise ValueError("zero-hold completion captured stale publication")
+                if completion.get("gain") != dispatch.get("gain"):
+                    raise ValueError("zero-hold completion gain changed")
+                close(completion["command"], dispatch["command"], "grid completion command")
+                if completion.get("retired_after_publication"):
+                    raise ValueError("zero-hold completion cannot be retired")
+                if identity(completion.get("published_installation"),
+                            "grid completion publication") != current_snapshot:
+                    raise ValueError("zero-hold completion publication mismatch")
+                completed += 1
+                held_command = completion["command"]
+                max_command = max(max_command, abs(held_command))
+                saturated += abs(held_command) == 4.0
+                violations += abs(held_command) > start.get("command_bound", 4.0)
+    if active:
+        raise ValueError("schedule-grid invocation outlived event mesh")
+    started = sum(dispatch.get("outcome") == "Started" for dispatch in dispatch_records)
+    if completed != started or completed != len(seen_completions):
+        raise ValueError("schedule-grid started/completed invocation mismatch")
+    return {
+        "scheduled_ticks": 8000, "completed_invocations": completed,
+        "pre_rmse": math.sqrt(sum(pre_errors) / len(pre_errors)),
+        "post_rmse": math.sqrt(sum(post_errors) / len(post_errors)),
+        "max_abs_error": max_error, "max_abs_command": max_command,
+        "abs_command_integral_us": command_integral,
+        "saturated_completions": saturated, "command_bound_violations": violations,
+        "old_new_overlaps": overlaps, "retired_commands": retired,
+        "transition_skips": transition, "execution_skips": execution, "empty_skips": empty,
+        "final_installation": manager_current,
+    }
+
+
+def reduce_schedule_run(records):
+    start, end = _one(records, "run_start"), _one(records, "run_end")
+    key = (start.get("protocol"), start.get("hold_us"), start.get("phase_us"))
+    if key[0] not in GRID_PROTOCOLS or key[1] not in GRID_HOLDS_US or key[2] not in GRID_PHASES_US:
+        raise ValueError("invalid schedule-grid run identity")
+    if any((record.get("protocol"), record.get("hold_us"), record.get("phase_us")) != key
+           for record in records):
+        raise ValueError("schedule-grid record identity changed within a run")
+    if any(record.get("schema") != 1 or record.get("experiment") != "schedule_grid"
+           or record.get("kind") not in {"run_start", "attempt", "dispatch", "completion", "run_end"}
+           for record in records):
+        raise ValueError("schedule-grid record schema/kind mismatch")
+    integer_fields = (
+        "scheduled_ticks", "completed_invocations", "attempted_updates", "successful_updates",
+        "busy_attempts", "retry_attempts", "deadline_censored", "old_new_overlaps",
+        "retired_commands", "saturated_completions", "command_bound_violations",
+        "transition_skips", "execution_skips", "empty_skips", "final_gain", "final_committed",
+    )
+    for field in integer_fields:
+        _nonnegative(end, field)
+    if end["scheduled_ticks"] != 8000:
+        raise ValueError("schedule-grid run has wrong control denominator")
+    if end["successful_updates"] + end["deadline_censored"] != 4:
+        raise ValueError("schedule-grid update denominator mismatch")
+    attempts = [record for record in records if record.get("kind") == "attempt"]
+    if len(attempts) != end["attempted_updates"]:
+        raise ValueError("schedule-grid attempt denominator mismatch")
+    for attempt in attempts:
+        proposal = attempt.get("proposal")
+        if type(proposal) is not int or proposal not in range(4):
+            raise ValueError("schedule-grid attempt has invalid proposal")
+        if attempt.get("scheduled_us", 0) >= attempt.get("deadline_us", 0):
+            raise ValueError("schedule-grid attempt reached its deadline")
+        for name in ("expected", "before_installation", "after_installation"):
+            identity(attempt.get(name), f"grid {name}")
+        published = attempt.get("published_us")
+        returned = attempt.get("returned_us")
+        if type(returned) is not int or returned < attempt["scheduled_us"]:
+            raise ValueError("grid return time is invalid")
+        if published is not None and (type(published) is not int or published > returned):
+            raise ValueError("grid publication/return order is invalid")
+    request_rows = []
+    bases = start.get("proposal_bases_us")
+    if not isinstance(bases, list) or len(bases) != 4:
+        raise ValueError("schedule-grid proposal bases are incomplete")
+    for proposal, base in enumerate(bases):
+        members = sorted((attempt for attempt in attempts if attempt.get("proposal") == proposal),
+                         key=lambda attempt: attempt["ordinal"])
+        if not members or [attempt["ordinal"] for attempt in members] != list(range(len(members))):
+            raise ValueError("schedule-grid request attempt sequence is incomplete")
+        primary = base + key[2]
+        deadline = primary + start.get("retry_deadline_us", 0)
+        expected = identity(members[0].get("before_installation"), "grid request expected")
+        candidate = members[0].get("candidate_handle")
+        candidate_gain = (2, 4, 8, 16)[proposal]
+        if (any(identity(member.get("expected"), "grid request expected") != expected
+                or member.get("candidate_handle") != candidate
+                or member.get("candidate_gain") != candidate_gain for member in members)
+                or any(member["deadline_us"] != deadline for member in members)
+                or any(member["scheduled_us"] != (
+                    primary if ordinal == 0 else base + ordinal * 1000
+                    + (key[2] + start["retry_phase_step_us"] * ordinal) % 1000)
+                    for ordinal, member in enumerate(members))):
+            raise ValueError("schedule-grid request schedule is inconsistent")
+        success = [attempt for attempt in members if attempt.get("outcome") == "Ok"]
+        censored = not success
+        if len(success) > 1:
+            raise ValueError("schedule-grid request completion is inconsistent")
+        published = None if censored else success[0]["published_us"]
+        returned = None if censored else success[0]["returned_us"]
+        request_rows.append({
+            "protocol": key[0], "hold_us": key[1], "phase_us": key[2],
+            "proposal": proposal, "primary_us": primary, "deadline_us": deadline,
+            "attempts": len(members),
+            "busy_attempts": sum(m.get("outcome") == "Busy" for m in members),
+            "retries": len(members) - 1, "completed": not censored, "censored": censored,
+            "published_us": published, "returned_us": returned,
+            "publication_delay_us": None if censored else published - primary,
+            "return_delay_us": None if censored else returned - primary,
+        })
+    if sum(request["censored"] for request in request_rows) != end["deadline_censored"]:
+        raise ValueError("schedule-grid censored-request count mismatch")
+    raw_counts = {
+        "successful_updates": sum(attempt.get("outcome") == "Ok" for attempt in attempts),
+        "busy_attempts": sum(attempt.get("outcome") == "Busy" for attempt in attempts),
+        "retry_attempts": sum(attempt.get("ordinal", 0) > 0 for attempt in attempts),
+    }
+    for field, value in raw_counts.items():
+        if end[field] != value:
+            raise ValueError(f"schedule-grid {field} disagrees with attempts")
+    computed = _recompute_schedule(start, records, attempts)
+    for field in ("scheduled_ticks", "completed_invocations", "saturated_completions",
+                  "command_bound_violations", "old_new_overlaps", "retired_commands",
+                  "transition_skips", "execution_skips", "empty_skips"):
+        if computed[field] != end[field]:
+            raise ValueError(f"schedule-grid {field} disagrees with raw events")
+    for field in ("pre_rmse", "post_rmse", "max_abs_error", "max_abs_command",
+                  "abs_command_integral_us"):
+        close(end[field], computed[field], f"schedule-grid {field}")
+    if identity(end.get("final_installation"), "grid final") != computed["final_installation"]:
+        raise ValueError("schedule-grid final installation disagrees with attempts")
+    final_handle = computed["final_installation"][0]
+    final_gain = (start["initial_gain"] if final_handle == start["initial_installation"][0]
+                  else next(attempt["candidate_gain"] for attempt in attempts
+                            if attempt["candidate_handle"] == final_handle))
+    if end["final_gain"] != final_gain:
+        raise ValueError("schedule-grid final gain disagrees with attempts")
+    if end["final_committed"] != start.get("initial_committed"):
+        raise ValueError("schedule-grid final committed charge changed")
+    row = {"protocol": key[0], "hold_us": key[1], "phase_us": key[2]}
+    row.update({field: end[field] for field in integer_fields})
+    for field in ("pre_rmse", "post_rmse", "max_abs_error", "max_abs_command",
+                  "abs_command_integral_us"):
+        value = end.get(field)
+        if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"schedule-grid invalid {field}")
+        row[field] = value
+    busy_primaries = sum(request["busy_attempts"] > 0 for request in request_rows)
+    retried_successes = sum(request["completed"] and request["retries"] > 0
+                            for request in request_rows)
+    row.update({
+        "busy_primaries": busy_primaries,
+        "retried_successes": retried_successes,
+        "activation_rate": conditional_rate(end["successful_updates"], 4),
+        "busy_rate_per_attempt": conditional_rate(end["busy_attempts"], end["attempted_updates"]),
+        "retry_success_rate": conditional_rate(retried_successes, busy_primaries),
+        "overlaps_per_activation": conditional_rate(end["old_new_overlaps"], end["successful_updates"]),
+        "retired_commands_per_activation": conditional_rate(
+            end["retired_commands"], end["successful_updates"]),
+    })
+    return row, request_rows
+
+
+def _integral_abs_command(records, start_us, end_us, initial):
+    changes = sorted((record["completion_us"], record["command"])
+                     for record in records if record.get("kind") == "completion")
+    command = initial
+    cursor = start_us
+    total = 0.0
+    for when, next_command in changes:
+        if when <= start_us:
+            command = next_command
+            continue
+        if when >= end_us:
+            break
+        total += abs(command) * (when - cursor)
+        cursor, command = when, next_command
+    return total + abs(command) * (end_us - cursor)
+
+
+def _recompute_corrective(start, records, attempts):
+    duration = start["duration_us"]
+    fault = start["fault_us"]
+    period = start["control_period_us"]
+    initial = identity(start["initial_installation"], "corrective initial")
+    zero_handle = _nonnegative(start, "zero_handle")
+    current = initial
+    publications = {}
+    for attempt in sorted(attempts, key=lambda row: row["scheduled_us"]):
+        before = identity(attempt.get("before_installation"), "corrective attempt before")
+        after = identity(attempt.get("after_installation"), "corrective attempt after")
+        expected = identity(attempt.get("expected"), "corrective expected")
+        if before != current or expected != initial or attempt.get("candidate_handle") != zero_handle:
+            raise ValueError("corrective attempt identity history mismatch")
+        if (attempt.get("before_committed") != start["initial_committed"]
+                or attempt.get("after_committed") != start["initial_committed"]):
+            raise ValueError("corrective attempt ledger history mismatch")
+        outcome = attempt.get("outcome")
+        if outcome == "Busy":
+            if (after != before or attempt.get("receipt") is not None
+                    or attempt.get("published_us") is not None):
+                raise ValueError("corrective Busy attempt mutated publication")
+        elif outcome == "Ok":
+            receipt = attempt.get("receipt")
+            if (receipt is None
+                    or identity(receipt.get("previous"), "corrective receipt previous") != before
+                    or identity(receipt.get("installed"), "corrective receipt installed") != after
+                    or after != (zero_handle, before[1] + 1)
+                    or receipt.get("admission_delta") != 0
+                    or receipt.get("committed") != start["initial_committed"]):
+                raise ValueError("corrective receipt history mismatch")
+            published = attempt.get("published_us")
+            returned = attempt.get("returned_us")
+            if not isinstance(published, int) or not isinstance(returned, int) or published > returned:
+                raise ValueError("corrective publication/return order is invalid")
+            if published in publications:
+                raise ValueError("duplicate corrective publication timestamp")
+            publications[published] = after
+            current = after
+        else:
+            raise ValueError("unexpected corrective attempt outcome")
+
+    dispatch_records = [record for record in records if record.get("kind") == "dispatch"]
+    dispatches = {record.get("scheduled_us"): record for record in dispatch_records}
+    expected_ticks = set(range(0, duration, period))
+    if len(dispatches) != len(dispatch_records) or set(dispatches) != expected_ticks:
+        raise ValueError("corrective dispatch coverage mismatch")
+    completions_by_time = defaultdict(list)
+    completion_records = [record for record in records if record.get("kind") == "completion"]
+    seen_completions = set()
+    for completion in completion_records:
+        invocation = completion.get("invocation")
+        if type(invocation) is not int or invocation in seen_completions:
+            raise ValueError("duplicate or malformed corrective completion")
+        seen_completions.add(invocation)
+        completions_by_time[completion.get("completion_us")].append(completion)
+
+    mesh = set(range(0, duration + 1, start["step_max_us"]))
+    for tick in expected_ticks:
+        hold = start["long_hold_us"] if tick == start["long_start_us"] else start["normal_hold_us"]
+        mesh.add(tick + hold)
+    ordinal = 0
+    while True:
+        scheduled = (fault if ordinal == 0 else fault + ordinal * 1000
+                     + (start["retry_phase_step_us"] * ordinal) % 1000)
+        if scheduled >= fault + start["retry_deadline_us"]:
+            break
+        mesh.add(scheduled)
+        ordinal += 1
+
+    velocity = start["initial_velocity"]
+    held_command = start["initial_command"]
+    reference = start["reference"]
+    prior = 0
+    snapshot = initial
+    active = {}
+    fault_integral = 0.0
+    publication_integral = 0.0
+    successful = [attempt for attempt in attempts if attempt["outcome"] == "Ok"]
+    publication = successful[0]["published_us"] if len(successful) == 1 else None
+    max_velocity = 0.0
+    max_error = 0.0
+    below_since = None
+    stop_entry = None
+    stop_confirmed = None
+    retired = saturated = violations = completed = 0
+    transition = execution = empty_count = 0
+    for time_us in sorted(mesh):
+        if prior < duration:
+            end = min(time_us, duration)
+            if end > prior:
+                if end > fault:
+                    fault_integral += abs(held_command) * (end - max(prior, fault))
+                if publication is not None and end > publication:
+                    publication_integral += abs(held_command) * (end - max(prior, publication))
+                velocity += ((end - prior) / 1_000_000.0) * (held_command - velocity) / start["mass"]
+        prior = time_us
+
+        for completion in sorted(completions_by_time.get(time_us, []),
+                                 key=lambda row: row["invocation"]):
+            invocation = completion["invocation"]
+            dispatch = active.pop(invocation, None)
+            if dispatch is None:
+                raise ValueError("corrective completion lacks a started dispatch")
+            captured = identity(completion.get("captured_installation"),
+                                "corrective completion")
+            if captured != identity(dispatch.get("captured_installation"),
+                                    "corrective dispatch"):
+                raise ValueError("corrective completion identity changed")
+            if completion.get("gain") != dispatch.get("gain"):
+                raise ValueError("corrective completion gain changed")
+            close(completion.get("command"), dispatch.get("command"),
+                  "corrective completion command")
+            if completion.get("hold_us") != completion["completion_us"] - dispatch["scheduled_us"]:
+                raise ValueError("corrective completion hold mismatch")
+            is_retired = captured != snapshot
+            if completion.get("retired_after_publication") != is_retired:
+                raise ValueError("corrective retired completion classification mismatch")
+            if identity(completion.get("published_installation"),
+                        "corrective completion publication") != snapshot:
+                raise ValueError("corrective completion publication mismatch")
+            retired += is_retired
+            held_command = completion["command"]
+            saturated += abs(held_command) == start["command_bound"]
+            violations += abs(held_command) > start["command_bound"]
+            completed += 1
+
+        if time_us in publications:
+            snapshot = publications[time_us]
+
+        if time_us in dispatches:
+            dispatch = dispatches[time_us]
+            if dispatch.get("tick") != time_us // period:
+                raise ValueError("corrective dispatch tick mismatch")
+            close(dispatch.get("velocity"), velocity, "corrective plant evolution")
+            close(dispatch.get("reference"), reference, "corrective reference")
+            outcome = dispatch.get("outcome")
+            if outcome == "Started":
+                captured = identity(dispatch.get("captured_installation"),
+                                    "corrective dispatch")
+                if captured != snapshot:
+                    raise ValueError("corrective dispatch captured stale publication")
+                gain = dispatch.get("gain")
+                expected_gain = 1 if captured == initial else 0
+                if gain != expected_gain:
+                    raise ValueError("corrective dispatch gain/identity mismatch")
+                close(dispatch.get("command"), command_for(gain, reference, velocity),
+                      "corrective command")
+                hold = (start["long_hold_us"] if time_us == start["long_start_us"]
+                        else start["normal_hold_us"])
+                if dispatch.get("completion_us") != time_us + hold:
+                    raise ValueError("corrective completion timestamp mismatch")
+                active[dispatch["tick"]] = dispatch
+            elif outcome == "TransitionBusy":
+                transition += 1
+            elif outcome == "ExecutionBusy":
+                execution += 1
+            elif outcome == "Empty":
+                empty_count += 1
+            else:
+                raise ValueError("unexpected corrective dispatch outcome")
+
+        if fault <= time_us <= duration:
+            max_velocity = max(max_velocity, abs(velocity))
+            max_error = max(max_error, abs(reference - velocity))
+            if stop_confirmed is None:
+                if abs(velocity) <= start["stop_band"]:
+                    if below_since is None:
+                        below_since = time_us
+                    if time_us - below_since >= start["stop_dwell_us"]:
+                        stop_entry, stop_confirmed = below_since, time_us
+                else:
+                    below_since = None
+    if active:
+        raise ValueError("corrective invocation outlived event mesh")
+    return {
+        "published_us": publication, "stop_entry_us": stop_entry,
+        "stop_confirmed_us": stop_confirmed, "stop_censored": stop_confirmed is None,
+        "fault_abs_command_integral_us": fault_integral,
+        "publication_abs_command_integral_us": publication_integral,
+        "max_post_fault_abs_velocity": max_velocity,
+        "max_post_fault_abs_error": max_error,
+        "attempts": len(attempts),
+        "busy_attempts": sum(attempt["outcome"] == "Busy" for attempt in attempts),
+        "retries": sum(attempt["ordinal"] > 0 for attempt in attempts),
+        "transition_skips": transition, "execution_skips": execution,
+        "empty_skips": empty_count, "retired_commands": retired,
+        "saturated_completions": saturated, "command_bound_violations": violations,
+        "final_installation": current, "final_gain": 0 if current[0] == zero_handle else 1,
+        "completed_invocations": completed,
+    }
+
+
+def reduce_corrective_run(records):
+    start, end = _one(records, "run_start"), _one(records, "run_end")
+    duration = _nonnegative(start, "duration_us")
+    fault = _nonnegative(start, "fault_us")
+    initial_command = start.get("initial_command")
+    if not isinstance(initial_command, (int, float)) or not math.isfinite(initial_command):
+        raise ValueError("invalid corrective initial command")
+    fault_integral = _integral_abs_command(records, fault, duration, initial_command)
+    close(end.get("fault_abs_command_integral_us"), fault_integral, "command integral from fault")
+    published = end.get("published_us")
+    if not isinstance(published, int) or not fault <= published < duration:
+        raise ValueError("invalid corrective publication time")
+    publication_integral = _integral_abs_command(records, published, duration, initial_command)
+    close(end.get("publication_abs_command_integral_us"), publication_integral,
+          "command integral from publication")
+    if start.get("protocol") not in GRID_PROTOCOLS or any(
+            record.get("protocol") != start["protocol"]
+            or record.get("experiment") != "corrective_stop" for record in records):
+        raise ValueError("corrective run identity changed")
+    required = {
+        "duration_us": 8_000_000, "step_max_us": 100, "control_period_us": 1000,
+        "retry_phase_step_us": 137, "retry_deadline_us": 20_000,
+        "fault_us": 4_250_000, "long_start_us": 4_249_000,
+        "long_hold_us": 2_000, "normal_hold_us": 100,
+        "initial_velocity": 1.0, "initial_command": 1.0,
+        "reference": 2.0, "mass": 1.0, "command_bound": 4.0,
+        "stop_band": 0.05, "stop_dwell_us": 100_000,
+    }
+    if any(start.get(key) != value for key, value in required.items()):
+        raise ValueError("corrective configuration mismatch")
+    attempts = sorted((record for record in records if record.get("kind") == "attempt"),
+                      key=lambda row: row.get("ordinal", -1))
+    if (not attempts or [attempt.get("ordinal") for attempt in attempts] != list(range(len(attempts)))
+            or sum(attempt.get("outcome") == "Ok" for attempt in attempts) != 1):
+        raise ValueError("corrective attempt sequence is incomplete")
+    deadline = fault + start["retry_deadline_us"]
+    for ordinal, attempt in enumerate(attempts):
+        scheduled = (fault if ordinal == 0 else fault + ordinal * 1000
+                     + (start["retry_phase_step_us"] * ordinal) % 1000)
+        if (attempt.get("scheduled_us") != scheduled or attempt.get("deadline_us") != deadline
+                or scheduled >= deadline):
+            raise ValueError("corrective retry schedule mismatch")
+    computed = _recompute_corrective(start, records, attempts)
+    integer_fields = (
+        "published_us", "attempts", "busy_attempts", "retries", "transition_skips",
+        "execution_skips", "empty_skips", "retired_commands", "saturated_completions",
+        "command_bound_violations", "final_gain",
+    )
+    for field in integer_fields:
+        _nonnegative(end, field)
+        if end[field] != computed[field]:
+            raise ValueError(f"corrective {field} disagrees with raw events")
+    if identity(end.get("final_installation"), "corrective final") != computed["final_installation"]:
+        raise ValueError("corrective final installation disagrees with attempts")
+    for field in ("fault_abs_command_integral_us", "publication_abs_command_integral_us",
+                  "max_post_fault_abs_velocity", "max_post_fault_abs_error"):
+        close(end.get(field), computed[field], f"corrective {field}")
+    for field in ("stop_entry_us", "stop_confirmed_us", "stop_censored"):
+        if end.get(field) != computed[field]:
+            raise ValueError(f"corrective {field} disagrees with raw events")
+    row = {"protocol": start["protocol"], **{key: end[key] for key in end
+           if key not in ("schema", "experiment", "kind", "protocol")}}
+    row["fault_us"] = fault
+    row["request_publication_delay_us"] = published - fault
+    return row
+
+
+def analyze_stream(trace):
+    legacy = []
+    schedule_rows = []
+    request_rows = []
+    corrective_rows = []
+    active = None
+    with trace.open() as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            experiment = record.get("experiment")
+            if experiment is None:
+                legacy.append(record)
+                continue
+            if (record.get("schema") != 1 or record.get("protocol") not in GRID_PROTOCOLS
+                    or experiment not in ("schedule_grid", "corrective_stop")):
+                raise ValueError("unknown adaptation experiment")
+            if record.get("kind") == "run_start":
+                if active is not None:
+                    raise ValueError("nested adaptation run")
+                active = [record]
+                continue
+            if active is None:
+                raise ValueError("adaptation record outside a run")
+            if experiment != active[0]["experiment"]:
+                raise ValueError("adaptation experiment changed within a run")
+            active.append(record)
+            if record.get("kind") == "run_end":
+                if active[0]["experiment"] == "schedule_grid":
+                    row, requests = reduce_schedule_run(active)
+                    schedule_rows.append(row)
+                    request_rows.extend(requests)
+                else:
+                    corrective_rows.append(reduce_corrective_run(active))
+                active = None
+    if active is not None:
+        raise ValueError("unterminated adaptation run")
+    report = analyze(legacy) if legacy else {}
+    if schedule_rows:
+        expected = {(protocol, hold, phase) for protocol in GRID_PROTOCOLS
+                    for hold in GRID_HOLDS_US for phase in GRID_PHASES_US}
+        actual = {(row["protocol"], row["hold_us"], row["phase_us"])
+                  for row in schedule_rows}
+        if actual != expected or len(schedule_rows) != len(expected):
+            raise ValueError("schedule-grid coverage is incomplete")
+        report["schedule_grid"] = schedule_rows
+        report["schedule_requests"] = request_rows
+    if corrective_rows:
+        if {row["protocol"] for row in corrective_rows} != set(GRID_PROTOCOLS) or len(corrective_rows) != 2:
+            raise ValueError("corrective-stop coverage is incomplete")
+        report["corrective_stop"] = corrective_rows
+    return report
 
 
 def identity(value, label):
@@ -569,7 +1264,7 @@ def write_artifacts(trace, report, destination):
             row = report["protocols"][protocol]
             writer.writerow({field: protocol if field == "protocol" else row[field]
                              for field in fields})
-    payload = {**report, "trace_sha256": hashlib.sha256(trace.read_bytes()).hexdigest(),
+    payload = {**report, "trace_sha256": file_digest(trace),
                "rmse_denominator": "all 4,000 scheduled control ticks in each phase, including skips",
                "utility_scope": "paired 250 ms synchronous counterfactual from each actual activation state"}
     (destination / "analysis.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -600,8 +1295,155 @@ def write_artifacts(trace, report, destination):
     checksum_paths = [path for path in sorted(destination.rglob("*"))
                       if path.is_file() and path.name != "SHA256SUMS"]
     (destination / "SHA256SUMS").write_text("".join(
-        f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(destination)}\n"
+        f"{file_digest(path)}  {path.relative_to(destination)}\n"
         for path in checksum_paths))
+
+
+def _write_csv(path, rows):
+    if not rows:
+        return
+    with path.open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=rows[0].keys())
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def distribution(values):
+    values = sorted(values)
+    if not values:
+        return None
+    pick = lambda q: values[math.ceil(q * len(values)) - 1]
+    return {"count": len(values), "median": pick(0.5), "p99": pick(0.99), "max": values[-1]}
+
+
+def schedule_aggregates(rows, requests):
+    aggregates = []
+    for protocol in GRID_PROTOCOLS:
+        for hold in GRID_HOLDS_US:
+            members = [row for row in rows if row["protocol"] == protocol and row["hold_us"] == hold]
+            request_members = [row for row in requests
+                               if row["protocol"] == protocol and row["hold_us"] == hold]
+            total = lambda field: sum(row[field] for row in members)
+            aggregates.append({
+                "protocol": protocol, "hold_us": hold, "runs": len(members),
+                "scheduled_requests": len(request_members),
+                "successful_requests": sum(row["completed"] for row in request_members),
+                "censored_requests": sum(row["censored"] for row in request_members),
+                "attempts": sum(row["attempts"] for row in request_members),
+                "busy_attempts": sum(row["busy_attempts"] for row in request_members),
+                "retries": sum(row["retries"] for row in request_members),
+                "scheduled_ticks": total("scheduled_ticks"),
+                "completed_invocations": total("completed_invocations"),
+                "transition_skips": total("transition_skips"),
+                "execution_skips": total("execution_skips"),
+                "empty_skips": total("empty_skips"),
+                "old_new_overlaps": total("old_new_overlaps"),
+                "retired_commands": total("retired_commands"),
+                "saturated_completions": total("saturated_completions"),
+                "command_bound_violations": total("command_bound_violations"),
+                "schedules_with_old_new_overlap": sum(row["old_new_overlaps"] > 0 for row in members),
+                "schedules_with_retired_command": sum(row["retired_commands"] > 0 for row in members),
+                "schedules_with_dispatch_skip": sum(
+                    row["transition_skips"] + row["execution_skips"] + row["empty_skips"] > 0
+                    for row in members),
+                "activation_rate": conditional_rate(
+                    sum(row["completed"] for row in request_members), len(request_members)),
+                "busy_rate_per_attempt": conditional_rate(
+                    sum(row["busy_attempts"] for row in request_members),
+                    sum(row["attempts"] for row in request_members)),
+                "retry_success_rate": conditional_rate(
+                    sum(row["completed"] and row["retries"] > 0 for row in request_members),
+                    sum(row["busy_attempts"] > 0 for row in request_members)),
+                "publication_delay_us": distribution([
+                    row["publication_delay_us"] for row in request_members
+                    if row["publication_delay_us"] is not None]),
+                "return_delay_us": distribution([
+                    row["return_delay_us"] for row in request_members
+                    if row["return_delay_us"] is not None]),
+                "post_rmse": distribution([row["post_rmse"] for row in members]),
+                "max_abs_error": distribution([row["max_abs_error"] for row in members]),
+                "max_abs_command": distribution([row["max_abs_command"] for row in members]),
+                "abs_command_integral_us": distribution([
+                    row["abs_command_integral_us"] for row in members]),
+            })
+    return aggregates
+
+
+def write_experiment_artifacts(report, destination):
+    rows = report.get("schedule_grid")
+    if rows:
+        _write_csv(destination / "schedule-grid.csv", rows)
+        requests = report["schedule_requests"]
+        _write_csv(destination / "schedule-requests.csv", requests)
+        aggregates = schedule_aggregates(rows, requests)
+        payload = {
+            "schema": 1,
+            "experiment": "schedule_grid",
+            "coverage": {
+                "protocols": list(GRID_PROTOCOLS),
+                "primary_holds_us": list(GRID_HOLDS_US[:-1]),
+                "stress_holds_us": [GRID_HOLDS_US[-1]],
+                "phases_us": list(GRID_PHASES_US),
+                "runs": len(rows),
+                "logical_requests": len(requests),
+            },
+            "rows": rows,
+            "requests": requests,
+            "aggregates": aggregates,
+            "denominators": {
+                "activation_rate": "4 scheduled logical updates per replay",
+                "busy_rate_per_attempt": "all attempted primary and retry replacements",
+                "retry_success_rate": "primary Busy outcomes; null when none",
+                "overlaps_per_activation": "successful activations; null when none",
+                "retired_commands_per_activation": "successful activations; null when none",
+                "task_metrics": "all 8,000 scheduled control ticks; command integral uses command*us",
+            },
+        }
+        (destination / "schedule-grid.json").write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        lines = [
+            "% Generated from the validated deterministic schedule grid.\n",
+            r"\begin{tabular}{llrrrr}" + "\n", r"\toprule" + "\n",
+            r"Protocol & Hold ($\mu$s) & Runs & Activations/scheduled & Busy/attempts & Censored \\" + "\n",
+            r"\midrule" + "\n",
+        ]
+        for protocol in GRID_PROTOCOLS:
+            for hold in GRID_HOLDS_US:
+                members = [row for row in rows
+                           if row["protocol"] == protocol and row["hold_us"] == hold]
+                lines.append(
+                    f"{protocol} & {hold} & {len(members)} & "
+                    f"{sum(r['successful_updates'] for r in members)}/{4 * len(members)} & "
+                    f"{sum(r['busy_attempts'] for r in members)}/"
+                    f"{sum(r['attempted_updates'] for r in members)} & "
+                    f"{sum(r['deadline_censored'] for r in members)} \\\\\n")
+        lines += [r"\bottomrule" + "\n", r"\end{tabular}" + "\n"]
+        (destination / "schedule-grid.tex").write_text("".join(lines))
+    corrective = report.get("corrective_stop")
+    if corrective:
+        _write_csv(destination / "corrective-stop.csv", corrective)
+        (destination / "corrective-stop.json").write_text(json.dumps({
+            "schema": 1,
+            "experiment": "corrective_stop",
+            "rows": corrective,
+            "integral_units": "absolute command times microseconds",
+            "common_horizon": "fault_us through duration_us",
+            "publication_horizon": "protocol-specific successful publication through duration_us",
+        }, indent=2, sort_keys=True) + "\n")
+        lines = [
+            "% Generated from the validated corrective-stop replay.\n",
+            r"\begin{tabular}{lrrrr}" + "\n", r"\toprule" + "\n",
+            r"Protocol & Stop entry ($\mu$s) & Confirmed ($\mu$s) & $\int_{fault}|u|dt$ & $\int_{pub}|u|dt$ \\" + "\n",
+            r"\midrule" + "\n",
+        ]
+        for row in corrective:
+            entry = "--" if row["stop_entry_us"] is None else str(row["stop_entry_us"])
+            confirmed = "--" if row["stop_confirmed_us"] is None else str(row["stop_confirmed_us"])
+            lines.append(f"{row['protocol']} & {entry} & {confirmed} & "
+                         f"{row['fault_abs_command_integral_us']:.0f} & "
+                         f"{row['publication_abs_command_integral_us']:.0f} \\\\\n")
+        lines += [r"\bottomrule" + "\n", r"\end{tabular}" + "\n"]
+        (destination / "corrective-stop.tex").write_text("".join(lines))
 
 
 def main():
@@ -611,11 +1453,18 @@ def main():
     parser.add_argument("--output-dir", type=Path,
                         help="write derived files here (implies --write-artifacts)")
     args = parser.parse_args()
-    records = [json.loads(line) for line in args.trace.read_text().splitlines() if line.strip()]
-    report = analyze(records)
-    validate_campaign(report, records)
+    report = analyze_stream(args.trace)
+    records = []
+    with args.trace.open() as stream:
+        for line in stream:
+            if line.strip() and '"experiment"' not in line:
+                records.append(json.loads(line))
+    legacy = {key: report[key] for key in ("config", "initial_committed", "protocols")}
+    validate_campaign(legacy, records)
     if args.write_artifacts or args.output_dir:
-        write_artifacts(args.trace, report, args.output_dir or args.trace.parent)
+        destination = args.output_dir or args.trace.parent
+        write_experiment_artifacts(report, destination)
+        write_artifacts(args.trace, legacy, destination)
     print("PASS: deterministic plant, controller, identity, guard, retry, and ledger replay hold")
 
 

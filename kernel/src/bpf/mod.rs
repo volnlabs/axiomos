@@ -1472,6 +1472,42 @@ impl BpfManager {
     }
 
     #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
+    #[doc(hidden)]
+    pub fn try_replace_exclusive_observed_for_diagnostics(
+        &mut self,
+        owner: u64,
+        slot: ControlSlot,
+        expected: InstallationId,
+        candidate: ProgramHandle,
+        state: StatePolicy,
+        post_swap: impl FnOnce(),
+    ) -> Result<InstallReceipt, InstallError> {
+        let mode = TimerPublicationMode::Guarded;
+        let candidate_entry = self.validate_exclusive_candidate(candidate, state)?;
+        if self
+            .timer_publication_mode
+            .is_some_and(|current| current != mode)
+        {
+            return Err(InstallError::Busy);
+        }
+        let mut transition = match slot {
+            ControlSlot::Timer => TIMER_EXCLUSIVE_SLOT
+                .try_transition()
+                .map_err(|_| InstallError::Busy)?,
+        };
+        let prepared = self.prepare_exclusive_update(
+            owner,
+            Some(expected),
+            candidate,
+            candidate_entry,
+            transition.current(),
+        )?;
+        self.commit_exclusive_update(prepared, mode, |snapshot| {
+            transition.publish_observed_for_diagnostics(snapshot, post_swap);
+        })
+    }
+
+    #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
     pub fn try_install_atomic_without_quiescence_for(
         &mut self,
         owner: u64,
@@ -1506,6 +1542,42 @@ impl BpfManager {
             state,
             TimerPublicationMode::AtomicWithoutQuiescence,
         )
+    }
+
+    #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
+    #[doc(hidden)]
+    pub fn try_replace_atomic_without_quiescence_observed_for_diagnostics(
+        &mut self,
+        owner: u64,
+        slot: ControlSlot,
+        expected: InstallationId,
+        candidate: ProgramHandle,
+        state: StatePolicy,
+        post_swap: impl FnOnce(),
+    ) -> Result<InstallReceipt, InstallError> {
+        let mode = TimerPublicationMode::AtomicWithoutQuiescence;
+        let candidate_entry = self.validate_exclusive_candidate(candidate, state)?;
+        if self
+            .timer_publication_mode
+            .is_some_and(|current| current != mode)
+        {
+            return Err(InstallError::Busy);
+        }
+        let current = match slot {
+            ControlSlot::Timer => TIMER_EXCLUSIVE_SLOT.read_without_quiescence_for_diagnostics(),
+        };
+        let prepared = self.prepare_exclusive_update(
+            owner,
+            Some(expected),
+            candidate,
+            candidate_entry,
+            current.as_deref(),
+        )?;
+        drop(current);
+        self.commit_exclusive_update(prepared, mode, move |snapshot| {
+            TIMER_EXCLUSIVE_SLOT
+                .publish_without_quiescence_observed_for_diagnostics(snapshot, post_swap);
+        })
     }
 
     fn try_update_exclusive_for(

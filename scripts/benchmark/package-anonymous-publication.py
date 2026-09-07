@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -17,21 +19,11 @@ import zipfile
 from pathlib import Path
 
 
-ARTIFACT = "artifact-r2"
+ARTIFACT = "artifact-r3"
 ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 FILE_MODE = 0o644
 DIR_MODE = 0o755
 
-RAW_FILES = {
-    "docs/performance/evidence/update-transaction-v2/trace.jsonl":
-        "raw/publication/trace.jsonl",
-    "docs/performance/evidence/update-transaction-v2/cost-trace.jsonl":
-        "raw/publication/cost-trace.jsonl",
-    "docs/performance/evidence/update-transaction-v2/cost-runs.csv":
-        "raw/publication/cost-runs.csv",
-    "docs/performance/evidence/update-adaptation-v1/adaptation-trace.jsonl":
-        "raw/adaptation/adaptation-trace.jsonl",
-}
 SCRIPT_FILES = {
     "scripts/benchmark/analyze-update-transaction.py":
         "scripts/analyze-publication.py",
@@ -55,6 +47,8 @@ HOST_TESTS = {
 }
 PATCH_PATHS = {
     "kernel/crates/kernel_bpf/Cargo.toml": "source/runtime-core/Cargo.toml",
+    "kernel/crates/kernel_bpf/src/concurrency/epoch_snapshot.rs":
+        "source/runtime-core/src/concurrency/epoch_snapshot.rs",
     "kernel/crates/kernel_bpf/src/concurrency/exclusive_slot.rs":
         "source/runtime-core/src/concurrency/exclusive_slot.rs",
     "kernel/crates/kernel_bpf/tests/concurrency_model.rs":
@@ -83,7 +77,7 @@ TRACKER_IDS = re.compile(
     r"#(?:20|43|48|65|67|83|84|85|86|87|88|89|102|104|105|114|116|121|122|123|181)\b"
 )
 FORBIDDEN = (
-    ("project identity", re.compile(r"axiomos|volnlabs", re.I)),
+    ("project identity", re.compile(r"axiomos|volnlabs|utkarsh|maurya|kernex", re.I)),
     ("first-party crate identity", re.compile(r"\b(?:kernel_bpf|kernel_abi)\b")),
     ("user path", re.compile(r"/(?:home|Users|tmp)/")),
     ("email", re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")),
@@ -101,6 +95,11 @@ FORBIDDEN = (
 
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def file_sha256(path: Path) -> str:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def sanitized(text: str) -> str:
@@ -121,15 +120,19 @@ def write_text(path: Path, text: str) -> None:
 def copy_text(source: Path, destination: Path, export_root: Path, mapping: list[dict]) -> None:
     if source.is_symlink() or not source.is_file():
         raise ValueError(f"source must be a regular file: {source}")
-    original = source.read_bytes()
-    exported = sanitized(original.decode("utf-8")).encode()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(exported)
+    original_hash, exported_hash = hashlib.sha256(), hashlib.sha256()
+    with source.open("rb") as incoming, destination.open("wb") as outgoing:
+        for line in incoming:
+            exported = sanitized(line.decode("utf-8")).encode()
+            original_hash.update(line)
+            exported_hash.update(exported)
+            outgoing.write(exported)
     mapping.append({
         "source": str(source),
         "export": str(destination.relative_to(export_root)),
-        "source_sha256": sha256(original),
-        "export_sha256": sha256(exported),
+        "source_sha256": original_hash.hexdigest(),
+        "export_sha256": exported_hash.hexdigest(),
     })
 
 
@@ -190,12 +193,14 @@ commands = (
      "--output-dir", publication),
     (root / "scripts/analyze-cost.py", root / "raw/publication/cost-trace.jsonl",
      "--output-dir", publication),
+    (root / "scripts/analyze-cost.py", root / "raw/timing-only/cost-trace.jsonl",
+     "--output-dir", root / "derived/timing-only"),
     (root / "scripts/analyze-adaptation.py", root / "raw/adaptation/adaptation-trace.jsonl",
      "--output-dir", adaptation),
 )
 for command in commands:
     subprocess.run((sys.executable, *map(str, command)), check=True)
-for checksum in (publication / "SHA256SUMS", adaptation / "SHA256SUMS"):
+for checksum in (publication / "SHA256SUMS", adaptation / "SHA256SUMS", root / "derived/timing-only/SHA256SUMS"):
     checksum.unlink(missing_ok=True)
 subprocess.run((sys.executable, str(root / "scripts/render_tables.py"),
                 "--publication", str(publication), "--adaptation", str(adaptation),
@@ -257,7 +262,7 @@ source files was removed.
 
 README = '''# Anonymous publication artifact
 
-Local artifact revision: `artifact-r2`.
+Local artifact revision: `artifact-r3`.
 
 This bundle contains the runtime publication source needed to inspect the
 reported mechanism, the four hosted campaign sources, retained raw traces, the
@@ -282,9 +287,14 @@ Run `python3 scripts/reproduce.py` from any directory to recompute `derived/`
 from `raw/`. Run `cargo test --manifest-path source/runtime-core/Cargo.toml
 --features loom-model,cloud-profile --test concurrency_model` to exercise the
 same publication and reclamation implementation under the model checker.
-The reproduction passes the retained cost trace directly to the table renderer,
-which writes its appendix analysis and presentation files under
-`derived/review-tables/`.
+The independent reducers stream the full raw campaign. The renderer consumes
+validated summaries and writes the main and appendix tables under
+`derived/review-tables/`. The primary grid contains 400 full eight-second
+replays; a separate stress stratum contains 100, and the corrective case two.
+Legacy replay rows remain separate. Hosted measurements distinguish observed
+publication from API return and retain unfinished logical requests as censored.
+Reproduction time and memory depend on the host; allow several minutes and
+sufficient space for the uncompressed raw traces.
 
 `source/runtime-core` and `source/runtime-abi` form an independently buildable
 subset. `source/manager/bpf` and `source/host-tests` preserve the actual manager
@@ -301,9 +311,10 @@ private workspace lock contains repository locations and source checksums.
 '''
 
 
-def recorded_environment(repo: Path) -> str:
-    evidence = json.loads((repo / "docs/performance/evidence/update-transaction-v2/environment.json").read_text())
-    build = json.loads((repo / "docs/performance/evidence/update-transaction-v2/build-command.json").read_text())
+def recorded_environment(repo: Path, publication: Path | None = None) -> str:
+    publication = publication or repo / "docs/performance/evidence/update-transaction-v2"
+    evidence = json.loads((publication / "environment.json").read_text())
+    build = json.loads((publication / "build-command.json").read_text())
     host = evidence["host"]
     model = re.search(r"^model name\s*:\s*(.+)$", host["cpuinfo"], re.M).group(1)
     rustc = dict(line.split(": ", 1) for line in evidence["rustc"]["output"].splitlines()
@@ -351,6 +362,7 @@ def recorded_environment(repo: Path) -> str:
             "target": rustc["host"],
             "cargo_release": cargo_version,
         },
+        "build_environment_overrides": evidence.get("build_environment", {}),
         "captured_build": {
             "subcommand": build[1],
             "locked": "--locked" in build,
@@ -370,8 +382,9 @@ def recorded_environment(repo: Path) -> str:
     return json.dumps(summary, indent=2, sort_keys=True) + "\n"
 
 
-def retained_validation_log(repo: Path) -> str:
-    source = repo / "docs/performance/evidence/update-transaction-v2/validation/atomic-baseline-transaction.log"
+def retained_validation_log(repo: Path, publication: Path | None = None) -> str:
+    source = (publication / "validation/publication-transaction.log" if publication is not None
+              else repo / "docs/performance/evidence/update-transaction-v2/validation/atomic-baseline-transaction.log")
     lines = source.read_text().splitlines()
     start = next(index for index, line in enumerate(lines) if line.startswith("running "))
     result = next(index for index, line in enumerate(lines[start:], start)
@@ -405,7 +418,7 @@ def write_manifest(root: Path) -> None:
     lines = []
     for path in sorted(root.rglob("*")):
         if path.is_file() and path.name != "MANIFEST.sha256":
-            lines.append(f"{sha256(path.read_bytes())}  {path.relative_to(root)}\n")
+            lines.append(f"{file_sha256(path)}  {path.relative_to(root)}\n")
     write_text(root / "MANIFEST.sha256", "".join(lines))
 
 
@@ -424,9 +437,18 @@ def scan_tree(root: Path) -> None:
         if path.is_symlink():
             raise ValueError(f"symlink in artifact: {relative}")
         if path.is_file():
-            scan_text(relative, path.read_text(encoding="utf-8"))
+            with path.open(encoding="utf-8") as stream:
+                scan_stream(relative, stream)
             if stat.S_IMODE(path.stat().st_mode) != FILE_MODE:
                 raise ValueError(f"unsafe file mode: {relative}")
+
+
+def scan_stream(label: str, stream) -> None:
+    # Keep overlap so an identity token split across chunks is still checked.
+    tail = ""
+    for chunk in iter(lambda: stream.read(1024 * 1024), ""):
+        scan_text(label, tail + chunk)
+        tail = chunk[-512:]
 
 
 def make_zip(root: Path, destination: Path) -> None:
@@ -440,7 +462,12 @@ def make_zip(root: Path, destination: Path) -> None:
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = ((stat.S_IFDIR | DIR_MODE) if path.is_dir()
                                   else (stat.S_IFREG | FILE_MODE)) << 16
-            archive.writestr(info, b"" if path.is_dir() else path.read_bytes())
+            if path.is_dir():
+                archive.writestr(info, b"")
+            else:
+                info.file_size = path.stat().st_size
+                with path.open("rb") as source, archive.open(info, "w") as output:
+                    shutil.copyfileobj(source, output, 1024 * 1024)
 
 
 def scan_zip(path: Path) -> None:
@@ -449,17 +476,30 @@ def scan_zip(path: Path) -> None:
             raise ValueError("ZIP comment is not permitted")
         for info in archive.infolist():
             scan_text(f"ZIP path {info.filename}", info.filename)
-            if info.date_time != ZIP_TIME or info.extra or info.comment:
+            extra = info.extra
+            while extra:
+                if len(extra) < 4:
+                    raise ValueError(f"malformed ZIP extra field: {info.filename}")
+                kind, length = struct.unpack("<HH", extra[:4])
+                # ZIP64 stores sizes/offsets only, required for large raw traces.
+                if kind != 1 or length not in (8, 16, 24, 28) or len(extra) < length + 4:
+                    raise ValueError(f"non-neutral ZIP extra field: {info.filename}")
+                extra = extra[4 + length:]
+            if info.date_time != ZIP_TIME or info.comment:
                 raise ValueError(f"non-neutral ZIP metadata: {info.filename}")
             mode = (info.external_attr >> 16) & 0o177777
             wanted = stat.S_IFDIR | DIR_MODE if info.is_dir() else stat.S_IFREG | FILE_MODE
             if mode != wanted:
                 raise ValueError(f"unsafe ZIP mode: {info.filename}")
             if not info.is_dir():
-                scan_text(f"ZIP content {info.filename}", archive.read(info).decode("utf-8"))
+                with archive.open(info) as content:
+                    scan_stream(f"ZIP content {info.filename}", io.TextIOWrapper(content, encoding="utf-8"))
 
 
-def build(repo: Path, output_root: Path) -> tuple[Path, Path, Path]:
+def build(repo: Path, output_root: Path, publication: Path | None = None,
+          adaptation: Path | None = None) -> tuple[Path, Path, Path]:
+    publication = publication or repo / "target/cl4fmagents-v3/capture-r3"
+    adaptation = adaptation or repo / "target/cl4fmagents-v3/capture-r3-adaptation"
     output_root.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".anonymous-publication-", dir=output_root))
     artifact = staging / ARTIFACT
@@ -479,8 +519,15 @@ def build(repo: Path, output_root: Path) -> tuple[Path, Path, Path]:
         for source, destination in OPTIONAL_SCRIPT_FILES.items():
             if (repo / source).is_file():
                 copy_text(repo / source, artifact / destination, artifact, mapping)
-        for source, destination in RAW_FILES.items():
-            copy_text(repo / source, artifact / destination, artifact, mapping)
+        for name in ("trace.jsonl", "cost-trace.jsonl", "cost-runs.csv"):
+            copy_text(publication / name, artifact / "raw/publication" / name, artifact, mapping)
+        timing_only = repo / "target/cl4fmagents-v3/capture"
+        copy_text(timing_only / "cost-trace.jsonl",
+                  artifact / "raw/timing-only/cost-trace.jsonl", artifact, mapping)
+        write_text(artifact / "raw/timing-only/recorded-environment.json",
+                   recorded_environment(repo, timing_only))
+        copy_text(adaptation / "adaptation-trace.jsonl",
+                  artifact / "raw/adaptation/adaptation-trace.jsonl", artifact, mapping)
 
         write_text(artifact / "source/runtime-core/Cargo.toml", CORE_MANIFEST)
         write_text(artifact / "source/runtime-abi/Cargo.toml", ABI_MANIFEST)
@@ -488,12 +535,15 @@ def build(repo: Path, output_root: Path) -> tuple[Path, Path, Path]:
         write_text(artifact / "source/DEPENDENCIES.md", THIRD_PARTY)
         write_text(artifact / "scripts/reproduce.py", REPRODUCE)
         write_text(artifact / "raw/publication/recorded-environment.json",
-                   recorded_environment(repo))
+                   recorded_environment(repo, publication))
         write_text(artifact / "raw/validation/publication-transaction.log",
-                   retained_validation_log(repo))
-        write_text(artifact / "README.md", README)
-        write_text(artifact / "patch.diff", export_patch(
-            repo / "docs/performance/evidence/update-transaction-v2/source.patch"))
+                   retained_validation_log(repo, publication))
+        write_text(artifact / "README.md", README + "\nThe separate raw/timing-only capture predates observed per-attempt installation identities. It is retained and reduced independently, not pooled into paper results. Raw atomic/atomic_publication labels mean QF-AP; guarded/transactional mean GR.\n")
+        # Export the complete runtime delta, not only the last uncommitted edit.
+        delta = staging / "runtime.patch"
+        delta.write_bytes(subprocess.check_output(
+            ["git", "diff", "--src-prefix=c/", "--dst-prefix=w/", "4f5aa9037832b9ee27145c5ffc87f4c3ca707e18", "--", *PATCH_PATHS], cwd=repo))
+        write_text(artifact / "patch.diff", export_patch(delta))
         write_text(artifact / "derived/reproduction.log", reproduce(artifact))
 
         normalize(artifact)
@@ -530,9 +580,11 @@ def main() -> int:
     default_target = Path(os.environ.get("CARGO_TARGET_DIR", repo / "target"))
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", type=Path,
-                        default=default_target / "update-publication-paper-appendix")
+                        default=default_target / "cl4fmagents-v3/package")
+    parser.add_argument("--publication", type=Path)
+    parser.add_argument("--adaptation", type=Path)
     args = parser.parse_args()
-    artifact, archive, private_map = build(repo, args.output_root.resolve())
+    artifact, archive, private_map = build(repo, args.output_root.resolve(), args.publication, args.adaptation)
     print(f"PASS: built {artifact.name} ({len(artifact.joinpath('MANIFEST.sha256').read_text().splitlines())} files)")
     print(f"PASS: deterministic archive {archive.name}; private source map {private_map.name}")
     return 0

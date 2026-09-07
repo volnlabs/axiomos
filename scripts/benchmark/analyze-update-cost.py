@@ -13,6 +13,7 @@ from pathlib import Path
 
 PROTOCOLS = ("atomic", "guarded")
 HOLDS_US = (0, 10, 100, 500)
+V2_HOLDS_US = (0, 10, 100, 500, 900, 1100)
 RESOURCE_PHASES = ("one_program", "two_loaded", "after_replace", "after_cleanup")
 RECORD_KINDS = {"meta", "clock", "resource", "update", "dispatch",
                 "controlled_transition", "end"}
@@ -28,12 +29,23 @@ def stats(values: list[int]) -> dict[str, int] | None:
 
 def _nonnegative(record: dict, key: str) -> int:
     value = record.get(key)
-    if not isinstance(value, int) or value < 0:
+    if type(value) is not int or value < 0:
         raise ValueError(f"{record.get('kind')} has invalid {key}")
     return value
 
 
-def _summarize_run(key: tuple[str, int, int], records: list[dict], expected_attempts: int) -> dict:
+def _installation_identity(record: dict, key: str) -> tuple[int, int]:
+    value = record.get(key)
+    if (not isinstance(value, list) or len(value) != 2
+            or any(type(part) is not int for part in value)
+            or not 0 <= value[0] <= 2**32 - 1
+            or not 1 <= value[1] <= 2**64 - 1):
+        raise ValueError(f"{record.get('kind')} has invalid {key}")
+    return value[0], value[1]
+
+
+def _summarize_run(key: tuple[str, int, int], records: list[dict], expected_attempts: int,
+                   schema: int = 1) -> dict:
     protocol, hold_us, run_number = key
     grouped: dict[str, list[dict]] = defaultdict(list)
     for record in records:
@@ -46,9 +58,10 @@ def _summarize_run(key: tuple[str, int, int], records: list[dict], expected_atte
     expected_controlled = 100 if protocol == "guarded" else 0
     if len(grouped["controlled_transition"]) != expected_controlled:
         raise ValueError(f"{key}: expected {expected_controlled} controlled transition samples")
-    if meta.get("attempts") != expected_attempts or meta.get("period_ns") != 1_000_000:
+    if (type(meta.get("attempts")) is not int or meta["attempts"] != expected_attempts
+            or type(meta.get("period_ns")) is not int or meta["period_ns"] != 1_000_000):
         raise ValueError(f"{key}: measurement contract mismatch")
-    if not isinstance(meta.get("warmup"), int) or meta["warmup"] < 0:
+    if type(meta.get("warmup")) is not int or meta["warmup"] < 0:
         raise ValueError(f"{key}: invalid warmup")
     _nonnegative(meta, "clock_resolution_ns")
     for field in ("dispatch_cpu", "update_cpu", "dispatch_core", "update_core",
@@ -69,8 +82,14 @@ def _summarize_run(key: tuple[str, int, int], records: list[dict], expected_atte
     replace_ok: list[int] = []
     replace_busy: list[int] = []
     update_lateness: list[int] = []
+    previous_return = None
+    previous_installation = None
     for attempt, record in enumerate(updates):
-        if record.get("attempt") != attempt or record.get("logical_update") != logical or record.get("retry_ordinal") != retry:
+        identity = (record.get("attempt"), record.get("logical_update"),
+                    record.get("retry_ordinal"))
+        if any(type(value) is not int for value in identity):
+            raise ValueError(f"{key}: invalid attempt identity at attempt {attempt}")
+        if identity != (attempt, logical, retry):
             raise ValueError(f"{key}: invalid retry sequence at attempt {attempt}")
         latency = _nonnegative(record, "latency_ns")
         scheduled_offset = _nonnegative(record, "scheduled_offset_ns")
@@ -82,19 +101,52 @@ def _summarize_run(key: tuple[str, int, int], records: list[dict], expected_atte
         if lateness_ns != started_offset - scheduled_offset:
             raise ValueError(f"{key}: update lateness disagrees with schedule")
         update_lateness.append(lateness_ns)
+        called_offset = started_offset
+        if schema >= 2:
+            if latency == 0:
+                raise ValueError(f"{key}: update has invalid zero latency sentinel at {attempt}")
+            called_offset = _nonnegative(record, "called_offset_ns")
+            if called_offset < started_offset:
+                raise ValueError(f"{key}: update call precedes attempt start at {attempt}")
+            if previous_return is not None and called_offset < previous_return:
+                raise ValueError(f"{key}: serialized update calls overlap at attempt {attempt}")
+            previous_return = called_offset + latency
+            if "post_swap_observed_offset_ns" not in record:
+                raise ValueError(f"{key}: update lacks post-swap timestamp at {attempt}")
+        before_installation = after_installation = None
+        if schema == 3:
+            before_installation = _installation_identity(record, "before_installation")
+            after_installation = _installation_identity(record, "after_installation")
+            if (previous_installation is not None
+                    and before_installation != previous_installation):
+                raise ValueError(f"{key}: update identity continuity failed at attempt {attempt}")
         outcome = record.get("outcome")
         if outcome == "Ok":
+            if schema >= 2:
+                published = record["post_swap_observed_offset_ns"]
+                if (not isinstance(published, int) or isinstance(published, bool)
+                        or not called_offset <= published <= called_offset + latency):
+                    raise ValueError(f"{key}: successful update has invalid post-swap timestamp")
+            if (schema == 3 and (after_installation[0] == before_installation[0]
+                    or after_installation[1] != before_installation[1] + 1)):
+                raise ValueError(f"{key}: successful update identity is invalid at attempt {attempt}")
             successes += 1
             first_successes += retry == 1
             replace_ok.append(latency)
             logical += 1
             retry = 1
         elif outcome == "Busy" and protocol == "guarded":
+            if schema >= 2 and record["post_swap_observed_offset_ns"] is not None:
+                raise ValueError(f"{key}: Busy update has a post-swap timestamp")
+            if schema == 3 and after_installation != before_installation:
+                raise ValueError(f"{key}: Busy update changed installation at attempt {attempt}")
             busy += 1
             replace_busy.append(latency)
             retry += 1
         else:
             raise ValueError(f"{key}: unexpected update outcome {outcome!r}")
+        if schema == 3:
+            previous_installation = after_installation
 
     dispatches = grouped["dispatch"]
     last_scheduled = -1
@@ -133,8 +185,10 @@ def _summarize_run(key: tuple[str, int, int], records: list[dict], expected_atte
         else:
             raise ValueError(f"{key}: unexpected dispatch outcome {outcome!r}")
 
-    resources = {record.get("phase"): record for record in grouped["resource"]}
-    if (tuple(phase for phase in RESOURCE_PHASES if phase in resources) != RESOURCE_PHASES
+    resource_records = grouped["resource"]
+    resources = {record.get("phase"): record for record in resource_records}
+    if (len(resource_records) != len(RESOURCE_PHASES)
+            or tuple(phase for phase in RESOURCE_PHASES if phase in resources) != RESOURCE_PHASES
             or len(resources) != len(RESOURCE_PHASES)):
         raise ValueError(f"{key}: incomplete resource observations")
     for phase, expected_live in (("one_program", 1), ("two_loaded", 2),
@@ -188,20 +242,195 @@ def _summarize_run(key: tuple[str, int, int], records: list[dict], expected_atte
     }
 
 
+LOGICAL_METRICS = (
+    "scheduled_to_publication",
+    "first_attempt_to_publication",
+    "scheduled_to_return",
+    "first_attempt_to_return",
+)
+THRESHOLDS_NS = (1_000_000, 5_000_000, 10_000_000, 20_000_000)
+
+
+def _stats_v2(values: list[int]) -> dict[str, int] | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    rank = lambda q: ordered[math.ceil(q * len(ordered)) - 1]
+    return {
+        "count": len(values), "median": rank(0.5), "p95": rank(0.95),
+        "p99": rank(0.99), "max": ordered[-1],
+    }
+
+
+def _thresholds(requests: list[dict], metric: str) -> dict[str, dict]:
+    result = {}
+    value_key = f"{metric}_ns"
+    start = "scheduled" if metric.startswith("scheduled_") else "first_attempt"
+    censor_key = f"{start}_to_censor_ns"
+    for threshold in THRESHOLDS_NS:
+        known_met = known_missed = unknown = 0
+        for request in requests:
+            if request["completed"]:
+                if request[value_key] <= threshold:
+                    known_met += 1
+                else:
+                    known_missed += 1
+            elif request[censor_key] >= threshold:
+                known_missed += 1
+            else:
+                unknown += 1
+        denominator = len(requests)
+        result[f"{threshold // 1_000_000}ms"] = {
+            "denominator": denominator,
+            "known_met": known_met,
+            "known_missed": known_missed,
+            "unknown": unknown,
+            "lower_rate": known_met / denominator if denominator else None,
+            "upper_rate": (known_met + unknown) / denominator if denominator else None,
+        }
+    return result
+
+
+def _logical_analysis(by_run: dict[tuple[str, int, int], list[dict]],
+                      cost_runs: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    requests = []
+    run_summaries = []
+    cost_index = {(run["protocol"], run["hold_us"], run["run"]): run for run in cost_runs}
+    for key in sorted(by_run):
+        protocol, hold_us, run_number = key
+        updates = [record for record in by_run[key] if record.get("kind") == "update"]
+        first = None
+        busy_attempts = 0
+        run_requests = []
+        for record in updates:
+            if first is None:
+                first = record
+                busy_attempts = 0
+            if record["outcome"] == "Busy":
+                busy_attempts += 1
+                continue
+            returned = record["called_offset_ns"] + record["latency_ns"]
+            published = record["post_swap_observed_offset_ns"]
+            request = {
+                "protocol": protocol, "hold_us": hold_us, "run": run_number,
+                "logical_update": record["logical_update"],
+                "attempts": record["retry_ordinal"], "busy_attempts": busy_attempts,
+                "completed": True, "censored": False,
+                "first_scheduled_offset_ns": first["scheduled_offset_ns"],
+                "first_started_offset_ns": first["started_offset_ns"],
+                "first_called_offset_ns": first["called_offset_ns"],
+                "post_swap_observed_offset_ns": published,
+                "returned_offset_ns": returned,
+                "scheduled_to_publication_ns": published - first["scheduled_offset_ns"],
+                "first_attempt_to_publication_ns": published - first["called_offset_ns"],
+                "scheduled_to_return_ns": returned - first["scheduled_offset_ns"],
+                "first_attempt_to_return_ns": returned - first["called_offset_ns"],
+                "scheduled_to_censor_ns": None,
+                "first_attempt_to_censor_ns": None,
+            }
+            requests.append(request)
+            run_requests.append(request)
+            first = None
+        if first is not None:
+            last = updates[-1]
+            censor = last["called_offset_ns"] + last["latency_ns"]
+            request = {
+                "protocol": protocol, "hold_us": hold_us, "run": run_number,
+                "logical_update": first["logical_update"],
+                "attempts": last["retry_ordinal"], "busy_attempts": busy_attempts,
+                "completed": False, "censored": True,
+                "first_scheduled_offset_ns": first["scheduled_offset_ns"],
+                "first_started_offset_ns": first["started_offset_ns"],
+                "first_called_offset_ns": first["called_offset_ns"],
+                "post_swap_observed_offset_ns": None, "returned_offset_ns": None,
+                "scheduled_to_publication_ns": None,
+                "first_attempt_to_publication_ns": None,
+                "scheduled_to_return_ns": None,
+                "first_attempt_to_return_ns": None,
+                "scheduled_to_censor_ns": censor - first["scheduled_offset_ns"],
+                "first_attempt_to_censor_ns": censor - first["called_offset_ns"],
+            }
+            requests.append(request)
+            run_requests.append(request)
+
+        completed = [request for request in run_requests if request["completed"]]
+        cost = cost_index[key]
+        run_summaries.append({
+            "protocol": protocol, "hold_us": hold_us, "run": run_number,
+            "raw_attempts": len(updates), "requests_started": len(run_requests),
+            "completed": len(completed), "censored": len(run_requests) - len(completed),
+            "busy_attempts": sum(request["busy_attempts"] for request in run_requests),
+            "first_attempt_successes": sum(request["completed"] and request["attempts"] == 1
+                                           for request in run_requests),
+            "retried_successes": sum(request["completed"] and request["attempts"] > 1
+                                     for request in run_requests),
+            "transition_busy_skips": cost["transition_busy_skips"],
+            "execution_busy_skips": cost["execution_busy_skips"],
+            "empty_skips": cost["empty_skips"],
+            "latency_ns": {
+                metric: _stats_v2([request[f"{metric}_ns"] for request in completed])
+                for metric in LOGICAL_METRICS
+            },
+            "thresholds": {metric: _thresholds(run_requests, metric)
+                           for metric in LOGICAL_METRICS},
+        })
+
+    aggregates = []
+    for protocol, hold_us in sorted({(run["protocol"], run["hold_us"])
+                                     for run in run_summaries}):
+        members = [run for run in run_summaries
+                   if (run["protocol"], run["hold_us"]) == (protocol, hold_us)]
+        group_requests = [request for request in requests
+                          if (request["protocol"], request["hold_us"]) == (protocol, hold_us)]
+        total = lambda field: sum(member[field] for member in members)
+        latency = {}
+        for metric in LOGICAL_METRICS:
+            summaries = [member["latency_ns"][metric] for member in members
+                         if member["latency_ns"][metric] is not None]
+            latency[metric] = None if not summaries else {
+                "runs_with_completions": len(summaries),
+                "median_of_run_medians": stats([summary["median"] for summary in summaries])["median"],
+                "median_of_run_p95s": stats([summary["p95"] for summary in summaries])["median"],
+                "median_of_run_p99s": stats([summary["p99"] for summary in summaries])["median"],
+                "observed_max": max(summary["max"] for summary in summaries),
+            }
+        aggregates.append({
+            "protocol": protocol, "hold_us": hold_us, "runs": len(members),
+            "raw_attempts": total("raw_attempts"),
+            "requests_started": total("requests_started"),
+            "completed": total("completed"), "censored": total("censored"),
+            "busy_attempts": total("busy_attempts"),
+            "first_attempt_successes": total("first_attempt_successes"),
+            "retried_successes": total("retried_successes"),
+            "transition_busy_skips": total("transition_busy_skips"),
+            "execution_busy_skips": total("execution_busy_skips"),
+            "empty_skips": total("empty_skips"), "latency_ns": latency,
+            "thresholds": {metric: _thresholds(group_requests, metric)
+                           for metric in LOGICAL_METRICS},
+        })
+    return requests, run_summaries, aggregates
+
+
 def analyze(records: list[dict], *, expected_attempts: int = 1000, expected_runs: int = 10,
-            expected_holds: tuple[int, ...] = HOLDS_US,
+            expected_holds: tuple[int, ...] | None = None,
             expected_protocols: tuple[str, ...] = PROTOCOLS) -> dict:
+    schemas = {record.get("schema") for record in records}
+    if (len(schemas) != 1 or any(type(schema) is not int for schema in schemas)
+            or not schemas <= {1, 2, 3}):
+        raise ValueError("unknown or mixed update-cost schema")
+    schema = next(iter(schemas), None)
+    expected_holds = expected_holds or (V2_HOLDS_US if schema >= 2 else HOLDS_US)
     by_run: dict[tuple[str, int, int], list[dict]] = defaultdict(list)
     for record in records:
-        if record.get("schema") != 1 or record.get("protocol") not in PROTOCOLS:
+        if record.get("protocol") not in PROTOCOLS:
             raise ValueError("unknown update-cost schema/protocol")
         if record.get("kind") not in RECORD_KINDS:
             raise ValueError(f"unknown record kind {record.get('kind')!r}")
         hold, run = record.get("hold_us"), record.get("run")
-        if not isinstance(hold, int) or hold < 0 or not isinstance(run, int) or run < 0:
+        if type(hold) is not int or hold < 0 or type(run) is not int or run < 0:
             raise ValueError("invalid hold/run identity")
         by_run[(record["protocol"], hold, run)].append(record)
-    runs = [_summarize_run(key, by_run[key], expected_attempts) for key in sorted(by_run)]
+    runs = [_summarize_run(key, by_run[key], expected_attempts, schema) for key in sorted(by_run)]
     if not runs:
         raise ValueError("empty update-cost campaign")
     expected_keys = {(protocol, hold, run) for protocol in expected_protocols
@@ -250,12 +479,38 @@ def analyze(records: list[dict], *, expected_attempts: int = 1000, expected_runs
             "execution_busy_skips": total("execution_busy_skips"),
             "empty_skips": total("empty_skips"), "latency_ns": latency,
         })
-    return {"runs": runs, "aggregates": aggregates,
-            "denominators": {"replacement": "raw replacement calls",
-                             "first_attempt": "logical update sequences started",
-                             "dispatch": "dispatch calls attempted",
-                             "missed": "scheduled releases",
-                             "skips_per_update": "successful replacements"}}
+    report = {"runs": runs, "aggregates": aggregates,
+              "denominators": {"replacement": "raw replacement calls",
+                               "first_attempt": "logical update sequences started",
+                               "dispatch": "dispatch calls attempted",
+                               "missed": "scheduled releases",
+                               "skips_per_update": "successful replacements"}}
+    if schema >= 2:
+        logical = _logical_analysis(by_run, runs)
+        report.update({
+            "schema": 2,
+            "logical_metric": {
+                "publication_event": "post-swap and reader-epoch-flip clock observation before reclamation wait",
+                "return_event": "clock observation immediately after successful replacement API return",
+                "first_attempt_start": "called_offset_ns sampled immediately before the first replacement API call",
+                "attempt_started": "started_offset_ns sampled when wait_until returns, before pre-call candidate setup",
+                "scheduled_start": "scheduled_offset_ns target for the first request release",
+                "thresholds_ns": list(THRESHOLDS_NS),
+                "censor": "final Busy API return at the fixed attempt limit",
+            },
+            "logical_requests": logical[0],
+            "logical_runs": logical[1],
+            "logical_aggregates": logical[2],
+        })
+        if schema == 3:
+            report.update({
+                "raw_schema": 3,
+                "raw_identity": (
+                    "each update records actual before_installation and post-timing "
+                    "after_installation as [program, epoch]"
+                ),
+            })
+    return report
 
 
 def _fmt_latency(aggregate: dict | None) -> str:
@@ -347,6 +602,35 @@ def write_outputs(report: dict, destination: Path) -> None:
         "these counters exclude allocator, metadata, and process RSS.\n"
     )
     (destination / "cost-note.tex").write_text(note)
+    if "logical_aggregates" in report:
+        base = ["protocol", "hold_us", "metric", "runs", "raw_attempts",
+                "requests_started", "completed", "censored", "busy_attempts",
+                "first_attempt_successes", "retried_successes",
+                "transition_busy_skips", "execution_busy_skips", "empty_skips",
+                "runs_with_completions", "median_of_run_medians_ns",
+                "median_of_run_p95s_ns", "median_of_run_p99s_ns", "observed_max_ns"]
+        threshold_fields = [f"{threshold}_{field}" for threshold in ("1ms", "5ms", "10ms", "20ms")
+                            for field in ("denominator", "known_met", "known_missed", "unknown",
+                                          "lower_rate", "upper_rate")]
+        rows = []
+        for aggregate in report["logical_aggregates"]:
+            for metric in LOGICAL_METRICS:
+                summary = aggregate["latency_ns"][metric] or {}
+                row = {key: aggregate[key] for key in base[3:14]}
+                row.update({"protocol": aggregate["protocol"], "hold_us": aggregate["hold_us"],
+                            "metric": metric,
+                            "runs_with_completions": summary.get("runs_with_completions", 0),
+                            "median_of_run_medians_ns": summary.get("median_of_run_medians", ""),
+                            "median_of_run_p95s_ns": summary.get("median_of_run_p95s", ""),
+                            "median_of_run_p99s_ns": summary.get("median_of_run_p99s", ""),
+                            "observed_max_ns": summary.get("observed_max", "")})
+                for threshold, counts in aggregate["thresholds"][metric].items():
+                    row.update({f"{threshold}_{field}": value for field, value in counts.items()})
+                rows.append(row)
+        with (destination / "cost-logical-latency.csv").open("w", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=base + threshold_fields)
+            writer.writeheader()
+            writer.writerows(rows)
     checksum_paths = [path for path in sorted(destination.rglob("*"))
                       if path.is_file() and path.name != "SHA256SUMS"]
     (destination / "SHA256SUMS").write_text("".join(

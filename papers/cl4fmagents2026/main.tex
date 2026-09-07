@@ -10,115 +10,110 @@
 \pdftrailerid{ }
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
-\usepackage{amsmath,microtype,booktabs}
+\usepackage{amsmath,microtype,booktabs,tikz}
 \usepackage[hidelinks]{hyperref}
 \hypersetup{pdftitle={Who Guards the Update? Transactional Publication Semantics for Continually Learning Embodied Agents},pdfauthor={},pdfsubject={Short systems paper},pdfkeywords={continual learning, embodied agents, transactional publication, runtime assurance}}
 
 \title{Who Guards the Update? Transactional Publication Semantics for Continually Learning Embodied Agents}
 \author{Anonymous Author(s)}
 
+\input{headline-results.tex}
 \begin{document}
 \maketitle
-
 \begin{abstract}
-Adaptation should not imply deployment: a better controller can still be installed unreliably. We define an executor contract combining expected installation identity, invocation quiescence, stateless admission, authority revalidation, and resource-atomic publication for one runtime slot. In a forced held-reader schedule, atomic publication (AP) makes the candidate current while a predecessor invocation remains live; guarded replacement (GR) returns \texttt{Busy} without old/new invocation overlap. Both preserve the predecessor across six rejection cases per protocol. Hosted measurements quantify replacement and availability costs. In a payload-shift replay, post-shift RMSE rounds to 0.974 for both, yet AP applies one retired predecessor command and GR none: task quality alone does not establish installation correctness. Foundation-model adaptation, downstream command fencing, and physical safety remain unevaluated.
+A better controller can still be installed unreliably. A predecessor invocation may remain live after a candidate becomes current, and a stale request may target a superseded installation. We define a conditional installation contract for one executor slot: check the expected installation, admit stateless candidates, revalidate authority, exclude active invocations, and preserve accounting on rejection. We compare quiescence-free atomic publication (QF-AP) with guarded replacement (GR). \SweepFinding{} \StopFinding{} Here ``transactional'' refers only to software-authority publication; it implies neither crash atomicity, persistent recovery, nor reversible physical effects. The experiments use hosted guards and simulated control, without foundation-model adaptation, privileged controller execution, or downstream command fencing.
 \end{abstract}
 
-\section{The update is part of the execution contract}
-\label{sec:position}
-After a payload change, an agent revises a motor reflex. Its candidate passes isolated tests, but activation races an old invocation whose command arrives later. A stale recovery request may also replace a newer installation reusing the same program handle. These installation failures are independent of controller quality.
+\section{Adaptation creates a recurring installation decision}
+After a payload change, an agent proposes a revised motor reflex. Its isolated task score improves. That score does not establish whether an old invocation can still issue a command after replacement, or whether a delayed request still names the incumbent installation.
 
-Voyager grows executable skills through feedback \citep{wang2023voyager}. ABot-AgentOS gates memory-evolution assets above low-level controllers \citep{tian2026abot}. Physical control adds authority limits, deadlines, and irreversible effects. \emph{Adaptation should not imply deployment}: candidates need testable identity, concurrency, state, and accounting rules.
+\emph{Adaptation should not imply deployment.}
 
-Qin et al. govern capability versions through compatibility checks, staged evaluation, activation, and rollback \citep{qin2026governed}. LITHE swaps controller pointers at Spine-cycle boundaries, obtaining implicit quiescence \citep{lim2026lithe}; Kitsune supports state-preserving software updates \citep{hayden2014kitsune}. Action shielding \citep{alshiekh2018shielding} and Neural Simplex's runtime assurance and retraining \citep{phan2020neural} remain complementary: publication determines which installation may issue actions.
+Executable skill libraries and failure-driven robotic runtimes make such transitions part of an adaptation loop \citep{wang2023voyager,tian2026abot}. Proposals can arrive repeatedly and asynchronously; handles can be reused, and concurrent tools need not share one control-cycle boundary. The contract also applies to human-authored updates. Continual agents make installation frequent, autonomous, and worth evaluating alongside task quality. Conversely, rejecting updates can delay useful or corrective adaptation.
 
-We contribute (1) an executor installation contract; (2) a nonblocking implementation for one exclusive slot with monotonic epochs; (3) a same-manager atomic-publication comparison measuring correctness and availability; and (4) a simulated adaptation replay separating tracking quality from installation correctness.
+We contribute a five-part executor contract, a one-slot implementation, and a matched comparison of \emph{quiescence-free atomic publication} (QF-AP) with \emph{guarded replacement} (GR). A declared schedule sweep, hosted timing, and corrective replay measure coherence and availability separately. We claim no new pointer-exchange, version-tag, quiescence, or reference-monitor primitive.
 
-\section{A narrow transactional publication primitive}
-\label{sec:semantics}
-A bare-metal Rust research kernel supplies verified runtime programs, load authentication, capabilities, quotas, and immutable snapshots. We add one opt-in exclusive TIMER slot. Ordinary TIMER fanout remains outside its gate; exclusivity concerns this slot. \emph{Transactional} denotes software-authority publication, without atomic physical effects or persistent recovery.
+\section{The installation contract}
+An installation is $I=(h,e)$: a program handle and an epoch that increases on every successful installation, including rollback. Exhaustion rejects instead of wrapping. Bootstrap establishes a slot and authority ceiling; replacement requires an incumbent identity. A Rust research kernel implements the contract at one opt-in TIMER slot. Ordinary fanout and downstream commands are outside this boundary.
 
-An installation is identified by
-\begin{equation}
- I=(h,e), \qquad e\in\{1,\ldots,2^{64}-1\},
-\end{equation}
-where $h$ is a program handle and $e$ increases at every successful replacement, including rollback. Replacement checks the expected full $I$, preventing a stale request from becoming current when the same handle is reinstalled (ABA). Epoch exhaustion rejects; bootstrap is separate.
+\textbf{C1: Identity and freshness.} Compare the full expected $(h,e)$, preventing a delayed A--B--A request from succeeding merely because handle A is current again.
 
-Invocation and replacement share one atomic state: open, active, or transitioning. Invocation claims open$\rightarrow$active, holds its snapshot guard throughout execution, and drops it before reopening. Other entry attempts return \texttt{TransitionBusy} or \texttt{ExecutionBusy} and increment skip counters. Replacement tries open$\rightarrow$transitioning once; an active invocation causes immediate, unchanged \texttt{Busy} rejection.
+\textbf{C2: Invocation quiescence.} A successful guarded replacement excludes overlap between guarded predecessor and successor invocations. An atomic open/active/transitioning gate admits either invocation or replacement. An active invocation causes replacement to return \texttt{Busy}; it does not wait for that invocation.
 
-The prototype admits only candidates with no verifier-reported runtime-map references (\texttt{Stateless}). Stateful replacement and validated state transfer are unsupported. This policy makes no claim about physical, device, or external state.
+\textbf{C3: State admissibility.} Admit only candidates with no verifier-reported runtime-map references (\texttt{Stateless}). State transfer is unsupported; external and device state are unaffected.
 
-Once quiescent, replacement checks expected identity, ownership, retained authentication provenance, bootstrap authority ceiling, TIMER re-verification, conflicts, and quota. Replacement uses the resident entry's immutable decoded instructions and retained load-time metadata. The source artifact is not retained: it reruns verification and policy checks without reparsing the ELF or rechecking its signature. Fallible snapshot preparation precedes mutation; a final serialized emergency-stop check rejects stop state or lock contention unchanged. The immutable published object contains runtime and full identity. The manager commits an allocation-free admission delta $-\mathrm{cost}(A)+\mathrm{cost}(B)$, publishes once, and records the receipt before reopening. Invocations read the object; serialized manager operations cannot observe intermediate ledger or receipt state. Both programs retain resident-memory charges. Rollback conditionally reinstalls the resident predecessor with a fresh epoch.
+\textbf{C4: Authority and resource revalidation.} Recheck ownership, retained provenance, authority ceiling, verifier constraints, conflicts, stop state, and capacity at installation. Immutable decoded instructions retain load-time metadata; replacement re-verifies them without rechecking the original artifact signature.
+
+\textbf{C5: Publication and accounting consistency.} Runtime and full installation identity share one immutable published object. Admission accounting and the receipt complete within the same serialized manager operation. Every returned error preserves predecessor authority and accounting. These fields are not one multiword atomic snapshot; physical effects and crash recovery are excluded.
+
+\begin{figure}[!ht]
+\centering
+\input{protocol-figure.tex}
+\caption{The gate and an overlap witness. QF-AP can publish B while A is live, then waits for predecessor readers before returning. GR rejects and requires a later retry. Panel (b) requires a hold extending across a successor dispatch; it is not a claim about every sweep schedule.}
+\label{fig:protocol}
+\end{figure}
 
 \paragraph{Two invariants.}
-Assume serialized manager operations, normal returns, and invocations that hold their slot guard throughout their body. \emph{Invocation exclusivity:} if replacement from $I_A$ to $I_B$ succeeds, no guarded invocation of $I_A$ overlaps one of $I_B$. Entry claims open$\rightarrow$active; replacement claims open$\rightarrow$transitioning on the same atomic state. These claims exclude one another. Replacement publishes $I_B$ while transitioning, rejects new entries until completion, and reopens only with $I_B$ current. An old reader drops its snapshot before reopening. A successful invocation linearizes at its open-to-active transition; replacement linearizes at the pointer swap of the complete installation object.
+Under serialized manager operations and normal completion, successful open-to-active and open-to-transitioning claims exclude one another. Rust RAII retains the invocation guard through the callback and drops its snapshot pin before reopening. GR publishes while transitioning and reopens afterward; thus predecessor and successor guarded invocations cannot overlap. Invocation linearizes at its successful gate claim; publication linearizes at the complete-object pointer swap.
 
-\emph{Returned-error preservation:} every replacement returning an error preserves the published installation, executable snapshot, and admission ledger. All rejecting checks and snapshot preparation precede mutation. Ledger commit validates before writing; after it succeeds, publication and receipt updates have no error return. Releasing an unsuccessful transition only reopens the gate. This proposition excludes diagnostic counters, panic/crash recovery, and physical effects.
+Returned-error preservation follows from validation, allocation, epoch checks, and final stop checks preceding ledger mutation. Ledger commit validates before writing; subsequent publication and receipt updates have no error return. Diagnostic counters may change. Panic, power failure, unsafe bypasses, and queued commands are outside both arguments.
 
-Receipts and diagnostic guard observations carry installation identity; production dispatch and actuation audit do not yet propagate it downstream.
+\section{Matched evidence and availability costs}
+\paragraph{Comparison and measurements.}
+QF-AP and GR use the same manager checks, candidates, accounting, snapshot preparation, and receipts. The host-only QF-AP path omits the invocation gate. It publishes before draining old readers, so publication and API return are different events. GR excludes active readers before publication. Hosted callbacks retain real guards but do not execute privileged bytecode or actuate hardware. Unsigned development fixtures do not test authentication rejection.
 
-\section{Correctness and availability under matched updates}
-\label{sec:evaluation}
-\paragraph{Same-manager comparison.}
-\textbf{Atomic publication} (AP) and \textbf{guarded replacement} (GR) share validation, expected identity, ownership, authority, re-verification, accounting, snapshot preparation, and receipts. AP bypasses only the invocation gate through a host diagnostic path absent from bare-metal builds. Both publish the same immutable identity/runtime object. AP retains the predecessor allocation and waits for old readers before returning, but B becomes visible during that wait. A B reader can therefore overlap an A reader. GR returns \texttt{Busy} while A is active; a later retry can publish B. Each fixture fixes its protocol until draining cleanup.
+\paragraph{Predeclared schedule sweep.}
+Each protocol runs 200 complete eight-second simulations: uniform invocation holds 0/100/500/900\,$\mu$s crossed with 50 phases spaced 20\,$\mu$s across a 1\,ms dispatch period. A separate 50-phase stratum uses 1,100\,$\mu$s holds. The plant is $m\dot v=u-v$, mass changes from 1 to 2 at 4\,s, and the reference alternates $\pm1$ each second. A feedback tuner produces gains 2/4/8/16 once; both protocols replay those proposals at identical phases. Commands use captured identity and state, complete after the declared hold, and otherwise retain the last output.
 
-Hand-written map-free bytecode uses unsigned development loading, so authentication is not tested. Hosted callbacks hold real guards without privileged bytecode execution or actuation. The admission model assigns 1\,kHz hook frequency and 500\,ms/s CPU budget; unrelated reservations exercise that budget. Fixture charges are measured through manager attachments, not execution timing. A separate QEMU probe checks interpreter dispatch after A--B--A and stale-request rejection.
-
-\paragraph{Fault schedules.}
-Both protocols receive snapshot-preparation failure, over-budget, authority, stale-identity, retry, ABA, rollback, and concurrent-proposer schedules. Rejections preserve snapshot, identity, ledger, and receipt. One schedule retains A, starts replacement, and attempts a B invocation. AP exposes B before A drains; GR rejects until A drains. Overlap records carry identities captured by actual guards. Accounting is checked outside callbacks: taking the manager lock while AP waits for a reader would deadlock.
+Busy requests follow a fixed 137\,$\mu$s phase walk with a 20\,ms request deadline. Completions precede attempts and dispatch; both protocols share an Euler mesh with steps at most 100\,$\mu$s, including suppressed retry events. No seed or schedule is selected for its outcome. Table~\ref{tab:sweep} reports schedule counts, not failure-probability estimates.
 
 \begin{table}[!ht]
-\caption{Same-manager fault campaign. AP bypasses invocation quiescence; GR uses the production gate. Counts describe finite adversarial schedules and observed checkpoints, not estimated failure probabilities.}
-\label{tab:results}
-\centering
-\small
-\input{results.tex}
+\caption{Complete replay sweep: 50 schedules per row and protocol, four proposals per schedule. Counts are schedules with at least one event. RMSE is median post-shift tracking error across schedules. The 1,100\,$\mu$s rows form a separate above-period stress stratum.}
+\label{tab:sweep}
+\centering\small
+\input{sweep.tex}
 \end{table}
 
-Attach-first and detach-first remain supporting failure witnesses: stopping between calls exposes overlap or an empty slot, without simulating a crash inside commit. Python recomputes cardinality, identity, overlap, and ledger invariants from raw observations. Same-source Loom and manager tests separately check guard lifetime and rejection paths.
+\SweepInterpretation{}
+A retired command can finish after B is published but before B invokes; retirement does not require invocation overlap.
+At 1,100\,$\mu$s, GR also serializes same-installation invocations, so task differences include steady-state skipped service, not just the replacement decision. Task quality and installation defects remain separate observations, consistent with governance-oriented evaluation \citep{qin2026govbench}.
 
-\paragraph{Hosted cost campaign.}
-Release builds use identical preloaded candidates. Dispatcher and updater are pinned to separate physical cores of an AMD Ryzen 7 7735HS under normal Linux scheduling and frequency scaling. Dispatch period is 1\,ms; imposed guard holds are 0/10/100/500\,$\mu$s, not bytecode runtimes. Each protocol/hold regime has ten fresh processes with 1,000 attempts after excluded warmup. A deterministic phase sweep spans the period. \texttt{Busy} retains the same logical request; only success advances expected identity and candidate.
+\paragraph{Hosted logical latency.}
+Ten fresh processes per protocol and hold perform 1,000 measured attempts after 1,000 warmup replacements. Dispatcher and updater use separate physical cores of an AMD Ryzen 7 7735HS, a 1\,ms dispatcher period, and identical absolute attempt schedules. A nonallocating clock observation immediately after pointer exchange and reader-epoch flip records publication before reclamation waiting. Clock overhead is retained; this marker follows rather than timestamps the exact atomic instruction.
 
 \begin{table}[!ht]
-\caption{Hosted replacement cost and availability (ten fresh processes per protocol and row). Cells give medians across process-level medians/p99s of successful API calls only. GR excludes failed \texttt{Busy} calls and retry waiting; first-try success measures retry incidence, not end-to-end delay. First-try denominators count logical requests started; natural skips divide by successful activations and exclude forced \texttt{TransitionBusy} probes. Raw counts are in the supplement; no real-time guarantees.}
+\caption{Hosted latency in $\mu$s: medians across process-level medians/p99s, conditional on completion. Publication columns start at the first scheduled request and include scheduler delay, updater backlog, pre-call setup, Busy attempts and retry gaps through the post-swap observation. Counts include censored requests. Appendix~\ref{app:measurement} reports both endpoints, maxima, p95s, threshold denominators and unfinished requests. No real-time guarantees.}
 \label{tab:costs}
-\centering
-\small
+\centering\small
 \input{costs.tex}
 \end{table}
 
-\input{cost-note.tex}
+\LatencyInterpretation{}
 
-Timing uses \texttt{CLOCK\_MONOTONIC\_RAW}, preallocated buffers, and no timed JSON emission. Clock overhead is retained without subtraction. Latencies include verification through reclamation; observer costs exclude BPF execution. Raw per-process count/median/p99/maximum, lateness, holds, missed releases, and retries are retained.
-
-\paragraph{Installation-conditioned control replay.}
-An eight-second host simulation integrates $m\dot v=u-v$ by 100\,$\mu$s Euler steps, with mass $1\rightarrow2$ at four seconds and reference alternating $\pm1$ each second. Control ticks every millisecond use $u=\mathrm{clip}(k(r-v),-4,4)$. A seed tuner, starting at $k=1$, doubles gain up to 16 when recent 250\,ms tracking RMSE exceeds 0.1, at 4.25, 4.5, 4.75, and 5 seconds. We freeze these proposals before replaying frozen control, AP, and GR.
-
-Real manager installations and guards select the gain; host code computes control. Each invocation captures identity and error at entry and applies its command at completion, with zero-order hold between commands. Normal holds are 100\,$\mu$s; one predecessor invocation at 4.249\,s lasts 2\,ms. Completion precedes update attempts, then control ticks. Each proposal has the same primary and $+1$\,ms attempt; AP can expose B while A remains held, whereas GR must retry. RMSE includes skipped ticks. Paired synchronous utility probes compare candidate and predecessor gains from the same activation state over 250\,ms; they do not estimate a learning algorithm's performance.
+\paragraph{Corrective update.}
+A separate declared replay starts at steady velocity and command 1, mass 1 and reference 2. At 4.250\,s it requests gain zero, with a predecessor invocation held from 4.249 to 4.251\,s. Both protocols receive the same event. The stop band is $|v|\leq0.05$ sustained for 100\,ms; this is a simulated criterion, not a physical-safety specification.
 
 \begin{table}[!ht]
-\caption{Simulated control replay. Pre/post RMSE refers to intervals before and after the mass change at $t=4$ s. Utility fractions count activations with lower paired-probe RMSE. Frozen uses the guarded slot without updates: its single skip comes from serialized invocation during the injected 2 ms hold, not replacement.}
-\label{tab:adaptation}
-\centering
-\small
-\input{adaptation.tex}
+\caption{Corrective replay. Delay is from the common fault/request to observed publication; command integral uses the common fault-to-8\,s horizon. Stop time is band entry after the fault, confirmed for 100\,ms. Command values are simulation units.}
+\label{tab:stop}
+\centering\small
+\input{stop.tex}
 \end{table}
 
-AP and GR both round to 0.974 post-shift RMSE, but AP admits one old/new invocation overlap and applies one retired predecessor command, while GR admits neither. At this precision, task RMSE hides the installation defect. Only three of four activations per updating protocol improve paired-probe RMSE: correct installation does not imply useful adaptation. This gives an executor-level instance of EmbodiedGovBench's separation of upgrade safety, recovery, and auditability from task success \citep{qin2026govbench}.
+\StopInterpretation{}
+Neither protocol is universally safer: early corrective publication competes with predecessor completion and update delay. Quiescence does not fence commands that escape the invocation boundary.
 
-The anonymous supplement uses the local revision label \texttt{artifact-r2}, with source, raw traces, derived tables, and hashes of the anonymized files.
+\paragraph{Supporting checks.}
+Both protocols preserve six rejecting fault requests and reject stale epochs; concurrent proposers have one winner. Attach-first/detach-first remain interruption witnesses. Shared-source Loom models slot entry/transition races and snapshot reclamation, not the complete manager or plant. A separate QEMU probe exercises interpreter A--B--A dispatch. Appendix~\ref{app:coverage} separates these scopes.
 
-\section{Scope and implications}
-\label{sec:limits}
-We do not claim atomic pointer exchange or quiescence as new in isolation. The contribution is an agent-facing executor contract combining quiescence with expected installation identity, authority revalidation, explicit state admissibility, resource-atomic accounting, and observable availability outcomes.
+\section{Established mechanisms and implications}
+ROS~2 lifecycle states govern managed processing, but the design does not specify a concurrent callback-drain and conditional-version transaction \citep{macenski2022ros2,ros2lifecycle}. Kitsune uses explicit update points and state transformation; Linux livepatch moves tasks individually when safe \citep{hayden2014kitsune,linuxlivepatch}. RCU permits old readers after new publication \citep{linuxrcu}. Linearization points and ABA defenses are established concurrency concepts \citep{herlihy1990linearizability,michael2004hazard}.
 
-Quiescence serializes invocations and trades availability for rejection; acceptability depends on the controller and schedule. Retaining predecessors costs memory; stateless admission excludes useful updates. Middleware could enforce this contract. AP is a manager ablation, not LITHE, whose single loop supplies cycle-boundary quiescence.
+Qin et al. govern compatibility, staged evaluation, activation, and rollback; their inspected procedures do not specify our exact-incumbent operation with invocation exclusion and ledger consistency \citep{qin2026governed}. LITHE obtains quiescence at a single Spine-cycle boundary and retains shared controller state \citep{lim2026lithe}; a concurrent executor need not have that boundary. Action shielding and Neural Simplex address complementary behaviour-level assurance \citep{alshiekh2018shielding,phan2020neural}.
 
+GR does not wait for active invocations, but it is not inherently starvation-free: progress requires the updater to claim an open interval. Delaying a corrective update is a counter-hazard. The deployment tradeoff concerns latency, overlap and service; it is not the classical parameter-learning stability--plasticity tradeoff. Stateful updates, downstream freshness, persistent recovery, physical safety and foundation-model learning remain unevaluated.
 
-
-The contract ends at the guarded invocation. Commands can outlive their installation; physical motion cannot be rolled back. Queue fencing requires propagated identity and a stale-command rejection point. Controller stability, state transfer, persistent recovery, hardware-stop timing, and foundation-model continual learning require separate experiments. The replay illustrates two evaluation axes, without a robot or privileged controller execution: adaptation should not imply deployment.
-
+Continually learning agent evaluations should report task quality and installation correctness separately, including update latency, stale-version execution, retries, skipped service, and recovery outcomes.
 \clearpage
 \bibliographystyle{plainnat}
 \bibliography{references}

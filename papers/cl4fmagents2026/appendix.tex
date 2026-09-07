@@ -1,66 +1,56 @@
 \section{Protocol API and state machine}
 \label{app:protocol}
-The pseudocode below summarizes the existing guarded replacement API. A candidate is a resident, loaded program handle; installation identity $I=(h,e)$ also contains a monotonically increasing epoch. Bootstrap installs into an empty slot and establishes its authority ceiling; replacement requires an expected predecessor identity. Rollback is replacement with the retained predecessor handle and a new epoch. Neither operation restores physical history.
+Installation identity is $(h,e)$, distinct from the two reclamation-reader epochs. An installation epoch increases after every success, including rollback, and never wraps. Bootstrap establishes the authority ceiling. A candidate is a loaded resident program. Original signed artifact bytes are not retained: the runtime stores decoded instructions and load-time metadata, then rechecks verification and authorization at installation.
 
-\begin{quote}
+\begin{quote}\small
 \begin{tabular}{@{}l@{}}
-\texttt{try\_replace(owner, slot, expected, candidate, Stateless):}\\
-\quad validate resident candidate and absence of referenced maps\\
-\quad acquire open$\rightarrow$transitioning, or return \texttt{Busy}\\
-\quad check current identity, ownership, provenance and authority\\
-\quad reject attached/in-use candidate; reverify TIMER constraints\\
-\quad preflight admission delta; check next epoch; prepare snapshot\\
-\quad acquire final emergency-stop gate, or return an error\\
-\quad commit admission delta, validating before any ledger write\\
-\quad publish immutable (runtime, identity) snapshot \emph{[linearization]}\\
-\quad update manager identity, epoch and receipt; release stop gate\\
-\quad reopen slot; return receipt
+\texttt{invoke(callback):}\\
+\quad claim open$\rightarrow$active or return \texttt{ExecutionBusy}/\texttt{TransitionBusy}\\
+\quad read immutable (runtime, identity); if empty, reopen and reject\\
+\quad call callback while retaining the invocation guard\\
+\quad drop snapshot pin; reopen; return callback result\\[3pt]
+\texttt{try\_replace(owner, expected, candidate, Stateless):}\\
+\quad validate candidate and absence of referenced maps\\
+\quad claim open$\rightarrow$transitioning or return \texttt{Busy}\\
+\quad check expected identity, owner, provenance, authority and conflicts\\
+\quad reverify TIMER constraints; preflight accounting delta and next epoch\\
+\quad prepare snapshot; acquire final clear-stop gate or reject\\
+\quad validate and commit accounting delta\\
+\quad exchange immutable (runtime, identity) pointer [linearization]\\
+\quad finish publication; set manager epoch, identity and receipt\\
+\quad release stop gate; reopen; return receipt
 \end{tabular}
 \end{quote}
 
-All error exits after acquisition release the transition guard. Candidate validation precedes gate acquisition: a bad candidate need not receive \texttt{Busy} even when an invocation is active. The resident entry contains decoded instructions and load-time provenance, not original signed artifact bytes. Replacement re-verifies those instructions and authorization; it does not reauthenticate a source artifact or reevaluate trust-store membership.
+All error exits release any acquired transition guard. Candidate checks precede gate acquisition, so an invalid candidate can return its specific error while another invocation is active. Receipt fields identify slot, predecessor and installed identity. Same-handle rollback is a new installation rather than reversal of time.
 
-Invocation claims open$\rightarrow$active on the same sequentially consistent atomic state, then reads the immutable installation. The successful claim is its linearization point. A claim against active yields \texttt{ExecutionBusy}; against transitioning it yields \texttt{TransitionBusy}. An empty snapshot reopens the slot and returns \texttt{Empty}. On completion, the guard drops its epoch reader \emph{before} returning the state to open. Transition-guard destruction similarly releases its reader before reopening.
+QF-AP uses the same commit preparation and accounting. Its diagnostic publication omits the invocation gate: after pointer exchange and reader-epoch flip it waits for the previous reader counter, then reclaims. During that wait, a reader can observe B while manager-protected identity and receipt still describe A; manager access remains serialized and unavailable. Those fields are coherent on return, not co-published. GR has excluded participating predecessor invocations before committing. Production dispatch does not propagate installation identity to downstream actuation.
 
-\begin{figure}[!ht]
-\centering
-\begin{tabular}{@{}p{0.10\linewidth}p{0.81\linewidth}@{}}
-AP & A starts $\longrightarrow$ publish B $\longrightarrow$ B starts $\longrightarrow$ A ends\\
-   & One current snapshot; A and B invocation guards overlap. AP returns after A drains.\\[4pt]
-GR & A starts $\longrightarrow$ replacement: \texttt{Busy} $\longrightarrow$ A ends\\
-   & Retry $\longrightarrow$ publish B $\longrightarrow$ B starts. No old/new guard overlap.
-\end{tabular}
-\caption{Held-reader witness, with logical event order rather than a latency scale. AP publication precedes successful return; GR rejects the initial replacement.}
-\label{fig:timeline}
-\end{figure}
-
-\section{Proof details}
+\section{Assumptions and proof details}
 \label{app:proofs}
-The following statements concern the opted-in slot. Assume serialized manager operations, invocations retaining their guard throughout their body, and normal completion after ledger commit. They exclude panic, power loss, unsafe bypasses, ordinary TIMER fanout, and downstream queued commands. Diagnostic counters may change on rejection. Bootstrap and intentional teardown are separate from replacement's nonempty-slot invariant.
+Assume serialized manager operations, valid use of the opted-in slot, guards retained through callback execution, and normal completion after ledger commit. Exclude unsafe bypasses, ordinary TIMER fanout, panic, power loss and commands escaping the invocation. Rejected operations can change diagnostic counters. Bootstrap and deliberate teardown are outside replacement's nonempty-slot invariant.
 
 \paragraph{Invocation exclusivity.}
-The only successful entry is open$\rightarrow$active, and the only guarded publication path first claims open$\rightarrow$transitioning. Atomic modification order excludes simultaneous successful claims. While active, publication cannot acquire the gate; while transitioning, new invocation entry fails. The last old guard releases its epoch reader before reopening. The new snapshot is published before the transition reopens. Thus no guarded invocation of the predecessor installation overlaps a successor invocation.
+Entry and guarded transition claim the same sequentially consistent state from open. Atomic modification order admits at most one. Active excludes publication; transitioning excludes invocation. Rust RAII releases the old epoch reader before reopening, while the transition publishes the successor before reopening. Thus no guarded predecessor invocation overlaps a guarded successor invocation. This is not a command-consumer freshness proof.
 
 \paragraph{Returned-error preservation.}
-Candidate, identity, authority, verification, quota, epoch, and snapshot-preparation checks precede mutation. The final stop gate rejects active stop state or lock contention before ledger commit. Ledger commit validates its preflight token before writing. After a successful ledger write, snapshot publication and manager receipt updates have no returned-error path. Consequently every returned error preserves the executable snapshot, installation identity, ledger, and last receipt. This does not promise that concurrent dispatch attempts avoid skip-counter increments.
+Candidate, identity, authority, verifier, quota, epoch and allocation checks precede mutation. Final stop-state and lock-contention rejection precede ledger commit. The ledger revalidates before writing; publication and receipt updates afterward have no error return. Consequently a returned error preserves snapshot, installation identity, ledger and last receipt. This argument promises neither crash rollback nor unchanged concurrent skip counters.
 
-\paragraph{ABA rejection and one winner.}
-After $A_{e_1}\rightarrow B_{e_2}\rightarrow A_{e_3}$, the old expected pair $(A,e_1)$ differs from $(A,e_3)$. Epoch increment is checked rather than wrapping. A stale request therefore cannot become current by handle reuse. For two otherwise admissible proposers expecting the same installation, serialized manager operations let the first successful replacement advance identity; the other receives \texttt{StaleInstallation}. At most one wins; without quiescence or admissible candidates there may be no winner. Repeating a completed request is rejected, not acknowledged as an idempotent success.
+\paragraph{Freshness and accounting.}
+After $A_{e_1}\rightarrow B_{e_2}\rightarrow A_{e_3}$, the old expected $(A,e_1)$ fails equality with $(A,e_3)$. Epoch exhaustion rejects. Serialized proposers expecting one incumbent have at most one winner; admissibility or a busy gate can leave no winner. Completed-request retries reject rather than act as idempotent acknowledgements. Admission preflight checks $C-c_A+c_B$ before commit. Failed updates leave $C$ unchanged; resident-memory charges for both loaded programs persist independently of the one active-slot charge.
 
-\paragraph{Resource accounting.}
-For admitted slot charge $c_A$ and candidate charge $c_B$, preflight validates the prospective total $C-c_A+c_B$, including arithmetic and budget constraints. Commit revalidates before applying the delta. Failed replacement leaves $C$ unchanged, while successful replacement charges exactly one slot installation. This slot charge is distinct from resident-memory accounting: both loaded programs remain charged while retained. Holding the manager serialization boundary across ledger commit and publication prevents another manager operation observing their intermediate state.
+\section{Model and integration coverage}
+\label{app:coverage}
+Loom substitutes instrumented atomics into the real \texttt{EpochSnapshot} and \texttt{ExclusiveSlot} implementation. Its finite models exercise coherent payload reads, old-reader lifetime and reclamation, competing entry, entry-versus-transition races, and skip counts. It does not model the complete manager, authority verifier, admission ledger, receipt update, plant, or diagnostic QF-AP bypass. Model-check success is not unrestricted whole-kernel verification.
 
-\section{Complete fault coverage}
-\label{app:faults}
-Table~\ref{tab:full-faults} expands the nine paired scenarios. Here $P$ means that the snapshot, full identity, admission ledger and receipt match the pre-request state. Outcomes are checked from raw observations, including intermediate attempt records; they are not merely labels emitted by the system under test.
-
+The hosted manager test and paired campaign separately check conditional activation, rejection preservation, accounting, rollback, ABA and competing proposers. Callbacks retain real guards but perform host arithmetic rather than privileged BPF execution. The QEMU probe checks interpreter dispatch after A--B--A and stale-request rejection; it does not validate physical hardware or controller safety. In the following tables $P$ means preserved snapshot, full identity, admission ledger and receipt.
 \begin{table}[!ht]
 \caption{Paired campaign outcomes. Error names are implementation outcomes; $P$ denotes predecessor preservation. The successful rollback and concurrent/held-reader schedules are separate from the six rejecting requests per protocol.}
 \label{tab:full-faults}
 \centering\small
 \begin{tabular}{@{}p{0.25\linewidth}p{0.33\linewidth}p{0.34\linewidth}@{}}
 \toprule
-Schedule & AP & GR\\\midrule
+Schedule & QF-AP & GR\\\midrule
 Snapshot preparation & \texttt{SnapshotAllocationFailed}; $P$ & Same\\
 Over-budget & \texttt{AdmissionRejected}; $P$ & Same\\
 Authority expansion & \texttt{AuthorityExceeded}; $P$ & Same\\
@@ -75,12 +65,12 @@ Held predecessor & \texttt{Ok}; B current while A live & \texttt{Busy}; $P$; ret
 \end{table}
 
 \begin{table}[!ht]
-\caption{Additional retained integration-test coverage. The log records the enclosing test passing; individual assertions are inspectable in its source, not separate paired trace rows. ``Not observed'' must not be read as a passing AP result.}
+\caption{Additional retained integration-test coverage. The log records the enclosing test passing; individual assertions are inspectable in its source, not separate paired trace rows. ``Not observed'' must not be read as a passing QF-AP result.}
 \label{tab:extra-faults}
 \centering\small
 \begin{tabular}{@{}p{0.23\linewidth}p{0.39\linewidth}p{0.30\linewidth}@{}}
 \toprule
-Condition & GR assertion & AP evidence\\\midrule
+Condition & GR assertion & QF-AP evidence\\\midrule
 State transfer & \texttt{StateTransferUnsupported} & Same error asserted\\
 Map-bearing candidate & \texttt{PersistentStateUnsupported}; $P$ & Same error and $P$ asserted\\
 Epoch exhausted & \texttt{EpochExhausted}; $P$ & Not observed; shared check\\
@@ -90,72 +80,83 @@ Active-owner teardown & Reclamation returns false; identity preserved & Active c
 \end{tabular}
 \end{table}
 
-Successful teardown intentionally clears the slot; it is not a replacement that preserves nonempty publication. The separate AP teardown success follows explicit slot clearing and does not establish behavior during an active AP invocation. Authentication rejection is not exercised by these unsigned-development fixtures. Attach-first and detach-first provide supporting interruption witnesses, not equivalents to the same-check AP baseline. Loom checks the gate and snapshot machinery independently; finite model checks and fault schedules do not establish unrestricted whole-kernel correctness.
+Successful teardown intentionally clears the slot; it is not a replacement that preserves nonempty publication. The separate QF-AP teardown success follows explicit slot clearing and does not establish behavior during an active QF-AP invocation. Authentication rejection is not exercised by these unsigned-development fixtures. Attach-first and detach-first provide supporting interruption witnesses, not equivalents to the same-check QF-AP baseline. Loom checks the gate and snapshot machinery independently; finite model checks and fault schedules do not establish unrestricted whole-kernel correctness.
 
-\section{Hosted measurement methodology}
+
+\section{Hosted measurement and complete distributions}
 \label{app:measurement}
-The retained host is an AMD Ryzen 7 7735HS with eight physical cores and two hardware threads per core. Dispatcher CPU 12 and updater CPU 14 belong to different physical cores (6 and 7); their siblings are 13 and 15. The recorded governor is \texttt{performance}, boost is enabled, and neither frequency nor scheduler latency is fixed. The build uses Rust 1.98.0-nightly dated 2026-07-01, LLVM 22.1.8, the Linux x86-64 host target, and Cargo's release test profile. Bare-metal target flags do not describe these host tests. Sanitized recorded build information accompanies the traces.
+Both protocols use the same preloaded candidates, 1\,ms dispatcher period and absolute updater phases. Ten fresh processes per hold use 1,000 excluded warmup operations followed by 1,000 measured attempts. Holds are imposed guard durations, not bytecode runtimes. Dispatcher CPU 12 and updater CPU 14 are on separate physical cores of the retained Ryzen 7 7735HS; clock resolution, compiler/release flags, affinity, governor and boost state are recorded in the environment manifest. OS lateness, missed releases and tails remain in the data. The hosted dispatcher executes late releases immediately while lateness is below one period, and expires older releases. Long callbacks can therefore cause near-continuous catch-up occupancy. The replay instead attempts each fixed tick and GR skips active ticks. Their progress results describe different declared arrival policies, not a universal duty-cycle threshold.
 
-Each protocol/hold regime has ten new processes. Each process performs 1,000 uncontended warm-up replacements, then 1,000 measured attempts. Invocation holds are 0, 10, 100, or 500\,$\mu$s; dispatcher period is 1\,ms. Updater attempt $j$ in run $r$ is scheduled at
-\[
- t_0+j\cdot1\,\mathrm{ms}+((137j+97r)\bmod1000)\,\mu\mathrm{s}.
-\]
-This deterministic sweep varies phase without claiming randomized independence. \texttt{CLOCK\_MONOTONIC\_RAW} reports 1\,ns resolution; clock measurement overhead remains included. Samples are buffered before JSON emission. Late dispatches and missed releases are retained, not removed as outliers. Quantile $q$ uses sorted sample rank $\lceil qn\rceil$, including the lower middle observation for an even-sized median. Requested holds differ from observed guard durations; host observer timings exclude privileged bytecode execution.
+Attempt $j$ in process $r$ is scheduled at $t_0+j\,\mathrm{ms}+((137j+97r)\bmod1000)\,\mu\mathrm{s}$. Busy retains the same logical request; success advances its expected identity and candidate. The clock is \texttt{CLOCK\_MONOTONIC\_RAW}. The timed callback stores only the post-swap/epoch-flip clock observation in preallocated storage, before reclamation waiting; no extra observer reader, allocation or logging is inserted. Clock failure invalidates capture without an error return after commit.
+
+For first scheduled release $s$, first API-call entry $a$ (the called timestamp), successful post-swap observation $p$, and API return $r$, derive all four intervals $p-s,p-a,r-s,r-a$. Publication and return must not be substituted. Quantiles use nearest-rank $\lceil qn\rceil$. Aggregate latency cells use median of process quantiles, and the largest observed maximum. They condition on completion rather than assigning a latency to unfinished requests. The started timestamp precedes pre-call setup; scheduled intervals include that setup and initial scheduler delay. The latency table shows call-origin values; threshold accounting uses the scheduled origin. All four endpoints remain in derived data. Processes with no completion contribute counts but no latency quantile. The hosted campaign has an attempt budget, not a 20\,ms retry deadline; that deadline belongs to the separate replay.
 
 \begin{table}[!ht]
-\caption{Successful replacement calls and availability counts. Latency triplets are median of process medians, median of process nearest-rank p99s, and maximum observed sample, in $\mu$s. Counts sum ten processes; Busy counts include all failed attempts, not distinct logical requests.}
-\label{tab:cost-details}
+\caption{Hosted first-attempt latency distributions in $\mu$s. Each quartet is median/p95/p99/maximum, with the aggregation above. Counts are completed/started logical requests; unfinished requests remain censored.}
+\label{tab:latency-details}
 \centering\small
-\input{appendix-cost-details.tex}
+\input{latency-details.tex}
 \end{table}
 
 \begin{table}[!ht]
-\caption{Successful dispatch and guarded rejection timing, in $\mu$s, using the same median/p99/maximum aggregation. Dispatch is a hosted guard-observer round trip. Controlled TB denotes \texttt{TransitionBusy} in a separately forced probe, not naturally occurring skips. A dash means no applicable samples.}
-\label{tab:dispatch-details}
+\caption{Scheduled-request publication threshold accounting, summed across processes. Each threshold cell is known met / known missed / unknown; its denominator is every logical request started. A censored request observed for less than the threshold remains unknown.}
+\label{tab:thresholds}
 \centering\small
-\input{appendix-dispatch-details.tex}
+\input{latency-thresholds.tex}
 \end{table}
 
-In Tables~\ref{tab:cost-details}--\ref{tab:completion}, P denotes protocol.
+Raw schema 3 records full installation identity before and after every timed call, sampled outside its latency interval. Busy must preserve identity; successful epochs advance once. An earlier timing-only capture is retained separately and is not pooled: recapture added these observed identities, without selecting schedules or outcomes. The two complete replay captures are byte-identical; the package stores one copy.
 
-\paragraph{Logical-request elapsed time.}
-Group attempts by protocol, hold, process and logical-request number; numbering restarts in each process. For a completed request, compute
-\[
- L= t^{\mathrm{start}}_{\mathrm{last}}+\ell_{\mathrm{last}}-t^{\mathrm{start}}_{\mathrm{first}},
-\]
-where $\ell$ is measured API-call latency and the last attempt returns \texttt{Ok}. This includes earlier \texttt{Busy} calls, retry waiting and inter-attempt scheduler delay. It excludes initial lateness before the first actual call. It measures first-attempt-to-success under this retry schedule, not agent proposal-to-actuation latency. For AP, each request has one attempt, so $L$ equals successful-call latency.
+\input{hosted-cost-note.tex}
 
-\begin{table}[!ht]
-\caption{Logical-request elapsed time (P: protocol; Cens.: censored requests), in $\mu$s. Median/p99/maximum are conditional on observed completion; unfinished requests are reported separately. First-try and elapsed-time measurements describe different aspects of availability.}
-\label{tab:completion}
-\centering\small
-\input{appendix-completion.tex}
-\end{table}
+The raw and derived records retain per-request attempt counts, Busy counts, scheduled/actual times, per-process quantiles, dispatcher skips, resource counts and lateness. Rates with no conditioning population are undefined. Skip-per-activation divides aggregate natural skips by successful activations; forced transition probes are separate. This campaign estimates hosted costs under a declared schedule, not worst-case time or eventual progress.
 
-Six GR requests remain unfinished at the fixed attempt limit: one in the 100\,$\mu$s regime and five at 500\,$\mu$s. Their elapsed time through the last \texttt{Busy} return is retained as a right-censor bound, not an imputed completion. Conditional quantiles do not bound those requests' eventual latency. The ZIP retains each process's counts, median, p99 and maximum, together with request-level completed/censored rows. At 500~$\mu$s hold, GR has a longer completed-request p99 than AP despite its shorter successful-call p99; the two measurements expose different costs. All derived values use the original capture; no new timing campaign is implied.
-
-\section{Control-replay specification}
+\section{Complete control-replay specification}
 \label{app:replay}
-Initialize $v(0)=0$, held command $u=0$, and gain $k=1$. Over $0\leq t<8$\,s, use $m(t)=1$ before 4\,s and $2$ thereafter, with $r(t)=(-1)^{\lfloor t/1\mathrm{s}\rfloor}$. At 100\,$\mu$s integration steps,
+The primary grid has exactly four holds times 50 phases times two protocols. The separate stress stratum adds 50 phases per protocol at 1,100\,$\mu$s. Each case has a fresh manager, identical resident candidates and an eight-second plant trajectory. Initial velocity and held command are zero; mass is 1 before 4\,s and 2 afterward; $r(t)=(-1)^{\lfloor t/1\mathrm{s}\rfloor}$. Commands are $u=\mathrm{clip}(k(r-v),-4,4)$ and the Euler plant step is
 \[
- v_{n+1}=v_n+10^{-4}(u_{\mathrm{held}}-v_n)/m(t_n),\qquad
- u=\mathrm{clip}(k(r-v),-4,4).
+ v(t+\Delta)=v(t)+\Delta\,(u_{\mathrm{held}}-v(t))/m(t),\quad \Delta\leq100\,\mu\mathrm{s}.
 \]
-At each step, finish due invocations in start order and apply their captured commands; finalize any completed AP replacement; process update attempts; process a control tick when due; then integrate. Control ticks are 1\,ms apart. Commands capture gain, identity, reference and velocity at invocation entry. They become the held output only at completion. A skipped tick preserves the previous command. Multiple completions at one timestamp are applied in their recorded order.
+The mesh is fixed for the matched protocols from the regular integration grid and every potential attempt and completion time, including suppressed attempts. Protocol-dependent extra Euler subdivisions must not affect task comparisons.
 
-The seed tuner observes the preceding 250 control-tick squared errors, before the current tick. At 4.25, 4.5, 4.75 and 5\,s it doubles the current gain, capped at 16, if window RMSE exceeds 0.1. This yields the frozen proposals $2,4,8,16$. The seed trajectory uses synchronous controller evaluation; proposal generation is separate from all three installation-conditioned replays. No random seed is needed: the plant, proposal times, gains and logical schedules are deterministic.
+The seed tuner uses preceding 250-tick RMSE, threshold 0.1, initial gain 1 and cap 16, at 4.25/4.5/4.75/5\,s. Its frozen gains are 2/4/8/16. Grid primaries occur at those bases plus phase $p$. Retry $j$ occurs at $b+j\cdot1000+((p+137j)\bmod1000)$\,$\mu$s, only following Busy and strictly before primary+20\,ms. Expired requests are retained. No completed request receives a synthetic retry.
 
-Normal invocations hold a real runtime guard for 100\,$\mu$s of simulated time. One invocation starting at 4.249\,s holds it until 4.251\,s. Every proposal has a primary attempt and a fixed $+1$\,ms event. Under AP the first new installation publishes at 4.250\,s while the predecessor invocation is live, allowing a new invocation. At 4.251\,s the predecessor's captured command is applied after publication, producing the one retired-command observation. Under GR the primary attempt returns \texttt{Busy}; the old invocation finishes before the retry publishes the successor. Frozen uses the same serialized entry gate but makes no replacements, hence its single skipped tick during the injected long hold.
+At equal timestamps finish invocations in start order, apply their captured commands, finalize completed QF-AP calls, process attempts, then dispatch. Zero-hold invocation completes immediately. Commands capture identity, reference, velocity and gain at entry; later completion applies the captured value. Skipped dispatch retains output. Observing QF-AP's published identity does not acquire the manager lock held by its pending writer. Cleanup drains all workers, clears the exact final installation, unloads resident handles and checks accounting.
 
-Tracking RMSE uses 4,000 ticks in $[0,4)$\,s and 4,000 in $[4,8)$\,s, including ticks whose invocation is skipped. For each actual activation, the paired utility probe clones the current plant velocity and time, then evaluates predecessor and candidate gains separately for 250\,ms with synchronous control updates, the same reference/mass schedule, and the same Euler integrator. Lower candidate RMSE marks that activation useful. These probes omit invocation delays and are local counterfactuals, not independent deployment trials. Programs encode gain constants; real manager installations select their identity, while host arithmetic computes commands. Neither the plant nor command application is physical actuation.
+RMSE uses 4,000 ticks before and 4,000 after the mass change, including skipped ticks. Record maximum absolute error/command, saturation at the declared bound and violations above 4 separately. These are simulation envelopes, not physical constraints. Scenario fractions describe a census of the declared grid. Per-request retry/deadline populations differ from the 50-scenario populations; complete CSV rows retain both denominators.
 
-\section{Artifact and reproduction notes}
+The legacy replay retains its one special 2\,ms hold and paired synchronous 250\,ms utility probes as a separate witness. It is not pooled into the primary grid. No random seed or post-hoc choice is involved.
+
+\paragraph{Corrective case.}
+Use mass 1, $v(0)=1$, held command 1, reference 2, gain 1 and a single gain-zero proposal at 4.250\,s. Normal holds are 100\,$\mu$s; one invocation starting at 4.249\,s ends at 4.251\,s. The same retry policy applies. Integrate absolute command over both the common fault-to-8\,s horizon and each publication-to-8\,s horizon; report the latter as different windows. Stop-band entry requires $|v|\leq0.05$ continuously for 100\,ms, with entry and confirmation recorded or censored at the horizon. Post-fault tracking error retains reference 2; the stop criterion instead targets zero velocity. A retired completion is an installation defect even when its task consequence is small or absent.
+
+\section{Conditional comparison with established mechanisms}
+\label{app:related}
+ROS~2 lifecycle exposes supervised states and managed-processing policies; its design does not specify a linearized drain of in-flight callbacks \citep{ros2lifecycle}. Kitsune obtains all-thread quiescence at explicit update points and transforms state. Livepatch instead converges tasks individually and may remain transitional indefinitely \citep{hayden2014kitsune,linuxlivepatch}. RCU deliberately permits old readers after new publication \citep{linuxrcu}. These mechanisms supply different consistency boundaries rather than interchangeable safety guarantees.
+
+\begin{table}[!ht]
+\caption{Conditional mechanism comparison. Full and partial refer only to the stated boundary; ``not specified'' is not a claim of impossibility. The source-by-source literature notes retain broader comparisons.}
+\label{tab:related}
+\centering\small
+\begin{tabular}{@{}p{.19\linewidth}p{.37\linewidth}p{.36\linewidth}@{}}
+\toprule
+Obligation & Established support & This executor boundary\\\midrule
+Identity & Version registries: partial; tagged identity addresses ABA & Full expected $(h,e)$; no wrapping\\
+Quiescence & DSU barriers: full at update points; RCU: permits coexistence & GR full for guarded invocations; QF-AP omits it\\
+State & Kitsune transforms state; LITHE retains shared state & Stateless only; transfer unsupported\\
+Authority & Qin checks policy/context; ROS supplies supervision & Revalidate authority at installation\\
+Accounting & Qin checks declared resources; ledger commit not specified & Serialized delta and receipt; runtime/id co-published\\
+Downstream freshness & Action assurance constrains behaviour & Not provided by this prototype\\
+Progress & DSU convergence depends on safe points & Open interval required; no fairness claim\\
+Retry/skip outcomes & ROS/LITHE expose failures or skipped work & Explicit observed counts and deadlines\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Qin's lifecycle governs whether a version should advance; the exact-incumbent concurrency and accounting protocol is not specified in the procedures inspected \citep{qin2026governed}. LITHE's single Spine cycle supplies controller quiescence without establishing downstream command fencing \citep{lim2026lithe}. Our identity check addresses the established ABA problem; the publication point uses linearizability \citep{michael2004hazard,herlihy1990linearizability}. The contribution is the combined, tested contract and its availability consequences, not invention of those primitives.
+
+\section{Reproducibility and evidence availability}
 \label{app:artifact}
-\texttt{artifact-r2} contains an anonymized source snapshot, source delta, raw publication/cost/replay records, selected integration-test evidence, sanitized environment data, derived CSV/JSON/LaTeX, and \texttt{MANIFEST.sha256}. Hashes identify exported files rather than a public repository revision. Source names and metadata are anonymized; numerical observations and installation identities are retained.
+An anonymized local package, \texttt{artifact-r3}, contains source, raw traces, derived tables, reproduction scripts and \texttt{MANIFEST.sha256}. Its revision denotes exported content, not a public Git identifier. Run \texttt{python3 scripts/reproduce.py} in a clean extraction to regenerate every table; verify the manifest before and after. The source subset supports the documented standalone Loom test. Full manager/campaign recapture needs the research checkout's omitted platform/boot modules; the subset does not pretend otherwise.
 
-Run \texttt{python3 scripts/reproduce.py} in the extracted bundle to regenerate analyses and main/appendix tables. The source subset also supports the documented standalone concurrency-model test. Manager integration and campaign sources are available for inspection, but omitted platform, boot and device modules prevent recapturing the complete campaigns from this bundle alone. Dependency packages are fetched separately. Raw logs remain in the ZIP rather than the PDF; no anonymous reproduction claim implies hardware validation.
-
-\paragraph{Extended related work.}
-SENTINEL checks semantic interpretation, plans and execution trajectories against temporal-logic safety specifications \citep{zhan2025sentinel}. Such checks can complement an installation contract: they ask whether requirements and behavior satisfy safety properties, while publication governs which installation may issue requests. This paper demonstrates neither SENTINEL integration nor those physical-safety properties.
-
-RCU separates publication from reclamation: a new pointer can become visible while pre-existing read-side critical sections retain an old allocation; a grace-period wait protects subsequent reclamation \citep{linuxrcu}. Our AP witness uses an epoch snapshot with this distinction, not Linux RCU as an experimental baseline. Quiescence and pointer exchange are established mechanisms. The contribution here combines invocation exclusion with expected installation identity, state admissibility, authority revalidation, resource-atomic accounting and measured availability outcomes at one executor slot. ABot-AgentOS and EmbodiedGovBench motivate adjacent agent-runtime and evaluation concerns; neither is evaluated as an integrated component of this prototype.
+Supplement delivery requires a venue-supported channel; the PDF alone does not imply separate artifact delivery. Raw JSONL stays outside the PDF.

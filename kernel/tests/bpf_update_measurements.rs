@@ -58,6 +58,10 @@ struct UpdateSample {
     latency_ns: u64,
     scheduled_offset_ns: u64,
     started_offset_ns: u64,
+    called_offset_ns: u64,
+    post_swap_observed_offset_ns: Option<u64>,
+    before_installation: InstallationId,
+    after_installation: InstallationId,
     lateness_ns: u64,
 }
 
@@ -85,7 +89,7 @@ fn env_usize(name: &str) -> usize {
 }
 
 #[inline]
-fn raw_ns() -> u64 {
+fn try_raw_ns() -> Option<u64> {
     let mut timestamp = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -93,11 +97,17 @@ fn raw_ns() -> u64 {
     // SAFETY: timestamp points to writable storage and CLOCK_MONOTONIC_RAW is
     // a read-only Linux process clock.
     let result = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC_RAW, &mut timestamp) };
-    assert_eq!(result, 0, "clock_gettime(CLOCK_MONOTONIC_RAW) failed");
+    if result != 0 {
+        return None;
+    }
     (timestamp.tv_sec as u64)
         .checked_mul(1_000_000_000)
         .and_then(|seconds| seconds.checked_add(timestamp.tv_nsec as u64))
-        .expect("monotonic timestamp overflow")
+}
+
+#[inline]
+fn raw_ns() -> u64 {
+    try_raw_ns().expect("clock_gettime(CLOCK_MONOTONIC_RAW) failed")
 }
 
 fn clock_resolution_ns() -> u64 {
@@ -228,6 +238,34 @@ fn replace(
             expected,
             candidate,
             StatePolicy::Reset,
+        ),
+    }
+}
+
+fn replace_observed(
+    manager: &mut BpfManager,
+    protocol: Protocol,
+    owner: u64,
+    expected: InstallationId,
+    candidate: ProgramHandle,
+    post_swap: impl FnOnce(),
+) -> Result<InstallReceipt, InstallError> {
+    match protocol {
+        Protocol::Atomic => manager.try_replace_atomic_without_quiescence_observed_for_diagnostics(
+            owner,
+            ControlSlot::Timer,
+            expected,
+            candidate,
+            StatePolicy::Reset,
+            post_swap,
+        ),
+        Protocol::Guarded => manager.try_replace_exclusive_observed_for_diagnostics(
+            owner,
+            ControlSlot::Timer,
+            expected,
+            candidate,
+            StatePolicy::Reset,
+            post_swap,
         ),
     }
 }
@@ -376,7 +414,7 @@ fn json_optional(value: Option<u64>) -> String {
 
 fn prefix(protocol: Protocol, hold_us: usize, run: usize, kind: &str) -> String {
     format!(
-        "UPDATE_COST {{\"schema\":1,\"protocol\":\"{}\",\"hold_us\":{},\"run\":{},\"kind\":\"{}\"",
+        "UPDATE_COST {{\"schema\":3,\"protocol\":\"{}\",\"hold_us\":{},\"run\":{},\"kind\":\"{}\"",
         protocol.name(),
         hold_us,
         run,
@@ -424,7 +462,7 @@ fn measures_update_cost() {
         Protocol::parse(&std::env::var("AXIOM_UPDATE_COST_PROTOCOL").expect("missing protocol"));
     let hold_us = env_usize("AXIOM_UPDATE_COST_HOLD_US");
     assert!(
-        [0, 10, 100, 500].contains(&hold_us),
+        [0, 10, 100, 500, 900, 1100].contains(&hold_us),
         "unsupported hold duration"
     );
     let run = env_usize("AXIOM_UPDATE_COST_RUN");
@@ -505,18 +543,32 @@ fn measures_update_cost() {
         let started = wait_until(scheduled_at);
         let candidate = alternate(installed.program, a, b);
         let previous = installed;
-        let outcome = replace(&mut manager, protocol, owner, previous, candidate);
-        let end = raw_ns();
+        let called = raw_ns();
+        let mut post_swap_observed = None;
+        let outcome = replace_observed(&mut manager, protocol, owner, previous, candidate, || {
+            post_swap_observed = Some(try_raw_ns().unwrap_or(0))
+        });
+        // The update may already be committed, so a subsequent clock failure must
+        // invalidate the capture without unwinding through the committed operation.
+        let end = try_raw_ns().unwrap_or(0);
+        // Identity evidence is deliberately outside the timed interval.
+        let after = manager
+            .exclusive_timer_identity()
+            .expect("replacement left the measured slot empty");
         let (name, succeeded) = match outcome {
             Ok(receipt) => {
                 assert_eq!(receipt.previous, Some(previous));
                 assert_eq!(receipt.installed.program, candidate);
                 assert_eq!(receipt.installed.epoch, previous.epoch + 1);
+                assert_eq!(after, receipt.installed);
                 installed = receipt.installed;
                 last_receipt = receipt;
                 ("Ok", true)
             }
-            Err(InstallError::Busy) if protocol == Protocol::Guarded => ("Busy", false),
+            Err(InstallError::Busy) if protocol == Protocol::Guarded => {
+                assert_eq!(after, previous);
+                ("Busy", false)
+            }
             Err(error) => panic!("unexpected replacement result: {error:?}"),
         };
         update_samples.push(UpdateSample {
@@ -524,9 +576,14 @@ fn measures_update_cost() {
             logical_update,
             retry_ordinal,
             outcome: name,
-            latency_ns: end - started,
+            latency_ns: end.checked_sub(called).unwrap_or(0),
             scheduled_offset_ns: scheduled_at - start_ns,
             started_offset_ns: started - start_ns,
+            called_offset_ns: called - start_ns,
+            post_swap_observed_offset_ns: post_swap_observed
+                .map(|timestamp| timestamp.saturating_sub(start_ns)),
+            before_installation: previous,
+            after_installation: after,
             lateness_ns: started - scheduled_at,
         });
         if succeeded {
@@ -596,7 +653,7 @@ fn measures_update_cost() {
     emit_resource(protocol, hold_us, run, "two_loaded", two_loaded);
     for sample in update_samples {
         println!(
-            "{},\"attempt\":{},\"logical_update\":{},\"retry_ordinal\":{},\"outcome\":\"{}\",\"latency_ns\":{},\"scheduled_offset_ns\":{},\"started_offset_ns\":{},\"lateness_ns\":{}}}",
+            "{},\"attempt\":{},\"logical_update\":{},\"retry_ordinal\":{},\"outcome\":\"{}\",\"latency_ns\":{},\"scheduled_offset_ns\":{},\"started_offset_ns\":{},\"called_offset_ns\":{},\"post_swap_observed_offset_ns\":{},\"before_installation\":[{},{}],\"after_installation\":[{},{}],\"lateness_ns\":{}}}",
             prefix(protocol, hold_us, run, "update"),
             sample.attempt,
             sample.logical_update,
@@ -605,6 +662,12 @@ fn measures_update_cost() {
             sample.latency_ns,
             sample.scheduled_offset_ns,
             sample.started_offset_ns,
+            sample.called_offset_ns,
+            json_optional(sample.post_swap_observed_offset_ns),
+            sample.before_installation.program,
+            sample.before_installation.epoch,
+            sample.after_installation.program,
+            sample.after_installation.epoch,
             sample.lateness_ns,
         );
     }
