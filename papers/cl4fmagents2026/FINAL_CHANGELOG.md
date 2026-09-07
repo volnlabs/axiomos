@@ -16,3 +16,7 @@ No new pointer-exchange/quiescence/ABA primitive; no multiword atomic ledger/rec
 ## Scope retained
 
 One exclusive executor slot, stateless loaded candidates, existing manager checks, existing guarded/atomic baseline, hosted measurements and deterministic simulation. No hardware, broader runtime API or new model loop. All work remains local; nothing was pushed or submitted.
+
+## Editorial follow-up
+
+Clarified the abstract result and identified the origins of Tables 2, 6 and 7 explicitly. Appendix G distinguishes the full artifact-r3.zip from paper-source.zip. The evidence ZIP, runtime, experiments and numeric table inputs are unchanged; abstract wording was checked against the existing schedule and corrective analyses. The portable source README explicitly requires BibTeX. Previous delivered files remain preserved in the original final directory.

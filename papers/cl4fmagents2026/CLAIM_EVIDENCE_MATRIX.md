@@ -4,9 +4,9 @@ Private audit ledger; do not add original capture provenance to the anonymous re
 
 | Paper claim/cell | Generated/paper input | Derived evidence | Raw/source evidence | Reduction/check |
 |---|---|---|---|---|
-| Main Table 1; sweep abstract/body | sweep.tex; headline-results.tex | schedule-grid.json: aggregates; schedule-grid.csv | adaptation-trace.jsonl: schedule_grid dispatch/completion/attempt/run_end | analyze-update-adaptation.py |
+| Main Table 1; sweep abstract/body | sweep.tex; headline-results.tex; main.tex abstract (counts independently checked) | schedule-grid.json: aggregates; schedule-grid.csv | adaptation-trace.jsonl: schedule_grid dispatch/completion/attempt/run_end | analyze-update-adaptation.py |
 | Main Table 2; latency paragraph | costs.tex; headline-results.tex | cost-analysis.json: logical_aggregates, scheduled_to_publication; cost-logical-latency.csv | cost-trace.jsonl: schema3 update rows, before/after_installation, called/scheduled/post_swap offsets | analyze-update-cost.py |
-| Main Table 3; corrective abstract/body | stop.tex; headline-results.tex | corrective-stop.json and .csv | adaptation-trace.jsonl: corrective_stop events and plant observations | analyze-update-adaptation.py |
+| Main Table 3; corrective abstract/body | stop.tex; headline-results.tex; main.tex abstract (delay independently checked) | corrective-stop.json and .csv | adaptation-trace.jsonl: corrective_stop events and plant observations | analyze-update-adaptation.py |
 | Appendix Table 4 | appendix.tex (stated outcomes) | analysis.json: paired_summary; summary.csv | trace.jsonl: paired fault requests and receipt/ledger observations | analyze-update-transaction.py |
 | Appendix Table 5 | appendix.tex (assertion coverage) | validation/publication-transaction.log; source assertions | bpf_update_transaction.rs; not separate AP observations where labeled not observed | cargo test bpf_update_transaction |
 | Appendix Table 6 | latency-details.tex | cost-analysis.json: first_attempt_to_publication and first_attempt_to_return | cost-trace.jsonl: every attempt grouped through success/censor | analyze-update-cost.py |
