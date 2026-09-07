@@ -35,6 +35,20 @@ Four content pages maximum plus references; double blind. Preserve source draft.
 
 ## Progress
 
+## Accepted v2 evidence strengthening (2026-09-07)
+
+Continue locally from 82ea2de. Preserve v1 evidence and PDF as fallback. No push, PR, merge, or OpenReview submission.
+
+Core: replace the component headline with a host-only same-manager atomic baseline sharing candidate checks, full expected identity, authority, resource delta, snapshot preparation, and receipts. Only invocation quiescence differs. Use the existing ExclusiveSlot payload (identity plus runtime), unchanged epoch reclamation, stable fixture mode until draining cleanup. Atomic publication may expose B while an A guard remains held; its API waits for old readers before returning. Host callbacks must not acquire manager/actuation locks. Production dispatch remains guarded.
+
+Pair explicit fault outcomes and captured guard identities. Keep AF/DF as supporting failure witnesses. Prove guarded invocation exclusivity and returned-error preservation of snapshot, identity, and admission ledger; state assumptions and pointer-swap/entry linearization points. Paper-facing state policy is STATELESS (no referenced runtime maps).
+
+Hosted release campaign: holds 0/10/100/500 us, 1 ms dispatch period, 10 fresh processes x 1,000 attempts per protocol/regime, 1,000 excluded warmup operations. Absolute deterministic phase sweep, separate physical cores, CLOCK_MONOTONIC_RAW, preallocated samples. Report per-process count/median/p99/max, repeated-run summaries, success/Busy and guard costs, natural skips and separately controlled TransitionBusy, first-attempt success, retries, missed releases/lateness, and manager-accounted resident program storage. Retain noise and all runs; no physical/realtime/privileged-execution claim. Add measured executable hashes and one-command reproduction. New evidence directory: update-transaction-v2.
+
+Optional replay only after core is stable: real manager/guards/receipts select full captured installation IDs, pure-host first-order velocity simulation with payload shift and frozen online-tuner gain proposals. Commands use the identity and error captured at invocation start, apply in completion order, and use the same zero-order hold policy. No LLM, new runtime API, physical claims, or stateful controller. Start only if core stable by Sep 8 07:29 IST; validated by 13:29; final PDF freeze 15:29; otherwise omit.
+
+## v1 progress
+
 - Branch/worktree created; original checkout preserved; paper draft copied.
 - Baseline host library previously type-checked; existing host test link blockers are part of the planned harness work.
 - Account quota telemetry unavailable: unknown, maximum three worker agents.

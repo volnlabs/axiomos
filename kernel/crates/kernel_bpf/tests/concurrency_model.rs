@@ -59,6 +59,21 @@ impl ConsistentValue {
     }
 }
 
+#[derive(Clone, Copy)]
+struct PublishedInstallation {
+    identity: usize,
+    runtime_result: usize,
+}
+
+impl PublishedInstallation {
+    fn assert_coherent(&self) {
+        assert!(
+            matches!((self.identity, self.runtime_result), (1, 11) | (2, 22)),
+            "installation identity was paired with the wrong runtime"
+        );
+    }
+}
+
 #[test]
 fn publish_read_does_not_return_torn_value() {
     loom::model(|| {
@@ -85,6 +100,37 @@ fn publish_read_does_not_return_torn_value() {
         // The final published value is internally consistent.
         let final_value = snapshot.read().expect("snapshot is published");
         final_value.assert_consistent();
+    });
+}
+
+#[test]
+fn publication_keeps_installation_identity_and_runtime_coherent() {
+    loom::model(|| {
+        let snapshot = Arc::new(EpochSnapshot::empty());
+        snapshot.publish(Box::new(PublishedInstallation {
+            identity: 1,
+            runtime_result: 11,
+        }));
+        let old = snapshot.read().expect("A is published");
+
+        let writer_snapshot = snapshot.clone();
+        let writer = thread::spawn(move || {
+            writer_snapshot.publish(Box::new(PublishedInstallation {
+                identity: 2,
+                runtime_result: 22,
+            }));
+        });
+        let observed = snapshot.read().expect("an installation remains published");
+
+        old.assert_coherent();
+        observed.assert_coherent();
+        assert_eq!((old.identity, old.runtime_result), (1, 11));
+
+        drop(observed);
+        drop(old);
+        writer.join().unwrap();
+        let current = snapshot.read().expect("B is published");
+        assert_eq!((current.identity, current.runtime_result), (2, 22));
     });
 }
 

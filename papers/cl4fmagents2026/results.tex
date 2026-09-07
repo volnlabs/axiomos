@@ -1,12 +1,15 @@
-% Generated from shared manager scenarios; do not hand-edit.
-\begin{tabular}{lrrr}
+% Generated from the validated paired manager campaign; do not hand-edit.
+\begin{tabular}{lrr}
 \toprule
-Observation & AF & DF & TX \\
+Observation / fault & AP & GR \\
 \midrule
-Observed snapshots & 7 & 7 & 5 \\
-Multiple versions & 3 & 0 & 0 \\
-Empty snapshots & 0 & 5 & 0 \\
-Accounting mismatches & 0 & 0 & 0 \\
-Failed requests preserved & 2/3 & 0/3 & 2/2 \\
+Multi / empty snapshots & 0/0 & 0/0 \\
+Overlapping guards & 1 & 0 \\
+\midrule
+Snapshot preparation & reject; preserve & reject; preserve \\
+Authority / budget & reject (2/2) & reject (2/2) \\
+Stale / retry / ABA & reject (3/3) & reject (3/3) \\
+Concurrent proposers & one winner & one winner \\
+Held predecessor & publish; overlap & Busy; retry OK \\
 \bottomrule
 \end{tabular}

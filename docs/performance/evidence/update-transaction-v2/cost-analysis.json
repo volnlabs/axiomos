@@ -1,0 +1,7431 @@
+{
+  "aggregates": [
+    {
+      "attempts": 10000,
+      "busy_updates": 0,
+      "dispatch_attempts": 9990,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_successes": 10000,
+      "hold_us": 0,
+      "latency_ns": {
+        "actual_hold": {
+          "median_of_run_medians": 40,
+          "median_of_run_p99": 60,
+          "run_median_max": 40,
+          "run_median_min": 30,
+          "run_p99_max": 320,
+          "run_p99_min": 51,
+          "runs_with_samples": 10
+        },
+        "clock": {
+          "median_of_run_medians": 20,
+          "median_of_run_p99": 21,
+          "run_median_max": 30,
+          "run_median_min": 20,
+          "run_p99_max": 31,
+          "run_p99_min": 21,
+          "runs_with_samples": 10
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "median_of_run_medians": 200,
+          "median_of_run_p99": 450,
+          "run_median_max": 662,
+          "run_median_min": 200,
+          "run_p99_max": 2304,
+          "run_p99_min": 330,
+          "runs_with_samples": 10
+        },
+        "entry": {
+          "median_of_run_medians": 120,
+          "median_of_run_p99": 360,
+          "run_median_max": 541,
+          "run_median_min": 120,
+          "run_p99_max": 2214,
+          "run_p99_min": 250,
+          "runs_with_samples": 10
+        },
+        "execution_busy": null,
+        "lateness": {
+          "median_of_run_medians": 6288,
+          "median_of_run_p99": 26251,
+          "run_median_max": 17986,
+          "run_median_min": 5558,
+          "run_p99_max": 472356,
+          "run_p99_min": 8497,
+          "runs_with_samples": 10
+        },
+        "release": {
+          "median_of_run_medians": 40,
+          "median_of_run_p99": 90,
+          "run_median_max": 60,
+          "run_median_min": 40,
+          "run_p99_max": 481,
+          "run_p99_min": 50,
+          "runs_with_samples": 10
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "median_of_run_medians": 2004,
+          "median_of_run_p99": 8987,
+          "run_median_max": 19987,
+          "run_median_min": 1894,
+          "run_p99_max": 137226,
+          "run_p99_min": 6352,
+          "runs_with_samples": 10
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "median_of_run_medians": 6577,
+          "median_of_run_p99": 12419,
+          "run_median_max": 20198,
+          "run_median_min": 6357,
+          "run_p99_max": 1476358,
+          "run_p99_min": 9658,
+          "runs_with_samples": 10
+        }
+      },
+      "logical_updates_started": 10000,
+      "missed_releases": 10,
+      "protocol": "atomic",
+      "runs": 10,
+      "scheduled_releases": 10000,
+      "successful_updates": 10000,
+      "transition_busy_skips": 0
+    },
+    {
+      "attempts": 10000,
+      "busy_updates": 0,
+      "dispatch_attempts": 9994,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_successes": 10000,
+      "hold_us": 10,
+      "latency_ns": {
+        "actual_hold": {
+          "median_of_run_medians": 10019,
+          "median_of_run_p99": 10039,
+          "run_median_max": 10028,
+          "run_median_min": 10019,
+          "run_p99_max": 10039,
+          "run_p99_min": 10039,
+          "runs_with_samples": 10
+        },
+        "clock": {
+          "median_of_run_medians": 20,
+          "median_of_run_p99": 31,
+          "run_median_max": 30,
+          "run_median_min": 20,
+          "run_p99_max": 40,
+          "run_p99_min": 21,
+          "runs_with_samples": 10
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "median_of_run_medians": 10189,
+          "median_of_run_p99": 10510,
+          "run_median_max": 10580,
+          "run_median_min": 10179,
+          "run_p99_max": 11942,
+          "run_p99_min": 10359,
+          "runs_with_samples": 10
+        },
+        "entry": {
+          "median_of_run_medians": 120,
+          "median_of_run_p99": 421,
+          "run_median_max": 490,
+          "run_median_min": 111,
+          "run_p99_max": 1694,
+          "run_p99_min": 290,
+          "runs_with_samples": 10
+        },
+        "execution_busy": null,
+        "lateness": {
+          "median_of_run_medians": 6291,
+          "median_of_run_p99": 23071,
+          "run_median_max": 19187,
+          "run_median_min": 5558,
+          "run_p99_max": 588904,
+          "run_p99_min": 9205,
+          "runs_with_samples": 10
+        },
+        "release": {
+          "median_of_run_medians": 40,
+          "median_of_run_p99": 70,
+          "run_median_max": 61,
+          "run_median_min": 40,
+          "run_p99_max": 280,
+          "run_p99_min": 70,
+          "runs_with_samples": 10
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "median_of_run_medians": 2054,
+          "median_of_run_p99": 10680,
+          "run_median_max": 19616,
+          "run_median_min": 1954,
+          "run_p99_max": 43411,
+          "run_p99_min": 8506,
+          "runs_with_samples": 10
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "median_of_run_medians": 6535,
+          "median_of_run_p99": 11998,
+          "run_median_max": 18997,
+          "run_median_min": 5816,
+          "run_p99_max": 692470,
+          "run_p99_min": 9275,
+          "runs_with_samples": 10
+        }
+      },
+      "logical_updates_started": 10000,
+      "missed_releases": 6,
+      "protocol": "atomic",
+      "runs": 10,
+      "scheduled_releases": 10000,
+      "successful_updates": 10000,
+      "transition_busy_skips": 0
+    },
+    {
+      "attempts": 10000,
+      "busy_updates": 0,
+      "dispatch_attempts": 9977,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_successes": 10000,
+      "hold_us": 100,
+      "latency_ns": {
+        "actual_hold": {
+          "median_of_run_medians": 100017,
+          "median_of_run_p99": 100037,
+          "run_median_max": 100017,
+          "run_median_min": 100017,
+          "run_p99_max": 100046,
+          "run_p99_min": 100037,
+          "runs_with_samples": 10
+        },
+        "clock": {
+          "median_of_run_medians": 20,
+          "median_of_run_p99": 31,
+          "run_median_max": 30,
+          "run_median_min": 20,
+          "run_p99_max": 31,
+          "run_p99_min": 21,
+          "runs_with_samples": 10
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "median_of_run_medians": 100207,
+          "median_of_run_p99": 100598,
+          "run_median_max": 100588,
+          "run_median_min": 100178,
+          "run_p99_max": 104656,
+          "run_p99_min": 100367,
+          "runs_with_samples": 10
+        },
+        "entry": {
+          "median_of_run_medians": 131,
+          "median_of_run_p99": 511,
+          "run_median_max": 421,
+          "run_median_min": 120,
+          "run_p99_max": 2164,
+          "run_p99_min": 261,
+          "runs_with_samples": 10
+        },
+        "execution_busy": null,
+        "lateness": {
+          "median_of_run_medians": 6274,
+          "median_of_run_p99": 28582,
+          "run_median_max": 17230,
+          "run_median_min": 39,
+          "run_p99_max": 973359,
+          "run_p99_min": 9346,
+          "runs_with_samples": 10
+        },
+        "release": {
+          "median_of_run_medians": 50,
+          "median_of_run_p99": 140,
+          "run_median_max": 121,
+          "run_median_min": 40,
+          "run_p99_max": 891,
+          "run_p99_min": 80,
+          "runs_with_samples": 10
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "median_of_run_medians": 2094,
+          "median_of_run_p99": 95919,
+          "run_median_max": 19386,
+          "run_median_min": 1993,
+          "run_p99_max": 128881,
+          "run_p99_min": 88325,
+          "runs_with_samples": 10
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "median_of_run_medians": 6560,
+          "median_of_run_p99": 14978,
+          "run_median_max": 18516,
+          "run_median_min": 6420,
+          "run_p99_max": 1730009,
+          "run_p99_min": 8839,
+          "runs_with_samples": 10
+        }
+      },
+      "logical_updates_started": 10000,
+      "missed_releases": 25,
+      "protocol": "atomic",
+      "runs": 10,
+      "scheduled_releases": 10002,
+      "successful_updates": 10000,
+      "transition_busy_skips": 0
+    },
+    {
+      "attempts": 10000,
+      "busy_updates": 0,
+      "dispatch_attempts": 9990,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_successes": 10000,
+      "hold_us": 500,
+      "latency_ns": {
+        "actual_hold": {
+          "median_of_run_medians": 505383,
+          "median_of_run_p99": 513859,
+          "run_median_max": 517646,
+          "run_median_min": 500024,
+          "run_p99_max": 643111,
+          "run_p99_min": 508339,
+          "runs_with_samples": 10
+        },
+        "clock": {
+          "median_of_run_medians": 20,
+          "median_of_run_p99": 31,
+          "run_median_max": 30,
+          "run_median_min": 20,
+          "run_p99_max": 40,
+          "run_p99_min": 21,
+          "runs_with_samples": 10
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "median_of_run_medians": 505604,
+          "median_of_run_p99": 514972,
+          "run_median_max": 518479,
+          "run_median_min": 501286,
+          "run_p99_max": 644914,
+          "run_p99_min": 508570,
+          "runs_with_samples": 10
+        },
+        "entry": {
+          "median_of_run_medians": 130,
+          "median_of_run_p99": 401,
+          "run_median_max": 491,
+          "run_median_min": 120,
+          "run_p99_max": 1522,
+          "run_p99_min": 180,
+          "runs_with_samples": 10
+        },
+        "execution_busy": null,
+        "lateness": {
+          "median_of_run_medians": 6129,
+          "median_of_run_p99": 15908,
+          "run_median_max": 19027,
+          "run_median_min": 5390,
+          "run_p99_max": 442477,
+          "run_p99_min": 7687,
+          "runs_with_samples": 10
+        },
+        "release": {
+          "median_of_run_medians": 80,
+          "median_of_run_p99": 311,
+          "run_median_max": 300,
+          "run_median_min": 71,
+          "run_p99_max": 1233,
+          "run_p99_min": 150,
+          "runs_with_samples": 10
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "median_of_run_medians": 14667,
+          "median_of_run_p99": 503590,
+          "run_median_max": 23965,
+          "run_median_min": 6702,
+          "run_p99_max": 577588,
+          "run_p99_min": 496968,
+          "runs_with_samples": 10
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "median_of_run_medians": 6109,
+          "median_of_run_p99": 27413,
+          "run_median_max": 19060,
+          "run_median_min": 5326,
+          "run_p99_max": 1850787,
+          "run_p99_min": 7977,
+          "runs_with_samples": 10
+        }
+      },
+      "logical_updates_started": 10000,
+      "missed_releases": 10,
+      "protocol": "atomic",
+      "runs": 10,
+      "scheduled_releases": 10000,
+      "successful_updates": 10000,
+      "transition_busy_skips": 0
+    },
+    {
+      "attempts": 10000,
+      "busy_updates": 5,
+      "dispatch_attempts": 9983,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_successes": 9990,
+      "hold_us": 0,
+      "latency_ns": {
+        "actual_hold": {
+          "median_of_run_medians": 40,
+          "median_of_run_p99": 60,
+          "run_median_max": 50,
+          "run_median_min": 40,
+          "run_p99_max": 752,
+          "run_p99_min": 60,
+          "runs_with_samples": 10
+        },
+        "clock": {
+          "median_of_run_medians": 20,
+          "median_of_run_p99": 31,
+          "run_median_max": 30,
+          "run_median_min": 20,
+          "run_p99_max": 31,
+          "run_p99_min": 21,
+          "runs_with_samples": 10
+        },
+        "controlled_transition": {
+          "median_of_run_medians": 50,
+          "median_of_run_p99": 130,
+          "run_median_max": 70,
+          "run_median_min": 50,
+          "run_p99_max": 902,
+          "run_p99_min": 70,
+          "runs_with_samples": 10
+        },
+        "dispatch_ok": {
+          "median_of_run_medians": 210,
+          "median_of_run_p99": 561,
+          "run_median_max": 791,
+          "run_median_min": 210,
+          "run_p99_max": 2334,
+          "run_p99_min": 421,
+          "runs_with_samples": 10
+        },
+        "entry": {
+          "median_of_run_medians": 130,
+          "median_of_run_p99": 461,
+          "run_median_max": 611,
+          "run_median_min": 130,
+          "run_p99_max": 1864,
+          "run_p99_min": 331,
+          "runs_with_samples": 10
+        },
+        "execution_busy": null,
+        "lateness": {
+          "median_of_run_medians": 6277,
+          "median_of_run_p99": 11005,
+          "run_median_max": 18866,
+          "run_median_min": 6213,
+          "run_p99_max": 511414,
+          "run_p99_min": 9327,
+          "runs_with_samples": 10
+        },
+        "release": {
+          "median_of_run_medians": 40,
+          "median_of_run_p99": 100,
+          "run_median_max": 60,
+          "run_median_min": 40,
+          "run_p99_max": 701,
+          "run_p99_min": 60,
+          "runs_with_samples": 10
+        },
+        "replace_busy": {
+          "median_of_run_medians": 140,
+          "median_of_run_p99": 140,
+          "run_median_max": 3547,
+          "run_median_min": 140,
+          "run_p99_max": 3547,
+          "run_p99_min": 140,
+          "runs_with_samples": 4
+        },
+        "replace_ok": {
+          "median_of_run_medians": 2004,
+          "median_of_run_p99": 8646,
+          "run_median_max": 19136,
+          "run_median_min": 1963,
+          "run_p99_max": 42589,
+          "run_p99_min": 5981,
+          "runs_with_samples": 10
+        },
+        "transition_busy": {
+          "median_of_run_medians": 210,
+          "median_of_run_p99": 381,
+          "run_median_max": 521,
+          "run_median_min": 161,
+          "run_p99_max": 1553,
+          "run_p99_min": 170,
+          "runs_with_samples": 10
+        },
+        "update_lateness": {
+          "median_of_run_medians": 6534,
+          "median_of_run_p99": 10404,
+          "run_median_max": 18703,
+          "run_median_min": 6356,
+          "run_p99_max": 563325,
+          "run_p99_min": 8575,
+          "runs_with_samples": 10
+        }
+      },
+      "logical_updates_started": 9995,
+      "missed_releases": 17,
+      "protocol": "guarded",
+      "runs": 10,
+      "scheduled_releases": 10000,
+      "successful_updates": 9995,
+      "transition_busy_skips": 67
+    },
+    {
+      "attempts": 10000,
+      "busy_updates": 118,
+      "dispatch_attempts": 9985,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_successes": 9764,
+      "hold_us": 10,
+      "latency_ns": {
+        "actual_hold": {
+          "median_of_run_medians": 10019,
+          "median_of_run_p99": 10039,
+          "run_median_max": 10028,
+          "run_median_min": 10019,
+          "run_p99_max": 10049,
+          "run_p99_min": 10039,
+          "runs_with_samples": 10
+        },
+        "clock": {
+          "median_of_run_medians": 30,
+          "median_of_run_p99": 31,
+          "run_median_max": 30,
+          "run_median_min": 20,
+          "run_p99_max": 31,
+          "run_p99_min": 21,
+          "runs_with_samples": 10
+        },
+        "controlled_transition": {
+          "median_of_run_medians": 50,
+          "median_of_run_p99": 71,
+          "run_median_max": 80,
+          "run_median_min": 40,
+          "run_p99_max": 501,
+          "run_p99_min": 61,
+          "runs_with_samples": 10
+        },
+        "dispatch_ok": {
+          "median_of_run_medians": 10199,
+          "median_of_run_p99": 10530,
+          "run_median_max": 10750,
+          "run_median_min": 10199,
+          "run_p99_max": 11943,
+          "run_p99_min": 10369,
+          "runs_with_samples": 10
+        },
+        "entry": {
+          "median_of_run_medians": 130,
+          "median_of_run_p99": 441,
+          "run_median_max": 641,
+          "run_median_min": 130,
+          "run_p99_max": 1863,
+          "run_p99_min": 291,
+          "runs_with_samples": 10
+        },
+        "execution_busy": null,
+        "lateness": {
+          "median_of_run_medians": 6356,
+          "median_of_run_p99": 14733,
+          "run_median_max": 18624,
+          "run_median_min": 6135,
+          "run_p99_max": 668257,
+          "run_p99_min": 8740,
+          "runs_with_samples": 10
+        },
+        "release": {
+          "median_of_run_medians": 50,
+          "median_of_run_p99": 90,
+          "run_median_max": 70,
+          "run_median_min": 50,
+          "run_p99_max": 371,
+          "run_p99_min": 70,
+          "runs_with_samples": 10
+        },
+        "replace_busy": {
+          "median_of_run_medians": 140,
+          "median_of_run_p99": 171,
+          "run_median_max": 430,
+          "run_median_min": 121,
+          "run_p99_max": 2044,
+          "run_p99_min": 140,
+          "runs_with_samples": 10
+        },
+        "replace_ok": {
+          "median_of_run_medians": 2004,
+          "median_of_run_p99": 9297,
+          "run_median_max": 19746,
+          "run_median_min": 1953,
+          "run_p99_max": 45996,
+          "run_p99_min": 5972,
+          "runs_with_samples": 10
+        },
+        "transition_busy": {
+          "median_of_run_medians": 191,
+          "median_of_run_p99": 340,
+          "run_median_max": 521,
+          "run_median_min": 170,
+          "run_p99_max": 2344,
+          "run_p99_min": 201,
+          "runs_with_samples": 10
+        },
+        "update_lateness": {
+          "median_of_run_medians": 6521,
+          "median_of_run_p99": 10050,
+          "run_median_max": 18912,
+          "run_median_min": 6298,
+          "run_p99_max": 850401,
+          "run_p99_min": 8773,
+          "runs_with_samples": 10
+        }
+      },
+      "logical_updates_started": 9882,
+      "missed_releases": 15,
+      "protocol": "guarded",
+      "runs": 10,
+      "scheduled_releases": 10000,
+      "successful_updates": 9882,
+      "transition_busy_skips": 76
+    },
+    {
+      "attempts": 10000,
+      "busy_updates": 1019,
+      "dispatch_attempts": 9986,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_successes": 7983,
+      "hold_us": 100,
+      "latency_ns": {
+        "actual_hold": {
+          "median_of_run_medians": 100017,
+          "median_of_run_p99": 100037,
+          "run_median_max": 100017,
+          "run_median_min": 100017,
+          "run_p99_max": 100047,
+          "run_p99_min": 100037,
+          "runs_with_samples": 10
+        },
+        "clock": {
+          "median_of_run_medians": 20,
+          "median_of_run_p99": 31,
+          "run_median_max": 30,
+          "run_median_min": 20,
+          "run_p99_max": 31,
+          "run_p99_min": 21,
+          "runs_with_samples": 10
+        },
+        "controlled_transition": {
+          "median_of_run_medians": 50,
+          "median_of_run_p99": 70,
+          "run_median_max": 60,
+          "run_median_min": 50,
+          "run_p99_max": 220,
+          "run_p99_min": 61,
+          "runs_with_samples": 10
+        },
+        "dispatch_ok": {
+          "median_of_run_medians": 100258,
+          "median_of_run_p99": 100738,
+          "run_median_max": 100989,
+          "run_median_min": 100197,
+          "run_p99_max": 103473,
+          "run_p99_min": 100418,
+          "runs_with_samples": 10
+        },
+        "entry": {
+          "median_of_run_medians": 171,
+          "median_of_run_p99": 641,
+          "run_median_max": 722,
+          "run_median_min": 120,
+          "run_p99_max": 2204,
+          "run_p99_min": 311,
+          "runs_with_samples": 10
+        },
+        "execution_busy": null,
+        "lateness": {
+          "median_of_run_medians": 6253,
+          "median_of_run_p99": 23691,
+          "run_median_max": 19827,
+          "run_median_min": 4701,
+          "run_p99_max": 942541,
+          "run_p99_min": 8567,
+          "runs_with_samples": 10
+        },
+        "release": {
+          "median_of_run_medians": 50,
+          "median_of_run_p99": 141,
+          "run_median_max": 220,
+          "run_median_min": 50,
+          "run_p99_max": 952,
+          "run_p99_min": 121,
+          "runs_with_samples": 10
+        },
+        "replace_busy": {
+          "median_of_run_medians": 131,
+          "median_of_run_p99": 261,
+          "run_median_max": 531,
+          "run_median_min": 120,
+          "run_p99_max": 22632,
+          "run_p99_min": 160,
+          "runs_with_samples": 10
+        },
+        "replace_ok": {
+          "median_of_run_medians": 2084,
+          "median_of_run_p99": 8145,
+          "run_median_max": 21420,
+          "run_median_min": 1924,
+          "run_p99_max": 57206,
+          "run_p99_min": 6422,
+          "runs_with_samples": 10
+        },
+        "transition_busy": {
+          "median_of_run_medians": 210,
+          "median_of_run_p99": 271,
+          "run_median_max": 662,
+          "run_median_min": 161,
+          "run_p99_max": 1512,
+          "run_p99_min": 191,
+          "runs_with_samples": 10
+        },
+        "update_lateness": {
+          "median_of_run_medians": 6511,
+          "median_of_run_p99": 11093,
+          "run_median_max": 19505,
+          "run_median_min": 6316,
+          "run_p99_max": 2179933,
+          "run_p99_min": 8945,
+          "runs_with_samples": 10
+        }
+      },
+      "logical_updates_started": 8982,
+      "missed_releases": 16,
+      "protocol": "guarded",
+      "runs": 10,
+      "scheduled_releases": 10002,
+      "successful_updates": 8981,
+      "transition_busy_skips": 75
+    },
+    {
+      "attempts": 10000,
+      "busy_updates": 5018,
+      "dispatch_attempts": 9979,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_successes": 3591,
+      "hold_us": 500,
+      "latency_ns": {
+        "actual_hold": {
+          "median_of_run_medians": 505995,
+          "median_of_run_p99": 510844,
+          "run_median_max": 518809,
+          "run_median_min": 500014,
+          "run_p99_max": 751664,
+          "run_p99_min": 507388,
+          "runs_with_samples": 10
+        },
+        "clock": {
+          "median_of_run_medians": 20,
+          "median_of_run_p99": 31,
+          "run_median_max": 30,
+          "run_median_min": 20,
+          "run_p99_max": 31,
+          "run_p99_min": 21,
+          "runs_with_samples": 10
+        },
+        "controlled_transition": {
+          "median_of_run_medians": 50,
+          "median_of_run_p99": 140,
+          "run_median_max": 61,
+          "run_median_min": 50,
+          "run_p99_max": 330,
+          "run_p99_min": 61,
+          "runs_with_samples": 10
+        },
+        "dispatch_ok": {
+          "median_of_run_medians": 506205,
+          "median_of_run_p99": 511084,
+          "run_median_max": 519891,
+          "run_median_min": 500234,
+          "run_p99_max": 752215,
+          "run_p99_min": 507728,
+          "runs_with_samples": 10
+        },
+        "entry": {
+          "median_of_run_medians": 110,
+          "median_of_run_p99": 281,
+          "run_median_max": 561,
+          "run_median_min": 100,
+          "run_p99_max": 1884,
+          "run_p99_min": 231,
+          "runs_with_samples": 10
+        },
+        "execution_busy": null,
+        "lateness": {
+          "median_of_run_medians": 6099,
+          "median_of_run_p99": 8280,
+          "run_median_max": 18897,
+          "run_median_min": 5109,
+          "run_p99_max": 446377,
+          "run_p99_min": 7404,
+          "runs_with_samples": 10
+        },
+        "release": {
+          "median_of_run_medians": 90,
+          "median_of_run_p99": 251,
+          "run_median_max": 441,
+          "run_median_min": 90,
+          "run_p99_max": 1472,
+          "run_p99_min": 190,
+          "runs_with_samples": 10
+        },
+        "replace_busy": {
+          "median_of_run_medians": 130,
+          "median_of_run_p99": 471,
+          "run_median_max": 1222,
+          "run_median_min": 110,
+          "run_p99_max": 2705,
+          "run_p99_min": 390,
+          "runs_with_samples": 10
+        },
+        "replace_ok": {
+          "median_of_run_medians": 2063,
+          "median_of_run_p99": 9547,
+          "run_median_max": 21190,
+          "run_median_min": 2004,
+          "run_p99_max": 86742,
+          "run_p99_min": 7314,
+          "runs_with_samples": 10
+        },
+        "transition_busy": {
+          "median_of_run_medians": 180,
+          "median_of_run_p99": 391,
+          "run_median_max": 411,
+          "run_median_min": 150,
+          "run_p99_max": 8936,
+          "run_p99_min": 170,
+          "runs_with_samples": 10
+        },
+        "update_lateness": {
+          "median_of_run_medians": 6524,
+          "median_of_run_p99": 10306,
+          "run_median_max": 18011,
+          "run_median_min": 5625,
+          "run_p99_max": 1256994,
+          "run_p99_min": 8735,
+          "runs_with_samples": 10
+        }
+      },
+      "logical_updates_started": 4987,
+      "missed_releases": 21,
+      "protocol": "guarded",
+      "runs": 10,
+      "scheduled_releases": 10000,
+      "successful_updates": 4982,
+      "transition_busy_skips": 95
+    }
+  ],
+  "denominators": {
+    "dispatch": "dispatch calls attempted",
+    "first_attempt": "logical update sequences started",
+    "missed": "scheduled releases",
+    "replacement": "raw replacement calls",
+    "skips_per_update": "successful replacements"
+  },
+  "runs": [
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 0,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 231,
+          "median": 40,
+          "p99": 60
+        },
+        "clock": {
+          "count": 1000,
+          "max": 60,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 601,
+          "median": 200,
+          "p99": 340
+        },
+        "entry": {
+          "count": 1000,
+          "max": 521,
+          "median": 120,
+          "p99": 260
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 186987,
+          "median": 6290,
+          "p99": 26251
+        },
+        "release": {
+          "count": 1000,
+          "max": 141,
+          "median": 40,
+          "p99": 60
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 30898,
+          "median": 2004,
+          "p99": 7194
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 153113,
+          "median": 6629,
+          "p99": 13075
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 0,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 0,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 240,
+          "median": 40,
+          "p99": 60
+        },
+        "clock": {
+          "count": 1000,
+          "max": 30,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 1143,
+          "median": 300,
+          "p99": 701
+        },
+        "entry": {
+          "count": 1000,
+          "max": 982,
+          "median": 210,
+          "p99": 541
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 620501,
+          "median": 5558,
+          "p99": 282277
+        },
+        "release": {
+          "count": 1000,
+          "max": 320,
+          "median": 60,
+          "p99": 110
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 31388,
+          "median": 1894,
+          "p99": 9558
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 61918,
+          "median": 6492,
+          "p99": 11722
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 1,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 0,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 70,
+          "median": 40,
+          "p99": 51
+        },
+        "clock": {
+          "count": 1000,
+          "max": 50,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 752,
+          "median": 200,
+          "p99": 330
+        },
+        "entry": {
+          "count": 1000,
+          "max": 681,
+          "median": 120,
+          "p99": 250
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 53744,
+          "median": 6232,
+          "p99": 12361
+        },
+        "release": {
+          "count": 1000,
+          "max": 241,
+          "median": 40,
+          "p99": 60
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 15909,
+          "median": 1954,
+          "p99": 6352
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 113160,
+          "median": 6606,
+          "p99": 9981
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 2,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 0,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 111,
+          "median": 40,
+          "p99": 60
+        },
+        "clock": {
+          "count": 1000,
+          "max": 80,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 1092,
+          "median": 200,
+          "p99": 420
+        },
+        "entry": {
+          "count": 1000,
+          "max": 1022,
+          "median": 120,
+          "p99": 351
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 177127,
+          "median": 6288,
+          "p99": 11906
+        },
+        "release": {
+          "count": 1000,
+          "max": 250,
+          "median": 40,
+          "p99": 60
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 13425,
+          "median": 2004,
+          "p99": 6452
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 21881,
+          "median": 6526,
+          "p99": 9658
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 3,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 0,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 110,
+          "median": 40,
+          "p99": 60
+        },
+        "clock": {
+          "count": 1000,
+          "max": 50,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 902,
+          "median": 200,
+          "p99": 411
+        },
+        "entry": {
+          "count": 1000,
+          "max": 822,
+          "median": 120,
+          "p99": 270
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 14860,
+          "median": 6252,
+          "p99": 8497
+        },
+        "release": {
+          "count": 1000,
+          "max": 381,
+          "median": 40,
+          "p99": 90
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 17192,
+          "median": 2013,
+          "p99": 6623
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 105468,
+          "median": 6357,
+          "p99": 10029
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 4,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 0,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 401,
+          "median": 40,
+          "p99": 51
+        },
+        "clock": {
+          "count": 1000,
+          "max": 40,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 1382,
+          "median": 201,
+          "p99": 611
+        },
+        "entry": {
+          "count": 1000,
+          "max": 1302,
+          "median": 121,
+          "p99": 541
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 417569,
+          "median": 6420,
+          "p99": 27713
+        },
+        "release": {
+          "count": 1000,
+          "max": 381,
+          "median": 40,
+          "p99": 111
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 20228,
+          "median": 2635,
+          "p99": 10881
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 148688,
+          "median": 6577,
+          "p99": 17189
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 5,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 0,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 180,
+          "median": 40,
+          "p99": 60
+        },
+        "clock": {
+          "count": 1000,
+          "max": 130,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 922,
+          "median": 200,
+          "p99": 450
+        },
+        "entry": {
+          "count": 1000,
+          "max": 852,
+          "median": 120,
+          "p99": 360
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 25583,
+          "median": 6265,
+          "p99": 8700
+        },
+        "release": {
+          "count": 1000,
+          "max": 260,
+          "median": 40,
+          "p99": 50
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 30006,
+          "median": 1993,
+          "p99": 8987
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 37593,
+          "median": 6514,
+          "p99": 12419
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 6,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 0,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 431,
+          "median": 40,
+          "p99": 71
+        },
+        "clock": {
+          "count": 1000,
+          "max": 40,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 7043,
+          "median": 260,
+          "p99": 781
+        },
+        "entry": {
+          "count": 1000,
+          "max": 6973,
+          "median": 170,
+          "p99": 652
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 995080,
+          "median": 7524,
+          "p99": 468347
+        },
+        "release": {
+          "count": 1000,
+          "max": 451,
+          "median": 40,
+          "p99": 150
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 61164,
+          "median": 4959,
+          "p99": 20819
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 972676,
+          "median": 7442,
+          "p99": 337717
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 7,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 998,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 0,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 998,
+          "max": 572,
+          "median": 40,
+          "p99": 180
+        },
+        "clock": {
+          "count": 1000,
+          "max": 50,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 998,
+          "max": 3797,
+          "median": 341,
+          "p99": 2063
+        },
+        "entry": {
+          "count": 998,
+          "max": 3637,
+          "median": 250,
+          "p99": 1933
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 998,
+          "max": 992417,
+          "median": 9969,
+          "p99": 262055
+        },
+        "release": {
+          "count": 998,
+          "max": 1022,
+          "median": 40,
+          "p99": 381
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 74529,
+          "median": 5711,
+          "p99": 30768
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 3579242,
+          "median": 8868,
+          "p99": 1476358
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 2,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 8,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 992,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 0,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 992,
+          "max": 1302,
+          "median": 30,
+          "p99": 320
+        },
+        "clock": {
+          "count": 1000,
+          "max": 50,
+          "median": 20,
+          "p99": 31
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 992,
+          "max": 9016,
+          "median": 662,
+          "p99": 2304
+        },
+        "entry": {
+          "count": 992,
+          "max": 8355,
+          "median": 541,
+          "p99": 2214
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 992,
+          "max": 976766,
+          "median": 17986,
+          "p99": 472356
+        },
+        "release": {
+          "count": 992,
+          "max": 1643,
+          "median": 50,
+          "p99": 481
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 169246,
+          "median": 19987,
+          "p99": 137226
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 3465094,
+          "median": 20198,
+          "p99": 995968
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 8,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 9,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 10,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 10069,
+          "median": 10019,
+          "p99": 10039
+        },
+        "clock": {
+          "count": 1000,
+          "max": 40,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 10710,
+          "median": 10189,
+          "p99": 10359
+        },
+        "entry": {
+          "count": 1000,
+          "max": 592,
+          "median": 120,
+          "p99": 290
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 112698,
+          "median": 6252,
+          "p99": 9205
+        },
+        "release": {
+          "count": 1000,
+          "max": 80,
+          "median": 40,
+          "p99": 70
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 16841,
+          "median": 1994,
+          "p99": 8727
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 131702,
+          "median": 6627,
+          "p99": 11437
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 0,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 10,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 22021,
+          "median": 10019,
+          "p99": 10039
+        },
+        "clock": {
+          "count": 1000,
+          "max": 391,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 22592,
+          "median": 10239,
+          "p99": 11331
+        },
+        "entry": {
+          "count": 1000,
+          "max": 4218,
+          "median": 170,
+          "p99": 1092
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 995243,
+          "median": 6337,
+          "p99": 338009
+        },
+        "release": {
+          "count": 1000,
+          "max": 431,
+          "median": 40,
+          "p99": 140
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 189614,
+          "median": 2315,
+          "p99": 36488
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 2922846,
+          "median": 6848,
+          "p99": 602221
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 1,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 10,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 10049,
+          "median": 10019,
+          "p99": 10039
+        },
+        "clock": {
+          "count": 1000,
+          "max": 571,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 15970,
+          "median": 10189,
+          "p99": 10469
+        },
+        "entry": {
+          "count": 1000,
+          "max": 5871,
+          "median": 120,
+          "p99": 401
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 695065,
+          "median": 6280,
+          "p99": 10539
+        },
+        "release": {
+          "count": 1000,
+          "max": 411,
+          "median": 40,
+          "p99": 70
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 29395,
+          "median": 1954,
+          "p99": 9037
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 85399,
+          "median": 6442,
+          "p99": 10841
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 2,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 10,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 10049,
+          "median": 10019,
+          "p99": 10039
+        },
+        "clock": {
+          "count": 1000,
+          "max": 51,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 11842,
+          "median": 10189,
+          "p99": 10489
+        },
+        "entry": {
+          "count": 1000,
+          "max": 1763,
+          "median": 120,
+          "p99": 421
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 122117,
+          "median": 6377,
+          "p99": 13736
+        },
+        "release": {
+          "count": 1000,
+          "max": 280,
+          "median": 40,
+          "p99": 71
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 18835,
+          "median": 2054,
+          "p99": 10419
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 234934,
+          "median": 6532,
+          "p99": 11362
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 3,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 10,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 10059,
+          "median": 10028,
+          "p99": 10039
+        },
+        "clock": {
+          "count": 1000,
+          "max": 60,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 11111,
+          "median": 10189,
+          "p99": 10510
+        },
+        "entry": {
+          "count": 1000,
+          "max": 1022,
+          "median": 121,
+          "p99": 421
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 321779,
+          "median": 6291,
+          "p99": 23071
+        },
+        "release": {
+          "count": 1000,
+          "max": 501,
+          "median": 40,
+          "p99": 80
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 20919,
+          "median": 1994,
+          "p99": 10680
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 901835,
+          "median": 6535,
+          "p99": 11998
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 4,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 10,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 15759,
+          "median": 10019,
+          "p99": 10039
+        },
+        "clock": {
+          "count": 1000,
+          "max": 70,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 22141,
+          "median": 10219,
+          "p99": 10710
+        },
+        "entry": {
+          "count": 1000,
+          "max": 12083,
+          "median": 151,
+          "p99": 631
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 694311,
+          "median": 6491,
+          "p99": 155892
+        },
+        "release": {
+          "count": 1000,
+          "max": 361,
+          "median": 50,
+          "p99": 91
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 25237,
+          "median": 4188,
+          "p99": 13906
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 949780,
+          "median": 7060,
+          "p99": 278842
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 5,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 10,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 10049,
+          "median": 10019,
+          "p99": 10039
+        },
+        "clock": {
+          "count": 1000,
+          "max": 100,
+          "median": 30,
+          "p99": 40
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 10750,
+          "median": 10179,
+          "p99": 10360
+        },
+        "entry": {
+          "count": 1000,
+          "max": 701,
+          "median": 111,
+          "p99": 291
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 172361,
+          "median": 5558,
+          "p99": 9484
+        },
+        "release": {
+          "count": 1000,
+          "max": 160,
+          "median": 40,
+          "p99": 70
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 14306,
+          "median": 2024,
+          "p99": 8506
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 57922,
+          "median": 5816,
+          "p99": 9275
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 6,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 10,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 10049,
+          "median": 10019,
+          "p99": 10039
+        },
+        "clock": {
+          "count": 1000,
+          "max": 131,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 11140,
+          "median": 10219,
+          "p99": 10600
+        },
+        "entry": {
+          "count": 1000,
+          "max": 1061,
+          "median": 151,
+          "p99": 511
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 538383,
+          "median": 7006,
+          "p99": 31164
+        },
+        "release": {
+          "count": 1000,
+          "max": 221,
+          "median": 50,
+          "p99": 70
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 21881,
+          "median": 4318,
+          "p99": 13305
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 923362,
+          "median": 7123,
+          "p99": 155875
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 7,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 10,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 32892,
+          "median": 10028,
+          "p99": 10039
+        },
+        "clock": {
+          "count": 1000,
+          "max": 70,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 33072,
+          "median": 10189,
+          "p99": 10520
+        },
+        "entry": {
+          "count": 1000,
+          "max": 5510,
+          "median": 120,
+          "p99": 410
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 304258,
+          "median": 5764,
+          "p99": 37366
+        },
+        "release": {
+          "count": 1000,
+          "max": 391,
+          "median": 41,
+          "p99": 70
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 18695,
+          "median": 2856,
+          "p99": 11732
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 609529,
+          "median": 6086,
+          "p99": 28994
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 8,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 994,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 10,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 994,
+          "max": 10129,
+          "median": 10019,
+          "p99": 10039
+        },
+        "clock": {
+          "count": 1000,
+          "max": 60,
+          "median": 20,
+          "p99": 31
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 994,
+          "max": 36338,
+          "median": 10580,
+          "p99": 11942
+        },
+        "entry": {
+          "count": 994,
+          "max": 26249,
+          "median": 490,
+          "p99": 1694
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 994,
+          "max": 969158,
+          "median": 19187,
+          "p99": 588904
+        },
+        "release": {
+          "count": 994,
+          "max": 902,
+          "median": 61,
+          "p99": 280
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 81712,
+          "median": 19616,
+          "p99": 43411
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 2366214,
+          "median": 18997,
+          "p99": 692470
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 6,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 9,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 100,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 100056,
+          "median": 100017,
+          "p99": 100037
+        },
+        "clock": {
+          "count": 1000,
+          "max": 100,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 101048,
+          "median": 100178,
+          "p99": 100367
+        },
+        "entry": {
+          "count": 1000,
+          "max": 991,
+          "median": 120,
+          "p99": 261
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 75646,
+          "median": 6121,
+          "p99": 9346
+        },
+        "release": {
+          "count": 1000,
+          "max": 260,
+          "median": 40,
+          "p99": 81
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 102070,
+          "median": 2044,
+          "p99": 95919
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 12877,
+          "median": 6478,
+          "p99": 9084
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 0,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 100,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 100278,
+          "median": 100017,
+          "p99": 100037
+        },
+        "clock": {
+          "count": 1000,
+          "max": 50,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 101740,
+          "median": 100187,
+          "p99": 100467
+        },
+        "entry": {
+          "count": 1000,
+          "max": 1683,
+          "median": 120,
+          "p99": 331
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 446745,
+          "median": 6274,
+          "p99": 9868
+        },
+        "release": {
+          "count": 1000,
+          "max": 441,
+          "median": 40,
+          "p99": 80
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 101339,
+          "median": 2004,
+          "p99": 93335
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 74337,
+          "median": 6467,
+          "p99": 10199
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 1,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 100,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 100076,
+          "median": 100017,
+          "p99": 100037
+        },
+        "clock": {
+          "count": 1000,
+          "max": 60,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 101249,
+          "median": 100187,
+          "p99": 100367
+        },
+        "entry": {
+          "count": 1000,
+          "max": 1202,
+          "median": 120,
+          "p99": 291
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 89845,
+          "median": 6184,
+          "p99": 9348
+        },
+        "release": {
+          "count": 1000,
+          "max": 100,
+          "median": 40,
+          "p99": 80
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 104015,
+          "median": 1993,
+          "p99": 95028
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 47480,
+          "median": 6560,
+          "p99": 9382
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 2,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 100,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 100097,
+          "median": 100017,
+          "p99": 100037
+        },
+        "clock": {
+          "count": 1000,
+          "max": 101,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 101159,
+          "median": 100187,
+          "p99": 100598
+        },
+        "entry": {
+          "count": 1000,
+          "max": 1082,
+          "median": 120,
+          "p99": 511
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 993360,
+          "median": 6187,
+          "p99": 35385
+        },
+        "release": {
+          "count": 1000,
+          "max": 411,
+          "median": 40,
+          "p99": 140
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 102061,
+          "median": 2094,
+          "p99": 95097
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 561355,
+          "median": 6504,
+          "p99": 14978
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 3,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 100,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 100047,
+          "median": 100017,
+          "p99": 100037
+        },
+        "clock": {
+          "count": 1000,
+          "max": 60,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 103423,
+          "median": 100237,
+          "p99": 101069
+        },
+        "entry": {
+          "count": 1000,
+          "max": 3367,
+          "median": 161,
+          "p99": 1012
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 146972,
+          "median": 6788,
+          "p99": 28582
+        },
+        "release": {
+          "count": 1000,
+          "max": 421,
+          "median": 50,
+          "p99": 221
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 102491,
+          "median": 5360,
+          "p99": 97372
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 850674,
+          "median": 7235,
+          "p99": 329435
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 4,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 100,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 100077,
+          "median": 100017,
+          "p99": 100037
+        },
+        "clock": {
+          "count": 1000,
+          "max": 90,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 107661,
+          "median": 100277,
+          "p99": 100838
+        },
+        "entry": {
+          "count": 1000,
+          "max": 7584,
+          "median": 180,
+          "p99": 651
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 246169,
+          "median": 6631,
+          "p99": 54439
+        },
+        "release": {
+          "count": 1000,
+          "max": 612,
+          "median": 51,
+          "p99": 270
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 105056,
+          "median": 5200,
+          "p99": 99405
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 950515,
+          "median": 7429,
+          "p99": 521342
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 5,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 100,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 100107,
+          "median": 100017,
+          "p99": 100037
+        },
+        "clock": {
+          "count": 1000,
+          "max": 110,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 100768,
+          "median": 100228,
+          "p99": 100538
+        },
+        "entry": {
+          "count": 1000,
+          "max": 681,
+          "median": 170,
+          "p99": 471
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 684507,
+          "median": 39,
+          "p99": 313650
+        },
+        "release": {
+          "count": 1000,
+          "max": 210,
+          "median": 50,
+          "p99": 81
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 100478,
+          "median": 2024,
+          "p99": 88325
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 37217,
+          "median": 6420,
+          "p99": 8839
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 6,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 100,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 100046,
+          "median": 100017,
+          "p99": 100037
+        },
+        "clock": {
+          "count": 1000,
+          "max": 31,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 101259,
+          "median": 100207,
+          "p99": 100698
+        },
+        "entry": {
+          "count": 1000,
+          "max": 1172,
+          "median": 131,
+          "p99": 621
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 220483,
+          "median": 6459,
+          "p99": 17533
+        },
+        "release": {
+          "count": 1000,
+          "max": 761,
+          "median": 50,
+          "p99": 180
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 120936,
+          "median": 4378,
+          "p99": 97863
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 704724,
+          "median": 6810,
+          "p99": 113819
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 7,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 993,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 100,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 993,
+          "max": 3068400,
+          "median": 100017,
+          "p99": 100046
+        },
+        "clock": {
+          "count": 1000,
+          "max": 80,
+          "median": 20,
+          "p99": 30
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 993,
+          "max": 3070654,
+          "median": 100588,
+          "p99": 104656
+        },
+        "entry": {
+          "count": 993,
+          "max": 15199,
+          "median": 421,
+          "p99": 2164
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 993,
+          "max": 916515,
+          "median": 17230,
+          "p99": 462724
+        },
+        "release": {
+          "count": 993,
+          "max": 19627,
+          "median": 121,
+          "p99": 891
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 1634974,
+          "median": 16951,
+          "p99": 128881
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 3132790,
+          "median": 15662,
+          "p99": 1730009
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 9,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 8,
+      "scheduled_releases": 1002,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 984,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 100,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 984,
+          "max": 102020,
+          "median": 100017,
+          "p99": 100037
+        },
+        "clock": {
+          "count": 1000,
+          "max": 80,
+          "median": 20,
+          "p99": 31
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 984,
+          "max": 112931,
+          "median": 100538,
+          "p99": 101821
+        },
+        "entry": {
+          "count": 984,
+          "max": 12834,
+          "median": 400,
+          "p99": 1523
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 984,
+          "max": 993571,
+          "median": 15362,
+          "p99": 973359
+        },
+        "release": {
+          "count": 984,
+          "max": 1633,
+          "median": 100,
+          "p99": 541
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 155030,
+          "median": 19386,
+          "p99": 106169
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 2609396,
+          "median": 18516,
+          "p99": 793176
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 16,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 9,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 500,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 1425342,
+          "median": 505103,
+          "p99": 508490
+        },
+        "clock": {
+          "count": 1000,
+          "max": 40,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 1425552,
+          "median": 505334,
+          "p99": 508720
+        },
+        "entry": {
+          "count": 1000,
+          "max": 821,
+          "median": 130,
+          "p99": 311
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 430641,
+          "median": 6113,
+          "p99": 9202
+        },
+        "release": {
+          "count": 1000,
+          "max": 1002,
+          "median": 80,
+          "p99": 210
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 594270,
+          "median": 9578,
+          "p99": 500475
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 375975,
+          "median": 5978,
+          "p99": 8075
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 0,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 999,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 500,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 999,
+          "max": 1409292,
+          "median": 505453,
+          "p99": 512847
+        },
+        "clock": {
+          "count": 1000,
+          "max": 70,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 999,
+          "max": 1410153,
+          "median": 505684,
+          "p99": 513279
+        },
+        "entry": {
+          "count": 999,
+          "max": 4198,
+          "median": 130,
+          "p99": 461
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 999,
+          "max": 643277,
+          "median": 6151,
+          "p99": 12263
+        },
+        "release": {
+          "count": 999,
+          "max": 3176,
+          "median": 80,
+          "p99": 340
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 514441,
+          "median": 11481,
+          "p99": 500565
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 1296669,
+          "median": 6162,
+          "p99": 33793
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 1,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 1,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 500,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 1055561,
+          "median": 505585,
+          "p99": 513288
+        },
+        "clock": {
+          "count": 1000,
+          "max": 80,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 1055852,
+          "median": 505814,
+          "p99": 513479
+        },
+        "entry": {
+          "count": 1000,
+          "max": 461,
+          "median": 130,
+          "p99": 251
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 125753,
+          "median": 6170,
+          "p99": 9242
+        },
+        "release": {
+          "count": 1000,
+          "max": 401,
+          "median": 80,
+          "p99": 200
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 675402,
+          "median": 10350,
+          "p99": 501978
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 381507,
+          "median": 5992,
+          "p99": 9614
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 2,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 500,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 691922,
+          "median": 504813,
+          "p99": 508339
+        },
+        "clock": {
+          "count": 1000,
+          "max": 3847,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 692172,
+          "median": 505023,
+          "p99": 508570
+        },
+        "entry": {
+          "count": 1000,
+          "max": 521,
+          "median": 120,
+          "p99": 180
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 93144,
+          "median": 5390,
+          "p99": 7687
+        },
+        "release": {
+          "count": 1000,
+          "max": 381,
+          "median": 81,
+          "p99": 150
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 506165,
+          "median": 6702,
+          "p99": 496968
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 374653,
+          "median": 5326,
+          "p99": 7977
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 3,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 500,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 1928361,
+          "median": 505383,
+          "p99": 534187
+        },
+        "clock": {
+          "count": 1000,
+          "max": 90,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 1929413,
+          "median": 505604,
+          "p99": 534367
+        },
+        "entry": {
+          "count": 1000,
+          "max": 782,
+          "median": 130,
+          "p99": 461
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 941359,
+          "median": 5605,
+          "p99": 29906
+        },
+        "release": {
+          "count": 1000,
+          "max": 651,
+          "median": 80,
+          "p99": 361
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 1858892,
+          "median": 17463,
+          "p99": 505293
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 1848302,
+          "median": 5658,
+          "p99": 27413
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 4,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 500,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 1612290,
+          "median": 505905,
+          "p99": 619206
+        },
+        "clock": {
+          "count": 1000,
+          "max": 100,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 1612542,
+          "median": 506165,
+          "p99": 619417
+        },
+        "entry": {
+          "count": 1000,
+          "max": 1943,
+          "median": 150,
+          "p99": 561
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 846644,
+          "median": 6485,
+          "p99": 214800
+        },
+        "release": {
+          "count": 1000,
+          "max": 3637,
+          "median": 90,
+          "p99": 431
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 1088443,
+          "median": 23705,
+          "p99": 503590
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 927110,
+          "median": 6390,
+          "p99": 163624
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 5,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 998,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 500,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 998,
+          "max": 2027256,
+          "median": 505304,
+          "p99": 513859
+        },
+        "clock": {
+          "count": 1000,
+          "max": 50,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 998,
+          "max": 2027747,
+          "median": 505524,
+          "p99": 514972
+        },
+        "entry": {
+          "count": 998,
+          "max": 1383,
+          "median": 130,
+          "p99": 391
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 998,
+          "max": 998587,
+          "median": 6129,
+          "p99": 15908
+        },
+        "release": {
+          "count": 998,
+          "max": 722,
+          "median": 71,
+          "p99": 280
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 1762170,
+          "median": 14667,
+          "p99": 504382
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 637613,
+          "median": 6109,
+          "p99": 18451
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 2,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 6,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 500,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 1000,
+          "max": 1531200,
+          "median": 505644,
+          "p99": 595973
+        },
+        "clock": {
+          "count": 1000,
+          "max": 120,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 1000,
+          "max": 1531380,
+          "median": 505875,
+          "p99": 596183
+        },
+        "entry": {
+          "count": 1000,
+          "max": 712,
+          "median": 130,
+          "p99": 401
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 769167,
+          "median": 6103,
+          "p99": 158071
+        },
+        "release": {
+          "count": 1000,
+          "max": 1463,
+          "median": 80,
+          "p99": 311
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 1456651,
+          "median": 14767,
+          "p99": 503771
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 376266,
+          "median": 6129,
+          "p99": 71261
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 7,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 998,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 500,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 998,
+          "max": 1500723,
+          "median": 500024,
+          "p99": 587948
+        },
+        "clock": {
+          "count": 1000,
+          "max": 832,
+          "median": 20,
+          "p99": 31
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 998,
+          "max": 1501534,
+          "median": 501286,
+          "p99": 589110
+        },
+        "entry": {
+          "count": 998,
+          "max": 2434,
+          "median": 491,
+          "p99": 1522
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 998,
+          "max": 925735,
+          "median": 19027,
+          "p99": 423683
+        },
+        "release": {
+          "count": 998,
+          "max": 7124,
+          "median": 300,
+          "p99": 1233
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 1653187,
+          "median": 23434,
+          "p99": 577588
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 2524055,
+          "median": 19060,
+          "p99": 1599706
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 2,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 8,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 995,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 500,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 995,
+          "max": 2906297,
+          "median": 517646,
+          "p99": 643111
+        },
+        "clock": {
+          "count": 1000,
+          "max": 461,
+          "median": 20,
+          "p99": 40
+        },
+        "controlled_transition": null,
+        "dispatch_ok": {
+          "count": 995,
+          "max": 2907039,
+          "median": 518479,
+          "p99": 644914
+        },
+        "entry": {
+          "count": 995,
+          "max": 24476,
+          "median": 401,
+          "p99": 1472
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 995,
+          "max": 812178,
+          "median": 17338,
+          "p99": 442477
+        },
+        "release": {
+          "count": 995,
+          "max": 1914,
+          "median": 290,
+          "p99": 1002
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 1895850,
+          "median": 23965,
+          "p99": 531673
+        },
+        "transition_busy": null,
+        "update_lateness": {
+          "count": 1000,
+          "max": 2672601,
+          "median": 17421,
+          "p99": 1850787
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 5,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "atomic",
+      "run": 9,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0,
+      "successful_updates": 1000,
+      "transition_busy_skips": 0,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 0,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 993,
+          "max": 150,
+          "median": 40,
+          "p99": 60
+        },
+        "clock": {
+          "count": 1000,
+          "max": 50,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 130,
+          "median": 50,
+          "p99": 130
+        },
+        "dispatch_ok": {
+          "count": 993,
+          "max": 1262,
+          "median": 210,
+          "p99": 671
+        },
+        "entry": {
+          "count": 993,
+          "max": 1162,
+          "median": 130,
+          "p99": 581
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 641270,
+          "median": 6283,
+          "p99": 12346
+        },
+        "release": {
+          "count": 993,
+          "max": 350,
+          "median": 40,
+          "p99": 110
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 29385,
+          "median": 2184,
+          "p99": 10930
+        },
+        "transition_busy": {
+          "count": 7,
+          "max": 391,
+          "median": 210,
+          "p99": 391
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 2286839,
+          "median": 6724,
+          "p99": 13314
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 0,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.007,
+      "successful_updates": 1000,
+      "transition_busy_skips": 7,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 0,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 997,
+          "max": 120,
+          "median": 40,
+          "p99": 60
+        },
+        "clock": {
+          "count": 1000,
+          "max": 4719,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 120,
+          "median": 50,
+          "p99": 80
+        },
+        "dispatch_ok": {
+          "count": 997,
+          "max": 1122,
+          "median": 210,
+          "p99": 421
+        },
+        "entry": {
+          "count": 997,
+          "max": 1002,
+          "median": 130,
+          "p99": 331
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 416509,
+          "median": 6252,
+          "p99": 9514
+        },
+        "release": {
+          "count": 997,
+          "max": 240,
+          "median": 40,
+          "p99": 60
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 69250,
+          "median": 1963,
+          "p99": 6472
+        },
+        "transition_busy": {
+          "count": 3,
+          "max": 170,
+          "median": 161,
+          "p99": 170
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 38113,
+          "median": 6465,
+          "p99": 10404
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 1,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.003,
+      "successful_updates": 1000,
+      "transition_busy_skips": 3,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 2,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.9979959919839679,
+      "first_attempt_successes": 996,
+      "hold_us": 0,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 996,
+          "max": 150,
+          "median": 40,
+          "p99": 60
+        },
+        "clock": {
+          "count": 1000,
+          "max": 40,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 341,
+          "median": 50,
+          "p99": 160
+        },
+        "dispatch_ok": {
+          "count": 996,
+          "max": 811,
+          "median": 210,
+          "p99": 471
+        },
+        "entry": {
+          "count": 996,
+          "max": 741,
+          "median": 130,
+          "p99": 391
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 51951,
+          "median": 6277,
+          "p99": 9404
+        },
+        "release": {
+          "count": 996,
+          "max": 231,
+          "median": 40,
+          "p99": 60
+        },
+        "replace_busy": {
+          "count": 2,
+          "max": 140,
+          "median": 140,
+          "p99": 140
+        },
+        "replace_ok": {
+          "count": 998,
+          "max": 12283,
+          "median": 1994,
+          "p99": 5981
+        },
+        "transition_busy": {
+          "count": 4,
+          "max": 201,
+          "median": 170,
+          "p99": 201
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 129192,
+          "median": 6534,
+          "p99": 8651
+        }
+      },
+      "logical_updates_started": 998,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 2,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.004008016032064128,
+      "successful_updates": 998,
+      "transition_busy_skips": 4,
+      "update_success_rate": 0.998
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 1,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.998998998998999,
+      "first_attempt_successes": 998,
+      "hold_us": 0,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 996,
+          "max": 210,
+          "median": 41,
+          "p99": 60
+        },
+        "clock": {
+          "count": 1000,
+          "max": 50,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 151,
+          "median": 50,
+          "p99": 70
+        },
+        "dispatch_ok": {
+          "count": 996,
+          "max": 2965,
+          "median": 210,
+          "p99": 541
+        },
+        "entry": {
+          "count": 996,
+          "max": 2915,
+          "median": 130,
+          "p99": 461
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 568899,
+          "median": 6237,
+          "p99": 11005
+        },
+        "release": {
+          "count": 996,
+          "max": 160,
+          "median": 40,
+          "p99": 60
+        },
+        "replace_busy": {
+          "count": 1,
+          "max": 140,
+          "median": 140,
+          "p99": 140
+        },
+        "replace_ok": {
+          "count": 999,
+          "max": 18254,
+          "median": 1974,
+          "p99": 8646
+        },
+        "transition_busy": {
+          "count": 4,
+          "max": 240,
+          "median": 181,
+          "p99": 240
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 394814,
+          "median": 6502,
+          "p99": 9537
+        }
+      },
+      "logical_updates_started": 999,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 3,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.004004004004004004,
+      "successful_updates": 999,
+      "transition_busy_skips": 4,
+      "update_success_rate": 0.999
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 0,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 998,
+          "max": 151,
+          "median": 40,
+          "p99": 60
+        },
+        "clock": {
+          "count": 1000,
+          "max": 91,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 140,
+          "median": 50,
+          "p99": 120
+        },
+        "dispatch_ok": {
+          "count": 998,
+          "max": 1483,
+          "median": 221,
+          "p99": 541
+        },
+        "entry": {
+          "count": 998,
+          "max": 1423,
+          "median": 141,
+          "p99": 421
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 21007,
+          "median": 6251,
+          "p99": 9591
+        },
+        "release": {
+          "count": 998,
+          "max": 280,
+          "median": 40,
+          "p99": 70
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 15178,
+          "median": 1974,
+          "p99": 6973
+        },
+        "transition_busy": {
+          "count": 2,
+          "max": 200,
+          "median": 180,
+          "p99": 200
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 57375,
+          "median": 6489,
+          "p99": 9933
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 4,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.002,
+      "successful_updates": 1000,
+      "transition_busy_skips": 2,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 0,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 996,
+          "max": 461,
+          "median": 50,
+          "p99": 60
+        },
+        "clock": {
+          "count": 1000,
+          "max": 120,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 431,
+          "median": 50,
+          "p99": 271
+        },
+        "dispatch_ok": {
+          "count": 996,
+          "max": 3827,
+          "median": 270,
+          "p99": 972
+        },
+        "entry": {
+          "count": 996,
+          "max": 3737,
+          "median": 180,
+          "p99": 852
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 534279,
+          "median": 7225,
+          "p99": 240104
+        },
+        "release": {
+          "count": 996,
+          "max": 371,
+          "median": 40,
+          "p99": 100
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 26530,
+          "median": 4248,
+          "p99": 14226
+        },
+        "transition_busy": {
+          "count": 4,
+          "max": 381,
+          "median": 220,
+          "p99": 381
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 1207395,
+          "median": 7096,
+          "p99": 126924
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 5,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.004,
+      "successful_updates": 1000,
+      "transition_busy_skips": 4,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 0,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 997,
+          "max": 120,
+          "median": 40,
+          "p99": 60
+        },
+        "clock": {
+          "count": 1000,
+          "max": 90,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 220,
+          "median": 60,
+          "p99": 150
+        },
+        "dispatch_ok": {
+          "count": 997,
+          "max": 1002,
+          "median": 210,
+          "p99": 561
+        },
+        "entry": {
+          "count": 997,
+          "max": 872,
+          "median": 130,
+          "p99": 461
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 393709,
+          "median": 6213,
+          "p99": 9327
+        },
+        "release": {
+          "count": 997,
+          "max": 311,
+          "median": 40,
+          "p99": 100
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 21881,
+          "median": 2004,
+          "p99": 6412
+        },
+        "transition_busy": {
+          "count": 3,
+          "max": 411,
+          "median": 231,
+          "p99": 411
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 14485,
+          "median": 6356,
+          "p99": 8575
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 6,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.003,
+      "successful_updates": 1000,
+      "transition_busy_skips": 3,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 0,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 1.0,
+      "first_attempt_successes": 1000,
+      "hold_us": 0,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 989,
+          "max": 260,
+          "median": 40,
+          "p99": 80
+        },
+        "clock": {
+          "count": 1000,
+          "max": 80,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 421,
+          "median": 50,
+          "p99": 190
+        },
+        "dispatch_ok": {
+          "count": 989,
+          "max": 6943,
+          "median": 280,
+          "p99": 962
+        },
+        "entry": {
+          "count": 989,
+          "max": 6883,
+          "median": 190,
+          "p99": 822
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 869431,
+          "median": 6892,
+          "p99": 435064
+        },
+        "release": {
+          "count": 989,
+          "max": 671,
+          "median": 40,
+          "p99": 220
+        },
+        "replace_busy": null,
+        "replace_ok": {
+          "count": 1000,
+          "max": 48381,
+          "median": 4388,
+          "p99": 15088
+        },
+        "transition_busy": {
+          "count": 11,
+          "max": 1553,
+          "median": 271,
+          "p99": 1553
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 1417861,
+          "median": 7063,
+          "p99": 337848
+        }
+      },
+      "logical_updates_started": 1000,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 7,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.011,
+      "successful_updates": 1000,
+      "transition_busy_skips": 11,
+      "update_success_rate": 1.0
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 1,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.998998998998999,
+      "first_attempt_successes": 998,
+      "hold_us": 0,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 994,
+          "max": 921,
+          "median": 50,
+          "p99": 140
+        },
+        "clock": {
+          "count": 1000,
+          "max": 100,
+          "median": 20,
+          "p99": 30
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 150,
+          "median": 50,
+          "p99": 91
+        },
+        "dispatch_ok": {
+          "count": 994,
+          "max": 8947,
+          "median": 280,
+          "p99": 1542
+        },
+        "entry": {
+          "count": 994,
+          "max": 8165,
+          "median": 190,
+          "p99": 1133
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 752019,
+          "median": 6854,
+          "p99": 144947
+        },
+        "release": {
+          "count": 994,
+          "max": 3065,
+          "median": 40,
+          "p99": 241
+        },
+        "replace_busy": {
+          "count": 1,
+          "max": 3547,
+          "median": 3547,
+          "p99": 3547
+        },
+        "replace_ok": {
+          "count": 999,
+          "max": 86972,
+          "median": 4138,
+          "p99": 39283
+        },
+        "transition_busy": {
+          "count": 6,
+          "max": 972,
+          "median": 360,
+          "p99": 972
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 2286425,
+          "median": 7171,
+          "p99": 413291
+        }
+      },
+      "logical_updates_started": 999,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 8,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.006006006006006006,
+      "successful_updates": 999,
+      "transition_busy_skips": 6,
+      "update_success_rate": 0.999
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 1,
+      "dispatch_attempts": 983,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.998998998998999,
+      "first_attempt_successes": 998,
+      "hold_us": 0,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 960,
+          "max": 971,
+          "median": 50,
+          "p99": 752
+        },
+        "clock": {
+          "count": 1000,
+          "max": 210,
+          "median": 20,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 1443,
+          "median": 70,
+          "p99": 902
+        },
+        "dispatch_ok": {
+          "count": 960,
+          "max": 7954,
+          "median": 791,
+          "p99": 2334
+        },
+        "entry": {
+          "count": 960,
+          "max": 7874,
+          "median": 611,
+          "p99": 1864
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 983,
+          "max": 935910,
+          "median": 18866,
+          "p99": 511414
+        },
+        "release": {
+          "count": 960,
+          "max": 971,
+          "median": 60,
+          "p99": 701
+        },
+        "replace_busy": {
+          "count": 1,
+          "max": 1423,
+          "median": 1423,
+          "p99": 1423
+        },
+        "replace_ok": {
+          "count": 999,
+          "max": 82615,
+          "median": 19136,
+          "p99": 42589
+        },
+        "transition_busy": {
+          "count": 23,
+          "max": 1363,
+          "median": 521,
+          "p99": 1363
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 2391342,
+          "median": 18703,
+          "p99": 563325
+        }
+      },
+      "logical_updates_started": 999,
+      "missed_releases": 17,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 9,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.023023023023023025,
+      "successful_updates": 999,
+      "transition_busy_skips": 23,
+      "update_success_rate": 0.999
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 13,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.9868287740628167,
+      "first_attempt_successes": 974,
+      "hold_us": 10,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 995,
+          "max": 10049,
+          "median": 10019,
+          "p99": 10039
+        },
+        "clock": {
+          "count": 1000,
+          "max": 90,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 290,
+          "median": 50,
+          "p99": 70
+        },
+        "dispatch_ok": {
+          "count": 995,
+          "max": 10760,
+          "median": 10199,
+          "p99": 10430
+        },
+        "entry": {
+          "count": 995,
+          "max": 571,
+          "median": 130,
+          "p99": 361
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 125566,
+          "median": 6272,
+          "p99": 9269
+        },
+        "release": {
+          "count": 995,
+          "max": 170,
+          "median": 50,
+          "p99": 80
+        },
+        "replace_busy": {
+          "count": 13,
+          "max": 160,
+          "median": 130,
+          "p99": 160
+        },
+        "replace_ok": {
+          "count": 987,
+          "max": 36438,
+          "median": 1993,
+          "p99": 8696
+        },
+        "transition_busy": {
+          "count": 5,
+          "max": 290,
+          "median": 191,
+          "p99": 290
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 11423,
+          "median": 6444,
+          "p99": 8773
+        }
+      },
+      "logical_updates_started": 987,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 0,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.005065856129685917,
+      "successful_updates": 987,
+      "transition_busy_skips": 5,
+      "update_success_rate": 0.987
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 11,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.9888776541961577,
+      "first_attempt_successes": 978,
+      "hold_us": 10,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 996,
+          "max": 10058,
+          "median": 10019,
+          "p99": 10039
+        },
+        "clock": {
+          "count": 1000,
+          "max": 90,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 240,
+          "median": 50,
+          "p99": 210
+        },
+        "dispatch_ok": {
+          "count": 996,
+          "max": 10811,
+          "median": 10199,
+          "p99": 10530
+        },
+        "entry": {
+          "count": 996,
+          "max": 732,
+          "median": 130,
+          "p99": 441
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 95251,
+          "median": 6356,
+          "p99": 12025
+        },
+        "release": {
+          "count": 996,
+          "max": 160,
+          "median": 50,
+          "p99": 90
+        },
+        "replace_busy": {
+          "count": 11,
+          "max": 161,
+          "median": 140,
+          "p99": 161
+        },
+        "replace_ok": {
+          "count": 989,
+          "max": 32291,
+          "median": 2004,
+          "p99": 9297
+        },
+        "transition_busy": {
+          "count": 4,
+          "max": 320,
+          "median": 170,
+          "p99": 320
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 39278,
+          "median": 6521,
+          "p99": 10050
+        }
+      },
+      "logical_updates_started": 989,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 1,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.004044489383215369,
+      "successful_updates": 989,
+      "transition_busy_skips": 4,
+      "update_success_rate": 0.989
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 10,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.98989898989899,
+      "first_attempt_successes": 980,
+      "hold_us": 10,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 997,
+          "max": 10039,
+          "median": 10019,
+          "p99": 10039
+        },
+        "clock": {
+          "count": 1000,
+          "max": 60,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 281,
+          "median": 50,
+          "p99": 281
+        },
+        "dispatch_ok": {
+          "count": 997,
+          "max": 10911,
+          "median": 10199,
+          "p99": 10369
+        },
+        "entry": {
+          "count": 997,
+          "max": 832,
+          "median": 130,
+          "p99": 291
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 107385,
+          "median": 6135,
+          "p99": 8740
+        },
+        "release": {
+          "count": 997,
+          "max": 120,
+          "median": 50,
+          "p99": 70
+        },
+        "replace_busy": {
+          "count": 10,
+          "max": 140,
+          "median": 130,
+          "p99": 140
+        },
+        "replace_ok": {
+          "count": 990,
+          "max": 22132,
+          "median": 1953,
+          "p99": 5972
+        },
+        "transition_busy": {
+          "count": 3,
+          "max": 270,
+          "median": 221,
+          "p99": 270
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 408713,
+          "median": 6298,
+          "p99": 9219
+        }
+      },
+      "logical_updates_started": 990,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 2,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0030303030303030303,
+      "successful_updates": 990,
+      "transition_busy_skips": 3,
+      "update_success_rate": 0.99
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 11,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.9888776541961577,
+      "first_attempt_successes": 978,
+      "hold_us": 10,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 996,
+          "max": 10099,
+          "median": 10028,
+          "p99": 10039
+        },
+        "clock": {
+          "count": 1000,
+          "max": 31,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 201,
+          "median": 50,
+          "p99": 71
+        },
+        "dispatch_ok": {
+          "count": 996,
+          "max": 10880,
+          "median": 10199,
+          "p99": 10489
+        },
+        "entry": {
+          "count": 996,
+          "max": 691,
+          "median": 130,
+          "p99": 401
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 91638,
+          "median": 6314,
+          "p99": 14733
+        },
+        "release": {
+          "count": 996,
+          "max": 230,
+          "median": 50,
+          "p99": 90
+        },
+        "replace_busy": {
+          "count": 11,
+          "max": 160,
+          "median": 140,
+          "p99": 160
+        },
+        "replace_ok": {
+          "count": 989,
+          "max": 16240,
+          "median": 1984,
+          "p99": 7003
+        },
+        "transition_busy": {
+          "count": 4,
+          "max": 201,
+          "median": 171,
+          "p99": 201
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 815416,
+          "median": 6482,
+          "p99": 9215
+        }
+      },
+      "logical_updates_started": 989,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 3,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.004044489383215369,
+      "successful_updates": 989,
+      "transition_busy_skips": 4,
+      "update_success_rate": 0.989
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 12,
+      "dispatch_attempts": 998,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.9878542510121457,
+      "first_attempt_successes": 976,
+      "hold_us": 10,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 994,
+          "max": 13345,
+          "median": 10019,
+          "p99": 10039
+        },
+        "clock": {
+          "count": 1000,
+          "max": 100,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 170,
+          "median": 40,
+          "p99": 90
+        },
+        "dispatch_ok": {
+          "count": 994,
+          "max": 20839,
+          "median": 10280,
+          "p99": 11392
+        },
+        "entry": {
+          "count": 994,
+          "max": 10770,
+          "median": 201,
+          "p99": 1263
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 998,
+          "max": 768480,
+          "median": 7500,
+          "p99": 219575
+        },
+        "release": {
+          "count": 994,
+          "max": 711,
+          "median": 50,
+          "p99": 151
+        },
+        "replace_busy": {
+          "count": 12,
+          "max": 1443,
+          "median": 150,
+          "p99": 1443
+        },
+        "replace_ok": {
+          "count": 988,
+          "max": 64129,
+          "median": 4769,
+          "p99": 20429
+        },
+        "transition_busy": {
+          "count": 4,
+          "max": 401,
+          "median": 190,
+          "p99": 401
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 997643,
+          "median": 7333,
+          "p99": 387264
+        }
+      },
+      "logical_updates_started": 988,
+      "missed_releases": 2,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 4,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.004048582995951417,
+      "successful_updates": 988,
+      "transition_busy_skips": 4,
+      "update_success_rate": 0.988
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 10,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.98989898989899,
+      "first_attempt_successes": 980,
+      "hold_us": 10,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 993,
+          "max": 10089,
+          "median": 10019,
+          "p99": 10039
+        },
+        "clock": {
+          "count": 1000,
+          "max": 100,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 260,
+          "median": 50,
+          "p99": 61
+        },
+        "dispatch_ok": {
+          "count": 993,
+          "max": 12924,
+          "median": 10250,
+          "p99": 10740
+        },
+        "entry": {
+          "count": 993,
+          "max": 2835,
+          "median": 180,
+          "p99": 632
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 411722,
+          "median": 6963,
+          "p99": 112354
+        },
+        "release": {
+          "count": 993,
+          "max": 280,
+          "median": 50,
+          "p99": 131
+        },
+        "replace_busy": {
+          "count": 10,
+          "max": 240,
+          "median": 140,
+          "p99": 240
+        },
+        "replace_ok": {
+          "count": 990,
+          "max": 48952,
+          "median": 4308,
+          "p99": 12162
+        },
+        "transition_busy": {
+          "count": 7,
+          "max": 340,
+          "median": 240,
+          "p99": 340
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 891764,
+          "median": 7019,
+          "p99": 273753
+        }
+      },
+      "logical_updates_started": 990,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 5,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.007070707070707071,
+      "successful_updates": 990,
+      "transition_busy_skips": 7,
+      "update_success_rate": 0.99
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 13,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.9868287740628167,
+      "first_attempt_successes": 974,
+      "hold_us": 10,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 996,
+          "max": 10069,
+          "median": 10019,
+          "p99": 10049
+        },
+        "clock": {
+          "count": 1000,
+          "max": 90,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 220,
+          "median": 50,
+          "p99": 71
+        },
+        "dispatch_ok": {
+          "count": 996,
+          "max": 19486,
+          "median": 10199,
+          "p99": 10460
+        },
+        "entry": {
+          "count": 996,
+          "max": 9388,
+          "median": 130,
+          "p99": 380
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 36230,
+          "median": 6301,
+          "p99": 9515
+        },
+        "release": {
+          "count": 996,
+          "max": 160,
+          "median": 50,
+          "p99": 90
+        },
+        "replace_busy": {
+          "count": 13,
+          "max": 171,
+          "median": 141,
+          "p99": 171
+        },
+        "replace_ok": {
+          "count": 987,
+          "max": 33362,
+          "median": 2003,
+          "p99": 8295
+        },
+        "transition_busy": {
+          "count": 4,
+          "max": 491,
+          "median": 170,
+          "p99": 491
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 12383,
+          "median": 6482,
+          "p99": 10045
+        }
+      },
+      "logical_updates_started": 987,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 6,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.004052684903748734,
+      "successful_updates": 987,
+      "transition_busy_skips": 4,
+      "update_success_rate": 0.987
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 11,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.9888776541961577,
+      "first_attempt_successes": 978,
+      "hold_us": 10,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 992,
+          "max": 10059,
+          "median": 10019,
+          "p99": 10039
+        },
+        "clock": {
+          "count": 1000,
+          "max": 60,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 100,
+          "median": 50,
+          "p99": 70
+        },
+        "dispatch_ok": {
+          "count": 992,
+          "max": 14447,
+          "median": 10279,
+          "p99": 11211
+        },
+        "entry": {
+          "count": 992,
+          "max": 4378,
+          "median": 200,
+          "p99": 1102
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 623434,
+          "median": 7371,
+          "p99": 130574
+        },
+        "release": {
+          "count": 992,
+          "max": 301,
+          "median": 50,
+          "p99": 160
+        },
+        "replace_busy": {
+          "count": 11,
+          "max": 451,
+          "median": 140,
+          "p99": 451
+        },
+        "replace_ok": {
+          "count": 989,
+          "max": 19156,
+          "median": 4739,
+          "p99": 12744
+        },
+        "transition_busy": {
+          "count": 8,
+          "max": 431,
+          "median": 260,
+          "p99": 431
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 1081268,
+          "median": 7313,
+          "p99": 444646
+        }
+      },
+      "logical_updates_started": 989,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 7,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.008088978766430738,
+      "successful_updates": 989,
+      "transition_busy_skips": 8,
+      "update_success_rate": 0.989
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 10,
+      "dispatch_attempts": 997,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.98989898989899,
+      "first_attempt_successes": 980,
+      "hold_us": 10,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 986,
+          "max": 10079,
+          "median": 10019,
+          "p99": 10039
+        },
+        "clock": {
+          "count": 1000,
+          "max": 41,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 1253,
+          "median": 50,
+          "p99": 280
+        },
+        "dispatch_ok": {
+          "count": 986,
+          "max": 25919,
+          "median": 10240,
+          "p99": 11421
+        },
+        "entry": {
+          "count": 986,
+          "max": 15870,
+          "median": 161,
+          "p99": 1352
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 997,
+          "max": 869852,
+          "median": 6519,
+          "p99": 289707
+        },
+        "release": {
+          "count": 986,
+          "max": 531,
+          "median": 50,
+          "p99": 161
+        },
+        "replace_busy": {
+          "count": 10,
+          "max": 1443,
+          "median": 121,
+          "p99": 1443
+        },
+        "replace_ok": {
+          "count": 990,
+          "max": 51176,
+          "median": 3607,
+          "p99": 32661
+        },
+        "transition_busy": {
+          "count": 11,
+          "max": 2344,
+          "median": 521,
+          "p99": 2344
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 1066463,
+          "median": 6699,
+          "p99": 271103
+        }
+      },
+      "logical_updates_started": 990,
+      "missed_releases": 3,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 8,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.011111111111111112,
+      "successful_updates": 990,
+      "transition_busy_skips": 11,
+      "update_success_rate": 0.99
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 17,
+      "dispatch_attempts": 990,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.982706002034588,
+      "first_attempt_successes": 966,
+      "hold_us": 10,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 964,
+          "max": 10600,
+          "median": 10019,
+          "p99": 10039
+        },
+        "clock": {
+          "count": 1000,
+          "max": 300,
+          "median": 20,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 751,
+          "median": 80,
+          "p99": 501
+        },
+        "dispatch_ok": {
+          "count": 964,
+          "max": 13074,
+          "median": 10750,
+          "p99": 11943
+        },
+        "entry": {
+          "count": 964,
+          "max": 2995,
+          "median": 641,
+          "p99": 1863
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 990,
+          "max": 899148,
+          "median": 18624,
+          "p99": 668257
+        },
+        "release": {
+          "count": 964,
+          "max": 702,
+          "median": 70,
+          "p99": 371
+        },
+        "replace_busy": {
+          "count": 17,
+          "max": 2044,
+          "median": 430,
+          "p99": 2044
+        },
+        "replace_ok": {
+          "count": 983,
+          "max": 66855,
+          "median": 19746,
+          "p99": 45996
+        },
+        "transition_busy": {
+          "count": 26,
+          "max": 901,
+          "median": 481,
+          "p99": 901
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 2323670,
+          "median": 18912,
+          "p99": 850401
+        }
+      },
+      "logical_updates_started": 983,
+      "missed_releases": 10,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 9,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.026449643947100712,
+      "successful_updates": 983,
+      "transition_busy_skips": 26,
+      "update_success_rate": 0.983
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 102,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.8864142538975501,
+      "first_attempt_successes": 796,
+      "hold_us": 100,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 997,
+          "max": 100067,
+          "median": 100017,
+          "p99": 100037
+        },
+        "clock": {
+          "count": 1000,
+          "max": 51,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 230,
+          "median": 50,
+          "p99": 161
+        },
+        "dispatch_ok": {
+          "count": 997,
+          "max": 101360,
+          "median": 100197,
+          "p99": 100458
+        },
+        "entry": {
+          "count": 997,
+          "max": 1293,
+          "median": 130,
+          "p99": 401
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 126008,
+          "median": 6239,
+          "p99": 9608
+        },
+        "release": {
+          "count": 997,
+          "max": 210,
+          "median": 50,
+          "p99": 121
+        },
+        "replace_busy": {
+          "count": 102,
+          "max": 821,
+          "median": 131,
+          "p99": 261
+        },
+        "replace_ok": {
+          "count": 898,
+          "max": 21730,
+          "median": 1994,
+          "p99": 7514
+        },
+        "transition_busy": {
+          "count": 3,
+          "max": 250,
+          "median": 241,
+          "p99": 250
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 16098,
+          "median": 6501,
+          "p99": 8945
+        }
+      },
+      "logical_updates_started": 898,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 0,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0033407572383073497,
+      "successful_updates": 898,
+      "transition_busy_skips": 3,
+      "update_success_rate": 0.898
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 102,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.8864142538975501,
+      "first_attempt_successes": 796,
+      "hold_us": 100,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 997,
+          "max": 100107,
+          "median": 100017,
+          "p99": 100037
+        },
+        "clock": {
+          "count": 1000,
+          "max": 101,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 190,
+          "median": 50,
+          "p99": 140
+        },
+        "dispatch_ok": {
+          "count": 997,
+          "max": 100868,
+          "median": 100197,
+          "p99": 100478
+        },
+        "entry": {
+          "count": 997,
+          "max": 791,
+          "median": 130,
+          "p99": 311
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 13733,
+          "median": 6197,
+          "p99": 8567
+        },
+        "release": {
+          "count": 997,
+          "max": 421,
+          "median": 50,
+          "p99": 140
+        },
+        "replace_busy": {
+          "count": 102,
+          "max": 350,
+          "median": 130,
+          "p99": 160
+        },
+        "replace_ok": {
+          "count": 898,
+          "max": 13024,
+          "median": 2034,
+          "p99": 7314
+        },
+        "transition_busy": {
+          "count": 3,
+          "max": 321,
+          "median": 171,
+          "p99": 321
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 108112,
+          "median": 6486,
+          "p99": 11093
+        }
+      },
+      "logical_updates_started": 898,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 1,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0033407572383073497,
+      "successful_updates": 898,
+      "transition_busy_skips": 3,
+      "update_success_rate": 0.898
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 104,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.8840579710144928,
+      "first_attempt_successes": 793,
+      "hold_us": 100,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 998,
+          "max": 100047,
+          "median": 100017,
+          "p99": 100037
+        },
+        "clock": {
+          "count": 1000,
+          "max": 60,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 141,
+          "median": 50,
+          "p99": 61
+        },
+        "dispatch_ok": {
+          "count": 998,
+          "max": 101359,
+          "median": 100267,
+          "p99": 100809
+        },
+        "entry": {
+          "count": 998,
+          "max": 1232,
+          "median": 171,
+          "p99": 642
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 730094,
+          "median": 4701,
+          "p99": 248375
+        },
+        "release": {
+          "count": 998,
+          "max": 982,
+          "median": 50,
+          "p99": 141
+        },
+        "replace_busy": {
+          "count": 104,
+          "max": 351,
+          "median": 120,
+          "p99": 211
+        },
+        "replace_ok": {
+          "count": 896,
+          "max": 20137,
+          "median": 1924,
+          "p99": 6562
+        },
+        "transition_busy": {
+          "count": 2,
+          "max": 191,
+          "median": 161,
+          "p99": 191
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 99943,
+          "median": 6316,
+          "p99": 9493
+        }
+      },
+      "logical_updates_started": 897,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 2,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.002232142857142857,
+      "successful_updates": 896,
+      "transition_busy_skips": 2,
+      "update_success_rate": 0.896
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 102,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.8864142538975501,
+      "first_attempt_successes": 796,
+      "hold_us": 100,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 996,
+          "max": 100077,
+          "median": 100017,
+          "p99": 100037
+        },
+        "clock": {
+          "count": 1000,
+          "max": 160,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 150,
+          "median": 50,
+          "p99": 70
+        },
+        "dispatch_ok": {
+          "count": 996,
+          "max": 100818,
+          "median": 100197,
+          "p99": 100418
+        },
+        "entry": {
+          "count": 996,
+          "max": 771,
+          "median": 120,
+          "p99": 361
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 36964,
+          "median": 6118,
+          "p99": 8982
+        },
+        "release": {
+          "count": 996,
+          "max": 201,
+          "median": 50,
+          "p99": 121
+        },
+        "replace_busy": {
+          "count": 102,
+          "max": 331,
+          "median": 120,
+          "p99": 221
+        },
+        "replace_ok": {
+          "count": 898,
+          "max": 13785,
+          "median": 2084,
+          "p99": 6422
+        },
+        "transition_busy": {
+          "count": 4,
+          "max": 201,
+          "median": 181,
+          "p99": 201
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 84253,
+          "median": 6431,
+          "p99": 9246
+        }
+      },
+      "logical_updates_started": 898,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 3,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.004454342984409799,
+      "successful_updates": 898,
+      "transition_busy_skips": 4,
+      "update_success_rate": 0.898
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 95,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.8950276243093923,
+      "first_attempt_successes": 810,
+      "hold_us": 100,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 994,
+          "max": 116367,
+          "median": 100017,
+          "p99": 100037
+        },
+        "clock": {
+          "count": 1000,
+          "max": 51,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 141,
+          "median": 50,
+          "p99": 140
+        },
+        "dispatch_ok": {
+          "count": 994,
+          "max": 117910,
+          "median": 100258,
+          "p99": 100849
+        },
+        "entry": {
+          "count": 994,
+          "max": 17823,
+          "median": 171,
+          "p99": 672
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 380394,
+          "median": 6543,
+          "p99": 23691
+        },
+        "release": {
+          "count": 994,
+          "max": 671,
+          "median": 50,
+          "p99": 371
+        },
+        "replace_busy": {
+          "count": 95,
+          "max": 1002,
+          "median": 140,
+          "p99": 1002
+        },
+        "replace_ok": {
+          "count": 905,
+          "max": 92803,
+          "median": 4749,
+          "p99": 39133
+        },
+        "transition_busy": {
+          "count": 6,
+          "max": 481,
+          "median": 221,
+          "p99": 481
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 859411,
+          "median": 7128,
+          "p99": 547466
+        }
+      },
+      "logical_updates_started": 905,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 4,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.0066298342541436465,
+      "successful_updates": 905,
+      "transition_busy_skips": 6,
+      "update_success_rate": 0.905
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 98,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.8913525498891353,
+      "first_attempt_successes": 804,
+      "hold_us": 100,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 996,
+          "max": 102892,
+          "median": 100017,
+          "p99": 100037
+        },
+        "clock": {
+          "count": 1000,
+          "max": 90,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 151,
+          "median": 50,
+          "p99": 70
+        },
+        "dispatch_ok": {
+          "count": 996,
+          "max": 103935,
+          "median": 100297,
+          "p99": 100938
+        },
+        "entry": {
+          "count": 996,
+          "max": 3878,
+          "median": 180,
+          "p99": 792
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 478778,
+          "median": 6926,
+          "p99": 51438
+        },
+        "release": {
+          "count": 996,
+          "max": 3276,
+          "median": 100,
+          "p99": 301
+        },
+        "replace_busy": {
+          "count": 98,
+          "max": 22632,
+          "median": 141,
+          "p99": 22632
+        },
+        "replace_ok": {
+          "count": 902,
+          "max": 29094,
+          "median": 4518,
+          "p99": 17082
+        },
+        "transition_busy": {
+          "count": 4,
+          "max": 301,
+          "median": 221,
+          "p99": 301
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 872442,
+          "median": 7062,
+          "p99": 458367
+        }
+      },
+      "logical_updates_started": 902,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 5,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.004434589800443459,
+      "successful_updates": 902,
+      "transition_busy_skips": 4,
+      "update_success_rate": 0.902
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 100,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.8888888888888888,
+      "first_attempt_successes": 800,
+      "hold_us": 100,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 995,
+          "max": 100117,
+          "median": 100017,
+          "p99": 100037
+        },
+        "clock": {
+          "count": 1000,
+          "max": 40,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 130,
+          "median": 50,
+          "p99": 70
+        },
+        "dispatch_ok": {
+          "count": 995,
+          "max": 101099,
+          "median": 100197,
+          "p99": 100458
+        },
+        "entry": {
+          "count": 995,
+          "max": 1022,
+          "median": 121,
+          "p99": 311
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 91367,
+          "median": 6253,
+          "p99": 10014
+        },
+        "release": {
+          "count": 995,
+          "max": 791,
+          "median": 50,
+          "p99": 140
+        },
+        "replace_busy": {
+          "count": 100,
+          "max": 230,
+          "median": 130,
+          "p99": 190
+        },
+        "replace_ok": {
+          "count": 900,
+          "max": 53009,
+          "median": 2033,
+          "p99": 8145
+        },
+        "transition_busy": {
+          "count": 5,
+          "max": 251,
+          "median": 170,
+          "p99": 251
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 69734,
+          "median": 6511,
+          "p99": 10714
+        }
+      },
+      "logical_updates_started": 900,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 6,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.005555555555555556,
+      "successful_updates": 900,
+      "transition_busy_skips": 5,
+      "update_success_rate": 0.9
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 101,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.8876529477196885,
+      "first_attempt_successes": 798,
+      "hold_us": 100,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 993,
+          "max": 100137,
+          "median": 100017,
+          "p99": 100037
+        },
+        "clock": {
+          "count": 1000,
+          "max": 50,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 210,
+          "median": 50,
+          "p99": 61
+        },
+        "dispatch_ok": {
+          "count": 993,
+          "max": 106349,
+          "median": 100267,
+          "p99": 100738
+        },
+        "entry": {
+          "count": 993,
+          "max": 6252,
+          "median": 180,
+          "p99": 641
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 402606,
+          "median": 6385,
+          "p99": 28155
+        },
+        "release": {
+          "count": 993,
+          "max": 320,
+          "median": 50,
+          "p99": 181
+        },
+        "replace_busy": {
+          "count": 101,
+          "max": 571,
+          "median": 140,
+          "p99": 401
+        },
+        "replace_ok": {
+          "count": 899,
+          "max": 37961,
+          "median": 4348,
+          "p99": 16280
+        },
+        "transition_busy": {
+          "count": 7,
+          "max": 271,
+          "median": 210,
+          "p99": 271
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 2315660,
+          "median": 6947,
+          "p99": 232792
+        }
+      },
+      "logical_updates_started": 899,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 7,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.00778642936596218,
+      "successful_updates": 899,
+      "transition_busy_skips": 7,
+      "update_success_rate": 0.899
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 119,
+      "dispatch_attempts": 991,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.887627695800227,
+      "first_attempt_successes": 782,
+      "hold_us": 100,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 973,
+          "max": 132958,
+          "median": 100017,
+          "p99": 100047
+        },
+        "clock": {
+          "count": 1000,
+          "max": 120,
+          "median": 20,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 681,
+          "median": 60,
+          "p99": 220
+        },
+        "dispatch_ok": {
+          "count": 973,
+          "max": 134131,
+          "median": 100989,
+          "p99": 103473
+        },
+        "entry": {
+          "count": 973,
+          "max": 11902,
+          "median": 722,
+          "p99": 2204
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 991,
+          "max": 954195,
+          "median": 17867,
+          "p99": 942541
+        },
+        "release": {
+          "count": 973,
+          "max": 10751,
+          "median": 201,
+          "p99": 911
+        },
+        "replace_busy": {
+          "count": 119,
+          "max": 3126,
+          "median": 531,
+          "p99": 2415
+        },
+        "replace_ok": {
+          "count": 881,
+          "max": 423020,
+          "median": 20649,
+          "p99": 57206
+        },
+        "transition_busy": {
+          "count": 18,
+          "max": 1512,
+          "median": 662,
+          "p99": 1512
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 3529409,
+          "median": 19356,
+          "p99": 2179933
+        }
+      },
+      "logical_updates_started": 881,
+      "missed_releases": 11,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 8,
+      "scheduled_releases": 1002,
+      "skips_per_successful_update": 0.02043132803632236,
+      "successful_updates": 881,
+      "transition_busy_skips": 18,
+      "update_success_rate": 0.881
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 96,
+      "dispatch_attempts": 995,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.8938053097345132,
+      "first_attempt_successes": 808,
+      "hold_us": 100,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 972,
+          "max": 135523,
+          "median": 100017,
+          "p99": 100047
+        },
+        "clock": {
+          "count": 1000,
+          "max": 120,
+          "median": 20,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 461,
+          "median": 60,
+          "p99": 171
+        },
+        "dispatch_ok": {
+          "count": 972,
+          "max": 136625,
+          "median": 100968,
+          "p99": 102732
+        },
+        "entry": {
+          "count": 972,
+          "max": 3095,
+          "median": 691,
+          "p99": 2024
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 995,
+          "max": 989209,
+          "median": 19827,
+          "p99": 720977
+        },
+        "release": {
+          "count": 972,
+          "max": 7003,
+          "median": 220,
+          "p99": 952
+        },
+        "replace_busy": {
+          "count": 96,
+          "max": 1904,
+          "median": 481,
+          "p99": 1904
+        },
+        "replace_ok": {
+          "count": 904,
+          "max": 255126,
+          "median": 21420,
+          "p99": 48560
+        },
+        "transition_busy": {
+          "count": 23,
+          "max": 1182,
+          "median": 501,
+          "p99": 1182
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 2033917,
+          "median": 19505,
+          "p99": 879801
+        }
+      },
+      "logical_updates_started": 904,
+      "missed_releases": 5,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 9,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.025442477876106196,
+      "successful_updates": 904,
+      "transition_busy_skips": 23,
+      "update_success_rate": 0.904
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 498,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.7250996015936255,
+      "first_attempt_successes": 364,
+      "hold_us": 500,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 994,
+          "max": 697573,
+          "median": 500014,
+          "p99": 522737
+        },
+        "clock": {
+          "count": 1000,
+          "max": 50,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 141,
+          "median": 50,
+          "p99": 70
+        },
+        "dispatch_ok": {
+          "count": 994,
+          "max": 697783,
+          "median": 500234,
+          "p99": 522927
+        },
+        "entry": {
+          "count": 994,
+          "max": 682,
+          "median": 110,
+          "p99": 291
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 230295,
+          "median": 6121,
+          "p99": 9194
+        },
+        "release": {
+          "count": 994,
+          "max": 351,
+          "median": 91,
+          "p99": 211
+        },
+        "replace_busy": {
+          "count": 498,
+          "max": 1623,
+          "median": 130,
+          "p99": 431
+        },
+        "replace_ok": {
+          "count": 502,
+          "max": 18985,
+          "median": 2134,
+          "p99": 7314
+        },
+        "transition_busy": {
+          "count": 6,
+          "max": 541,
+          "median": 161,
+          "p99": 541
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 20851,
+          "median": 6574,
+          "p99": 10306
+        }
+      },
+      "logical_updates_started": 502,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 0,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.01195219123505976,
+      "successful_updates": 502,
+      "transition_busy_skips": 6,
+      "update_success_rate": 0.502
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 504,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.7237903225806451,
+      "first_attempt_successes": 359,
+      "hold_us": 500,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 997,
+          "max": 514150,
+          "median": 505825,
+          "p99": 507578
+        },
+        "clock": {
+          "count": 1000,
+          "max": 60,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 150,
+          "median": 50,
+          "p99": 140
+        },
+        "dispatch_ok": {
+          "count": 997,
+          "max": 514420,
+          "median": 506025,
+          "p99": 507728
+        },
+        "entry": {
+          "count": 997,
+          "max": 481,
+          "median": 100,
+          "p99": 260
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 84844,
+          "median": 6066,
+          "p99": 8252
+        },
+        "release": {
+          "count": 997,
+          "max": 701,
+          "median": 90,
+          "p99": 190
+        },
+        "replace_busy": {
+          "count": 504,
+          "max": 651,
+          "median": 110,
+          "p99": 390
+        },
+        "replace_ok": {
+          "count": 496,
+          "max": 15289,
+          "median": 2004,
+          "p99": 7905
+        },
+        "transition_busy": {
+          "count": 3,
+          "max": 190,
+          "median": 171,
+          "p99": 190
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 11926,
+          "median": 6423,
+          "p99": 8974
+        }
+      },
+      "logical_updates_started": 496,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 1,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.006048387096774193,
+      "successful_updates": 496,
+      "transition_busy_skips": 3,
+      "update_success_rate": 0.496
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 503,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.7228915662650602,
+      "first_attempt_successes": 360,
+      "hold_us": 500,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 995,
+          "max": 724022,
+          "median": 505965,
+          "p99": 510844
+        },
+        "clock": {
+          "count": 1000,
+          "max": 50,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 151,
+          "median": 60,
+          "p99": 131
+        },
+        "dispatch_ok": {
+          "count": 995,
+          "max": 724222,
+          "median": 506165,
+          "p99": 511084
+        },
+        "entry": {
+          "count": 995,
+          "max": 681,
+          "median": 111,
+          "p99": 281
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 426436,
+          "median": 6099,
+          "p99": 8280
+        },
+        "release": {
+          "count": 995,
+          "max": 841,
+          "median": 90,
+          "p99": 251
+        },
+        "replace_busy": {
+          "count": 503,
+          "max": 922,
+          "median": 130,
+          "p99": 481
+        },
+        "replace_ok": {
+          "count": 497,
+          "max": 18063,
+          "median": 2024,
+          "p99": 9478
+        },
+        "transition_busy": {
+          "count": 5,
+          "max": 391,
+          "median": 180,
+          "p99": 391
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 92260,
+          "median": 6436,
+          "p99": 10470
+        }
+      },
+      "logical_updates_started": 498,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 2,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.01006036217303823,
+      "successful_updates": 497,
+      "transition_busy_skips": 5,
+      "update_success_rate": 0.497
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 502,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.7234468937875751,
+      "first_attempt_successes": 361,
+      "hold_us": 500,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 996,
+          "max": 586946,
+          "median": 504772,
+          "p99": 507668
+        },
+        "clock": {
+          "count": 1000,
+          "max": 50,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 381,
+          "median": 50,
+          "p99": 301
+        },
+        "dispatch_ok": {
+          "count": 996,
+          "max": 587206,
+          "median": 504963,
+          "p99": 508379
+        },
+        "entry": {
+          "count": 996,
+          "max": 651,
+          "median": 100,
+          "p99": 250
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 32128,
+          "median": 5109,
+          "p99": 7404
+        },
+        "release": {
+          "count": 996,
+          "max": 781,
+          "median": 90,
+          "p99": 190
+        },
+        "replace_busy": {
+          "count": 502,
+          "max": 1413,
+          "median": 110,
+          "p99": 471
+        },
+        "replace_ok": {
+          "count": 498,
+          "max": 34224,
+          "median": 2054,
+          "p99": 13195
+        },
+        "transition_busy": {
+          "count": 4,
+          "max": 170,
+          "median": 161,
+          "p99": 170
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 112216,
+          "median": 5625,
+          "p99": 8735
+        }
+      },
+      "logical_updates_started": 499,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 3,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.008032128514056224,
+      "successful_updates": 498,
+      "transition_busy_skips": 4,
+      "update_success_rate": 0.498
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 498,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.7137176938369781,
+      "first_attempt_successes": 359,
+      "hold_us": 500,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 994,
+          "max": 802519,
+          "median": 506065,
+          "p99": 613576
+        },
+        "clock": {
+          "count": 1000,
+          "max": 70,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 140,
+          "median": 50,
+          "p99": 100
+        },
+        "dispatch_ok": {
+          "count": 994,
+          "max": 803410,
+          "median": 506366,
+          "p99": 614077
+        },
+        "entry": {
+          "count": 994,
+          "max": 2364,
+          "median": 141,
+          "p99": 651
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 746585,
+          "median": 6247,
+          "p99": 191975
+        },
+        "release": {
+          "count": 994,
+          "max": 1002,
+          "median": 101,
+          "p99": 541
+        },
+        "replace_busy": {
+          "count": 498,
+          "max": 1884,
+          "median": 171,
+          "p99": 892
+        },
+        "replace_ok": {
+          "count": 502,
+          "max": 37170,
+          "median": 4940,
+          "p99": 22111
+        },
+        "transition_busy": {
+          "count": 6,
+          "max": 310,
+          "median": 211,
+          "p99": 310
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 2680023,
+          "median": 6705,
+          "p99": 381614
+        }
+      },
+      "logical_updates_started": 503,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 4,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.01195219123505976,
+      "successful_updates": 502,
+      "transition_busy_skips": 6,
+      "update_success_rate": 0.502
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 517,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.6962809917355371,
+      "first_attempt_successes": 337,
+      "hold_us": 500,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 992,
+          "max": 1556897,
+          "median": 506696,
+          "p99": 651817
+        },
+        "clock": {
+          "count": 1000,
+          "max": 50,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 150,
+          "median": 50,
+          "p99": 61
+        },
+        "dispatch_ok": {
+          "count": 992,
+          "max": 1557168,
+          "median": 507056,
+          "p99": 652198
+        },
+        "entry": {
+          "count": 992,
+          "max": 39574,
+          "median": 160,
+          "p99": 922
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 746707,
+          "median": 7033,
+          "p99": 117955
+        },
+        "release": {
+          "count": 992,
+          "max": 4569,
+          "median": 130,
+          "p99": 551
+        },
+        "replace_busy": {
+          "count": 517,
+          "max": 8877,
+          "median": 231,
+          "p99": 1383
+        },
+        "replace_ok": {
+          "count": 483,
+          "max": 87443,
+          "median": 5921,
+          "p99": 16901
+        },
+        "transition_busy": {
+          "count": 8,
+          "max": 8936,
+          "median": 270,
+          "p99": 8936
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 786684,
+          "median": 7172,
+          "p99": 287692
+        }
+      },
+      "logical_updates_started": 484,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 5,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.016563146997929608,
+      "successful_updates": 483,
+      "transition_busy_skips": 8,
+      "update_success_rate": 0.483
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 505,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.7237903225806451,
+      "first_attempt_successes": 359,
+      "hold_us": 500,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 998,
+          "max": 566298,
+          "median": 506065,
+          "p99": 507959
+        },
+        "clock": {
+          "count": 1000,
+          "max": 120,
+          "median": 30,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 190,
+          "median": 50,
+          "p99": 150
+        },
+        "dispatch_ok": {
+          "count": 998,
+          "max": 566678,
+          "median": 506255,
+          "p99": 508189
+        },
+        "entry": {
+          "count": 998,
+          "max": 440,
+          "median": 101,
+          "p99": 241
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 13474,
+          "median": 6052,
+          "p99": 7947
+        },
+        "release": {
+          "count": 998,
+          "max": 541,
+          "median": 90,
+          "p99": 200
+        },
+        "replace_busy": {
+          "count": 505,
+          "max": 531,
+          "median": 130,
+          "p99": 411
+        },
+        "replace_ok": {
+          "count": 495,
+          "max": 13525,
+          "median": 2063,
+          "p99": 8145
+        },
+        "transition_busy": {
+          "count": 2,
+          "max": 181,
+          "median": 150,
+          "p99": 181
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 61653,
+          "median": 6453,
+          "p99": 9306
+        }
+      },
+      "logical_updates_started": 496,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 6,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.00404040404040404,
+      "successful_updates": 495,
+      "transition_busy_skips": 2,
+      "update_success_rate": 0.495
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 501,
+      "dispatch_attempts": 1000,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.7254509018036072,
+      "first_attempt_successes": 362,
+      "hold_us": 500,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 995,
+          "max": 666785,
+          "median": 505995,
+          "p99": 507388
+        },
+        "clock": {
+          "count": 1000,
+          "max": 60,
+          "median": 20,
+          "p99": 21
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 150,
+          "median": 60,
+          "p99": 140
+        },
+        "dispatch_ok": {
+          "count": 995,
+          "max": 666976,
+          "median": 506205,
+          "p99": 507738
+        },
+        "entry": {
+          "count": 995,
+          "max": 1703,
+          "median": 110,
+          "p99": 231
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 1000,
+          "max": 22186,
+          "median": 6063,
+          "p99": 7432
+        },
+        "release": {
+          "count": 995,
+          "max": 440,
+          "median": 90,
+          "p99": 270
+        },
+        "replace_busy": {
+          "count": 501,
+          "max": 641,
+          "median": 131,
+          "p99": 420
+        },
+        "replace_ok": {
+          "count": 499,
+          "max": 19988,
+          "median": 2054,
+          "p99": 9547
+        },
+        "transition_busy": {
+          "count": 5,
+          "max": 912,
+          "median": 180,
+          "p99": 912
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 24594,
+          "median": 6524,
+          "p99": 9214
+        }
+      },
+      "logical_updates_started": 499,
+      "missed_releases": 0,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 7,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.01002004008016032,
+      "successful_updates": 499,
+      "transition_busy_skips": 5,
+      "update_success_rate": 0.499
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 495,
+      "dispatch_attempts": 983,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.7227722772277227,
+      "first_attempt_successes": 365,
+      "hold_us": 500,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 958,
+          "max": 3048203,
+          "median": 518809,
+          "p99": 751664
+        },
+        "clock": {
+          "count": 1000,
+          "max": 1553,
+          "median": 20,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 391,
+          "median": 61,
+          "p99": 330
+        },
+        "dispatch_ok": {
+          "count": 958,
+          "max": 3050056,
+          "median": 519891,
+          "p99": 752215
+        },
+        "entry": {
+          "count": 958,
+          "max": 19997,
+          "median": 561,
+          "p99": 1754
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 983,
+          "max": 935738,
+          "median": 18897,
+          "p99": 446377
+        },
+        "release": {
+          "count": 958,
+          "max": 1994,
+          "median": 441,
+          "p99": 1472
+        },
+        "replace_busy": {
+          "count": 495,
+          "max": 3667,
+          "median": 1222,
+          "p99": 2705
+        },
+        "replace_ok": {
+          "count": 505,
+          "max": 164617,
+          "median": 21190,
+          "p99": 86742
+        },
+        "transition_busy": {
+          "count": 25,
+          "max": 1803,
+          "median": 411,
+          "p99": 1803
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 2566610,
+          "median": 18011,
+          "p99": 1256994
+        }
+      },
+      "logical_updates_started": 505,
+      "missed_releases": 17,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 8,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.04950495049504951,
+      "successful_updates": 505,
+      "transition_busy_skips": 25,
+      "update_success_rate": 0.505
+    },
+    {
+      "attempts": 1000,
+      "busy_updates": 495,
+      "dispatch_attempts": 996,
+      "empty_skips": 0,
+      "execution_busy_skips": 0,
+      "first_attempt_success_rate": 0.7227722772277227,
+      "first_attempt_successes": 365,
+      "hold_us": 500,
+      "latency_ns": {
+        "actual_hold": {
+          "count": 965,
+          "max": 657688,
+          "median": 517927,
+          "p99": 596334
+        },
+        "clock": {
+          "count": 1000,
+          "max": 40,
+          "median": 20,
+          "p99": 31
+        },
+        "controlled_transition": {
+          "count": 100,
+          "max": 421,
+          "median": 61,
+          "p99": 261
+        },
+        "dispatch_ok": {
+          "count": 965,
+          "max": 658389,
+          "median": 518909,
+          "p99": 604909
+        },
+        "entry": {
+          "count": 965,
+          "max": 10059,
+          "median": 521,
+          "p99": 1884
+        },
+        "execution_busy": null,
+        "lateness": {
+          "count": 996,
+          "max": 160728,
+          "median": 17622,
+          "p99": 108210
+        },
+        "release": {
+          "count": 965,
+          "max": 8165,
+          "median": 391,
+          "p99": 1263
+        },
+        "replace_busy": {
+          "count": 495,
+          "max": 2816,
+          "median": 1012,
+          "p99": 2325
+        },
+        "replace_ok": {
+          "count": 505,
+          "max": 65492,
+          "median": 20879,
+          "p99": 43210
+        },
+        "transition_busy": {
+          "count": 31,
+          "max": 1031,
+          "median": 351,
+          "p99": 1031
+        },
+        "update_lateness": {
+          "count": 1000,
+          "max": 1942710,
+          "median": 17166,
+          "p99": 810658
+        }
+      },
+      "logical_updates_started": 505,
+      "missed_releases": 4,
+      "program_bytes_one": 16,
+      "program_bytes_two": 32,
+      "protocol": "guarded",
+      "run": 9,
+      "scheduled_releases": 1000,
+      "skips_per_successful_update": 0.061386138613861385,
+      "successful_updates": 505,
+      "transition_busy_skips": 31,
+      "update_success_rate": 0.505
+    }
+  ]
+}

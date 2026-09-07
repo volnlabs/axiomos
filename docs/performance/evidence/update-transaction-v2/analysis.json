@@ -1,0 +1,299 @@
+{
+  "cases": {
+    "atomic_publication": [
+      "aba",
+      "authority_rejection",
+      "budget_rejection",
+      "completed_retry",
+      "concurrent_proposers",
+      "held_a_schedule",
+      "rollback",
+      "snapshot_prep_failure",
+      "stale_expected"
+    ],
+    "attach_first": [
+      "budget_rejection",
+      "interruption",
+      "rollback",
+      "snapshot_prep_failure",
+      "success"
+    ],
+    "detach_first": [
+      "budget_rejection",
+      "interruption",
+      "rollback",
+      "snapshot_prep_failure",
+      "success"
+    ],
+    "transactional": [
+      "aba",
+      "authority_rejection",
+      "budget_rejection",
+      "completed_retry",
+      "concurrent_proposers",
+      "held_a_schedule",
+      "rollback",
+      "snapshot_prep_failure",
+      "stale_expected"
+    ]
+  },
+  "denominator": "each emitted intermediate observation plus each request's final observation",
+  "fault_outcomes": {
+    "aba": {
+      "atomic_publication": [
+        {
+          "candidate": 1,
+          "outcome": "StaleInstallation { expected: InstallationId { program: 0, epoch: 1 }, current: Some(InstallationId { program: 0, epoch: 3 }) }"
+        }
+      ],
+      "transactional": [
+        {
+          "candidate": 1,
+          "outcome": "StaleInstallation { expected: InstallationId { program: 0, epoch: 1 }, current: Some(InstallationId { program: 0, epoch: 3 }) }"
+        }
+      ]
+    },
+    "authority_rejection": {
+      "atomic_publication": [
+        {
+          "candidate": 3,
+          "outcome": "AuthorityExceeded"
+        }
+      ],
+      "transactional": [
+        {
+          "candidate": 3,
+          "outcome": "AuthorityExceeded"
+        }
+      ]
+    },
+    "budget_rejection": {
+      "atomic_publication": [
+        {
+          "candidate": 6,
+          "outcome": "AdmissionRejected"
+        }
+      ],
+      "transactional": [
+        {
+          "candidate": 6,
+          "outcome": "AdmissionRejected"
+        }
+      ]
+    },
+    "completed_retry": {
+      "atomic_publication": [
+        {
+          "candidate": 1,
+          "outcome": "StaleInstallation { expected: InstallationId { program: 0, epoch: 1 }, current: Some(InstallationId { program: 1, epoch: 2 }) }"
+        }
+      ],
+      "transactional": [
+        {
+          "candidate": 1,
+          "outcome": "StaleInstallation { expected: InstallationId { program: 0, epoch: 1 }, current: Some(InstallationId { program: 1, epoch: 2 }) }"
+        }
+      ]
+    },
+    "concurrent_proposers": {
+      "atomic_publication": [
+        {
+          "candidate": 1,
+          "outcome": "StaleInstallation { expected: InstallationId { program: 0, epoch: 3 }, current: Some(InstallationId { program: 2, epoch: 4 }) }"
+        },
+        {
+          "candidate": 2,
+          "outcome": "Ok"
+        }
+      ],
+      "transactional": [
+        {
+          "candidate": 1,
+          "outcome": "StaleInstallation { expected: InstallationId { program: 0, epoch: 3 }, current: Some(InstallationId { program: 2, epoch: 4 }) }"
+        },
+        {
+          "candidate": 2,
+          "outcome": "Ok"
+        }
+      ]
+    },
+    "held_a_schedule": {
+      "atomic_publication": [
+        {
+          "candidate": 1,
+          "outcome": "Ok"
+        }
+      ],
+      "transactional": [
+        {
+          "candidate": 1,
+          "outcome": "Busy"
+        },
+        {
+          "candidate": 1,
+          "outcome": "Ok"
+        }
+      ]
+    },
+    "rollback": {
+      "atomic_publication": [
+        {
+          "candidate": 0,
+          "outcome": "Ok"
+        }
+      ],
+      "transactional": [
+        {
+          "candidate": 0,
+          "outcome": "Ok"
+        }
+      ]
+    },
+    "snapshot_prep_failure": {
+      "atomic_publication": [
+        {
+          "candidate": 1,
+          "outcome": "SnapshotAllocationFailed"
+        }
+      ],
+      "transactional": [
+        {
+          "candidate": 1,
+          "outcome": "SnapshotAllocationFailed"
+        }
+      ]
+    },
+    "stale_expected": {
+      "atomic_publication": [
+        {
+          "candidate": 2,
+          "outcome": "StaleInstallation { expected: InstallationId { program: 0, epoch: 1 }, current: Some(InstallationId { program: 1, epoch: 2 }) }"
+        }
+      ],
+      "transactional": [
+        {
+          "candidate": 2,
+          "outcome": "StaleInstallation { expected: InstallationId { program: 0, epoch: 1 }, current: Some(InstallationId { program: 1, epoch: 2 }) }"
+        }
+      ]
+    }
+  },
+  "paired_cases": [
+    "aba",
+    "authority_rejection",
+    "budget_rejection",
+    "completed_retry",
+    "concurrent_proposers",
+    "held_a_schedule",
+    "rollback",
+    "snapshot_prep_failure",
+    "stale_expected"
+  ],
+  "paired_summary": {
+    "atomic_publication": {
+      "accounting_checks": 9,
+      "accounting_mismatches": 0,
+      "dual_snapshots": 0,
+      "empty_snapshots": 0,
+      "execution_checks": 0,
+      "execution_overlap": 0,
+      "expected_requests": 9,
+      "failed_preserved": 6,
+      "failed_requests": 6,
+      "guard_checks": 10,
+      "guard_overlap": 1,
+      "installation_violations": 0,
+      "receipt_checks": 9,
+      "receipt_violations": 0,
+      "requests": 9,
+      "single_snapshots": 10,
+      "skipped_dispatches": 0,
+      "snapshots": 10,
+      "stale_acceptances": 0,
+      "unsupported_cases": 0
+    },
+    "transactional": {
+      "accounting_checks": 10,
+      "accounting_mismatches": 0,
+      "dual_snapshots": 0,
+      "empty_snapshots": 0,
+      "execution_checks": 0,
+      "execution_overlap": 0,
+      "expected_requests": 9,
+      "failed_preserved": 6,
+      "failed_requests": 6,
+      "guard_checks": 10,
+      "guard_overlap": 0,
+      "installation_violations": 0,
+      "receipt_checks": 9,
+      "receipt_violations": 0,
+      "requests": 9,
+      "single_snapshots": 10,
+      "skipped_dispatches": 1,
+      "snapshots": 10,
+      "stale_acceptances": 0,
+      "unsupported_cases": 0
+    }
+  },
+  "scope": {
+    "atomic_publication": [
+      "bpf_manager_atomic_without_quiescence"
+    ],
+    "attach_first": [
+      "bpf_manager_ordinary_supporting"
+    ],
+    "detach_first": [
+      "bpf_manager_ordinary_supporting"
+    ],
+    "transactional": [
+      "bpf_manager_guarded"
+    ]
+  },
+  "supporting_summary": {
+    "attach_first": {
+      "accounting_checks": 7,
+      "accounting_mismatches": 0,
+      "dual_snapshots": 3,
+      "empty_snapshots": 0,
+      "execution_checks": 0,
+      "execution_overlap": 0,
+      "expected_requests": 0,
+      "failed_preserved": 2,
+      "failed_requests": 3,
+      "guard_checks": 0,
+      "guard_overlap": 0,
+      "installation_violations": 0,
+      "receipt_checks": 0,
+      "receipt_violations": 0,
+      "requests": 5,
+      "single_snapshots": 4,
+      "skipped_dispatches": 0,
+      "snapshots": 7,
+      "stale_acceptances": 0,
+      "unsupported_cases": 0
+    },
+    "detach_first": {
+      "accounting_checks": 7,
+      "accounting_mismatches": 0,
+      "dual_snapshots": 0,
+      "empty_snapshots": 5,
+      "execution_checks": 0,
+      "execution_overlap": 0,
+      "expected_requests": 0,
+      "failed_preserved": 0,
+      "failed_requests": 3,
+      "guard_checks": 0,
+      "guard_overlap": 0,
+      "installation_violations": 0,
+      "receipt_checks": 0,
+      "receipt_violations": 0,
+      "requests": 5,
+      "single_snapshots": 2,
+      "skipped_dispatches": 0,
+      "snapshots": 7,
+      "stale_acceptances": 0,
+      "unsupported_cases": 0
+    }
+  },
+  "trace_sha256": "58e315c3cf14bded6fc5a0153f489703d29fd0d13fe07fbb88d7a0f86359ae2c"
+}

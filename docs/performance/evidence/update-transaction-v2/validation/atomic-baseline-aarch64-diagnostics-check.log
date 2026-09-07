@@ -1,0 +1,83 @@
+warning: unused import: `VirtAddr`
+  --> kernel/src/mcore/mtask/process/trampoline.rs:26:39
+   |
+26 | use crate::arch::{PageSize, Size4KiB, VirtAddr};
+   |                                       ^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: variant `KernelImage` is never constructed
+   --> kernel/src/bpf/mod.rs:347:5
+    |
+345 | enum LoadAuthentication {
+    |      ------------------ variant in this enum
+346 |     Runtime(AuthenticationProvenance),
+347 |     KernelImage,
+    |     ^^^^^^^^^^^
+    |
+    = note: `LoadAuthentication` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `load_kernel_builtin_program` is never used
+    --> kernel/src/bpf/mod.rs:1360:19
+     |
+ 623 | impl BpfManager {
+     | --------------- method in this implementation
+...
+1360 |     pub(crate) fn load_kernel_builtin_program(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `subscribe` is never used
+   --> kernel/src/mcore/mtask/scheduler/wait_channel.rs:138:19
+    |
+ 99 | impl<W: WaiterSink> WaitChannel<W> {
+    | ---------------------------------- method in this implementation
+...
+138 |     pub(crate) fn subscribe(&self) -> WaitRegistration<'_, W> {
+    |                   ^^^^^^^^^
+
+warning: struct `WaitRegistration` is never constructed
+   --> kernel/src/mcore/mtask/scheduler/wait_channel.rs:178:12
+    |
+178 | pub struct WaitRegistration<'a, W: WaiterSink> {
+    |            ^^^^^^^^^^^^^^^^
+
+warning: method `park` is never used
+   --> kernel/src/mcore/mtask/scheduler/wait_channel.rs:184:12
+    |
+183 | impl<'a, W: WaiterSink> WaitRegistration<'a, W> {
+    | ----------------------------------------------- method in this implementation
+184 |     pub fn park(self, item: W::Item) {
+    |            ^^^^
+
+warning: method `shootdown_targets` is never used
+   --> kernel/src/mem/address_space/mod.rs:593:19
+    |
+229 | impl AddressSpace {
+    | ----------------- method in this implementation
+...
+593 |     pub(crate) fn shootdown_targets(&self) -> u64 {
+    |                   ^^^^^^^^^^^^^^^^^
+
+warning: `kernel` (lib) generated 7 warnings (run `cargo fix --lib -p kernel` to apply 1 suggestion)
+warning: variants `BootloaderRevisionUnsupported`, `BootTimeUnavailable`, `EmbeddedRamdiskInitialization`, and `RootBlockDeviceMissing` are never constructed
+  --> kernel/src/main.rs:40:5
+   |
+39 | enum BootError {
+   |      --------- variants in this enum
+40 |     BootloaderRevisionUnsupported,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+41 |     BootTimeUnavailable,
+   |     ^^^^^^^^^^^^^^^^^^^
+42 |     FileSystemInitialization,
+43 |     EmbeddedRamdiskInitialization,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+44 |     IioSimulationInitialization,
+45 |     RootBlockDeviceMissing,
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `BootError` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `kernel` (bin "kernel") generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.09s

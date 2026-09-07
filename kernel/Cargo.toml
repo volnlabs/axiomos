@@ -57,6 +57,9 @@ fdt.workspace = true
 [build-dependencies]
 cc = "1.0"
 
+[dev-dependencies]
+libc = "0.2.177"
+
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 acpi.workspace = true
 raw-cpuid.workspace = true
@@ -101,7 +104,7 @@ audit-diagnostics = []
 
 # Host/QEMU observation and deterministic transaction failpoints for the
 # continual-update campaign. This does not bypass production validation.
-bpf-update-diagnostics = []
+bpf-update-diagnostics = ["kernel_bpf/host-update-diagnostics"]
 
 # Raw AArch64 register/UART probes used only during hardware bring-up.
 bringup-diagnostics = []

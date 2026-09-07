@@ -1,0 +1,15 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running tests/concurrency_model.rs (/home/utkarsh/Work/axiomOS/target/debug/deps/concurrency_model-3899ac62dc5b706d)
+
+running 8 tests
+test publish_after_all_readers_drop_completes_without_waiting ... ok
+test saturated_reader_counter_fails_closed_without_wrapping ... ok
+test exclusive_slot_reports_every_skipped_invocation ... ok
+test old_reader_delays_reclamation_until_guard_drop ... ok
+test publication_keeps_installation_identity_and_runtime_coherent ... ok
+test exclusive_slot_enter_transition_race_never_overlaps ... ok
+test publish_read_does_not_return_torn_value ... ok
+test exclusive_slot_allows_only_one_of_two_competing_invocations ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.46s
+

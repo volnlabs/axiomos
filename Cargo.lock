@@ -949,6 +949,7 @@ dependencies = [
  "kernel_usermem",
  "kernel_vfs",
  "kernel_virtual_memory",
+ "libc",
  "limine",
  "linked_list_allocator",
  "linkme",

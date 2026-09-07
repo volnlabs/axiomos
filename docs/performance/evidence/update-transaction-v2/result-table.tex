@@ -1,0 +1,15 @@
+% Generated from the validated paired manager campaign; do not hand-edit.
+\begin{tabular}{lrr}
+\toprule
+Observation / fault & AP & GR \\
+\midrule
+Multi / empty snapshots & 0/0 & 0/0 \\
+Overlapping guards & 1 & 0 \\
+\midrule
+Snapshot preparation & reject; preserve & reject; preserve \\
+Authority / budget & reject (2/2) & reject (2/2) \\
+Stale / retry / ABA & reject (3/3) & reject (3/3) \\
+Concurrent proposers & one winner & one winner \\
+Held predecessor & publish; overlap & Busy; retry OK \\
+\bottomrule
+\end{tabular}

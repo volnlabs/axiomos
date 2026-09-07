@@ -41,7 +41,7 @@ use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
 use kernel_bpf::signing::{AuthenticationProvenance, SignatureVerifier};
 use kernel_bpf::verifier::admission::{
     commit_attachment, AdmissionLedger, AttachmentCommitError, AttachmentTable,
-    ExclusiveAdmissionError,
+    ExclusiveAdmissionError, ExclusiveAdmissionToken,
 };
 use kernel_bpf::verifier::{MapPerm, Verifier, VerifyConfig};
 use limits::BpfLimits;
@@ -309,6 +309,15 @@ struct SlotInstallation {
 }
 
 static TIMER_EXCLUSIVE_SLOT: ExclusiveSlot<SlotInstallation> = ExclusiveSlot::empty();
+#[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
+static TIMER_ATOMIC_WITHOUT_QUIESCENCE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimerPublicationMode {
+    Guarded,
+    #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
+    AtomicWithoutQuiescence,
+}
 
 #[cfg(feature = "bpf-update-diagnostics")]
 static FAIL_NEXT_EXCLUSIVE_SNAPSHOT: AtomicBool = AtomicBool::new(false);
@@ -322,6 +331,14 @@ struct PreparedHookSnapshot {
 
 struct PreparedSlotInstallation {
     snapshot: Box<SlotInstallation>,
+}
+
+struct PreparedExclusiveUpdate {
+    admission: ExclusiveAdmissionToken,
+    snapshot: PreparedSlotInstallation,
+    next_epoch: u64,
+    installed: InstallationId,
+    receipt: InstallReceipt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -540,6 +557,8 @@ pub struct BpfManager {
     timer_installation: Option<InstallationId>,
     timer_epoch: u64,
     last_install_receipt: Option<InstallReceipt>,
+    #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
+    timer_publication_mode: Option<TimerPublicationMode>,
 }
 
 /// Default fire frequency assumed for a hook, in Hz. Every hook is assumed to
@@ -732,6 +751,8 @@ impl BpfManager {
             timer_installation: None,
             timer_epoch: 0,
             last_install_receipt: None,
+            #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
+            timer_publication_mode: None,
         };
         let envelope = EnvelopeMap::<ActiveProfile>::init_from_profile();
         crate::actuation::ACTUATION_MONITOR
@@ -981,6 +1002,11 @@ impl BpfManager {
             }
             slot_transition.clear();
             self.timer_installation = None;
+            #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
+            {
+                self.timer_publication_mode = None;
+                TIMER_ATOMIC_WITHOUT_QUIESCENCE_ACTIVE.store(false, Ordering::SeqCst);
+            }
         }
         let programs = &self.programs;
         let program_generations = &self.program_generations;
@@ -1417,7 +1443,14 @@ impl BpfManager {
         candidate: ProgramHandle,
         state: StatePolicy,
     ) -> Result<InstallReceipt, InstallError> {
-        self.try_update_exclusive_for(owner, slot, None, candidate, state)
+        self.try_update_exclusive_for(
+            owner,
+            slot,
+            None,
+            candidate,
+            state,
+            TimerPublicationMode::Guarded,
+        )
     }
 
     pub fn try_replace_exclusive_for(
@@ -1428,7 +1461,51 @@ impl BpfManager {
         candidate: ProgramHandle,
         state: StatePolicy,
     ) -> Result<InstallReceipt, InstallError> {
-        self.try_update_exclusive_for(owner, slot, Some(expected), candidate, state)
+        self.try_update_exclusive_for(
+            owner,
+            slot,
+            Some(expected),
+            candidate,
+            state,
+            TimerPublicationMode::Guarded,
+        )
+    }
+
+    #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
+    pub fn try_install_atomic_without_quiescence_for(
+        &mut self,
+        owner: u64,
+        slot: ControlSlot,
+        candidate: ProgramHandle,
+        state: StatePolicy,
+    ) -> Result<InstallReceipt, InstallError> {
+        self.try_update_exclusive_for(
+            owner,
+            slot,
+            None,
+            candidate,
+            state,
+            TimerPublicationMode::AtomicWithoutQuiescence,
+        )
+    }
+
+    #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
+    pub fn try_replace_atomic_without_quiescence_for(
+        &mut self,
+        owner: u64,
+        slot: ControlSlot,
+        expected: InstallationId,
+        candidate: ProgramHandle,
+        state: StatePolicy,
+    ) -> Result<InstallReceipt, InstallError> {
+        self.try_update_exclusive_for(
+            owner,
+            slot,
+            Some(expected),
+            candidate,
+            state,
+            TimerPublicationMode::AtomicWithoutQuiescence,
+        )
     }
 
     fn try_update_exclusive_for(
@@ -1438,7 +1515,63 @@ impl BpfManager {
         expected: Option<InstallationId>,
         candidate: ProgramHandle,
         state: StatePolicy,
+        mode: TimerPublicationMode,
     ) -> Result<InstallReceipt, InstallError> {
+        let candidate_entry = self.validate_exclusive_candidate(candidate, state)?;
+        #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
+        if self
+            .timer_publication_mode
+            .is_some_and(|current| current != mode)
+        {
+            return Err(InstallError::Busy);
+        }
+
+        match mode {
+            TimerPublicationMode::Guarded => {
+                let mut transition = match slot {
+                    ControlSlot::Timer => TIMER_EXCLUSIVE_SLOT
+                        .try_transition()
+                        .map_err(|_| InstallError::Busy)?,
+                };
+                let prepared = self.prepare_exclusive_update(
+                    owner,
+                    expected,
+                    candidate,
+                    candidate_entry,
+                    transition.current(),
+                )?;
+                self.commit_exclusive_update(prepared, mode, |snapshot| {
+                    transition.publish(snapshot);
+                })
+            }
+            #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
+            TimerPublicationMode::AtomicWithoutQuiescence => {
+                let current = match slot {
+                    ControlSlot::Timer => {
+                        TIMER_EXCLUSIVE_SLOT.read_without_quiescence_for_diagnostics()
+                    }
+                };
+                let prepared = self.prepare_exclusive_update(
+                    owner,
+                    expected,
+                    candidate,
+                    candidate_entry,
+                    current.as_deref(),
+                )?;
+                // Publishing while this guard is live would wait on itself.
+                drop(current);
+                self.commit_exclusive_update(prepared, mode, move |snapshot| {
+                    TIMER_EXCLUSIVE_SLOT.publish_without_quiescence_for_diagnostics(snapshot);
+                })
+            }
+        }
+    }
+
+    fn validate_exclusive_candidate(
+        &self,
+        candidate: ProgramHandle,
+        state: StatePolicy,
+    ) -> Result<&ProgramEntry, InstallError> {
         if state == StatePolicy::Transfer {
             return Err(InstallError::StateTransferUnsupported);
         }
@@ -1448,13 +1581,17 @@ impl BpfManager {
         if !candidate_entry.referenced_map_handles.is_empty() {
             return Err(InstallError::PersistentStateUnsupported);
         }
+        Ok(candidate_entry)
+    }
 
-        let mut transition = match slot {
-            ControlSlot::Timer => TIMER_EXCLUSIVE_SLOT
-                .try_transition()
-                .map_err(|_| InstallError::Busy)?,
-        };
-        let current = transition.current();
+    fn prepare_exclusive_update(
+        &self,
+        owner: u64,
+        expected: Option<InstallationId>,
+        candidate: ProgramHandle,
+        candidate_entry: &ProgramEntry,
+        current: Option<&SlotInstallation>,
+    ) -> Result<PreparedExclusiveUpdate, InstallError> {
         match (expected, current) {
             (None, Some(current)) => {
                 return Err(InstallError::SlotOccupied {
@@ -1572,14 +1709,46 @@ impl BpfManager {
             authority_ceiling,
         })?;
 
+        Ok(PreparedExclusiveUpdate {
+            admission,
+            snapshot: prepared,
+            next_epoch,
+            installed,
+            receipt,
+        })
+    }
+
+    fn commit_exclusive_update(
+        &mut self,
+        prepared: PreparedExclusiveUpdate,
+        mode: TimerPublicationMode,
+        publish: impl FnOnce(Box<SlotInstallation>),
+    ) -> Result<InstallReceipt, InstallError> {
+        let PreparedExclusiveUpdate {
+            admission,
+            snapshot,
+            next_epoch,
+            installed,
+            receipt,
+        } = prepared;
         let committed = crate::actuation::try_with_estop_clear(|| {
             self.admission
                 .commit_exclusive(admission)
                 .map_err(|_| InstallError::AdmissionAccounting)?;
-            transition.publish(prepared.snapshot);
+            publish(snapshot.snapshot);
             self.timer_epoch = next_epoch;
             self.timer_installation = Some(installed);
             self.last_install_receipt = Some(receipt);
+            #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
+            {
+                self.timer_publication_mode = Some(mode);
+                TIMER_ATOMIC_WITHOUT_QUIESCENCE_ACTIVE.store(
+                    mode == TimerPublicationMode::AtomicWithoutQuiescence,
+                    Ordering::SeqCst,
+                );
+            }
+            #[cfg(not(all(feature = "bpf-update-diagnostics", not(target_os = "none"))))]
+            debug_assert_eq!(mode, TimerPublicationMode::Guarded);
             Ok(receipt)
         })
         .map_err(|error| match error {
@@ -1637,6 +1806,11 @@ impl BpfManager {
             .map_err(|_| InstallError::AdmissionAccounting)?;
         transition.clear();
         self.timer_installation = None;
+        #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
+        {
+            self.timer_publication_mode = None;
+            TIMER_ATOMIC_WITHOUT_QUIESCENCE_ACTIVE.store(false, Ordering::SeqCst);
+        }
         Ok(())
     }
 
@@ -1653,6 +1827,16 @@ impl BpfManager {
     #[cfg(feature = "bpf-update-diagnostics")]
     pub fn exclusive_slot_skips(&self) -> SlotSkipCounts {
         TIMER_EXCLUSIVE_SLOT.skipped()
+    }
+
+    #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
+    pub fn hold_timer_exclusive_transition_for_diagnostics<R>(
+        f: impl FnOnce() -> R,
+    ) -> Result<R, InstallError> {
+        let _transition = TIMER_EXCLUSIVE_SLOT
+            .try_transition()
+            .map_err(|_| InstallError::Busy)?;
+        Ok(f())
     }
 
     #[cfg(feature = "bpf-update-diagnostics")]
@@ -2091,6 +2275,10 @@ impl BpfManager {
     pub fn observe_timer_exclusive<R>(
         f: impl FnOnce(InstallationId) -> R,
     ) -> Result<R, HookRunError> {
+        #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
+        if TIMER_ATOMIC_WITHOUT_QUIESCENCE_ACTIVE.load(Ordering::SeqCst) {
+            return Err(HookRunError::Execution(BpfError::ObjectBusy));
+        }
         let installation = TIMER_EXCLUSIVE_SLOT
             .try_enter()
             .map_err(|error| match error {
@@ -2098,6 +2286,19 @@ impl BpfManager {
                 EnterError::ExecutionBusy => HookRunError::ExecutionBusy,
                 EnterError::Empty => HookRunError::Execution(BpfError::NotLoaded),
             })?;
+        Ok(f(installation.id))
+    }
+
+    #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
+    pub fn observe_timer_atomic_without_quiescence<R>(
+        f: impl FnOnce(InstallationId) -> R,
+    ) -> Result<R, HookRunError> {
+        if !TIMER_ATOMIC_WITHOUT_QUIESCENCE_ACTIVE.load(Ordering::SeqCst) {
+            return Err(HookRunError::Execution(BpfError::ObjectBusy));
+        }
+        let installation = TIMER_EXCLUSIVE_SLOT
+            .read_without_quiescence_for_diagnostics()
+            .ok_or(HookRunError::Execution(BpfError::NotLoaded))?;
         Ok(f(installation.id))
     }
 

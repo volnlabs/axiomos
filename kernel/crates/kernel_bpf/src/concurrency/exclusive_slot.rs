@@ -127,6 +127,26 @@ impl<T> ExclusiveSlot<T> {
             empty: self.empty_skips.load(Ordering::SeqCst),
         }
     }
+
+    /// Read the shared snapshot without participating in the exclusive gate.
+    ///
+    /// This exists only for the hosted publication baseline. Bare-metal builds
+    /// never compile an ungated invocation path.
+    #[cfg(all(feature = "host-update-diagnostics", not(target_os = "none")))]
+    #[doc(hidden)]
+    pub fn read_without_quiescence_for_diagnostics(&self) -> Option<EpochReadGuard<'_, T>> {
+        self.snapshot.read()
+    }
+
+    /// Publish without waiting for the exclusive gate to become quiescent.
+    ///
+    /// `EpochSnapshot` still retains the replaced allocation until readers of
+    /// its previous epoch drain.
+    #[cfg(all(feature = "host-update-diagnostics", not(target_os = "none")))]
+    #[doc(hidden)]
+    pub fn publish_without_quiescence_for_diagnostics(&self, next: Box<T>) {
+        self.snapshot.publish(next);
+    }
 }
 
 /// The slot's only active invocation.

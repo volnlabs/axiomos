@@ -397,6 +397,28 @@ fn replacement_rejections_preserve_publication_accounting_and_aba_identity() {
         assert_eq!(identity, winner.installed);
     })
     .unwrap();
+    assert_eq!(
+        BpfManager::observe_timer_atomic_without_quiescence(|_| ()),
+        Err(kernel::bpf::HookRunError::Execution(BpfError::ObjectBusy))
+    );
+    let guarded_alternative = if winner.installed.program == b { c } else { b };
+    assert_eq!(
+        manager.try_replace_atomic_without_quiescence_for(
+            owner,
+            ControlSlot::Timer,
+            winner.installed,
+            guarded_alternative,
+            StatePolicy::Reset,
+        ),
+        Err(InstallError::Busy)
+    );
+    BpfManager::hold_timer_exclusive_transition_for_diagnostics(|| {
+        assert_eq!(
+            BpfManager::observe_timer_exclusive(|_| ()),
+            Err(kernel::bpf::HookRunError::TransitionBusy)
+        );
+    })
+    .unwrap();
 
     manager.force_timer_epoch_for_diagnostics(u64::MAX);
     let next_candidate = if winner.installed.program == b { c } else { b };
@@ -416,6 +438,162 @@ fn replacement_rejections_preserve_publication_accounting_and_aba_identity() {
         winner.committed_exclusive_ns_per_s,
         winner,
     );
+
+    manager
+        .clear_exclusive_for_diagnostics(owner, winner.installed)
+        .unwrap();
+    manager.force_timer_epoch_for_diagnostics(winner.installed.epoch);
+    let atomic_a = manager
+        .try_install_atomic_without_quiescence_for(owner, ControlSlot::Timer, a, StatePolicy::Reset)
+        .expect("bootstrap atomic baseline A");
+    assert_eq!(
+        BpfManager::observe_timer_exclusive(|_| ()),
+        Err(kernel::bpf::HookRunError::Execution(BpfError::ObjectBusy))
+    );
+    assert_eq!(
+        manager.try_replace_atomic_without_quiescence_for(
+            owner,
+            ControlSlot::Timer,
+            winner.installed,
+            next_candidate,
+            StatePolicy::Reset,
+        ),
+        Err(InstallError::StaleInstallation {
+            expected: winner.installed,
+            current: Some(atomic_a.installed),
+        })
+    );
+    unchanged(
+        &manager,
+        atomic_a.installed,
+        atomic_a.committed_exclusive_ns_per_s,
+        atomic_a,
+    );
+    assert_eq!(
+        manager.try_replace_exclusive_for(
+            owner,
+            ControlSlot::Timer,
+            atomic_a.installed,
+            next_candidate,
+            StatePolicy::Reset,
+        ),
+        Err(InstallError::Busy)
+    );
+    unchanged(
+        &manager,
+        atomic_a.installed,
+        atomic_a.committed_exclusive_ns_per_s,
+        atomic_a,
+    );
+
+    for (candidate, state, error) in [
+        (
+            next_candidate,
+            StatePolicy::Transfer,
+            InstallError::StateTransferUnsupported,
+        ),
+        (
+            map_candidate,
+            StatePolicy::Reset,
+            InstallError::PersistentStateUnsupported,
+        ),
+        (
+            higher_authority,
+            StatePolicy::Reset,
+            InstallError::AuthorityExceeded,
+        ),
+        (
+            expensive,
+            StatePolicy::Reset,
+            InstallError::AdmissionRejected,
+        ),
+    ] {
+        assert_eq!(
+            manager.try_replace_atomic_without_quiescence_for(
+                owner,
+                ControlSlot::Timer,
+                atomic_a.installed,
+                candidate,
+                state,
+            ),
+            Err(error)
+        );
+        unchanged(
+            &manager,
+            atomic_a.installed,
+            atomic_a.committed_exclusive_ns_per_s,
+            atomic_a,
+        );
+    }
+    manager.fail_next_exclusive_snapshot_for_diagnostics();
+    assert_eq!(
+        manager.try_replace_atomic_without_quiescence_for(
+            owner,
+            ControlSlot::Timer,
+            atomic_a.installed,
+            next_candidate,
+            StatePolicy::Reset,
+        ),
+        Err(InstallError::SnapshotAllocationFailed)
+    );
+    unchanged(
+        &manager,
+        atomic_a.installed,
+        atomic_a.committed_exclusive_ns_per_s,
+        atomic_a,
+    );
+
+    let (a_entered_tx, a_entered_rx) = mpsc::channel();
+    let (release_a_tx, release_a_rx) = mpsc::channel();
+    let atomic_b = std::thread::scope(|scope| {
+        scope.spawn(move || {
+            BpfManager::observe_timer_atomic_without_quiescence(|identity| {
+                assert_eq!(identity, atomic_a.installed);
+                a_entered_tx.send(()).unwrap();
+                release_a_rx.recv().unwrap();
+            })
+            .unwrap();
+        });
+        a_entered_rx.recv().unwrap();
+        let writer = scope.spawn(|| {
+            manager.try_replace_atomic_without_quiescence_for(
+                owner,
+                ControlSlot::Timer,
+                atomic_a.installed,
+                next_candidate,
+                StatePolicy::Reset,
+            )
+        });
+        loop {
+            let observed = BpfManager::observe_timer_atomic_without_quiescence(|id| id).unwrap();
+            if observed.program == next_candidate {
+                assert_eq!(observed.epoch, atomic_a.installed.epoch + 1);
+                assert!(
+                    !writer.is_finished(),
+                    "writer returned before A guard drained"
+                );
+                break;
+            }
+            std::thread::yield_now();
+        }
+        release_a_tx.send(()).unwrap();
+        writer.join().unwrap().expect("atomic A -> B replacement")
+    });
+    assert_eq!(atomic_b.previous, Some(atomic_a.installed));
+    assert_eq!(atomic_b.installed.program, next_candidate);
+    assert_eq!(
+        manager.last_install_receipt(),
+        Some(atomic_b),
+        "receipt becomes visible with the completed manager operation"
+    );
+    assert_eq!(
+        manager.committed_exclusive_ns_per_s(),
+        atomic_b.committed_exclusive_ns_per_s
+    );
+    manager
+        .clear_exclusive_for_diagnostics(owner, atomic_b.installed)
+        .unwrap();
+
     kernel::actuation::ACTUATION_MONITOR
         .lock()
         .estop_trigger(AuditSource::Operator, 3);

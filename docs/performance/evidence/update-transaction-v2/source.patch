@@ -1,0 +1,2843 @@
+diff --git c/Cargo.lock w/Cargo.lock
+index bbcd96c..50284dd 100644
+--- c/Cargo.lock
++++ w/Cargo.lock
+@@ -949,6 +949,7 @@ dependencies = [
+  "kernel_usermem",
+  "kernel_vfs",
+  "kernel_virtual_memory",
++ "libc",
+  "limine",
+  "linked_list_allocator",
+  "linkme",
+diff --git c/docs/plans/active/cl4fmagents-transactional-publication.md w/docs/plans/active/cl4fmagents-transactional-publication.md
+index 744ecae..f8f487b 100644
+--- c/docs/plans/active/cl4fmagents-transactional-publication.md
++++ w/docs/plans/active/cl4fmagents-transactional-publication.md
+@@ -35,6 +35,20 @@ Four content pages maximum plus references; double blind. Preserve source draft.
+ 
+ ## Progress
+ 
++## Accepted v2 evidence strengthening (2026-09-07)
++
++Continue locally from 82ea2de. Preserve v1 evidence and PDF as fallback. No push, PR, merge, or OpenReview submission.
++
++Core: replace the component headline with a host-only same-manager atomic baseline sharing candidate checks, full expected identity, authority, resource delta, snapshot preparation, and receipts. Only invocation quiescence differs. Use the existing ExclusiveSlot payload (identity plus runtime), unchanged epoch reclamation, stable fixture mode until draining cleanup. Atomic publication may expose B while an A guard remains held; its API waits for old readers before returning. Host callbacks must not acquire manager/actuation locks. Production dispatch remains guarded.
++
++Pair explicit fault outcomes and captured guard identities. Keep AF/DF as supporting failure witnesses. Prove guarded invocation exclusivity and returned-error preservation of snapshot, identity, and admission ledger; state assumptions and pointer-swap/entry linearization points. Paper-facing state policy is STATELESS (no referenced runtime maps).
++
++Hosted release campaign: holds 0/10/100/500 us, 1 ms dispatch period, 10 fresh processes x 1,000 attempts per protocol/regime, 1,000 excluded warmup operations. Absolute deterministic phase sweep, separate physical cores, CLOCK_MONOTONIC_RAW, preallocated samples. Report per-process count/median/p99/max, repeated-run summaries, success/Busy and guard costs, natural skips and separately controlled TransitionBusy, first-attempt success, retries, missed releases/lateness, and manager-accounted resident program storage. Retain noise and all runs; no physical/realtime/privileged-execution claim. Add measured executable hashes and one-command reproduction. New evidence directory: update-transaction-v2.
++
++Optional replay only after core is stable: real manager/guards/receipts select full captured installation IDs, pure-host first-order velocity simulation with payload shift and frozen online-tuner gain proposals. Commands use the identity and error captured at invocation start, apply in completion order, and use the same zero-order hold policy. No LLM, new runtime API, physical claims, or stateful controller. Start only if core stable by Sep 8 07:29 IST; validated by 13:29; final PDF freeze 15:29; otherwise omit.
++
++## v1 progress
++
+ - Branch/worktree created; original checkout preserved; paper draft copied.
+ - Baseline host library previously type-checked; existing host test link blockers are part of the planned harness work.
+ - Account quota telemetry unavailable: unknown, maximum three worker agents.
+diff --git c/kernel/Cargo.toml w/kernel/Cargo.toml
+index e976d10..299e6d2 100644
+--- c/kernel/Cargo.toml
++++ w/kernel/Cargo.toml
+@@ -57,6 +57,9 @@ fdt.workspace = true
+ [build-dependencies]
+ cc = "1.0"
+ 
++[dev-dependencies]
++libc = "0.2.177"
++
+ [target.'cfg(target_arch = "x86_64")'.dependencies]
+ acpi.workspace = true
+ raw-cpuid.workspace = true
+@@ -101,7 +104,7 @@ audit-diagnostics = []
+ 
+ # Host/QEMU observation and deterministic transaction failpoints for the
+ # continual-update campaign. This does not bypass production validation.
+-bpf-update-diagnostics = []
++bpf-update-diagnostics = ["kernel_bpf/host-update-diagnostics"]
+ 
+ # Raw AArch64 register/UART probes used only during hardware bring-up.
+ bringup-diagnostics = []
+diff --git c/kernel/crates/kernel_bpf/Cargo.toml w/kernel/crates/kernel_bpf/Cargo.toml
+index fac8753..a375050 100644
+--- c/kernel/crates/kernel_bpf/Cargo.toml
++++ w/kernel/crates/kernel_bpf/Cargo.toml
+@@ -32,6 +32,10 @@ experimental-aarch64-jit = []
+ # default; enabled for `tests/concurrency_model.rs` and the audit-gate
+ # `loom-model-*` steps.
+ loom-model = ["dep:loom"]
++# Host-only access to the ungated EpochSnapshot inside ExclusiveSlot for the
++# manager-level publication baseline. The methods are additionally excluded on
++# target_os = "none", so no bare-metal image can call them.
++host-update-diagnostics = []
+ 
+ [[bench]]
+ name = "interpreter"
+diff --git c/kernel/crates/kernel_bpf/src/concurrency/exclusive_slot.rs w/kernel/crates/kernel_bpf/src/concurrency/exclusive_slot.rs
+index 8295d00..b51ec92 100644
+--- c/kernel/crates/kernel_bpf/src/concurrency/exclusive_slot.rs
++++ w/kernel/crates/kernel_bpf/src/concurrency/exclusive_slot.rs
+@@ -127,6 +127,26 @@ impl<T> ExclusiveSlot<T> {
+             empty: self.empty_skips.load(Ordering::SeqCst),
+         }
+     }
++
++    /// Read the shared snapshot without participating in the exclusive gate.
++    ///
++    /// This exists only for the hosted publication baseline. Bare-metal builds
++    /// never compile an ungated invocation path.
++    #[cfg(all(feature = "host-update-diagnostics", not(target_os = "none")))]
++    #[doc(hidden)]
++    pub fn read_without_quiescence_for_diagnostics(&self) -> Option<EpochReadGuard<'_, T>> {
++        self.snapshot.read()
++    }
++
++    /// Publish without waiting for the exclusive gate to become quiescent.
++    ///
++    /// `EpochSnapshot` still retains the replaced allocation until readers of
++    /// its previous epoch drain.
++    #[cfg(all(feature = "host-update-diagnostics", not(target_os = "none")))]
++    #[doc(hidden)]
++    pub fn publish_without_quiescence_for_diagnostics(&self, next: Box<T>) {
++        self.snapshot.publish(next);
++    }
+ }
+ 
+ /// The slot's only active invocation.
+diff --git c/kernel/crates/kernel_bpf/tests/concurrency_model.rs w/kernel/crates/kernel_bpf/tests/concurrency_model.rs
+index b2a1e78..2273053 100644
+--- c/kernel/crates/kernel_bpf/tests/concurrency_model.rs
++++ w/kernel/crates/kernel_bpf/tests/concurrency_model.rs
+@@ -59,6 +59,21 @@ impl ConsistentValue {
+     }
+ }
+ 
++#[derive(Clone, Copy)]
++struct PublishedInstallation {
++    identity: usize,
++    runtime_result: usize,
++}
++
++impl PublishedInstallation {
++    fn assert_coherent(&self) {
++        assert!(
++            matches!((self.identity, self.runtime_result), (1, 11) | (2, 22)),
++            "installation identity was paired with the wrong runtime"
++        );
++    }
++}
++
+ #[test]
+ fn publish_read_does_not_return_torn_value() {
+     loom::model(|| {
+@@ -88,6 +103,37 @@ fn publish_read_does_not_return_torn_value() {
+     });
+ }
+ 
++#[test]
++fn publication_keeps_installation_identity_and_runtime_coherent() {
++    loom::model(|| {
++        let snapshot = Arc::new(EpochSnapshot::empty());
++        snapshot.publish(Box::new(PublishedInstallation {
++            identity: 1,
++            runtime_result: 11,
++        }));
++        let old = snapshot.read().expect("A is published");
++
++        let writer_snapshot = snapshot.clone();
++        let writer = thread::spawn(move || {
++            writer_snapshot.publish(Box::new(PublishedInstallation {
++                identity: 2,
++                runtime_result: 22,
++            }));
++        });
++        let observed = snapshot.read().expect("an installation remains published");
++
++        old.assert_coherent();
++        observed.assert_coherent();
++        assert_eq!((old.identity, old.runtime_result), (1, 11));
++
++        drop(observed);
++        drop(old);
++        writer.join().unwrap();
++        let current = snapshot.read().expect("B is published");
++        assert_eq!((current.identity, current.runtime_result), (2, 22));
++    });
++}
++
+ #[test]
+ fn old_reader_delays_reclamation_until_guard_drop() {
+     loom::model(|| {
+diff --git c/kernel/src/bpf/mod.rs w/kernel/src/bpf/mod.rs
+index da190c5..84acd8f 100644
+--- c/kernel/src/bpf/mod.rs
++++ w/kernel/src/bpf/mod.rs
+@@ -41,7 +41,7 @@ use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
+ use kernel_bpf::signing::{AuthenticationProvenance, SignatureVerifier};
+ use kernel_bpf::verifier::admission::{
+     commit_attachment, AdmissionLedger, AttachmentCommitError, AttachmentTable,
+-    ExclusiveAdmissionError,
++    ExclusiveAdmissionError, ExclusiveAdmissionToken,
+ };
+ use kernel_bpf::verifier::{MapPerm, Verifier, VerifyConfig};
+ use limits::BpfLimits;
+@@ -309,6 +309,15 @@ struct SlotInstallation {
+ }
+ 
+ static TIMER_EXCLUSIVE_SLOT: ExclusiveSlot<SlotInstallation> = ExclusiveSlot::empty();
++#[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
++static TIMER_ATOMIC_WITHOUT_QUIESCENCE_ACTIVE: AtomicBool = AtomicBool::new(false);
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum TimerPublicationMode {
++    Guarded,
++    #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
++    AtomicWithoutQuiescence,
++}
+ 
+ #[cfg(feature = "bpf-update-diagnostics")]
+ static FAIL_NEXT_EXCLUSIVE_SNAPSHOT: AtomicBool = AtomicBool::new(false);
+@@ -324,6 +333,14 @@ struct PreparedSlotInstallation {
+     snapshot: Box<SlotInstallation>,
+ }
+ 
++struct PreparedExclusiveUpdate {
++    admission: ExclusiveAdmissionToken,
++    snapshot: PreparedSlotInstallation,
++    next_epoch: u64,
++    installed: InstallationId,
++    receipt: InstallReceipt,
++}
++
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ enum LoadAuthentication {
+     Runtime(AuthenticationProvenance),
+@@ -540,6 +557,8 @@ pub struct BpfManager {
+     timer_installation: Option<InstallationId>,
+     timer_epoch: u64,
+     last_install_receipt: Option<InstallReceipt>,
++    #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
++    timer_publication_mode: Option<TimerPublicationMode>,
+ }
+ 
+ /// Default fire frequency assumed for a hook, in Hz. Every hook is assumed to
+@@ -732,6 +751,8 @@ impl BpfManager {
+             timer_installation: None,
+             timer_epoch: 0,
+             last_install_receipt: None,
++            #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
++            timer_publication_mode: None,
+         };
+         let envelope = EnvelopeMap::<ActiveProfile>::init_from_profile();
+         crate::actuation::ACTUATION_MONITOR
+@@ -981,6 +1002,11 @@ impl BpfManager {
+             }
+             slot_transition.clear();
+             self.timer_installation = None;
++            #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
++            {
++                self.timer_publication_mode = None;
++                TIMER_ATOMIC_WITHOUT_QUIESCENCE_ACTIVE.store(false, Ordering::SeqCst);
++            }
+         }
+         let programs = &self.programs;
+         let program_generations = &self.program_generations;
+@@ -1417,7 +1443,14 @@ impl BpfManager {
+         candidate: ProgramHandle,
+         state: StatePolicy,
+     ) -> Result<InstallReceipt, InstallError> {
+-        self.try_update_exclusive_for(owner, slot, None, candidate, state)
++        self.try_update_exclusive_for(
++            owner,
++            slot,
++            None,
++            candidate,
++            state,
++            TimerPublicationMode::Guarded,
++        )
+     }
+ 
+     pub fn try_replace_exclusive_for(
+@@ -1428,7 +1461,51 @@ impl BpfManager {
+         candidate: ProgramHandle,
+         state: StatePolicy,
+     ) -> Result<InstallReceipt, InstallError> {
+-        self.try_update_exclusive_for(owner, slot, Some(expected), candidate, state)
++        self.try_update_exclusive_for(
++            owner,
++            slot,
++            Some(expected),
++            candidate,
++            state,
++            TimerPublicationMode::Guarded,
++        )
++    }
++
++    #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
++    pub fn try_install_atomic_without_quiescence_for(
++        &mut self,
++        owner: u64,
++        slot: ControlSlot,
++        candidate: ProgramHandle,
++        state: StatePolicy,
++    ) -> Result<InstallReceipt, InstallError> {
++        self.try_update_exclusive_for(
++            owner,
++            slot,
++            None,
++            candidate,
++            state,
++            TimerPublicationMode::AtomicWithoutQuiescence,
++        )
++    }
++
++    #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
++    pub fn try_replace_atomic_without_quiescence_for(
++        &mut self,
++        owner: u64,
++        slot: ControlSlot,
++        expected: InstallationId,
++        candidate: ProgramHandle,
++        state: StatePolicy,
++    ) -> Result<InstallReceipt, InstallError> {
++        self.try_update_exclusive_for(
++            owner,
++            slot,
++            Some(expected),
++            candidate,
++            state,
++            TimerPublicationMode::AtomicWithoutQuiescence,
++        )
+     }
+ 
+     fn try_update_exclusive_for(
+@@ -1438,7 +1515,63 @@ impl BpfManager {
+         expected: Option<InstallationId>,
+         candidate: ProgramHandle,
+         state: StatePolicy,
++        mode: TimerPublicationMode,
+     ) -> Result<InstallReceipt, InstallError> {
++        let candidate_entry = self.validate_exclusive_candidate(candidate, state)?;
++        #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
++        if self
++            .timer_publication_mode
++            .is_some_and(|current| current != mode)
++        {
++            return Err(InstallError::Busy);
++        }
++
++        match mode {
++            TimerPublicationMode::Guarded => {
++                let mut transition = match slot {
++                    ControlSlot::Timer => TIMER_EXCLUSIVE_SLOT
++                        .try_transition()
++                        .map_err(|_| InstallError::Busy)?,
++                };
++                let prepared = self.prepare_exclusive_update(
++                    owner,
++                    expected,
++                    candidate,
++                    candidate_entry,
++                    transition.current(),
++                )?;
++                self.commit_exclusive_update(prepared, mode, |snapshot| {
++                    transition.publish(snapshot);
++                })
++            }
++            #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
++            TimerPublicationMode::AtomicWithoutQuiescence => {
++                let current = match slot {
++                    ControlSlot::Timer => {
++                        TIMER_EXCLUSIVE_SLOT.read_without_quiescence_for_diagnostics()
++                    }
++                };
++                let prepared = self.prepare_exclusive_update(
++                    owner,
++                    expected,
++                    candidate,
++                    candidate_entry,
++                    current.as_deref(),
++                )?;
++                // Publishing while this guard is live would wait on itself.
++                drop(current);
++                self.commit_exclusive_update(prepared, mode, move |snapshot| {
++                    TIMER_EXCLUSIVE_SLOT.publish_without_quiescence_for_diagnostics(snapshot);
++                })
++            }
++        }
++    }
++
++    fn validate_exclusive_candidate(
++        &self,
++        candidate: ProgramHandle,
++        state: StatePolicy,
++    ) -> Result<&ProgramEntry, InstallError> {
+         if state == StatePolicy::Transfer {
+             return Err(InstallError::StateTransferUnsupported);
+         }
+@@ -1448,13 +1581,17 @@ impl BpfManager {
+         if !candidate_entry.referenced_map_handles.is_empty() {
+             return Err(InstallError::PersistentStateUnsupported);
+         }
++        Ok(candidate_entry)
++    }
+ 
+-        let mut transition = match slot {
+-            ControlSlot::Timer => TIMER_EXCLUSIVE_SLOT
+-                .try_transition()
+-                .map_err(|_| InstallError::Busy)?,
+-        };
+-        let current = transition.current();
++    fn prepare_exclusive_update(
++        &self,
++        owner: u64,
++        expected: Option<InstallationId>,
++        candidate: ProgramHandle,
++        candidate_entry: &ProgramEntry,
++        current: Option<&SlotInstallation>,
++    ) -> Result<PreparedExclusiveUpdate, InstallError> {
+         match (expected, current) {
+             (None, Some(current)) => {
+                 return Err(InstallError::SlotOccupied {
+@@ -1572,14 +1709,46 @@ impl BpfManager {
+             authority_ceiling,
+         })?;
+ 
++        Ok(PreparedExclusiveUpdate {
++            admission,
++            snapshot: prepared,
++            next_epoch,
++            installed,
++            receipt,
++        })
++    }
++
++    fn commit_exclusive_update(
++        &mut self,
++        prepared: PreparedExclusiveUpdate,
++        mode: TimerPublicationMode,
++        publish: impl FnOnce(Box<SlotInstallation>),
++    ) -> Result<InstallReceipt, InstallError> {
++        let PreparedExclusiveUpdate {
++            admission,
++            snapshot,
++            next_epoch,
++            installed,
++            receipt,
++        } = prepared;
+         let committed = crate::actuation::try_with_estop_clear(|| {
+             self.admission
+                 .commit_exclusive(admission)
+                 .map_err(|_| InstallError::AdmissionAccounting)?;
+-            transition.publish(prepared.snapshot);
++            publish(snapshot.snapshot);
+             self.timer_epoch = next_epoch;
+             self.timer_installation = Some(installed);
+             self.last_install_receipt = Some(receipt);
++            #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
++            {
++                self.timer_publication_mode = Some(mode);
++                TIMER_ATOMIC_WITHOUT_QUIESCENCE_ACTIVE.store(
++                    mode == TimerPublicationMode::AtomicWithoutQuiescence,
++                    Ordering::SeqCst,
++                );
++            }
++            #[cfg(not(all(feature = "bpf-update-diagnostics", not(target_os = "none"))))]
++            debug_assert_eq!(mode, TimerPublicationMode::Guarded);
+             Ok(receipt)
+         })
+         .map_err(|error| match error {
+@@ -1637,6 +1806,11 @@ impl BpfManager {
+             .map_err(|_| InstallError::AdmissionAccounting)?;
+         transition.clear();
+         self.timer_installation = None;
++        #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
++        {
++            self.timer_publication_mode = None;
++            TIMER_ATOMIC_WITHOUT_QUIESCENCE_ACTIVE.store(false, Ordering::SeqCst);
++        }
+         Ok(())
+     }
+ 
+@@ -1655,6 +1829,16 @@ impl BpfManager {
+         TIMER_EXCLUSIVE_SLOT.skipped()
+     }
+ 
++    #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
++    pub fn hold_timer_exclusive_transition_for_diagnostics<R>(
++        f: impl FnOnce() -> R,
++    ) -> Result<R, InstallError> {
++        let _transition = TIMER_EXCLUSIVE_SLOT
++            .try_transition()
++            .map_err(|_| InstallError::Busy)?;
++        Ok(f())
++    }
++
+     #[cfg(feature = "bpf-update-diagnostics")]
+     pub fn committed_exclusive_ns_per_s(&self) -> u64 {
+         self.admission.exclusive_ns_per_s()
+@@ -2091,6 +2275,10 @@ impl BpfManager {
+     pub fn observe_timer_exclusive<R>(
+         f: impl FnOnce(InstallationId) -> R,
+     ) -> Result<R, HookRunError> {
++        #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
++        if TIMER_ATOMIC_WITHOUT_QUIESCENCE_ACTIVE.load(Ordering::SeqCst) {
++            return Err(HookRunError::Execution(BpfError::ObjectBusy));
++        }
+         let installation = TIMER_EXCLUSIVE_SLOT
+             .try_enter()
+             .map_err(|error| match error {
+@@ -2101,6 +2289,19 @@ impl BpfManager {
+         Ok(f(installation.id))
+     }
+ 
++    #[cfg(all(feature = "bpf-update-diagnostics", not(target_os = "none")))]
++    pub fn observe_timer_atomic_without_quiescence<R>(
++        f: impl FnOnce(InstallationId) -> R,
++    ) -> Result<R, HookRunError> {
++        if !TIMER_ATOMIC_WITHOUT_QUIESCENCE_ACTIVE.load(Ordering::SeqCst) {
++            return Err(HookRunError::Execution(BpfError::ObjectBusy));
++        }
++        let installation = TIMER_EXCLUSIVE_SLOT
++            .read_without_quiescence_for_diagnostics()
++            .ok_or(HookRunError::Execution(BpfError::NotLoaded))?;
++        Ok(f(installation.id))
++    }
++
+     #[cfg(feature = "bpf-update-diagnostics")]
+     pub fn observe_hook_snapshot<R>(
+         attach_type: u32,
+diff --git c/kernel/tests/bpf_update_campaign.rs w/kernel/tests/bpf_update_campaign.rs
+index 9d0aae4..d260744 100644
+--- c/kernel/tests/bpf_update_campaign.rs
++++ w/kernel/tests/bpf_update_campaign.rs
+@@ -1,7 +1,5 @@
+-//! Host-only trace campaign. Raw fixtures require `bpf-unsigned-development`.
+-//!
+-//! `atomic_publication` is deliberately scoped to `EpochSnapshot`: it is a
+-//! component baseline, not a claim about the manager invocation seam.
++//! Host-only paired manager publication campaign. Raw fixtures require
++//! `bpf-unsigned-development`.
+ 
+ #![cfg(all(
+     feature = "bpf-update-diagnostics",
+@@ -9,23 +7,29 @@
+ ))]
+ 
+ use std::collections::BTreeMap;
++use std::sync::{mpsc, Arc, Barrier, Mutex};
+ 
+ use kernel::bpf::{
+-    BpfManager, ControlSlot, HookRunError, InstallError, InstallationId, ProgramHandle,
+-    StatePolicy, ATTACH_TYPE_SYS_ENTER, ATTACH_TYPE_TIMER,
++    BpfLoadAuthorization, BpfManager, ControlSlot, HookRunError, InstallError, InstallReceipt,
++    InstallationId, MapAccess, ProgramHandle, StatePolicy, ATTACH_TYPE_SYS_ENTER,
++    ATTACH_TYPE_TIMER,
+ };
+ use kernel_bpf::bytecode::insn::BpfInsn;
+-use kernel_bpf::concurrency::epoch_snapshot::EpochSnapshot;
+ use kernel_bpf::execution::BpfError;
+-use kernel_bpf::verifier::HelperId;
++use kernel_bpf::verifier::{HelperId, LoadCaller};
+ 
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ struct State {
+     snapshot: Vec<ProgramHandle>,
+     installation: Option<InstallationId>,
+     committed: Option<u64>,
+-    executing: Vec<InstallationId>,
+-    guarded_handles: Vec<ProgramHandle>,
++    receipt: Option<InstallReceipt>,
++    guards: Vec<InstallationId>,
++}
++
++struct Attempt {
++    candidate: ProgramHandle,
++    outcome: String,
+ }
+ 
+ struct Record {
+@@ -35,6 +39,7 @@ struct Record {
+     observations: Vec<State>,
+     after: State,
+     outcome: String,
++    attempts: Vec<Attempt>,
+     expected: Option<InstallationId>,
+     candidate: ProgramHandle,
+     skipped_dispatches: usize,
+@@ -42,10 +47,96 @@ struct Record {
+     scope: &'static str,
+ }
+ 
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum Publication {
++    Atomic,
++    Transactional,
++}
++
++impl Publication {
++    fn protocol(self) -> &'static str {
++        match self {
++            Self::Atomic => "atomic_publication",
++            Self::Transactional => "transactional",
++        }
++    }
++
++    fn scope(self) -> &'static str {
++        match self {
++            Self::Atomic => "bpf_manager_atomic_without_quiescence",
++            Self::Transactional => "bpf_manager_guarded",
++        }
++    }
++
++    fn install(
++        self,
++        manager: &mut BpfManager,
++        owner: u64,
++        candidate: ProgramHandle,
++    ) -> Result<InstallReceipt, InstallError> {
++        match self {
++            Self::Atomic => manager.try_install_atomic_without_quiescence_for(
++                owner,
++                ControlSlot::Timer,
++                candidate,
++                StatePolicy::Reset,
++            ),
++            Self::Transactional => manager.try_install_exclusive_for(
++                owner,
++                ControlSlot::Timer,
++                candidate,
++                StatePolicy::Reset,
++            ),
++        }
++    }
++
++    fn replace(
++        self,
++        manager: &mut BpfManager,
++        owner: u64,
++        expected: InstallationId,
++        candidate: ProgramHandle,
++    ) -> Result<InstallReceipt, InstallError> {
++        match self {
++            Self::Atomic => manager.try_replace_atomic_without_quiescence_for(
++                owner,
++                ControlSlot::Timer,
++                expected,
++                candidate,
++                StatePolicy::Reset,
++            ),
++            Self::Transactional => manager.try_replace_exclusive_for(
++                owner,
++                ControlSlot::Timer,
++                expected,
++                candidate,
++                StatePolicy::Reset,
++            ),
++        }
++    }
++
++    fn observe<R>(self, observer: impl FnOnce(InstallationId) -> R) -> Result<R, HookRunError> {
++        match self {
++            Self::Atomic => BpfManager::observe_timer_atomic_without_quiescence(observer),
++            Self::Transactional => BpfManager::observe_timer_exclusive(observer),
++        }
++    }
++}
++
+ fn program(value: i32) -> Vec<BpfInsn> {
+     vec![BpfInsn::mov64_imm(0, value), BpfInsn::exit()]
+ }
+ 
++fn learned_program(value: i32, additions: usize) -> (Vec<BpfInsn>, BpfLoadAuthorization) {
++    let mut insns = vec![BpfInsn::mov64_imm(0, value)];
++    insns.extend((0..additions).map(|_| BpfInsn::add64_imm(0, 1)));
++    insns.push(BpfInsn::exit());
++    (
++        insns,
++        BpfLoadAuthorization::new(LoadCaller::Unprivileged, false, MapAccess::NONE),
++    )
++}
++
+ fn timed_program(calls: usize) -> Vec<BpfInsn> {
+     let mut insns = Vec::with_capacity(calls + 1);
+     for _ in 0..calls {
+@@ -59,9 +150,6 @@ fn budget_background(
+     manager: &mut BpfManager,
+     owner: u64,
+ ) -> (ProgramHandle, u64, ProgramHandle, u64) {
+-    // Three 7k-call programs are each within the verifier's per-invocation
+-    // bound, while two admitted background programs make the third fail the
+-    // aggregate 500 ms/s embedded admission budget.
+     let first = manager
+         .load_raw_program_for(owner, timed_program(7_000))
+         .unwrap();
+@@ -86,12 +174,26 @@ fn result_name<T>(result: &Result<T, impl core::fmt::Debug>) -> String {
+     }
+ }
+ 
++fn attempt<T>(candidate: ProgramHandle, result: &Result<T, impl core::fmt::Debug>) -> Attempt {
++    Attempt {
++        candidate,
++        outcome: result_name(result),
++    }
++}
++
++fn json_id(id: InstallationId) -> String {
++    format!("[{},{}]", id.program, id.epoch)
++}
++
+ fn json_ids(ids: &[InstallationId]) -> String {
+-    let values: Vec<String> = ids
+-        .iter()
+-        .map(|id| format!("[{},{}]", id.program, id.epoch))
+-        .collect();
+-    format!("[{}]", values.join(","))
++    format!(
++        "[{}]",
++        ids.iter()
++            .copied()
++            .map(json_id)
++            .collect::<Vec<_>>()
++            .join(",")
++    )
+ }
+ 
+ fn json_handles(handles: &[ProgramHandle]) -> String {
+@@ -105,26 +207,42 @@ fn json_handles(handles: &[ProgramHandle]) -> String {
+     )
+ }
+ 
++fn json_receipt(receipt: Option<InstallReceipt>) -> String {
++    receipt.map_or_else(
++        || "null".into(),
++        |receipt| {
++            format!(
++                "{{\"previous\":{},\"installed\":{},\"admission_delta\":{},\"committed\":{}}}",
++                receipt
++                    .previous
++                    .map(json_id)
++                    .unwrap_or_else(|| "null".into()),
++                json_id(receipt.installed),
++                receipt.admission_delta_ns_per_s,
++                receipt.committed_exclusive_ns_per_s,
++            )
++        },
++    )
++}
++
+ fn json_state(state: &State) -> String {
+-    let installation = state
+-        .installation
+-        .map(|id| format!("[{},{}]", id.program, id.epoch))
+-        .unwrap_or_else(|| "null".into());
+     format!(
+-        "{{\"snapshot\":{},\"installation\":{},\"committed\":{},\"executing\":{},\"guarded_handles\":{}}}",
++        "{{\"snapshot\":{},\"installation\":{},\"committed\":{},\"receipt\":{},\"guards\":{}}}",
+         json_handles(&state.snapshot),
+-        installation,
+-        state.committed.map(|value| value.to_string()).unwrap_or_else(|| "null".into()),
+-        json_ids(&state.executing),
+-        json_handles(&state.guarded_handles),
++        state
++            .installation
++            .map(json_id)
++            .unwrap_or_else(|| "null".into()),
++        state
++            .committed
++            .map(|value| value.to_string())
++            .unwrap_or_else(|| "null".into()),
++        json_receipt(state.receipt),
++        json_ids(&state.guards),
+     )
+ }
+ 
+ fn emit(protocol: &str, costs: &BTreeMap<ProgramHandle, u64>, record: Record) {
+-    let expected = record
+-        .expected
+-        .map(|id| format!("[{},{}]", id.program, id.epoch))
+-        .unwrap_or_else(|| "null".into());
+     let json_costs = costs
+         .iter()
+         .map(|(handle, cost)| format!("\"{handle}\":{cost}"))
+@@ -136,59 +254,74 @@ fn emit(protocol: &str, costs: &BTreeMap<ProgramHandle, u64>, record: Record) {
+         .map(json_state)
+         .collect::<Vec<_>>()
+         .join(",");
++    let attempts = record
++        .attempts
++        .iter()
++        .map(|attempt| {
++            format!(
++                "{{\"candidate\":{},\"outcome\":\"{}\"}}",
++                attempt.candidate, attempt.outcome
++            )
++        })
++        .collect::<Vec<_>>()
++        .join(",");
+     println!(
+-        "UPDATE_TXN {{\"schema\":1,\"protocol\":\"{protocol}\",\"scope\":\"{}\",\"case\":\"{}\",\"request_id\":{},\"before\":{},\"observations\":[{}],\"after\":{},\"costs\":{{{json_costs}}},\"ordinary_charge\":{},\"outcome\":\"{}\",\"expected\":{},\"candidate\":{},\"skipped_dispatches\":{}}}",
++        "UPDATE_TXN {{\"schema\":2,\"protocol\":\"{protocol}\",\"scope\":\"{}\",\"case\":\"{}\",\"request_id\":{},\"before\":{},\"observations\":[{}],\"after\":{},\"costs\":{{{json_costs}}},\"ordinary_charge\":{},\"outcome\":\"{}\",\"attempts\":[{}],\"expected\":{},\"candidate\":{},\"skipped_dispatches\":{}}}",
+         record.scope,
+         record.case,
+         record.request_id,
+         json_state(&record.before),
+         observations,
+         json_state(&record.after),
+-        record.ordinary_charge.map(|value| value.to_string()).unwrap_or_else(|| "null".into()),
++        record
++            .ordinary_charge
++            .map(|value| value.to_string())
++            .unwrap_or_else(|| "null".into()),
+         record.outcome,
+-        expected,
++        attempts,
++        record
++            .expected
++            .map(json_id)
++            .unwrap_or_else(|| "null".into()),
+         record.candidate,
+         record.skipped_dispatches,
+     );
+ }
+ 
+-fn exclusive_state(manager: &BpfManager) -> State {
+-    BpfManager::observe_timer_exclusive(|id| State {
+-        // This callback runs with the actual ExclusiveReadGuard held.
+-        snapshot: vec![id.program],
+-        installation: manager.exclusive_timer_identity(),
+-        committed: Some(manager.committed_total_ns_per_s()),
+-        executing: vec![id],
+-        guarded_handles: vec![id.program],
+-    })
+-    .unwrap_or_else(|_| State {
+-        snapshot: Vec::new(),
+-        installation: manager.exclusive_timer_identity(),
+-        committed: Some(manager.committed_total_ns_per_s()),
+-        executing: Vec::new(),
+-        guarded_handles: Vec::new(),
+-    })
++fn manager_state(publication: Publication, manager: &BpfManager) -> State {
++    let installation = manager.exclusive_timer_identity();
++    let committed = manager.committed_total_ns_per_s();
++    let receipt = manager.last_install_receipt();
++    publication
++        .observe(|id| State {
++            snapshot: vec![id.program],
++            installation,
++            committed: Some(committed),
++            receipt,
++            guards: vec![id],
++        })
++        .unwrap()
+ }
+ 
+-fn held_exclusive_state(manager: &BpfManager, id: InstallationId) -> State {
++fn held_manager_state(manager: &BpfManager, id: InstallationId) -> State {
+     State {
+         snapshot: vec![id.program],
+         installation: manager.exclusive_timer_identity(),
+         committed: Some(manager.committed_total_ns_per_s()),
+-        executing: vec![id],
+-        guarded_handles: vec![id.program],
++        receipt: manager.last_install_receipt(),
++        guards: vec![id],
+     }
+ }
+ 
+ fn hook_state(manager: &BpfManager) -> State {
+-    let guarded_handles = BpfManager::observe_hook_snapshot(ATTACH_TYPE_TIMER, |ids| ids.to_vec())
++    let snapshot = BpfManager::observe_hook_snapshot(ATTACH_TYPE_TIMER, |handles| handles.to_vec())
+         .unwrap_or_default();
+     State {
+-        snapshot: guarded_handles.clone(),
++        snapshot,
+         installation: None,
+         committed: Some(manager.committed_total_ns_per_s()),
+-        executing: Vec::new(),
+-        guarded_handles,
++        receipt: None,
++        guards: Vec::new(),
+     }
+ }
+ 
+@@ -196,263 +329,397 @@ fn preserved(before: &State, after: &State) {
+     assert_eq!(before.snapshot, after.snapshot);
+     assert_eq!(before.installation, after.installation);
+     assert_eq!(before.committed, after.committed);
++    assert_eq!(before.receipt, after.receipt);
+ }
+ 
+-fn transactional() {
++fn record_failure(
++    records: &mut Vec<Record>,
++    publication: Publication,
++    case: &'static str,
++    request_id: usize,
++    before: State,
++    after: State,
++    expected: InstallationId,
++    candidate: ProgramHandle,
++    ordinary_charge: u64,
++    outcome: String,
++) {
++    preserved(&before, &after);
++    records.push(Record {
++        case,
++        request_id,
++        before,
++        observations: Vec::new(),
++        after,
++        attempts: vec![Attempt {
++            candidate,
++            outcome: outcome.clone(),
++        }],
++        outcome,
++        expected: Some(expected),
++        candidate,
++        skipped_dispatches: 0,
++        ordinary_charge: Some(ordinary_charge),
++        scope: publication.scope(),
++    });
++}
++
++fn paired_manager(publication: Publication) {
+     let mut manager = BpfManager::new();
+     let owner = 7;
+-    let a = manager.load_raw_program_for(owner, program(11)).unwrap();
+-    let b = manager.load_raw_program_for(owner, program(22)).unwrap();
+-    let (background_a, _, background_b, _) = budget_background(&mut manager, owner);
++    let (a_program, learned) = learned_program(11, 0);
++    let a = manager
++        .load_raw_program_authorized(owner, a_program, learned)
++        .unwrap();
++    let (b_program, learned) = learned_program(22, 1);
++    let b = manager
++        .load_raw_program_authorized(owner, b_program, learned)
++        .unwrap();
++    let (c_program, learned) = learned_program(33, 2);
++    let c = manager
++        .load_raw_program_authorized(owner, c_program, learned)
++        .unwrap();
++    let higher_authority = manager.load_raw_program_for(owner, program(44)).unwrap();
++    let (background_a, background_a_cost, background_b, background_b_cost) =
++        budget_background(&mut manager, owner);
+     let heavy = manager
+-        .load_raw_program_for(owner, timed_program(7_000))
++        .load_raw_program_authorized(owner, timed_program(7_000), learned)
+         .unwrap();
+-    let ordinary_charge = manager.committed_total_ns_per_s();
+-    manager.attach_for(owner, ATTACH_TYPE_TIMER, a).unwrap();
+-    let cost_a = manager.committed_total_ns_per_s() - ordinary_charge;
+-    manager.detach(ATTACH_TYPE_TIMER, a).unwrap();
+-    manager.attach_for(owner, ATTACH_TYPE_TIMER, b).unwrap();
+-    let cost_b = manager.committed_total_ns_per_s() - ordinary_charge;
+-    manager.detach(ATTACH_TYPE_TIMER, b).unwrap();
+-    let costs = BTreeMap::from([(a, cost_a), (b, cost_b)]);
++    let ordinary_charge = background_a_cost + background_b_cost;
++
++    let mut costs = BTreeMap::new();
++    for handle in [a, b, c] {
++        manager
++            .attach_for(owner, ATTACH_TYPE_TIMER, handle)
++            .unwrap();
++        costs.insert(handle, manager.committed_total_ns_per_s() - ordinary_charge);
++        manager.detach(ATTACH_TYPE_TIMER, handle).unwrap();
++    }
++
+     let mut records = Vec::new();
++    let installed_a = publication.install(&mut manager, owner, a).unwrap();
++    assert_eq!(manager.last_install_receipt(), Some(installed_a));
+ 
+-    let installed = manager
+-        .try_install_exclusive_for(owner, ControlSlot::Timer, a, StatePolicy::Reset)
+-        .unwrap();
+-    let before = exclusive_state(&manager);
+-    let interrupted = manager
+-        .try_replace_exclusive_for(
+-            owner,
+-            ControlSlot::Timer,
+-            installed.installed,
+-            b,
+-            StatePolicy::Reset,
+-        )
+-        .unwrap();
+-    let after = exclusive_state(&manager);
+-    records.push(Record {
+-        case: "interruption",
+-        request_id: 0,
+-        before,
+-        observations: Vec::new(),
+-        after,
+-        outcome: "Ok".into(),
+-        expected: Some(installed.installed),
+-        candidate: b,
+-        skipped_dispatches: 0,
+-        ordinary_charge: Some(ordinary_charge),
+-        scope: "bpf_manager",
+-    });
+-    let installed = manager
+-        .try_replace_exclusive_for(
+-            owner,
+-            ControlSlot::Timer,
+-            interrupted.installed,
+-            a,
+-            StatePolicy::Reset,
+-        )
+-        .unwrap();
+-
+-    let before = exclusive_state(&manager);
++    let before = manager_state(publication, &manager);
+     manager.fail_next_exclusive_snapshot_for_diagnostics();
+-    let outcome = manager.try_replace_exclusive_for(
+-        owner,
+-        ControlSlot::Timer,
+-        installed.installed,
++    let outcome = publication.replace(&mut manager, owner, installed_a.installed, b);
++    assert_eq!(outcome, Err(InstallError::SnapshotAllocationFailed));
++    let after = manager_state(publication, &manager);
++    record_failure(
++        &mut records,
++        publication,
++        "snapshot_prep_failure",
++        0,
++        before,
++        after,
++        installed_a.installed,
+         b,
+-        StatePolicy::Reset,
++        ordinary_charge,
++        result_name(&outcome),
+     );
+-    let after = exclusive_state(&manager);
+-    preserved(&before, &after);
+-    records.push(Record {
+-        case: "snapshot_prep_failure",
+-        request_id: 1,
+-        before: before.clone(),
+-        observations: Vec::new(),
+-        after,
+-        outcome: result_name(&outcome),
+-        expected: Some(installed.installed),
+-        candidate: b,
+-        skipped_dispatches: 0,
+-        ordinary_charge: Some(ordinary_charge),
+-        scope: "bpf_manager",
+-    });
+ 
+-    let before = exclusive_state(&manager);
+-    let outcome = manager.try_replace_exclusive_for(
+-        owner,
+-        ControlSlot::Timer,
+-        installed.installed,
+-        heavy,
+-        StatePolicy::Reset,
+-    );
++    let before = manager_state(publication, &manager);
++    let outcome = publication.replace(&mut manager, owner, installed_a.installed, heavy);
+     assert_eq!(outcome, Err(InstallError::AdmissionRejected));
+-    let after = exclusive_state(&manager);
+-    preserved(&before, &after);
+-    records.push(Record {
+-        case: "budget_rejection",
+-        request_id: 2,
+-        before: before.clone(),
+-        observations: Vec::new(),
+-        after,
+-        outcome: result_name(&outcome),
+-        expected: Some(installed.installed),
+-        candidate: heavy,
+-        skipped_dispatches: 0,
+-        ordinary_charge: Some(ordinary_charge),
+-        scope: "bpf_manager",
+-    });
+-
+-    let before = exclusive_state(&manager);
+-    let mut held = None;
+-    let skips_before = manager.exclusive_slot_skips().execution_busy;
+-    let outcome = BpfManager::observe_timer_exclusive(|id| {
+-        held = Some(held_exclusive_state(&manager, id));
+-        assert_eq!(
+-            BpfManager::observe_timer_exclusive(|_| ()),
+-            Err(HookRunError::ExecutionBusy)
+-        );
+-        manager.try_replace_exclusive_for(
+-            owner,
+-            ControlSlot::Timer,
+-            installed.installed,
+-            b,
+-            StatePolicy::Reset,
+-        )
+-    })
+-    .unwrap();
+-    assert_eq!(outcome, Err(InstallError::Busy));
+-    let after = exclusive_state(&manager);
+-    preserved(&before, &after);
+-    records.push(Record {
+-        case: "reader_busy",
+-        request_id: 3,
++    let after = manager_state(publication, &manager);
++    record_failure(
++        &mut records,
++        publication,
++        "budget_rejection",
++        1,
+         before,
+-        observations: vec![held.unwrap()],
+         after,
+-        outcome: result_name(&outcome),
+-        expected: Some(installed.installed),
+-        candidate: b,
+-        skipped_dispatches: manager.exclusive_slot_skips().execution_busy - skips_before,
+-        ordinary_charge: Some(ordinary_charge),
+-        scope: "bpf_manager",
+-    });
+-
+-    let before = exclusive_state(&manager);
+-    let receipt = manager
+-        .try_replace_exclusive_for(
+-            owner,
+-            ControlSlot::Timer,
+-            installed.installed,
+-            b,
+-            StatePolicy::Reset,
+-        )
+-        .unwrap();
+-    let after = exclusive_state(&manager);
+-    records.push(Record {
+-        case: "success",
+-        request_id: 4,
+-        before,
+-        observations: Vec::new(),
+-        after,
+-        outcome: "Ok".into(),
+-        expected: Some(installed.installed),
+-        candidate: b,
+-        skipped_dispatches: 0,
+-        ordinary_charge: Some(ordinary_charge),
+-        scope: "bpf_manager",
+-    });
+-
+-    let before = exclusive_state(&manager);
+-    let outcome = manager.try_replace_exclusive_for(
+-        owner,
+-        ControlSlot::Timer,
+-        installed.installed,
+-        a,
+-        StatePolicy::Reset,
++        installed_a.installed,
++        heavy,
++        ordinary_charge,
++        result_name(&outcome),
+     );
++
++    let before = manager_state(publication, &manager);
++    let outcome = publication.replace(&mut manager, owner, installed_a.installed, higher_authority);
++    assert_eq!(outcome, Err(InstallError::AuthorityExceeded));
++    let after = manager_state(publication, &manager);
++    record_failure(
++        &mut records,
++        publication,
++        "authority_rejection",
++        2,
++        before,
++        after,
++        installed_a.installed,
++        higher_authority,
++        ordinary_charge,
++        result_name(&outcome),
++    );
++
++    let installed_b = publication
++        .replace(&mut manager, owner, installed_a.installed, b)
++        .unwrap();
++    let before = manager_state(publication, &manager);
++    let outcome = publication.replace(&mut manager, owner, installed_a.installed, c);
+     assert!(matches!(
+         outcome,
+         Err(InstallError::StaleInstallation { .. })
+     ));
+-    let after = exclusive_state(&manager);
+-    preserved(&before, &after);
++    let after = manager_state(publication, &manager);
++    record_failure(
++        &mut records,
++        publication,
++        "stale_expected",
++        3,
++        before,
++        after,
++        installed_a.installed,
++        c,
++        ordinary_charge,
++        result_name(&outcome),
++    );
++
++    let before = manager_state(publication, &manager);
++    let outcome = publication.replace(&mut manager, owner, installed_a.installed, b);
++    assert!(matches!(
++        outcome,
++        Err(InstallError::StaleInstallation { .. })
++    ));
++    let after = manager_state(publication, &manager);
++    record_failure(
++        &mut records,
++        publication,
++        "completed_retry",
++        4,
++        before,
++        after,
++        installed_a.installed,
++        b,
++        ordinary_charge,
++        result_name(&outcome),
++    );
++
++    let before = manager_state(publication, &manager);
++    let rolled_back = publication
++        .replace(&mut manager, owner, installed_b.installed, a)
++        .unwrap();
++    let after = manager_state(publication, &manager);
++    assert_eq!(manager.last_install_receipt(), Some(rolled_back));
+     records.push(Record {
+-        case: "stale_expected",
++        case: "rollback",
+         request_id: 5,
+-        before: before.clone(),
++        before,
+         observations: Vec::new(),
+         after,
+-        outcome: result_name(&outcome),
+-        expected: Some(installed.installed),
++        outcome: "Ok".into(),
++        attempts: vec![Attempt {
++            candidate: a,
++            outcome: "Ok".into(),
++        }],
++        expected: Some(installed_b.installed),
+         candidate: a,
+         skipped_dispatches: 0,
+         ordinary_charge: Some(ordinary_charge),
+-        scope: "bpf_manager",
++        scope: publication.scope(),
+     });
+ 
+-    let before = exclusive_state(&manager);
+-    let repeated = manager.try_replace_exclusive_for(
+-        owner,
+-        ControlSlot::Timer,
+-        installed.installed,
+-        b,
+-        StatePolicy::Reset,
+-    );
++    let before = manager_state(publication, &manager);
++    let outcome = publication.replace(&mut manager, owner, installed_a.installed, b);
+     assert!(matches!(
+-        repeated,
+-        Err(InstallError::StaleInstallation { .. })
++        outcome,
++        Err(InstallError::StaleInstallation {
++            expected,
++            current: Some(current),
++        }) if expected == installed_a.installed && current == rolled_back.installed
+     ));
+-    let after = exclusive_state(&manager);
+-    preserved(&before, &after);
++    let after = manager_state(publication, &manager);
++    record_failure(
++        &mut records,
++        publication,
++        "aba",
++        6,
++        before,
++        after,
++        installed_a.installed,
++        b,
++        ordinary_charge,
++        result_name(&outcome),
++    );
++
++    let before = manager_state(publication, &manager);
++    let shared = Arc::new(Mutex::new(manager));
++    let start = Arc::new(Barrier::new(3));
++    let (b_result, c_result) = std::thread::scope(|scope| {
++        let b_manager = Arc::clone(&shared);
++        let b_start = Arc::clone(&start);
++        let b_proposer = scope.spawn(move || {
++            b_start.wait();
++            publication.replace(
++                &mut b_manager.lock().unwrap(),
++                owner,
++                rolled_back.installed,
++                b,
++            )
++        });
++        let c_manager = Arc::clone(&shared);
++        let c_start = Arc::clone(&start);
++        let c_proposer = scope.spawn(move || {
++            c_start.wait();
++            publication.replace(
++                &mut c_manager.lock().unwrap(),
++                owner,
++                rolled_back.installed,
++                c,
++            )
++        });
++        start.wait();
++        (b_proposer.join().unwrap(), c_proposer.join().unwrap())
++    });
++    let attempts = vec![attempt(b, &b_result), attempt(c, &c_result)];
++    let winner = match (b_result, c_result) {
++        (Ok(winner), Err(InstallError::StaleInstallation { current, .. }))
++        | (Err(InstallError::StaleInstallation { current, .. }), Ok(winner)) => {
++            assert_eq!(current, Some(winner.installed));
++            winner
++        }
++        results => panic!("expected exactly one successful proposer, got {results:?}"),
++    };
++    let mutex = Arc::into_inner(shared).expect("proposer references dropped");
++    let mut manager = mutex
++        .into_inner()
++        .unwrap_or_else(|poisoned| poisoned.into_inner());
++    assert_eq!(manager.last_install_receipt(), Some(winner));
++    let after = manager_state(publication, &manager);
+     records.push(Record {
+-        case: "completed_retry",
++        case: "concurrent_proposers",
+         request_id: 7,
+         before,
+         observations: Vec::new(),
+         after,
+-        outcome: result_name(&repeated),
+-        expected: Some(installed.installed),
+-        candidate: b,
++        outcome: "Ok".into(),
++        attempts,
++        expected: Some(rolled_back.installed),
++        candidate: winner.installed.program,
+         skipped_dispatches: 0,
+         ordinary_charge: Some(ordinary_charge),
+-        scope: "bpf_manager",
++        scope: publication.scope(),
+     });
+ 
+-    let before = exclusive_state(&manager);
+-    let outcome = manager.try_replace_exclusive_for(
+-        owner,
+-        ControlSlot::Timer,
+-        receipt.installed,
+-        a,
+-        StatePolicy::Reset,
+-    );
+-    let after = exclusive_state(&manager);
++    let held_a = publication
++        .replace(&mut manager, owner, winner.installed, a)
++        .unwrap();
++    let held_candidate = b;
++    let before = manager_state(publication, &manager);
++    let (observations, replacement, attempts, skipped_dispatches) = match publication {
++        Publication::Atomic => {
++            let (entered_tx, entered_rx) = mpsc::channel();
++            let (release_tx, release_rx) = mpsc::channel();
++            let (overlap, replacement) = std::thread::scope(|scope| {
++                scope.spawn(move || {
++                    BpfManager::observe_timer_atomic_without_quiescence(|id| {
++                        entered_tx.send(id).unwrap();
++                        release_rx.recv().unwrap();
++                    })
++                    .unwrap();
++                });
++                let guarded_a = entered_rx.recv().unwrap();
++                assert_eq!(guarded_a, held_a.installed);
++                let writer = scope.spawn(|| {
++                    publication.replace(&mut manager, owner, held_a.installed, held_candidate)
++                });
++                let overlap = loop {
++                    let observed = publication
++                        .observe(|guarded_b| {
++                            (guarded_b.program == held_candidate).then(|| State {
++                                snapshot: vec![guarded_b.program],
++                                installation: Some(guarded_b),
++                                committed: None,
++                                receipt: None,
++                                guards: vec![guarded_a, guarded_b],
++                            })
++                        })
++                        .unwrap();
++                    if let Some(overlap) = observed {
++                        break overlap;
++                    }
++                    std::thread::yield_now();
++                };
++                assert!(
++                    !writer.is_finished(),
++                    "AP writer returned before A guard drained"
++                );
++                release_tx.send(()).unwrap();
++                (overlap, writer.join().unwrap())
++            });
++            let attempts = vec![attempt(held_candidate, &replacement)];
++            (vec![overlap], replacement, attempts, 0)
++        }
++        Publication::Transactional => {
++            let (entered_tx, entered_rx) = mpsc::channel();
++            let (release_tx, release_rx) = mpsc::channel();
++            let skips_before = manager.exclusive_slot_skips().execution_busy;
++            let (held, first) = std::thread::scope(|scope| {
++                let observer = scope.spawn(move || {
++                    BpfManager::observe_timer_exclusive(|id| {
++                        entered_tx.send(id).unwrap();
++                        release_rx.recv().unwrap();
++                    })
++                    .unwrap();
++                });
++                let guarded_a = entered_rx.recv().unwrap();
++                assert_eq!(guarded_a, held_a.installed);
++                let first =
++                    publication.replace(&mut manager, owner, held_a.installed, held_candidate);
++                assert_eq!(first, Err(InstallError::Busy));
++                let held = held_manager_state(&manager, guarded_a);
++                preserved(&before, &held);
++                assert_eq!(
++                    BpfManager::observe_timer_exclusive(|_| ()),
++                    Err(HookRunError::ExecutionBusy)
++                );
++                release_tx.send(()).unwrap();
++                observer.join().unwrap();
++                (held, first)
++            });
++            let retry = publication.replace(&mut manager, owner, held_a.installed, held_candidate);
++            let attempts = vec![
++                attempt(held_candidate, &first),
++                attempt(held_candidate, &retry),
++            ];
++            (
++                vec![held],
++                retry,
++                attempts,
++                manager.exclusive_slot_skips().execution_busy - skips_before,
++            )
++        }
++    };
++    let replacement = replacement.unwrap();
++    assert_eq!(replacement.previous, Some(held_a.installed));
++    assert_eq!(manager.last_install_receipt(), Some(replacement));
++    let after = manager_state(publication, &manager);
+     records.push(Record {
+-        case: "rollback",
+-        request_id: 6,
++        case: "held_a_schedule",
++        request_id: 8,
+         before,
+-        observations: Vec::new(),
++        observations,
+         after,
+-        outcome: result_name(&outcome),
+-        expected: Some(receipt.installed),
+-        candidate: a,
+-        skipped_dispatches: 0,
++        outcome: "Ok".into(),
++        attempts,
++        expected: Some(held_a.installed),
++        candidate: held_candidate,
++        skipped_dispatches,
+         ordinary_charge: Some(ordinary_charge),
+-        scope: "bpf_manager",
++        scope: publication.scope(),
+     });
++
+     manager
+-        .clear_exclusive_for_diagnostics(owner, manager.exclusive_timer_identity().unwrap())
++        .clear_exclusive_for_diagnostics(owner, replacement.installed)
+         .unwrap();
+     manager.detach(ATTACH_TYPE_SYS_ENTER, background_a).unwrap();
+     manager.detach(ATTACH_TYPE_SYS_ENTER, background_b).unwrap();
+     for record in records {
+-        emit("transactional", &costs, record);
++        emit(publication.protocol(), &costs, record);
+     }
+ }
+ 
+-fn ordinary(protocol: &str, attach_first: bool) {
++fn ordinary(protocol: &'static str, attach_first: bool) {
+     let mut manager = BpfManager::new();
+     let owner = 7;
+     let a = manager.load_raw_program_for(owner, program(11)).unwrap();
+@@ -463,8 +730,6 @@ fn ordinary(protocol: &str, attach_first: bool) {
+         .load_raw_program_for(owner, timed_program(7_000))
+         .unwrap();
+     let ordinary_charge = ordinary_one_cost + ordinary_two_cost;
+-    // Measure each verifier-accepted fixture before the recorded protocol;
+-    // later records never derive a cost from their own publication outcome.
+     manager.attach_for(owner, ATTACH_TYPE_TIMER, a).unwrap();
+     let cost_a = manager.committed_total_ns_per_s() - ordinary_charge;
+     manager.detach(ATTACH_TYPE_TIMER, a).unwrap();
+@@ -473,6 +738,7 @@ fn ordinary(protocol: &str, attach_first: bool) {
+     manager.detach(ATTACH_TYPE_TIMER, b).unwrap();
+     let costs = BTreeMap::from([(a, cost_a), (b, cost_b)]);
+     let mut records = Vec::new();
++
+     manager.attach_for(owner, ATTACH_TYPE_TIMER, a).unwrap();
+     let before = hook_state(&manager);
+     let first_step = if attach_first {
+@@ -481,19 +747,22 @@ fn ordinary(protocol: &str, attach_first: bool) {
+         manager.detach(ATTACH_TYPE_TIMER, a)
+     };
+     first_step.unwrap();
+-    let after = hook_state(&manager);
+     records.push(Record {
+         case: "interruption",
+         request_id: 0,
+         before,
+         observations: Vec::new(),
+-        after,
++        after: hook_state(&manager),
+         outcome: "Interrupted".into(),
++        attempts: vec![Attempt {
++            candidate: b,
++            outcome: "Interrupted".into(),
++        }],
+         expected: None,
+         candidate: b,
+         skipped_dispatches: 0,
+         ordinary_charge: Some(ordinary_charge),
+-        scope: "bpf_manager_ordinary",
++        scope: "bpf_manager_ordinary_supporting",
+     });
+     if attach_first {
+         manager.detach(ATTACH_TYPE_TIMER, b).unwrap();
+@@ -509,15 +778,19 @@ fn ordinary(protocol: &str, attach_first: bool) {
+         records.push(Record {
+             case: "success",
+             request_id: 1,
+-            before: before.clone(),
++            before,
+             observations: vec![dual],
+             after: hook_state(&manager),
+             outcome: "Ok".into(),
++            attempts: vec![Attempt {
++                candidate: b,
++                outcome: "Ok".into(),
++            }],
+             expected: None,
+             candidate: b,
+             skipped_dispatches: 0,
+             ordinary_charge: Some(ordinary_charge),
+-            scope: "bpf_manager_ordinary",
++            scope: "bpf_manager_ordinary_supporting",
+         });
+     } else {
+         manager.detach(ATTACH_TYPE_TIMER, a).unwrap();
+@@ -526,18 +799,22 @@ fn ordinary(protocol: &str, attach_first: bool) {
+         records.push(Record {
+             case: "success",
+             request_id: 1,
+-            before: before.clone(),
++            before,
+             observations: vec![empty],
+             after: hook_state(&manager),
+             outcome: "Ok".into(),
++            attempts: vec![Attempt {
++                candidate: b,
++                outcome: "Ok".into(),
++            }],
+             expected: None,
+             candidate: b,
+             skipped_dispatches: 0,
+             ordinary_charge: Some(ordinary_charge),
+-            scope: "bpf_manager_ordinary",
++            scope: "bpf_manager_ordinary_supporting",
+         });
+     }
+-    // Restore A before each independent A→B failure schedule.
++
+     manager.detach(ATTACH_TYPE_TIMER, b).unwrap();
+     manager.attach_for(owner, ATTACH_TYPE_TIMER, a).unwrap();
+     let before = hook_state(&manager);
+@@ -555,15 +832,16 @@ fn ordinary(protocol: &str, attach_first: bool) {
+     records.push(Record {
+         case: "budget_rejection",
+         request_id: 2,
+-        before: before.clone(),
++        before,
+         observations: Vec::new(),
+         after,
+         outcome: result_name(&outcome),
++        attempts: vec![attempt(heavy, &outcome)],
+         expected: None,
+         candidate: heavy,
+         skipped_dispatches: 0,
+         ordinary_charge: Some(ordinary_charge),
+-        scope: "bpf_manager_ordinary",
++        scope: "bpf_manager_ordinary_supporting",
+     });
+ 
+     if !attach_first {
+@@ -585,19 +863,18 @@ fn ordinary(protocol: &str, attach_first: bool) {
+     records.push(Record {
+         case: "snapshot_prep_failure",
+         request_id: 3,
+-        before: before.clone(),
++        before,
+         observations: Vec::new(),
+         after,
+         outcome: result_name(&outcome),
++        attempts: vec![attempt(b, &outcome)],
+         expected: None,
+         candidate: b,
+         skipped_dispatches: 0,
+         ordinary_charge: Some(ordinary_charge),
+-        scope: "bpf_manager_ordinary",
++        scope: "bpf_manager_ordinary_supporting",
+     });
+ 
+-    // Set up B without recording it; the rollback request itself is B→A for
+-    // every manager protocol, matching the transactional rollback request.
+     if attach_first {
+         manager.attach_for(owner, ATTACH_TYPE_TIMER, b).unwrap();
+         manager.detach(ATTACH_TYPE_TIMER, a).unwrap();
+@@ -607,37 +884,45 @@ fn ordinary(protocol: &str, attach_first: bool) {
+     let before = hook_state(&manager);
+     if attach_first {
+         manager.attach_for(owner, ATTACH_TYPE_TIMER, a).unwrap();
+-        let dual_ba = hook_state(&manager);
++        let dual = hook_state(&manager);
+         manager.detach(ATTACH_TYPE_TIMER, b).unwrap();
+         records.push(Record {
+             case: "rollback",
+             request_id: 4,
+             before,
+-            observations: vec![dual_ba],
++            observations: vec![dual],
+             after: hook_state(&manager),
+             outcome: "Ok".into(),
++            attempts: vec![Attempt {
++                candidate: a,
++                outcome: "Ok".into(),
++            }],
+             expected: None,
+             candidate: a,
+             skipped_dispatches: 0,
+             ordinary_charge: Some(ordinary_charge),
+-            scope: "bpf_manager_ordinary",
++            scope: "bpf_manager_ordinary_supporting",
+         });
+     } else {
+         manager.detach(ATTACH_TYPE_TIMER, b).unwrap();
+-        let empty_ba = hook_state(&manager);
++        let empty = hook_state(&manager);
+         manager.attach_for(owner, ATTACH_TYPE_TIMER, a).unwrap();
+         records.push(Record {
+             case: "rollback",
+             request_id: 4,
+             before,
+-            observations: vec![empty_ba],
++            observations: vec![empty],
+             after: hook_state(&manager),
+             outcome: "Ok".into(),
++            attempts: vec![Attempt {
++                candidate: a,
++                outcome: "Ok".into(),
++            }],
+             expected: None,
+             candidate: a,
+             skipped_dispatches: 0,
+             ordinary_charge: Some(ordinary_charge),
+-            scope: "bpf_manager_ordinary",
++            scope: "bpf_manager_ordinary_supporting",
+         });
+     }
+     manager.detach(ATTACH_TYPE_TIMER, a).unwrap();
+@@ -648,85 +933,10 @@ fn ordinary(protocol: &str, attach_first: bool) {
+     }
+ }
+ 
+-fn atomic_state(snapshot: &EpochSnapshot<ProgramHandle>) -> State {
+-    let handle = *snapshot.read().unwrap();
+-    State {
+-        snapshot: vec![handle],
+-        installation: None,
+-        committed: None,
+-        executing: Vec::new(),
+-        guarded_handles: vec![handle],
+-    }
+-}
+-
+-fn atomic_publication() {
+-    use std::sync::{Arc, Barrier};
+-    use std::thread;
+-
+-    // Synthetic component handles identify guards, not kernel installations.
+-    let (a, b) = (1, 2);
+-    let snapshot = Arc::new(EpochSnapshot::empty());
+-    snapshot.publish(Box::new(a));
+-    let before = atomic_state(&snapshot);
+-    let old = snapshot.read().unwrap();
+-    let gate = Arc::new(Barrier::new(2));
+-    let writer_snapshot = snapshot.clone();
+-    let writer_gate = gate.clone();
+-    let writer = thread::spawn(move || {
+-        writer_gate.wait();
+-        writer_snapshot.publish(Box::new(b));
+-    });
+-    gate.wait();
+-    let new = loop {
+-        let guard = snapshot.read().unwrap();
+-        if *guard == b {
+-            break guard;
+-        }
+-        thread::yield_now();
+-    };
+-    let overlap = State {
+-        snapshot: vec![*new],
+-        installation: None,
+-        committed: None,
+-        executing: vec![
+-            InstallationId {
+-                program: *old,
+-                epoch: 1,
+-            },
+-            InstallationId {
+-                program: *new,
+-                epoch: 2,
+-            },
+-        ],
+-        guarded_handles: vec![*old, *new],
+-    };
+-    drop(new);
+-    drop(old);
+-    writer.join().unwrap();
+-    let after = atomic_state(&snapshot);
+-    emit(
+-        "atomic_publication",
+-        &BTreeMap::new(),
+-        Record {
+-            case: "outstanding_guards",
+-            request_id: 0,
+-            before,
+-            observations: vec![overlap],
+-            after,
+-            outcome: "Ok".into(),
+-            expected: None,
+-            candidate: b,
+-            skipped_dispatches: 0,
+-            ordinary_charge: None,
+-            scope: "component_epoch_snapshot_accounting_unsupported",
+-        },
+-    );
+-}
+-
+ #[test]
+ fn emits_real_publication_traces() {
+-    transactional();
++    paired_manager(Publication::Atomic);
++    paired_manager(Publication::Transactional);
+     ordinary("attach_first", true);
+     ordinary("detach_first", false);
+-    atomic_publication();
+ }
+diff --git c/kernel/tests/bpf_update_transaction.rs w/kernel/tests/bpf_update_transaction.rs
+index c74aa17..62e8695 100644
+--- c/kernel/tests/bpf_update_transaction.rs
++++ w/kernel/tests/bpf_update_transaction.rs
+@@ -397,6 +397,28 @@ fn replacement_rejections_preserve_publication_accounting_and_aba_identity() {
+         assert_eq!(identity, winner.installed);
+     })
+     .unwrap();
++    assert_eq!(
++        BpfManager::observe_timer_atomic_without_quiescence(|_| ()),
++        Err(kernel::bpf::HookRunError::Execution(BpfError::ObjectBusy))
++    );
++    let guarded_alternative = if winner.installed.program == b { c } else { b };
++    assert_eq!(
++        manager.try_replace_atomic_without_quiescence_for(
++            owner,
++            ControlSlot::Timer,
++            winner.installed,
++            guarded_alternative,
++            StatePolicy::Reset,
++        ),
++        Err(InstallError::Busy)
++    );
++    BpfManager::hold_timer_exclusive_transition_for_diagnostics(|| {
++        assert_eq!(
++            BpfManager::observe_timer_exclusive(|_| ()),
++            Err(kernel::bpf::HookRunError::TransitionBusy)
++        );
++    })
++    .unwrap();
+ 
+     manager.force_timer_epoch_for_diagnostics(u64::MAX);
+     let next_candidate = if winner.installed.program == b { c } else { b };
+@@ -416,6 +438,162 @@ fn replacement_rejections_preserve_publication_accounting_and_aba_identity() {
+         winner.committed_exclusive_ns_per_s,
+         winner,
+     );
++
++    manager
++        .clear_exclusive_for_diagnostics(owner, winner.installed)
++        .unwrap();
++    manager.force_timer_epoch_for_diagnostics(winner.installed.epoch);
++    let atomic_a = manager
++        .try_install_atomic_without_quiescence_for(owner, ControlSlot::Timer, a, StatePolicy::Reset)
++        .expect("bootstrap atomic baseline A");
++    assert_eq!(
++        BpfManager::observe_timer_exclusive(|_| ()),
++        Err(kernel::bpf::HookRunError::Execution(BpfError::ObjectBusy))
++    );
++    assert_eq!(
++        manager.try_replace_atomic_without_quiescence_for(
++            owner,
++            ControlSlot::Timer,
++            winner.installed,
++            next_candidate,
++            StatePolicy::Reset,
++        ),
++        Err(InstallError::StaleInstallation {
++            expected: winner.installed,
++            current: Some(atomic_a.installed),
++        })
++    );
++    unchanged(
++        &manager,
++        atomic_a.installed,
++        atomic_a.committed_exclusive_ns_per_s,
++        atomic_a,
++    );
++    assert_eq!(
++        manager.try_replace_exclusive_for(
++            owner,
++            ControlSlot::Timer,
++            atomic_a.installed,
++            next_candidate,
++            StatePolicy::Reset,
++        ),
++        Err(InstallError::Busy)
++    );
++    unchanged(
++        &manager,
++        atomic_a.installed,
++        atomic_a.committed_exclusive_ns_per_s,
++        atomic_a,
++    );
++
++    for (candidate, state, error) in [
++        (
++            next_candidate,
++            StatePolicy::Transfer,
++            InstallError::StateTransferUnsupported,
++        ),
++        (
++            map_candidate,
++            StatePolicy::Reset,
++            InstallError::PersistentStateUnsupported,
++        ),
++        (
++            higher_authority,
++            StatePolicy::Reset,
++            InstallError::AuthorityExceeded,
++        ),
++        (
++            expensive,
++            StatePolicy::Reset,
++            InstallError::AdmissionRejected,
++        ),
++    ] {
++        assert_eq!(
++            manager.try_replace_atomic_without_quiescence_for(
++                owner,
++                ControlSlot::Timer,
++                atomic_a.installed,
++                candidate,
++                state,
++            ),
++            Err(error)
++        );
++        unchanged(
++            &manager,
++            atomic_a.installed,
++            atomic_a.committed_exclusive_ns_per_s,
++            atomic_a,
++        );
++    }
++    manager.fail_next_exclusive_snapshot_for_diagnostics();
++    assert_eq!(
++        manager.try_replace_atomic_without_quiescence_for(
++            owner,
++            ControlSlot::Timer,
++            atomic_a.installed,
++            next_candidate,
++            StatePolicy::Reset,
++        ),
++        Err(InstallError::SnapshotAllocationFailed)
++    );
++    unchanged(
++        &manager,
++        atomic_a.installed,
++        atomic_a.committed_exclusive_ns_per_s,
++        atomic_a,
++    );
++
++    let (a_entered_tx, a_entered_rx) = mpsc::channel();
++    let (release_a_tx, release_a_rx) = mpsc::channel();
++    let atomic_b = std::thread::scope(|scope| {
++        scope.spawn(move || {
++            BpfManager::observe_timer_atomic_without_quiescence(|identity| {
++                assert_eq!(identity, atomic_a.installed);
++                a_entered_tx.send(()).unwrap();
++                release_a_rx.recv().unwrap();
++            })
++            .unwrap();
++        });
++        a_entered_rx.recv().unwrap();
++        let writer = scope.spawn(|| {
++            manager.try_replace_atomic_without_quiescence_for(
++                owner,
++                ControlSlot::Timer,
++                atomic_a.installed,
++                next_candidate,
++                StatePolicy::Reset,
++            )
++        });
++        loop {
++            let observed = BpfManager::observe_timer_atomic_without_quiescence(|id| id).unwrap();
++            if observed.program == next_candidate {
++                assert_eq!(observed.epoch, atomic_a.installed.epoch + 1);
++                assert!(
++                    !writer.is_finished(),
++                    "writer returned before A guard drained"
++                );
++                break;
++            }
++            std::thread::yield_now();
++        }
++        release_a_tx.send(()).unwrap();
++        writer.join().unwrap().expect("atomic A -> B replacement")
++    });
++    assert_eq!(atomic_b.previous, Some(atomic_a.installed));
++    assert_eq!(atomic_b.installed.program, next_candidate);
++    assert_eq!(
++        manager.last_install_receipt(),
++        Some(atomic_b),
++        "receipt becomes visible with the completed manager operation"
++    );
++    assert_eq!(
++        manager.committed_exclusive_ns_per_s(),
++        atomic_b.committed_exclusive_ns_per_s
++    );
++    manager
++        .clear_exclusive_for_diagnostics(owner, atomic_b.installed)
++        .unwrap();
++
+     kernel::actuation::ACTUATION_MONITOR
+         .lock()
+         .estop_trigger(AuditSource::Operator, 3);
+diff --git c/papers/cl4fmagents2026/README.md w/papers/cl4fmagents2026/README.md
+index 7892960..b7aa5d5 100644
+--- c/papers/cl4fmagents2026/README.md
++++ w/papers/cl4fmagents2026/README.md
+@@ -9,6 +9,16 @@ python3 verify.py
+ 
+ Output: `who-guards-the-update.pdf`. Upload that PDF only. The ignored `private/` directory and repository evidence contain author-facing information and are not anonymous review material. The paper reports software publication correctness, not learning quality or physical safety.
+ 
+-`results.tex` is generated from the retained real Rust campaign in `docs/performance/evidence/update-transaction`; regenerate it with the analyzer documented there, then copy `result-table.tex` here. Verification checks the PDF page limit, anonymity, citations/build warnings and every table row against the raw trace. Visually inspect every rendered page after layout changes.
++The v1 campaign remains in `docs/performance/evidence/update-transaction`. The strengthened campaign uses a new directory, `update-transaction-v2`, and compares guarded replacement with a host-only atomic publication path sharing the same manager checks. Host callbacks retain real invocation guards but do not execute privileged bytecode.
++
++From the repository root, reproduce the release correctness campaign, 80 fresh-process measurement runs, analysis tables, and paper checks:
++
++```sh
++CARGO_TARGET_DIR=/home/utkarsh/Work/axiomOS/target python3 scripts/benchmark/reproduce-update-publication.py --output /tmp/update-publication-reproduction
++```
++
++Choose an existing writable Cargo target directory with sufficient disk space on other machines. The output directory must not exist. The measurement driver records affinity and requires two distinct physical cores; its defaults are CPU 12 and 14 on the developer host. No scheduler or governor settings are changed. The retained manifest hashes source and measured executables. Raw scheduler misses and latency tails are retained.
++
++`results.tex` and `costs.tex` are generated from raw traces. Verification checks the PDF page limit, anonymity, citations/build warnings, and generated tables. Visually inspect every rendered page after layout changes. These artifacts contain developer-identifying provenance and must not accompany the anonymous PDF.
+ 
+ `neurips_2026.sty` is the unmodified official 2026 style. The manuscript uses `dblblindworkshop` and supplies the workshop title. No OpenReview submission receipt has been obtained.
+diff --git c/papers/cl4fmagents2026/main.tex w/papers/cl4fmagents2026/main.tex
+index ed4002c..939a8c3 100644
+--- c/papers/cl4fmagents2026/main.tex
++++ w/papers/cl4fmagents2026/main.tex
+@@ -14,7 +14,7 @@
+ \maketitle
+ 
+ \begin{abstract}
+-An embodied agent can improve a controller while remaining unreliable at installing it. A candidate can pass isolated checks yet overlap an invocation of its predecessor, inherit incompatible state, or be activated against a stale version. Existing work already governs capability lifecycles and atomically hot-swaps robotic control laws. We therefore make a narrower claim: a runtime that exposes replaceable executable hooks should specify publication semantics at the invocation boundary. We describe one opt-in kernel TIMER slot with nonblocking, fail-closed replacement, explicit installation identity, a map-free state policy, and resource-accounting updates committed with publication. In five matched software scenarios, two-step replacement exposes three multi-version snapshots or five empty snapshots; guarded replacement exposes neither and preserves its predecessor on both injected failures. A separate snapshot-component ablation demonstrates overlapping old/new guards despite a single current pointer. These results isolate installation correctness from adaptation quality; learning quality, downstream command fencing, hardware reset, and physical safety remain unevaluated.
++An embodied agent can improve a controller while remaining unreliable at installing it. Atomic publication selects one current program, but does not by itself prevent old and new invocations from overlapping. We define an executor-level installation contract combining expected installation identity, invocation quiescence, stateless admission, authority revalidation, and resource-atomic publication. A prototype implements this contract for one opt-in runtime slot using a nonblocking transition gate. We compare it with atomic publication sharing the same manager checks, accounting, and receipts, under matched failures and concurrent invocation. Hosted measurements report replacement and guard costs, retries, skipped dispatches, and retained program storage separately from correctness. This isolates the cost of invocation quiescence from candidate validation and pointer publication. The results concern software installation; closed-loop continual learning, downstream command fencing, and physical safety remain outside the evaluated contract.
+ \end{abstract}
+ 
+ \section{The update is part of the execution contract}
+@@ -27,9 +27,11 @@ This thesis complements established mechanisms at adjacent layers. Qin et al. tr
+ 
+ Action-level assurance remains separate. Shielding can constrain learner actions \citep{alshiekh2018shielding}, and Neural Simplex combines runtime assurance with online controller retraining \citep{phan2020neural}. An action monitor asks whether a command may execute in the current state. Publication asks which program installation is allowed to issue the next command. Either layer may reveal a failure the other cannot, so evaluations should report both rather than treating one as a proxy for the other.
+ 
++Our contributions are: (1) an executor-level contract combining expected installation identity, invocation quiescence, state admissibility, authority revalidation, and resource-atomic publication; (2) an implementation for one exclusive slot using a nonblocking transition gate and monotonic epochs; and (3) a comparison with atomic publication sharing the same manager checks, reporting correctness and hosted availability costs separately.
++
+ \section{A narrow transactional publication primitive}
+ \label{sec:semantics}
+-Our case study is an anonymous bare-metal Rust research kernel with verifier-accepted runtime programs, authenticated load policy, capability checks, quotas, generation-tagged handles, and immutable hook snapshots. We add one opt-in exclusive TIMER slot; ordinary TIMER fanout still coexists and executes outside this gate. Exclusivity and skipped invocations refer only to the opt-in slot, not all TIMER programs or hardware access. The word \emph{transactional} refers only to publication of software authority at this slot. It does not imply atomic physical effects, persistent logging, or a general dynamic-update subsystem.
++The prototype is an anonymous bare-metal Rust research kernel with verifier-accepted runtime programs, authenticated load policy, capability checks, quotas, generation-tagged handles, and immutable hook snapshots. We add one opt-in exclusive TIMER slot; ordinary TIMER fanout still coexists and executes outside this gate. Exclusivity and skipped invocations refer only to the opt-in slot, not all TIMER programs or hardware access. The word \emph{transactional} refers only to publication of software authority at this slot. It does not imply atomic physical effects, persistent logging, or a general dynamic-update subsystem.
+ 
+ An installation is identified by
+ \begin{equation}
+@@ -39,45 +41,64 @@ where $h$ is a program handle and $e$ is a monotonically increasing installation
+ 
+ Invocation and replacement share one atomic state: open, active, or transitioning. An invocation atomically claims the open state; a transitioning state returns \textsc{TransitionBusy}, and an active state returns \textsc{ExecutionBusy}. Both failures increment explicit skipped-invocation counters. The invocation holds the immutable snapshot guard throughout execution and drops that guard before reopening the slot. A replacement tries to change open to transitioning once. If an invocation is active, it returns \textsc{Busy} immediately and leaves the slot unchanged; it never waits for quiescence.
+ 
+-The only supported state policy is \textsc{Reset}, and only for candidates whose verifier-produced \texttt{referenced\_map\_handles} is empty. Map-bearing candidates return \textsc{PersistentStateUnsupported} before gate acquisition, and transfer is rejected explicitly. This policy performs no clearing: ``reset'' means the candidate references no runtime maps; it says nothing about physical, device, or external state.
++The supported policy is \textsc{Stateless}: candidates must have no verifier-reported runtime-map references. Map-bearing candidates and state transfer are rejected before gate acquisition. The internal API retains the enum name \texttt{Reset}, but performs no clearing. This restriction says nothing about physical, device, or external state.
+ 
+-Once gated and quiescent, replacement checks expected identity, ownership, retained load-time authentication provenance, and candidate authorization against the ceiling captured at bootstrap. It reruns TIMER-context verification and checks conflicts and quota; it does not reauthenticate the artifact. Fallible snapshot preparation precedes live mutation. A final emergency-stop check uses the kernel's existing monitor serialization; stop state or lock contention rejects without change. The commit publishes one old-to-new snapshot and fresh epoch together with a receipt and an allocation-free CPU-admission ledger delta of $-\mathrm{cost}(A)+\mathrm{cost}(B)$. Resident-memory charges for both programs persist. Replacement leaves the previous program loaded. Rollback uses the same conditional replacement in reverse with a fresh epoch, provided that program has not subsequently been unloaded.
++Once gated and quiescent, replacement checks expected identity, ownership, retained load-time authentication provenance, and candidate authorization against the ceiling captured at bootstrap. It reruns TIMER-context verification and checks conflicts and quota; it does not reauthenticate the artifact. Fallible snapshot preparation precedes live mutation. A final emergency-stop check uses the kernel's existing monitor serialization; stop state or lock contention rejects without change. The published immutable object contains both the runtime reference and full installation identity. The serialized manager commits an allocation-free CPU-admission delta of $-\mathrm{cost}(A)+\mathrm{cost}(B)$, publishes that object once, and records the matching receipt before reopening the slot. Invocation readers consume the object; other manager operations cannot observe intermediate ledger or receipt state. Resident-memory charges for both programs persist. Replacement leaves the previous program loaded. Rollback uses the same conditional replacement in reverse with a fresh epoch, provided that program has not subsequently been unloaded.
++
++\paragraph{Two invariants.}
++Assume serialized manager operations, normal returns, and invocations that hold their slot guard throughout their body. \emph{Invocation exclusivity:} if replacement from $I_A$ to $I_B$ succeeds, no guarded invocation of $I_A$ overlaps one of $I_B$. Entry claims open$\rightarrow$active; replacement claims open$\rightarrow$transitioning on the same atomic state. These claims exclude one another. Replacement publishes $I_B$ while transitioning, rejects new entries until completion, and reopens only with $I_B$ current. An old reader drops its snapshot before reopening. A successful invocation linearizes at its open-to-active transition; replacement linearizes at the pointer swap of the complete installation object.
++
++\emph{Returned-error preservation:} every replacement returning an error preserves the published installation, executable snapshot, and admission ledger. All rejecting checks and snapshot preparation precede mutation. Ledger commit validates before writing; after it succeeds, publication and receipt updates have no error return. Releasing an unsuccessful transition only reopens the gate. This proposition excludes diagnostic counters, panic/crash recovery, and physical effects.
+ 
+ The primitive deliberately stops at the executor boundary. Receipts and diagnostic guard observations carry installation identity. Production dispatch currently returns a count or error without an identity-bearing audit record. Extending that identity through downstream command queues and actuation audit records is future work. The present scope does not establish command freshness after dispatch, hardware-stop timing, physical safety, controller stability, or state migration.
+ 
+-\section{Prototype and fault-injected publication experiment}
++\section{Correctness and availability under matched updates}
+ \label{sec:evaluation}
+-\subsection{Separate evaluation axes}
+-The evaluation unit is a candidate within a versioned sequence. The task axis asks whether activated candidates improve an independently declared task metric. The installation axis asks whether the publication contract holds. These axes form four possible outcomes: improvement with or without correct installation, and regression with or without correct installation. A useful candidate cannot excuse an installation defect; correct publication cannot establish adaptation quality.
++\paragraph{Two evaluation axes.}
++The task axis asks whether activated candidates improve a declared task metric. The installation axis asks whether the publication contract holds. A useful candidate cannot excuse an installation defect; correct publication cannot establish adaptation quality. We fix candidate sequences to isolate installation behavior. An adaptive generator could later respond to previous activations, in which case diverging proposals also require attribution.
+ 
+-We use hand-written, map-free bytecode candidates in hosted tests of the production kernel library. Fixtures explicitly enable unsigned development loading; the experiment does not test authentication. The embedded admission profile assigns a nominal 1\,kHz hook frequency and a 500\,ms/s aggregate CPU budget. Two unrelated syscall-hook programs consume budget without changing TIMER cardinality. These are admission-model quantities, not measured execution times.
++\paragraph{Same-manager comparison.}
++The primary protocols are \textbf{atomic publication} (AP) and \textbf{guarded replacement} (GR). They share candidate validation, full expected identity, ownership and authority checks, TIMER re-verification, admission-ledger replacement, snapshot preparation, and receipts. AP bypasses only the invocation gate, through a host-only diagnostic path absent from bare-metal builds. Both publish the same immutable identity/runtime object. AP's epoch mechanism retains the predecessor allocation and waits for old readers before returning, but B becomes visible during that wait. A reader of B can therefore overlap a retained reader of A before replacement returns. GR instead returns \textsc{Busy} while A is active; after A finishes, a retry can publish B. Each fixture fixes its protocol until draining cleanup.
+ 
+-We compare three manager protocols on the same supported scenarios: \textbf{attach-first} (AF), \textbf{detach-first} (DF), and \textbf{transactional replacement} (TX). Each scenario fixes its starting installation, candidate bytecode, and fault location. Stopping after the first API publication leaves a two-step request incomplete; TX completes its single API operation. This is interruption between calls, not crash injection inside commit. Snapshot-allocation failure is injected immediately before candidate snapshot preparation, after predecessor removal for DF. Additional TX-only cases test an outstanding invocation, retry, and stale expected identity; they are excluded from the matched table.
++The hosted campaign uses hand-written map-free bytecode and unsigned development loading; it does not test authentication. Real snapshot/slot guards are held through observation callbacks, without executing privileged bytecode or actuation helpers. The admission profile assigns a nominal 1\,kHz hook frequency and a 500\,ms/s CPU budget; unrelated syscall-hook reservations exercise the finite budget. Fixture charges are pre-measured through standalone manager attachments. These charges are admission-model quantities, not measured execution times. A separate QEMU probe checks interpreter dispatch after A--B--A installation and stale-request rejection.
+ 
+-A separate \textbf{component ablation} publishes B through the existing epoch snapshot while retaining an A reader, then acquires a B reader before dropping A. It tests whether single-pointer publication alone prevents overlapping guards; it supplies neither manager accounting nor installation receipts. Host observations hold real production snapshot/invocation guards but do not execute privileged bytecode. We therefore report outstanding guards, not simultaneous motor commands. A QEMU probe separately exercises interpreter dispatch after A--B--A installations.
+-
+-Python analyzes Rust-emitted observations. Snapshot cardinality counts published program handles; accounting compares the observed ledger against fixture charges pre-measured by standalone manager attachments plus unrelated reservations. A failed request preserves its predecessor only if snapshot, installation identity, and ledger all remain unchanged. Table observations consist of actual intermediate snapshots and the final snapshot for each matched request; setup and restoration are excluded. These finite, deliberately adversarial schedules expose contract failures, not population failure rates.
++\paragraph{Fault schedules.}
++Both protocols receive the same snapshot-preparation failure, over-budget candidate, authority violation, stale expected installation, completed retry, ABA request, rollback, and concurrent-proposer schedules. Snapshot, full identity, ledger, and receipt are checked before and after returned errors. The concurrent-invocation schedule retains an A guard, starts replacement, and attempts a B invocation. AP must expose B before releasing A; GR rejects replacement until A drains. Overlap observations carry the identities captured by the actual guards. We do not read manager accounting from a callback while AP's writer waits for that callback, which would deadlock; accounting is checked before and after the operation.
+ 
+ \begin{table}[t]
+ \centering
++\small
+ \input{results.tex}
+-\caption{Five shared manager scenarios. AF: attach-first; DF: detach-first; TX: transactional replacement. Counts are observed checkpoints, not independent randomized trials. Failed requests include interrupted incomplete requests; TX has completed at that interruption point.}
++\caption{Same-manager fault campaign. AP bypasses invocation quiescence; GR uses the production gate. Counts describe finite adversarial schedules and observed checkpoints, not estimated failure probabilities.}
+ \label{tab:results}
+ \end{table}
+ 
+-Table~\ref{tab:results} shows three multi-version observations for AF and five empty observations for DF. TX has exactly one published version at all five matched checkpoints; both injected failures preserve its predecessor. All protocols maintain the pre-measured accounting invariant, so accounting alone cannot diagnose overlap or a gap. In three additional TX requests, an outstanding reader prevents replacement, a stale expected identity is rejected, and an exact retry of a completed request is rejected without another charge. All five TX failures preserve state. One nested invocation is explicitly skipped with \textsc{ExecutionBusy}; retry after the held guard drops succeeds. The separate component schedule holds old and new guards simultaneously despite a single published handle. This demonstrates the need to measure guard lifetime separately from pointer cardinality; it does not evaluate LITHE's single-loop executor.
++Two-step attach-first and detach-first protocols remain supporting failure witnesses. Stopping between their two publications exposes overlap or an empty slot. This is interruption between calls, not crash injection inside a transaction. They do not stand in for coordinated hot-swap systems, and do not drive the primary comparison. Python recomputes snapshot cardinality, full-identity freshness, guard overlap, and ledger consistency from the raw observations. Same-source Loom tests and manager integration tests separately exercise guard lifetime, epoch identity, and rejection paths.
+ 
+-The artifact retains the source revision and patch, commands, source hashes, raw JSONL, test logs, environment, derived CSV, and checksums. Additional tests cover authority expansion, map-bearing reset and unsupported transfer, candidate aliases, emergency-stop rejection, concurrent proposers, ABA recovery, epoch exhaustion, and owner teardown. Same-source Loom models check the invocation/transition race and guard lifetime. Cross-compilation and emulator dispatch are software checks; neither establishes physical safety or continual-learning performance.
++\paragraph{Hosted cost campaign.}
++We use release builds with identical preloaded candidates across both manager paths. A dispatcher and updater are pinned to separate physical cores of an AMD Ryzen 7 7735HS running Linux, with normal scheduling and frequency scaling. Dispatch has an absolute 1\,ms period and requested guard hold times of 0, 10, 100, or 500\,$\mu$s. Hold durations are imposed test conditions, not bytecode runtimes. Per protocol and hold regime, ten fresh processes each perform 1,000 raw replacement attempts after excluded warmup. A deterministic phase sweep spans the dispatch period. A \textsc{Busy} result retains the same logical request; only a successful receipt advances the expected installation and candidate.
+ 
+-\section{Limits and research agenda}
++\begin{table}[t]
++\centering
++\small
++\input{costs.tex}
++\caption{Hosted replacement cost and availability. Holds and latencies are in $\mu$s; latency cells show medians across ten per-process medians/p99s. Fractions give raw numerators and denominators. Natural skips exclude forced \textsc{TransitionBusy} probes. These are developer-host observations, not real-time guarantees.}
++\label{tab:costs}
++\end{table}
++
++\input{cost-note.tex}
++
++Timing uses \texttt{CLOCK\_MONOTONIC\_RAW}, preallocated sample buffers, and no JSON emission in timed regions. Empty clock-pair overhead is measured without subtraction. Successful replacement latency covers re-verification, preparation, admission, publication, and reclamation. Entry cost measures the real observer guard path, not BPF execution. We retain counts, per-process median/p99/maximum, release lateness, actual hold time, missed dispatch releases, first-attempt success, and skips per successful update. Reported latencies aggregate per-process quantiles, rather than pooling calls. Missing populations are undefined, not zero. Memory accounting compares one resident program with predecessor plus candidate; it measures manager-accounted resident bytecode bytes, excluding runtime objects, snapshots, allocator overhead, and RSS.
++
++The artifact retains revision and source patch, source and executable hashes, exact commands, raw JSONL, logs, environment, derived CSV/LaTeX, and checksums. One command rebuilds the hosted campaign and paper tables. Cross-compilation and QEMU remain separate software checks. No latency population is a hardware safety bound.
++
++\section{Scope and implications}
+ \label{sec:limits}
+-The guarded protocol trades availability for an explicit failure mode: an invocation may be skipped during a transition, and a replacement may have to retry rather than wait. Whether that trade is acceptable depends on the slot period and the controller above it. Likewise, retaining both programs consumes memory, and rejecting map-bearing candidates excludes useful stateful updates. These are visible limits rather than silent state-transfer assumptions.
++The gate trades availability for an explicit rejection: a replacement may need retrying, and a dispatch may be skipped during a transition. It also serializes invocations within this slot. Whether those costs are acceptable depends on the controller and scheduling policy; maximal rejection is not success. Retaining a predecessor consumes memory, and stateless admission excludes useful stateful updates. Kernel placement is one design point: middleware enforcing the same contract could supply equivalent semantics.
+ 
+-Kernel placement is a design choice: middleware enforcing the same invocation, identity, authority, state, and accounting contract could provide equivalent semantics. A sufficiently integrated action shield might subsume some installation checks. Our baselines expose uncoordinated attach/detach failure modes; they do not establish superiority over coordinated rollout or hot-swap systems. A stronger comparison should hold those surrounding mechanisms fixed and measure false rejection, availability, and task improvement alongside publication correctness. Maximal rejection is not success: a system that never admits an update can satisfy exclusivity while making continual adaptation useless.
++Our atomic baseline is a diagnostic ablation of this manager, not an implementation of LITHE. A single control loop can provide quiescence at a cycle boundary without this gate. Likewise, an integrated action monitor may subsume some installation checks. The contribution is an explicit contract and a matched method for testing it where invocation and replacement can race, beneath existing lifecycle governance.
+ 
+-The manager campaign and component ablation can test exclusivity, freshness, fail-closed behavior, and accounting, but it cannot support claims about physical safety. A command already dispatched downstream may outlive the installation that produced it. Closing that gap requires carrying installation identity into command and actuation records and defining where stale commands are rejected. Hardware experiments must separately validate emergency-stop timing, plant assumptions, and safe re-arming.
+-
+-Adaptation quality also remains unevaluated. Two follow-up scenarios are motor-reflex adaptation after a payload change and sensor-processing adaptation after distribution shift. The former tests actuator authority; the latter tests resource bounds and state compatibility without reducing the problem to an actuator filter. A later learning experiment should hold task streams, budgets, and action-assurance configuration fixed while reporting task outcomes independently from installation outcomes. Candidate generation may then respond to prior activations, so proposal sequences can diverge and must remain attributable. The immediate contribution is smaller: a testable publication contract for one exclusive runtime slot, situated beneath existing lifecycle governance and alongside existing atomic controller-swap systems. For continually learning embodied agents, who guards the update is a question about the execution substrate as well as the learner.
++The contract ends at the guarded invocation boundary. A command already sent downstream may outlive the installation that produced it, and physical motion cannot be rolled back. Queue fencing requires propagation of installation identity and an explicit stale-command rejection point. Controller stability, state transfer, persistent recovery, emergency-stop timing, and continual-learning quality require separate experiments. Motor-reflex adaptation after a payload shift and sensor-processing adaptation after distribution shift are two useful next task settings. Their evaluation should report task improvement and installation correctness independently: adaptation should not imply deployment.
+ 
+ \clearpage
+ \bibliographystyle{plainnat}
+diff --git c/papers/cl4fmagents2026/verify.py w/papers/cl4fmagents2026/verify.py
+index 221796e..a17654f 100644
+--- c/papers/cl4fmagents2026/verify.py
++++ w/papers/cl4fmagents2026/verify.py
+@@ -1,10 +1,13 @@
+ #!/usr/bin/env python3
+ """Check the review PDF and its table against the retained publication trace."""
+ import importlib.util
++import hashlib
+ import json
++import os
+ from pathlib import Path
+ import re
+ import subprocess
++import tempfile
+ 
+ HERE = Path(__file__).resolve().parent
+ ROOT = HERE.parents[1]
+@@ -36,22 +39,80 @@ log = (HERE / "build/main.log").read_text()
+ assert not re.search(r"Overfull|undefined|Citation .* undefined|Rerun to get", log)
+ source = (HERE / "main.tex").read_text()
+ assert r"\usepackage[dblblindworkshop]{neurips_2026}" in source
+-evidence = ROOT / "docs/performance/evidence/update-transaction"
+-subprocess.run(["python3", str(ROOT / "scripts/benchmark/analyze-update-transaction.py"),
+-                str(evidence / "trace.jsonl")], check=True, capture_output=True, text=True)
++evidence = Path(os.environ.get("UPDATE_PUBLICATION_EVIDENCE",
++                ROOT / "docs/performance/evidence/update-transaction-v2"))
++checksums = {}
++for line in (evidence / "SHA256SUMS").read_text().splitlines():
++    digest, separator, name = line.partition("  ")
++    relative = Path(name)
++    assert separator and re.fullmatch(r"[0-9a-f]{64}", digest), "Malformed checksum"
++    assert name and not relative.is_absolute() and ".." not in relative.parts
++    assert relative.as_posix() == name and name not in checksums, "Duplicate/aliased checksum path"
++    path = evidence / relative
++    assert not path.is_symlink() and path.is_file(), f"Missing/linked evidence: {name}"
++    assert hashlib.sha256(path.read_bytes()).hexdigest() == digest, f"Corrupt evidence: {name}"
++    checksums[name] = digest
++assert set(checksums) == {str(p.relative_to(evidence)) for p in evidence.rglob("*")
++                          if p.is_file() and p.name != "SHA256SUMS"}, "Incomplete checksums"
++manifest = json.loads((evidence / "environment.json").read_text())
++assert manifest["exit_code"] == 0 and not manifest["timed_out"], "Capture failed"
++assert not manifest["malformed_records"], "Malformed raw evidence"
++assert not manifest["changed_sources_during_run"] and not manifest["changed_executables_during_run"]
++source_digest = hashlib.sha256(json.dumps({"revision": manifest["revision"],
++    "sources": manifest["source_sha256"]}, sort_keys=True).encode()).hexdigest()
++assert source_digest == manifest["source_digest"] == manifest["build_source_digest"] == manifest["finished_source_digest"]
++assert manifest["patch_sha256"] == checksums["source.patch"]
++for name, digest in manifest["source_sha256"].items():
++    retained = "untracked-source/" + name
++    if retained in checksums:
++        assert checksums[retained] == digest, f"Source copy disagrees with manifest: {name}"
++for marker, trace in (("UPDATE_TXN", "trace.jsonl"), ("UPDATE_COST", "cost-trace.jsonl")):
++    assert manifest["trace_records"][marker] == sum(1 for line in (evidence / trace).open() if line.strip())
++build_command = json.loads((evidence / "build-command.json").read_text())
++assert "--locked" in build_command and "--release" in build_command
++assert "kernel_bpf/embedded-profile" in build_command[build_command.index("--features") + 1]
++targets = {}
++for line in (evidence / "build-artifacts.jsonl").read_text().splitlines():
++    record = json.loads(line)
++    if record.get("reason") == "compiler-artifact" and record.get("executable"):
++        targets[record["target"]["name"]] = record["executable"]
++assert {"bpf_update_campaign", "bpf_update_measurements"} <= targets.keys()
++assert {targets[name] for name in ("bpf_update_campaign", "bpf_update_measurements")} == set(manifest["executable_sha256"])
++if os.environ.get("UPDATE_PUBLICATION_CHECK_BINARIES") == "1":
++    for name, digest in manifest["executable_sha256"].items():
++        assert hashlib.sha256(Path(name).read_bytes()).hexdigest() == digest, f"Measured binary changed: {name}"
++# Verification must never rewrite the retained evidence being checked.
++with tempfile.TemporaryDirectory(prefix="publication-paper-check-") as directory:
++    regenerated = Path(directory)
++    for trace, analyzer in (("trace.jsonl", "analyze-update-transaction.py"),
++                            ("cost-trace.jsonl", "analyze-update-cost.py")):
++        command = ["python3", str(ROOT / "scripts/benchmark" / analyzer), str(evidence / trace),
++                   "--output-dir", str(regenerated)]
++        subprocess.run(command, check=True, capture_output=True, text=True, timeout=120)
++    for name in ("analysis.json", "cost-analysis.json", "result-table.tex", "cost-table.tex", "cost-note.tex"):
++        assert (evidence / name).read_bytes() == (regenerated / name).read_bytes(), name
+ records = [json.loads(line) for line in (evidence / "trace.jsonl").read_text().splitlines()]
+ spec = importlib.util.spec_from_file_location(
+     "update_analysis", ROOT / "scripts/benchmark/analyze-update-transaction.py")
+ analysis = importlib.util.module_from_spec(spec)
+ spec.loader.exec_module(analysis)
+-assert analysis.analyze(records) == json.loads((evidence / "analysis.json").read_text())["summary"]
+-assert (HERE / "results.tex").read_bytes() == (evidence / "result-table.tex").read_bytes()
+-assert r"\input{results.tex}" in source, "PDF does not include the generated result table"
+-for row in (HERE / "results.tex").read_text().splitlines():
+-    if " & " in row and not row.startswith("Observation &"):
++reported = json.loads((evidence / "analysis.json").read_text())
++assert analysis.analyze(records) == {**reported["paired_summary"], **reported["supporting_summary"]}
++for local, retained in (("results.tex", "result-table.tex"), ("costs.tex", "cost-table.tex"),
++                        ("cost-note.tex", "cost-note.tex")):
++    assert (HERE / local).read_bytes() == (evidence / retained).read_bytes()
++    assert f"\\input{{{local}}}" in source, f"PDF does not include {local}"
++    for row in (HERE / local).read_text().splitlines():
++        if " & " not in row or row.startswith(("Observation &", "Fault &", "Hold ")):
++            continue
+         cells = row.removesuffix(r" \\").split(" & ")
++        cells = [re.sub(r"\\(?:textsc|textbf|texttt)\{([^{}]*)\}", r"\1", cell) for cell in cells]
+         pattern = r"\s+".join((r"(?:--|–|—)" if cell == "--" else re.escape(cell)) for cell in cells)
+-        assert re.search(pattern, text), f"Generated table row absent from PDF: {cells}"
++        assert re.search(pattern, text, re.I), f"Generated table row absent from PDF: {cells}"
+ assert "qin2026governed" in source and "lim2026lithe" in source
++prose = re.sub(r"^\s*\d+\s{2,}", "", text, flags=re.M)
++normalize = lambda value: re.sub(r"[^a-z0-9]", "", value.lower())
++note = (HERE / "cost-note.tex").read_text().replace(r"\mu", "")
++assert normalize(note) in normalize(prose), "Generated cost prose absent from PDF"
+ 
+-print("PASS: at most four content pages; anonymous text/metadata; resolved build; trace-derived table.")
++print("PASS: at most four content pages; anonymous PDF; resolved build; verified provenance and trace-derived tables/prose.")
+diff --git c/scripts/benchmark/analyze-update-transaction.py w/scripts/benchmark/analyze-update-transaction.py
+index 87ce3e8..e2d3db7 100644
+--- c/scripts/benchmark/analyze-update-transaction.py
++++ w/scripts/benchmark/analyze-update-transaction.py
+@@ -10,9 +10,53 @@ import json
+ from pathlib import Path
+ 
+ PROTOCOLS = ("attach_first", "detach_first", "atomic_publication", "transactional")
+-METRICS = ("requests", "unsupported_cases", "snapshots", "single_snapshots", "dual_snapshots", "empty_snapshots",
+-           "execution_checks", "execution_overlap", "accounting_checks", "accounting_mismatches", "failed_requests", "failed_preserved",
+-           "expected_requests", "stale_acceptances", "installation_violations", "skipped_dispatches")
++PAIRED_PROTOCOLS = ("atomic_publication", "transactional")
++SUPPORTING_PROTOCOLS = ("attach_first", "detach_first")
++PAIRED_CASES = (
++    "snapshot_prep_failure", "budget_rejection", "authority_rejection",
++    "stale_expected", "completed_retry", "rollback", "aba",
++    "concurrent_proposers", "held_a_schedule",
++)
++METRICS = (
++    "requests", "unsupported_cases", "snapshots", "single_snapshots",
++    "dual_snapshots", "empty_snapshots", "guard_checks", "guard_overlap",
++    "execution_checks", "execution_overlap", "accounting_checks",
++    "accounting_mismatches", "receipt_checks", "receipt_violations",
++    "failed_requests", "failed_preserved", "expected_requests",
++    "stale_acceptances", "installation_violations", "skipped_dispatches",
++)
++
++
++def _outcome_kind(outcome):
++    return outcome.split(" ", 1)[0].split("{", 1)[0]
++
++
++def _guards(record, state):
++    return state.get("guards", []) if record["schema"] == 2 else state.get("executing", [])
++
++
++def _same_state(left, right, schema):
++    keys = ["snapshot", "installation", "committed"]
++    if schema == 2:
++        keys.append("receipt")
++    return all(left.get(key) == right.get(key) for key in keys)
++
++
++def _receipt_valid(record, before, after):
++    receipt = after.get("receipt")
++    if receipt is None or after.get("installation") is None:
++        return False
++    candidate = record["candidate"]
++    costs = record["costs"]
++    old_charge = sum(costs[str(program)] for program in before["snapshot"])
++    new_charge = costs[str(candidate)]
++    return (
++        receipt.get("previous") == before.get("installation")
++        and receipt.get("installed") == after.get("installation")
++        and after["installation"][0] == candidate
++        and receipt.get("committed") == new_charge
++        and receipt.get("admission_delta") == new_charge - old_charge
++    )
+ 
+ 
+ def analyze(records):
+@@ -20,12 +64,17 @@ def analyze(records):
+     seen = set()
+     for record in records:
+         protocol = record.get("protocol")
+-        if record.get("schema") != 1 or protocol not in PROTOCOLS:
++        schema = record.get("schema")
++        if schema not in (1, 2) or protocol not in PROTOCOLS:
+             raise ValueError("unknown trace schema/protocol")
+-        identity = (protocol, record["case"], record["request_id"])
++        identity = (schema, protocol, record["case"], record["request_id"])
+         if identity in seen:
+             raise ValueError(f"duplicate request: {identity}")
+         seen.add(identity)
++        observations = record["observations"]
++        encoded = [json.dumps(state, sort_keys=True) for state in observations]
++        if len(encoded) != len(set(encoded)):
++            raise ValueError(f"duplicate observation: {identity}")
+         row = result.setdefault(protocol, dict.fromkeys(METRICS, 0))
+         if record["outcome"] == "Unsupported":
+             row["unsupported_cases"] += 1
+@@ -33,95 +82,252 @@ def analyze(records):
+         row["requests"] += 1
+         before, after = record["before"], record["after"]
+         costs = record["costs"]
+-        for state in [*record["observations"], after]:
++        for state in [*observations, after]:
+             cardinality = len(state["snapshot"])
+             row["snapshots"] += 1
+             row["single_snapshots"] += cardinality == 1
+             row["dual_snapshots"] += cardinality > 1
+             row["empty_snapshots"] += cardinality == 0
+-            versions = {json.dumps(v, sort_keys=True) for v in (state["executing"] or [])}
+-            row["execution_checks"] += bool(versions)
+-            row["execution_overlap"] += len(versions) > 1
++            guards = {json.dumps(identity) for identity in _guards(record, state)}
++            if schema == 2:
++                row["guard_checks"] += bool(guards)
++                row["guard_overlap"] += len(guards) > 1
++            else:
++                row["execution_checks"] += bool(guards)
++                row["execution_overlap"] += len(guards) > 1
+             if state["committed"] is not None:
+                 row["accounting_checks"] += 1
+-                expected_charge = record["ordinary_charge"] + sum(costs[str(p)] for p in state["snapshot"])
++                try:
++                    expected_charge = record["ordinary_charge"] + sum(
++                        costs[str(program)] for program in state["snapshot"])
++                except (KeyError, TypeError) as error:
++                    raise ValueError(f"incomplete accounting evidence: {identity}") from error
+                 row["accounting_mismatches"] += state["committed"] != expected_charge
+         succeeded = record["outcome"] == "Ok"
+         if not succeeded:
+             row["failed_requests"] += 1
+-            row["failed_preserved"] += all(before[key] == after[key]
+-                                            for key in ("snapshot", "installation", "committed"))
++            row["failed_preserved"] += _same_state(before, after, schema)
+         expected = record["expected"]
+         if expected is not None:
+             row["expected_requests"] += 1
+             row["stale_acceptances"] += succeeded and expected != before["installation"]
+-        if succeeded and protocol == "transactional":
++        manager_publication = schema == 2 and protocol in PAIRED_PROTOCOLS
++        if succeeded and (manager_publication or protocol == "transactional"):
+             installed = after["installation"]
+             old = before["installation"]
+             row["installation_violations"] += not (
+                 installed is not None and installed[0] == record["candidate"]
+                 and after["snapshot"] == [record["candidate"]]
+                 and (old is None or installed[1] > old[1]))
++        if manager_publication:
++            row["receipt_checks"] += 1
++            if succeeded:
++                row["receipt_violations"] += not _receipt_valid(record, before, after)
++            else:
++                row["receipt_violations"] += before.get("receipt") != after.get("receipt")
+         row["skipped_dispatches"] += record["skipped_dispatches"]
+     if not result:
+         raise ValueError("empty campaign")
+     return result
+ 
+ 
++def validate_paired(records):
++    paired = [record for record in records if record.get("protocol") in PAIRED_PROTOCOLS]
++    by_protocol = {protocol: [r for r in paired if r["protocol"] == protocol]
++                   for protocol in PAIRED_PROTOCOLS}
++    if any(not group for group in by_protocol.values()):
++        raise ValueError("paired campaign requires AP and TX records")
++    case_sets = {protocol: {record["case"] for record in group}
++                 for protocol, group in by_protocol.items()}
++    if case_sets[PAIRED_PROTOCOLS[0]] != case_sets[PAIRED_PROTOCOLS[1]]:
++        raise ValueError("AP/TX case sets differ")
++
++    rows = analyze(paired)
++    for protocol in PAIRED_PROTOCOLS:
++        row = rows[protocol]
++        if row["failed_preserved"] != row["failed_requests"]:
++            raise ValueError(f"{protocol} failed preservation invariant violated")
++        if row["accounting_mismatches"]:
++            raise ValueError(f"{protocol} accounting invariant violated")
++        if row["receipt_violations"]:
++            raise ValueError(f"{protocol} receipt invariant violated")
++        if row["stale_acceptances"] or row["installation_violations"]:
++            raise ValueError(f"{protocol} identity invariant violated")
++        if row["dual_snapshots"] or row["empty_snapshots"]:
++            raise ValueError(f"{protocol} publication cardinality invariant violated")
++        if protocol == "transactional" and row["guard_overlap"]:
++            raise ValueError("transactional guard overlap is forbidden")
++
++    for record in paired:
++        all_states = [record["before"], *record["observations"], record["after"]]
++        for state in all_states:
++            if any(not isinstance(identity, list) or len(identity) != 2
++                   or not all(isinstance(value, int) for value in identity)
++                   for identity in _guards(record, state)):
++                raise ValueError("malformed guard identity")
++        overlaps = [state for state in [*record["observations"], record["after"]]
++                    if len({tuple(identity) for identity in _guards(record, state)}) > 1]
++        if record["protocol"] == "atomic_publication" and overlaps and record["case"] != "held_a_schedule":
++            raise ValueError("atomic guard overlap outside held_a_schedule")
++        for label, state in (("before", record["before"]), ("after", record["after"])):
++            installation = state.get("installation")
++            if (len(state["snapshot"]) != 1 or installation is None
++                    or state["snapshot"] != [installation[0]]
++                    or state.get("committed") is None or state.get("receipt") is None
++                    or state.get("guards") != [installation]):
++                raise ValueError(f"malformed paired {label} state")
++        if record["case"] == "held_a_schedule" and record["protocol"] == "atomic_publication":
++            if len(record["observations"]) != 1 or len(overlaps) != 1:
++                raise ValueError("atomic held_a_schedule requires one guard overlap")
++            overlap = overlaps[0]
++            if (overlap["snapshot"] != [record["candidate"]]
++                    or overlap["installation"][0] != record["candidate"]
++                    or overlap["committed"] is not None
++                    or overlap.get("receipt") is not None
++                    or {tuple(identity) for identity in overlap["guards"]}
++                    != {tuple(record["before"]["installation"]),
++                        tuple(overlap["installation"])}):
++                raise ValueError("atomic held_a_schedule overlap is malformed")
++        if record["case"] == "held_a_schedule" and record["protocol"] == "transactional":
++            if len(record["observations"]) != 1 or not _same_state(
++                    record["before"], record["observations"][0], record["schema"]):
++                raise ValueError("transactional Busy attempt did not preserve A")
++
++    indexed = {(record["protocol"], record["case"]): record for record in paired}
++    for case in case_sets[PAIRED_PROTOCOLS[0]]:
++        atomic = indexed[("atomic_publication", case)]
++        guarded = indexed[("transactional", case)]
++        if (atomic["costs"] != guarded["costs"]
++                or atomic["ordinary_charge"] != guarded["ordinary_charge"]):
++            raise ValueError(f"AP/TX accounting fixtures differ for {case}")
++
++    expected = {
++        "snapshot_prep_failure": {protocol: ["SnapshotAllocationFailed"] for protocol in PAIRED_PROTOCOLS},
++        "budget_rejection": {protocol: ["AdmissionRejected"] for protocol in PAIRED_PROTOCOLS},
++        "authority_rejection": {protocol: ["AuthorityExceeded"] for protocol in PAIRED_PROTOCOLS},
++        "stale_expected": {protocol: ["StaleInstallation"] for protocol in PAIRED_PROTOCOLS},
++        "completed_retry": {protocol: ["StaleInstallation"] for protocol in PAIRED_PROTOCOLS},
++        "rollback": {protocol: ["Ok"] for protocol in PAIRED_PROTOCOLS},
++        "aba": {protocol: ["StaleInstallation"] for protocol in PAIRED_PROTOCOLS},
++        "concurrent_proposers": {protocol: ["Ok", "StaleInstallation"] for protocol in PAIRED_PROTOCOLS},
++        "held_a_schedule": {
++            "atomic_publication": ["Ok"],
++            "transactional": ["Busy", "Ok"],
++        },
++    }
++    for record in paired:
++        if record["case"] not in expected:
++            continue
++        attempts = record.get("attempts", [
++            {"candidate": record["candidate"], "outcome": record["outcome"]}])
++        actual = sorted(_outcome_kind(attempt["outcome"]) for attempt in attempts)
++        wanted = sorted(expected[record["case"]][record["protocol"]])
++        if actual != wanted:
++            raise ValueError(f"unexpected outcome for {record['protocol']}/{record['case']}: {actual}")
++    return rows
++
++
++def _write_csv(path, protocols, rows):
++    with path.open("w", newline="") as stream:
++        writer = csv.DictWriter(stream, fieldnames=("protocol", *METRICS))
++        writer.writeheader()
++        writer.writerows({"protocol": protocol, **rows[protocol]} for protocol in protocols)
++
++
++def write_artifacts(trace, records, rows, destination):
++    validate_paired(records)
++    destination.mkdir(parents=True, exist_ok=True)
++    paired_rows = {protocol: rows[protocol] for protocol in PAIRED_PROTOCOLS}
++    supporting_rows = {protocol: rows[protocol] for protocol in SUPPORTING_PROTOCOLS}
++    cases = {protocol: sorted({r["case"] for r in records if r["protocol"] == protocol})
++             for protocol in PROTOCOLS}
++    outcomes = {
++        case: {
++            protocol: next(r.get("attempts", [{"candidate": r["candidate"], "outcome": r["outcome"]}])
++                           for r in records if r["protocol"] == protocol and r["case"] == case)
++            for protocol in PAIRED_PROTOCOLS
++        }
++        for case in sorted(set(cases[PAIRED_PROTOCOLS[0]]) & set(cases[PAIRED_PROTOCOLS[1]]))
++    }
++    _write_csv(destination / "summary.csv", PAIRED_PROTOCOLS, paired_rows)
++    _write_csv(destination / "supporting-summary.csv", SUPPORTING_PROTOCOLS, supporting_rows)
++    analysis = {
++        "paired_summary": paired_rows,
++        "supporting_summary": supporting_rows,
++        "fault_outcomes": outcomes,
++        "trace_sha256": hashlib.sha256(trace.read_bytes()).hexdigest(),
++        "cases": cases,
++        "paired_cases": sorted(set(cases[PAIRED_PROTOCOLS[0]]) & set(cases[PAIRED_PROTOCOLS[1]])),
++        "scope": {protocol: sorted({r.get("scope", "unspecified") for r in records
++                                     if r["protocol"] == protocol})
++                  for protocol in PROTOCOLS},
++        "denominator": "each emitted intermediate observation plus each request's final observation",
++    }
++    (destination / "analysis.json").write_text(json.dumps(analysis, indent=2, sort_keys=True) + "\n")
++    compact_faults = (
++        ("Snapshot preparation", "reject; preserve", "reject; preserve"),
++        ("Authority / budget", "reject (2/2)", "reject (2/2)"),
++        ("Stale / retry / ABA", "reject (3/3)", "reject (3/3)"),
++        ("Concurrent proposers", "one winner", "one winner"),
++        ("Held predecessor", "publish; overlap", "Busy; retry OK"),
++    )
++    # These labels are emitted only after validate_paired verifies each named
++    # outcome and error preservation; counts remain available in the full CSV.
++    lines = ["% Generated from the validated paired manager campaign; do not hand-edit.\n",
++             r"\begin{tabular}{lrr}" + "\n", r"\toprule" + "\n",
++             r"Observation / fault & AP & GR \\" + "\n", r"\midrule" + "\n"]
++    lines.append("Multi / empty snapshots & " + " & ".join(
++        f"{paired_rows[p]['dual_snapshots']}/{paired_rows[p]['empty_snapshots']}"
++        for p in PAIRED_PROTOCOLS) + r" \\" + "\n")
++    lines.append("Overlapping guards & " + " & ".join(
++        str(paired_rows[p]['guard_overlap']) for p in PAIRED_PROTOCOLS) + r" \\" + "\n")
++    lines.append(r"\midrule" + "\n")
++    for label, atomic, guarded in compact_faults:
++        lines.append(f"{label} & {atomic} & {guarded} " + r"\\" + "\n")
++    lines += [r"\bottomrule" + "\n", r"\end{tabular}" + "\n"]
++    (destination / "result-table.tex").write_text("".join(lines))
++    checksum_paths = [path for path in sorted(destination.rglob("*"))
++                      if path.is_file() and path.name != "SHA256SUMS"]
++    (destination / "SHA256SUMS").write_text("".join(
++        f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(destination)}\n"
++        for path in checksum_paths))
++
++
+ def main():
+     parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument("trace", type=Path)
++    parser.add_argument("--write-artifacts", action="store_true",
++                        help="write derived files beside the trace")
++    parser.add_argument("--output-dir", type=Path,
++                        help="write derived files here (implies --write-artifacts)")
+     args = parser.parse_args()
+     records = [json.loads(line) for line in args.trace.read_text().splitlines() if line.strip()]
+     rows = analyze(records)
+     if set(rows) != set(PROTOCOLS):
+         raise ValueError("final campaign must contain all four protocols")
+-    cases = {p: {r["case"] for r in records if r["protocol"] == p and r["outcome"] != "Unsupported"}
+-             for p in PROTOCOLS}
+-    shared_manager_cases = cases["attach_first"] & cases["detach_first"] & cases["transactional"]
+-    if not shared_manager_cases:
+-        raise ValueError("no shared manager scenarios")
+-    destination = args.trace.parent
+-    with (destination / "summary.csv").open("w", newline="") as stream:
+-        writer = csv.DictWriter(stream, fieldnames=("protocol", *METRICS))
+-        writer.writeheader()
+-        writer.writerows({"protocol": p, **rows[p]} for p in PROTOCOLS)
+-    manager_protocols = ("attach_first", "detach_first", "transactional")
+-    table_rows = analyze([r for r in records if r["protocol"] in manager_protocols
+-                          and r["case"] in shared_manager_cases])
+-    analysis = {"table_summary": table_rows, "trace_sha256": hashlib.sha256(args.trace.read_bytes()).hexdigest(),
+-                "cases": {p: sorted(c) for p, c in cases.items()}, "summary": rows,
+-                "shared_manager_cases": sorted(shared_manager_cases),
+-                "scope": {p: sorted({r.get("scope", "unspecified") for r in records if r["protocol"] == p})
+-                          for p in PROTOCOLS},
+-                "denominator": "emitted intermediate observations plus each request's final observation"}
+-    (destination / "analysis.json").write_text(json.dumps(analysis, indent=2, sort_keys=True) + "\n")
+-    labels = (("Observed snapshots", "snapshots"), ("Multiple versions", "dual_snapshots"),
+-              ("Empty snapshots", "empty_snapshots"),
+-              ("Accounting mismatches", "accounting_mismatches"))
+-    lines = ["% Generated from shared manager scenarios; do not hand-edit.\n",
+-             r"\begin{tabular}{lrrr}" + "\n", r"\toprule" + "\n",
+-             r"Observation & AF & DF & TX \\" + "\n", r"\midrule" + "\n"]
+-    for label, key in labels:
+-        lines.append(label + " & " + " & ".join(str(table_rows[p][key]) for p in manager_protocols) + r" \\" + "\n")
+-    lines.append("Failed requests preserved & " + " & ".join(
+-        f"{table_rows[p]['failed_preserved']}/{table_rows[p]['failed_requests']}" if table_rows[p]['failed_requests'] else "--"
+-        for p in manager_protocols) + r" \\" + "\n")
+-    lines += [r"\bottomrule" + "\n", r"\end{tabular}" + "\n"]
+-    (destination / "result-table.tex").write_text("".join(lines))
++    is_v2 = any(record["schema"] == 2 for record in records)
++    if is_v2:
++        cases = {protocol: {r["case"] for r in records if r["protocol"] == protocol}
++                 for protocol in PAIRED_PROTOCOLS}
++        if any(cases[protocol] != set(PAIRED_CASES) for protocol in PAIRED_PROTOCOLS):
++            raise ValueError("v2 paired campaign has an incomplete case set")
++        validate_paired(records)
++        if args.write_artifacts or args.output_dir:
++            write_artifacts(args.trace, records, rows, args.output_dir or args.trace.parent)
++        print(f"PASS: {sum(rows[p]['requests'] for p in PAIRED_PROTOCOLS)} paired AP/TX requests; invariants hold")
++        return
++
+     transactional = rows["transactional"]
+     failures = [key for key in ("dual_snapshots", "empty_snapshots", "execution_overlap",
+-                               "accounting_mismatches", "stale_acceptances", "installation_violations")
++                                "accounting_mismatches", "stale_acceptances", "installation_violations")
+                 if transactional[key]]
+     if transactional["failed_preserved"] != transactional["failed_requests"]:
+         failures.append("failed_preservation")
+     if failures:
+         raise ValueError(f"transactional invariants violated: {failures}")
+-    checksum_paths = [p for p in sorted(destination.rglob("*")) if p.is_file() and p.name != "SHA256SUMS"]
+-    (destination / "SHA256SUMS").write_text("".join(
+-        f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(destination)}\n" for p in checksum_paths))
+-    print(f"PASS: {sum(row['requests'] for row in rows.values())} measured requests, "
+-          f"{len(shared_manager_cases)} shared manager scenarios; transactional invariants hold")
++    if args.write_artifacts or args.output_dir:
++        raise ValueError("legacy v1 evidence is immutable; choose a separate v2 trace")
++    print(f"PASS: legacy v1 trace read-only; {sum(row['requests'] for row in rows.values())} requests")
+ 
+ 
+ if __name__ == "__main__":
+diff --git c/scripts/benchmark/test_update_transaction_analysis.py w/scripts/benchmark/test_update_transaction_analysis.py
+index 1b901ca..f274621 100644
+--- c/scripts/benchmark/test_update_transaction_analysis.py
++++ w/scripts/benchmark/test_update_transaction_analysis.py
+@@ -35,6 +35,71 @@ class AnalyzerTest(unittest.TestCase):
+         with self.assertRaises(ValueError):
+             analyzer.analyze([{"schema": 1, "protocol": "unknown"}])
+ 
++    def v2_state(self, program, epoch, committed, receipt, guards=None):
++        identity = [program, epoch]
++        return {"snapshot": [program], "installation": identity,
++                "committed": committed, "receipt": receipt,
++                "guards": guards if guards is not None else [identity]}
++
++    def v2_record(self, protocol, case="snapshot_prep_failure"):
++        receipt = {"previous": None, "installed": [1, 1],
++                   "admission_delta": 10, "committed": 10}
++        state = self.v2_state(1, 1, 110, receipt)
++        return {"schema": 2, "protocol": protocol, "scope": "bpf_manager",
++                "case": case, "request_id": 1, "before": state,
++                "observations": [], "after": dict(state),
++                "costs": {"1": 10, "2": 20}, "ordinary_charge": 100,
++                "outcome": "SnapshotAllocationFailed", "expected": [1, 1],
++                "candidate": 2, "attempts": [
++                    {"candidate": 2, "outcome": "SnapshotAllocationFailed"}],
++                "skipped_dispatches": 0}
++
++    def test_paired_validation_rejects_corrupt_accounting(self):
++        analyzer = load_analyzer()
++        records = [self.v2_record("atomic_publication"),
++                   self.v2_record("transactional")]
++        records[0]["before"]["committed"] = 999
++        records[0]["after"]["committed"] = 999
++        with self.assertRaisesRegex(ValueError, "accounting"):
++            analyzer.validate_paired(records)
++
++    def test_paired_validation_rejects_guard_overlap_in_transactional(self):
++        analyzer = load_analyzer()
++        records = [self.v2_record("atomic_publication"),
++                   self.v2_record("transactional")]
++        records[1]["after"]["guards"] = [[1, 1], [2, 2]]
++        with self.assertRaisesRegex(ValueError, "guard overlap"):
++            analyzer.validate_paired(records)
++
++    def test_paired_validation_rejects_multi_program_publication(self):
++        analyzer = load_analyzer()
++        records = [self.v2_record("atomic_publication"),
++                   self.v2_record("transactional")]
++        records[0]["observations"] = [
++            {"snapshot": [1, 2], "installation": [2, 2], "committed": 130,
++             "receipt": records[0]["before"]["receipt"], "guards": [[2, 2]]}]
++        with self.assertRaisesRegex(ValueError, "cardinality"):
++            analyzer.validate_paired(records)
++
++    def test_failed_request_must_preserve_receipt(self):
++        analyzer = load_analyzer()
++        records = [self.v2_record("atomic_publication"),
++                   self.v2_record("transactional")]
++        records[0]["after"]["receipt"] = {
++            "previous": [1, 1], "installed": [2, 2],
++            "admission_delta": 10, "committed": 20}
++        with self.assertRaisesRegex(ValueError, "failed preservation"):
++            analyzer.validate_paired(records)
++
++    def test_atomic_overlap_is_only_allowed_in_held_a_schedule(self):
++        analyzer = load_analyzer()
++        records = [self.v2_record("atomic_publication"),
++                   self.v2_record("transactional")]
++        records[0]["observations"] = [
++            self.v2_state(2, 2, None, None, [[1, 1], [2, 2]])]
++        with self.assertRaisesRegex(ValueError, "guard overlap"):
++            analyzer.validate_paired(records)
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
+diff --git c/scripts/benchmark/update-transaction-runner.py w/scripts/benchmark/update-transaction-runner.py
+index 8ca0f22..affaced 100644
+--- c/scripts/benchmark/update-transaction-runner.py
++++ w/scripts/benchmark/update-transaction-runner.py
+@@ -7,23 +7,51 @@ import argparse
+ import hashlib
+ from datetime import datetime, timezone
+ import json
++import os
+ import platform
+ import shlex
++import signal
+ import subprocess
+ import sys
++import threading
+ from pathlib import Path
+ 
+ ROOT = Path(__file__).resolve().parents[2]
+-MARKER = "UPDATE_TXN "
++MARKERS = {"UPDATE_TXN": "trace.jsonl", "UPDATE_COST": "cost-trace.jsonl"}
+ 
+ 
+ def git(*args: str) -> bytes:
+     return subprocess.check_output(["git", *args], cwd=ROOT)
+ 
+ 
++def read_host_file(path: str) -> str | None:
++    try:
++        return Path(path).read_text().strip()
++    except OSError:
++        return None
++
++
++def source_manifest(destination: Path):
++    revision = git("rev-parse", "HEAD").decode().strip()
++    tracked = git("ls-files", "-z").decode().split("\0")
++    untracked = git("ls-files", "--others", "--exclude-standard", "-z").decode().split("\0")
++    hashes = {}
++    for name in sorted(set(tracked + untracked) - {""}):
++        path = ROOT / name
++        if path.is_file() and not path.is_symlink() and destination not in path.parents:
++            hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
++    digest = hashlib.sha256(json.dumps({"revision": revision, "sources": hashes},
++                                      sort_keys=True).encode()).hexdigest()
++    return revision, hashes, untracked, digest
++
++
+ def main() -> int:
+     parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument("--output", type=Path, required=True)
++    parser.add_argument("--marker", action="append", choices=MARKERS)
++    parser.add_argument("--measured-executable", action="append", type=Path, default=[])
++    parser.add_argument("--expected-source-digest")
++    parser.add_argument("--timeout-seconds", type=float, default=600)
+     parser.add_argument("command", nargs=argparse.REMAINDER)
+     args = parser.parse_args()
+     command = args.command
+@@ -31,24 +59,23 @@ def main() -> int:
+         command = command[1:]
+     if not command:
+         parser.error("supply an explicit Rust test/campaign command after --")
++    if args.timeout_seconds <= 0:
++        parser.error("timeout must be positive")
+     destination = args.output.resolve()
++    revision, source_hashes, untracked, digest = source_manifest(destination)
++    if args.expected_source_digest and args.expected_source_digest != digest:
++        parser.error("source changed between build and evidence capture")
++    markers = args.marker or ["UPDATE_TXN"]
++    executable_hashes = {str(path.resolve()): hashlib.sha256(path.read_bytes()).hexdigest()
++                         for path in args.measured_executable}
+     destination.mkdir(parents=True, exist_ok=False)
+-    revision = git("rev-parse", "HEAD").decode().strip()
+     patch = git("diff", "--binary", "HEAD")
+     (destination / "source.patch").write_bytes(patch)
+-    tracked = git("ls-files", "-z").decode().split("\0")
+-    untracked = git("ls-files", "--others", "--exclude-standard", "-z").decode().split("\0")
+-    source_hashes = {}
+-    for name in sorted(set(tracked + untracked) - {""}):
+-        path = ROOT / name
+-        if not path.is_file() or path.is_symlink() or destination in path.parents:
+-            continue
+-        contents = path.read_bytes()
+-        source_hashes[name] = hashlib.sha256(contents).hexdigest()
++    for name in source_hashes:
+         if name in untracked:
+             retained = destination / "untracked-source" / name
+             retained.parent.mkdir(parents=True, exist_ok=True)
+-            retained.write_bytes(contents)
++            retained.write_bytes((ROOT / name).read_bytes())
+     manifest = {
+         "schema": 1,
+         "started_utc": datetime.now(timezone.utc).isoformat(),
+@@ -59,7 +86,23 @@ def main() -> int:
+         "platform": platform.uname()._asdict(),
+         "python": sys.version,
+         "source_sha256": source_hashes,
+-        "claim_boundary": "software kernel executor; no physical or learning experiment",
++        "source_digest": digest,
++        "build_source_digest": args.expected_source_digest,
++        "executable_sha256": executable_hashes,
++        "claim_boundary": "hosted manager and guard observations; no physical or privileged bytecode execution",
++    }
++    allowed = sorted(os.sched_getaffinity(0))
++    manifest["host"] = {
++        "allowed_cpus": allowed,
++        "cpuinfo": read_host_file("/proc/cpuinfo"),
++        "loadavg_start": read_host_file("/proc/loadavg"),
++        "boost": read_host_file("/sys/devices/system/cpu/cpufreq/boost"),
++        "cpu_topology": {str(cpu): {field: read_host_file(f"/sys/devices/system/cpu/cpu{cpu}/{path}")
++            for field, path in (("core", "topology/core_id"),
++                                ("package", "topology/physical_package_id"),
++                                ("siblings", "topology/thread_siblings_list"),
++                                ("governor", "cpufreq/scaling_governor"))}
++            for cpu in allowed},
+     }
+     for tool, flags in (("rustc", ["-Vv"]), ("cargo", ["-V"])):
+         result = subprocess.run([tool, *flags], cwd=ROOT, text=True, capture_output=True)
+@@ -67,25 +110,56 @@ def main() -> int:
+     (destination / "commands.txt").write_text(shlex.join(command) + "\n")
+     with (destination / "test-output.log").open("w") as log:
+         process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE,
+-                                   stderr=subprocess.STDOUT, text=True)
++                                   stderr=subprocess.STDOUT, text=True, start_new_session=True)
++        timed_out = False
++
++        def expire():
++            nonlocal timed_out
++            timed_out = True
++            try:
++                os.killpg(process.pid, signal.SIGKILL)
++            except ProcessLookupError:
++                pass
++
++        timer = threading.Timer(args.timeout_seconds, expire)
++        timer.start()
+         assert process.stdout is not None
+-        for line in process.stdout:
+-            log.write(line)
+-            log.flush()
+-            print(line, end="", flush=True)
+-        code = process.wait()
++        try:
++            for line in process.stdout:
++                log.write(line)
++                log.flush()
++                print(line, end="", flush=True)
++            code = process.wait()
++        finally:
++            timer.cancel()
++    manifest["timed_out"] = timed_out
++    if timed_out:
++        code = 124
+     manifest["exit_code"] = code
+     manifest["finished_utc"] = datetime.now(timezone.utc).isoformat()
++    manifest["host"]["loadavg_end"] = read_host_file("/proc/loadavg")
+     manifest["changed_sources_during_run"] = [name for name, digest in source_hashes.items()
+         if not (ROOT / name).is_file() or hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != digest]
+-    records = []
+-    for line in (destination / "test-output.log").read_text().splitlines():
+-        prefix, marker, payload = line.partition(MARKER)
+-        # libtest may print the first marker after its unfinished test-name line.
+-        if marker and (not prefix or (prefix.startswith("test ") and prefix.endswith(" ... "))):
+-            records.append(json.loads(payload))
+-    (destination / "trace.jsonl").write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records))
+-    manifest["trace_records"] = len(records)
++    _, final_sources, _, final_digest = source_manifest(destination)
++    manifest["changed_sources_during_run"] += sorted(set(final_sources) - set(source_hashes))
++    manifest["finished_source_digest"] = final_digest
++    records = {marker: [] for marker in markers}
++    malformed = []
++    for number, line in enumerate((destination / "test-output.log").read_text().splitlines(), 1):
++        for marker in markers:
++            prefix, found, payload = line.partition(marker + " ")
++            # libtest may print the first marker after its unfinished test-name line.
++            if found and (not prefix or (prefix.startswith("test ") and prefix.endswith(" ... "))):
++                try:
++                    records[marker].append(json.loads(payload))
++                except json.JSONDecodeError as error:
++                    malformed.append({"line": number, "marker": marker, "error": str(error)})
++    manifest["malformed_records"] = malformed
++    for marker, values in records.items():
++        (destination / MARKERS[marker]).write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in values))
++    manifest["trace_records"] = {marker: len(values) for marker, values in records.items()}
++    manifest["changed_executables_during_run"] = [name for name, digest in executable_hashes.items()
++        if not Path(name).is_file() or hashlib.sha256(Path(name).read_bytes()).hexdigest() != digest]
+     (destination / "environment.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+     checksums = []
+     for path in sorted(destination.rglob("*")):
+@@ -94,13 +168,17 @@ def main() -> int:
+     (destination / "SHA256SUMS").write_text("".join(checksums))
+     if code:
+         return code
+-    if manifest["changed_sources_during_run"]:
+-        print("FAIL: source changed while collecting evidence", file=sys.stderr)
++    if malformed:
++        print("FAIL: malformed marker records; original output retained", file=sys.stderr)
+         return 1
+-    if not records:
+-        print("FAIL: command passed but emitted no UPDATE_TXN evidence", file=sys.stderr)
++    if (manifest["changed_sources_during_run"] or manifest["changed_executables_during_run"]
++            or final_digest != manifest["source_digest"]):
++        print("FAIL: source or measured executable changed while collecting evidence", file=sys.stderr)
+         return 1
+-    print(f"Retained {len(records)} records in {destination}")
++    if any(not values for values in records.values()):
++        print("FAIL: command passed but a requested marker emitted no evidence", file=sys.stderr)
++        return 1
++    print(f"Retained {manifest['trace_records']} records in {destination}")
+     return 0
+ 
+ 

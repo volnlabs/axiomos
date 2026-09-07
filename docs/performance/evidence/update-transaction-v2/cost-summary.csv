@@ -1,0 +1,9 @@
+protocol,hold_us,runs,attempts,successful_updates,busy_updates,logical_updates_started,first_attempt_successes,dispatch_attempts,scheduled_releases,missed_releases,transition_busy_skips,execution_busy_skips,empty_skips
+atomic,0,10,10000,10000,0,10000,10000,9990,10000,10,0,0,0
+atomic,10,10,10000,10000,0,10000,10000,9994,10000,6,0,0,0
+atomic,100,10,10000,10000,0,10000,10000,9977,10002,25,0,0,0
+atomic,500,10,10000,10000,0,10000,10000,9990,10000,10,0,0,0
+guarded,0,10,10000,9995,5,9995,9990,9983,10000,17,67,0,0
+guarded,10,10,10000,9882,118,9882,9764,9985,10000,15,76,0,0
+guarded,100,10,10000,8981,1019,8982,7983,9986,10002,16,75,0,0
+guarded,500,10,10000,4982,5018,4987,3591,9979,10000,21,95,0,0

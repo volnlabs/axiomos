@@ -1,0 +1,174 @@
+   Compiling kernel_bpf v0.1.0 (/tmp/axiomos-cl4fmagents-transactional-publication/kernel/crates/kernel_bpf)
+   Compiling kernel v0.1.0 (/tmp/axiomos-cl4fmagents-transactional-publication/kernel)
+warning: variant `KernelImage` is never constructed
+   --> kernel/src/bpf/mod.rs:347:5
+    |
+345 | enum LoadAuthentication {
+    |      ------------------ variant in this enum
+346 |     Runtime(AuthenticationProvenance),
+347 |     KernelImage,
+    |     ^^^^^^^^^^^
+    |
+    = note: `LoadAuthentication` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `load_kernel_builtin_program` is never used
+    --> kernel/src/bpf/mod.rs:1360:19
+     |
+ 623 | impl BpfManager {
+     | --------------- method in this implementation
+...
+1360 |     pub(crate) fn load_kernel_builtin_program(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `interrupts_enabled` is never read
+  --> kernel/src/driver/iio.rs:93:5
+   |
+91 | struct V04DispatchGuard<'a> {
+   |        ---------------- field in this struct
+92 |     slot: &'a AtomicU64,
+93 |     interrupts_enabled: bool,
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: method `subscribe` is never used
+   --> kernel/src/mcore/mtask/scheduler/wait_channel.rs:138:19
+    |
+ 99 | impl<W: WaiterSink> WaitChannel<W> {
+    | ---------------------------------- method in this implementation
+...
+138 |     pub(crate) fn subscribe(&self) -> WaitRegistration<'_, W> {
+    |                   ^^^^^^^^^
+
+warning: struct `WaitRegistration` is never constructed
+   --> kernel/src/mcore/mtask/scheduler/wait_channel.rs:178:12
+    |
+178 | pub struct WaitRegistration<'a, W: WaiterSink> {
+    |            ^^^^^^^^^^^^^^^^
+
+warning: method `park` is never used
+   --> kernel/src/mcore/mtask/scheduler/wait_channel.rs:184:12
+    |
+183 | impl<'a, W: WaiterSink> WaitRegistration<'a, W> {
+    | ----------------------------------------------- method in this implementation
+184 |     pub fn park(self, item: W::Item) {
+    |            ^^^^
+
+warning: `kernel` (lib) generated 6 warnings
+warning: variant `EmbeddedRamdiskInitialization` is never constructed
+  --> kernel/src/main.rs:43:5
+   |
+39 | enum BootError {
+   |      --------- variant in this enum
+...
+43 |     EmbeddedRamdiskInitialization,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `BootError` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `kernel` (bin "kernel") generated 1 warning
+   Compiling axiomos v0.1.0 (/tmp/axiomos-cl4fmagents-transactional-publication)
+    Finished `release` profile [optimized] target(s) in 4.58s
+     Running `/home/utkarsh/Work/axiomOS/target/release/axiomos --headless --smp 1 --mem 1G`
+KERNEL_BINARY: /home/utkarsh/Work/axiomOS/target/x86_64-unknown-none/release/deps/artifact/kernel-37f9cf25328846aa/bin/kernel-37f9cf25328846aa
+BOOTABLE_ISO: /home/utkarsh/Work/axiomOS/target/release/build/axiomos-ca9300463660b388/out/axiomos.iso
+DISK_IMAGE: /home/utkarsh/Work/axiomOS/target/release/build/axiomos-ca9300463660b388/out/disk.img
+[2J[001;001H[=3h[2J[001;001H[2J[001;001H[8;056;240t[2J[001;001HBdsDxe: loading Boot0002 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Secondary,Master,0x0)
+BdsDxe: starting Boot0002 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Secondary,Master,0x0)
+[2J[001;001H[001;001H[2J[001;001H[001;001H[2J[001;001H[001;001Hl[001;002Hi[001;003Hm[001;004Hi[001;005Hn[001;006He[001;007H:[001;008H [001;009HL[001;010Ho[001;011Ha[001;012Hd[001;013Hi[001;014Hn[001;015Hg[001;016H [001;017He[001;018Hx[001;019He[001;020Hc[001;021Hu[001;022Ht[001;023Ha[001;024Hb[001;025Hl[001;026He[001;027H [001;028H`[001;029Hb[001;030Ho[001;031Ho[001;032Ht[001;033H([001;034H)[001;035H:[001;036H/[001;037Hb[001;038Ho[001;039Ho[001;040Ht[001;041H/[001;042Hk[001;043He[001;044Hr[001;045Hn[001;046He[001;047Hl[001;048H`[001;049H.[001;050H.[001;051H.[001;052H[002;001H
+AXIOM KERNEL METRICS
+Boot to init: 92 ms
+Kernel heap: 2123 KB
+Kernel image: 2 MB
+
+INIT_PROCESS_STARTED pid=1
+QEMU_BOOT_OK
+BPF_UPDATE_TRANSACTION_OK interpreter_a_b_a=true stale_rejected=true physical_output=false
+USERCOPY_EFAULT_OK
+UNKNOWN_SYSCALL_ENOSYS_OK
+NANOSLEEP_WAITQ_BENCH_NS=326749120
+NANOSLEEP_WAITQ_OK
+NANOSLEEP_INTERRUPT_OK
+PIPE_WAIT_READER_DATA_OK
+PIPE_WAIT_READER_DATA_BLOCKED_OK
+PIPE_WAIT_READER_EOF_OK
+PIPE_WAIT_READER_EOF_BLOCKED_OK
+PIPE_WAITQ_OK
+CHILD_WAIT_BEFORE_EXIT_OK
+CHILD_WAIT_BEFORE_EXIT_BLOCKED_OK
+CHILD_EXIT_BEFORE_WAIT_OK
+LIFECYCLE_EXIT_WAIT_OK
+LIFECYCLE_FAULT_WAIT_OK
+LIFECYCLE_EXEC_REJECT_OK
+Hello from child!
+Hello from parent, waiting for child...
+Child exited with 42! Success.
+LIFECYCLE_EXEC_WAIT_OK
+BPF_FOREIGN_OWNER_DENY_OK
+BPF_PINNED_WRITE_ONLY_OK
+BPF_HOOK_SNAPSHOT_SMP_OK
+SMP4_SCHEDULER_STAGE=6
+SMP4_SCHEDULER_WORKERS=4
+SMP4_SCHEDULER_CPU_MASK=1
+BPF_HANDLE_REUSE_OK
+BPF_OWNER_EXIT_OK
+BPF_OWNER_RECLAIM_OK owner=21
+BPF_UNPRIVILEGED_DENY_OK
+BPF_UNPRIVILEGED_TIER_DENY_OK
+BPF_ATTACH_DENY_OK
+BPF_CAPABILITY_PROBE_STARTED
+=== axiomos eBPF init ===
+Phase 4 demo boot: /bin/sched_switch_export_demo -> /bin/sched_switch_bridge_demo
+Spawning /bin/sched_switch_export_demo...
+Spawned PID: 25
+
+========================================
+  axiomos sched_switch export demo
+  Runtime attach + pinned object export
+========================================
+
+[1/4] Creating ringbuf map... OK (id=6145)
+[2/4] Loading sched_switch trace program... OK (id=6144)
+[3/4] Attaching to sched_switch... OK
+[4/4] Pinning ringbuf map object... OK
+
+Next step:
+  run /bin/sched_switch_bridge_demo to consume the pinned object
+  this process can now exit; hook and pinned map stay live in-kernel
+BPF_OWNER_RECLAIM_OK owner=25
+Spawning /bin/sched_switch_bridge_demo...
+Spawned PID: 26
+
+========================================
+  axiomos sched_switch bridge demo
+  pinned-object consumer -> live scheduler events
+========================================
+
+[1/3] Opening pinned ringbuf object... OK (id=6145)
+[2/3] Launching scheduler workload...
+  launch /bin/fork_test -> pid=27
+Hello from parent, waiting for child...
+Hello from child!
+Child exited with 42! Success.
+  launch /bin/fork_test -> pid=29
+Hello from parent, waiting for child...
+Hello from child!
+Child exited with 42! Success.
+  launch /bin/syscall_demo -> pid=31
+Part 1: This is a scatter/gather write.
+Hello from allocated memory!
+Pipe read: Hello through pipe!
+Hello from dup-ed stdout!
+Hello from dup2-ed stdout (fd 10)!
+All tests passed. Exiting successfully.
+[3/3] Polling ringbuf and printing bridge output...
+  SCHED_SWITCH #1: cpu=0 prev(pid=25, tid=107) -> next(pid=0, tid=66)
+  SCHED_SWITCH #2: cpu=0 prev(pid=0, tid=66) -> next(pid=0, tid=73)
+  SCHED_SWITCH #3: cpu=0 prev(pid=0, tid=73) -> next(pid=0, tid=64)
+  SCHED_SWITCH #4: cpu=0 prev(pid=0, tid=64) -> next(pid=25, tid=107)
+  SCHED_SWITCH #5: cpu=0 prev(pid=25, tid=107) -> next(pid=0, tid=66)
+  SCHED_SWITCH #6: cpu=0 prev(pid=0, tid=66) -> next(pid=0, tid=73)
+
+Poll summary: polls=120 events=6
+Pipeline proven: runtime attach -> sched_switch -> pinned object -> bridge consumer
+qemu-system-x86_64: terminating on signal 15 from pid 647676 (timeout)

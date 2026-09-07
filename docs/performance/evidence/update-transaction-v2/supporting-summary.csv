@@ -1,0 +1,3 @@
+protocol,requests,unsupported_cases,snapshots,single_snapshots,dual_snapshots,empty_snapshots,guard_checks,guard_overlap,execution_checks,execution_overlap,accounting_checks,accounting_mismatches,receipt_checks,receipt_violations,failed_requests,failed_preserved,expected_requests,stale_acceptances,installation_violations,skipped_dispatches
+attach_first,5,0,7,4,3,0,0,0,0,0,7,0,0,0,3,2,0,0,0,0
+detach_first,5,0,7,2,0,5,0,0,0,0,7,0,0,0,3,0,0,0,0,0
