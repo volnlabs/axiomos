@@ -83,7 +83,8 @@ def main():
     run([sys.executable, ROOT / "scripts/benchmark/reproduce-update-adaptation.py",
          "--output", adaptation])
     shutil.copyfile(adaptation / "adaptation-table.tex", paper / "adaptation.tex")
-    run(["make", "-C", paper])
+    run(["make", "-C", paper], env={**os.environ, "UPDATE_PUBLICATION_EVIDENCE": str(destination),
+                                        "UPDATE_ADAPTATION_EVIDENCE": str(adaptation)})
     run([sys.executable, paper / "verify.py"],
         env={**os.environ, "UPDATE_PUBLICATION_EVIDENCE": str(destination),
              "UPDATE_ADAPTATION_EVIDENCE": str(adaptation),

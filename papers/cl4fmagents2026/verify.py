@@ -67,7 +67,7 @@ for line in (HERE / "build/inputs.sha256").read_text().splitlines():
     assert name not in build_inputs and Path(name).name == name
     assert hashlib.sha256((HERE / name).read_bytes()).hexdigest() == digest, f"Stale build: {name}"
     build_inputs[name] = digest
-assert set(build_inputs) == {"Makefile", pdf.name} | {
+assert set(build_inputs) == {"Makefile", "render_tables.py", pdf.name} | {
     p.name for pattern in ("*.tex", "*.bib", "*.sty") for p in HERE.glob(pattern)
 }, "Build input inventory changed; rebuild the paper"
 text = output("pdftotext", "-layout", str(pdf), "-")
@@ -91,6 +91,13 @@ log = (HERE / "build/main.log").read_text()
 assert not re.search(r"Overfull|undefined|Citation .* undefined|Rerun to get", log)
 source = (HERE / "main.tex").read_text()
 assert r"\usepackage[dblblindworkshop]{neurips_2026}" in source
+assert "Workshop:" in pages[0] and "Foundation Models and Embodied Agents" in pages[0]
+assert "Short systems paper" in metadata and "CreationDate:" not in metadata
+assert r"\texttt{Reset}" not in source and r"\textsc{" not in source
+assert "Our contributions" in pages[0] or "We contribute" in pages[0], "Contributions moved off page one"
+for table in re.findall(r"\\begin\{table\}.*?\\end\{table\}", source, re.S):
+    assert table.index(r"\caption{") < table.index(r"\input{"), "Caption must precede table"
+assert r"\resizebox" not in source
 evidence = Path(os.environ.get("UPDATE_PUBLICATION_EVIDENCE",
                 ROOT / "docs/performance/evidence/update-transaction-v2"))
 check_capture(evidence, (("UPDATE_TXN", "trace.jsonl"), ("UPDATE_COST", "cost-trace.jsonl")),
@@ -122,23 +129,29 @@ with tempfile.TemporaryDirectory(prefix="adaptation-paper-check-") as directory:
                    check=True, capture_output=True, text=True, timeout=120)
     for name in ("analysis.json", "adaptation-table.tex"):
         assert (adaptation / name).read_bytes() == (regenerated / name).read_bytes(), name
-for local, retained, directory in (("results.tex", "result-table.tex", evidence),
-                                   ("costs.tex", "cost-table.tex", evidence),
-                                   ("cost-note.tex", "cost-note.tex", evidence),
-                                   ("adaptation.tex", "adaptation-table.tex", adaptation)):
-    assert (HERE / local).read_bytes() == (directory / retained).read_bytes()
-    assert f"\\input{{{local}}}" in source, f"PDF does not include {local}"
-    for row in (HERE / local).read_text().splitlines():
-        if " & " not in row or row.startswith(("Observation &", "Fault &", "Hold ", "Protocol &", "Metric &")):
-            continue
-        cells = row.removesuffix(r" \\").split(" & ")
-        cells = [re.sub(r"\\(?:textsc|textbf|texttt)\{([^{}]*)\}", r"\1", cell) for cell in cells]
-        pattern = r"\s+".join((r"(?:--|–|—)" if cell == "--" else re.escape(cell)) for cell in cells)
-        assert re.search(pattern, text, re.I), f"Generated table row absent from PDF: {cells}"
+spec = importlib.util.spec_from_file_location("review_tables", HERE / "render_tables.py")
+renderer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(renderer)
+with tempfile.TemporaryDirectory(prefix="review-table-check-") as directory:
+    regenerated = Path(directory)
+    rows = renderer.render(evidence, adaptation, regenerated)
+    for local in (*rows, "cost-note.tex"):
+        assert (HERE / local).read_bytes() == (regenerated / local).read_bytes(), local
+        assert f"\\input{{{local}}}" in source
+    for local, table_rows in rows.items():
+        for row in table_rows:
+            # Wrapped label cells may straddle numeric rows in pdftotext.
+            # Source/PDF build hashes bind the full table; check numeric cells too.
+            values = row[1:]
+            if not all(re.fullmatch(r"[0-9./]+|--", value) for value in values):
+                continue
+            pattern = r"\s+".join(r"(?:--|–|—)" if value == "--" else re.escape(value) for value in values)
+            assert re.search(pattern, text), f"Generated values absent from PDF: {values}"
 assert "qin2026governed" in source and "lim2026lithe" in source
 prose = re.sub(r"^\s*\d+\s{2,}", "", text, flags=re.M)
 normalize = lambda value: re.sub(r"[^a-z0-9]", "", value.lower())
 note = (HERE / "cost-note.tex").read_text().replace(r"\mu", "")
+note = re.sub(r"\\texttt\{([^{}]*)\}", r"\1", note)
 assert normalize(note) in normalize(prose), "Generated cost prose absent from PDF"
 
 print("PASS: at most four content pages; anonymous PDF; resolved build; verified provenance and trace-derived tables/prose.")

@@ -7,7 +7,7 @@ make
 python3 verify.py
 ```
 
-Output: `who-guards-the-update.pdf`. Upload that PDF only. The ignored `private/` directory and repository evidence contain author-facing information and are not anonymous review material. The paper reports software publication correctness, hosted costs, and a deterministic simulated control replay. It does not evaluate foundation-model learning or physical safety.
+Output: `who-guards-the-update.pdf`. Upload that PDF and the separately generated `artifact-r1.zip` supplement. The ignored `private/` directory and repository evidence contain author-facing information and are not anonymous review material. The paper reports software publication correctness, hosted costs, and a deterministic simulated control replay. It does not evaluate foundation-model learning or physical safety.
 
 The v1 campaign remains in `docs/performance/evidence/update-transaction`. The strengthened campaign uses a new directory, `update-transaction-v2`, and compares guarded replacement with a host-only atomic publication path sharing the same manager checks. Host callbacks retain real invocation guards but do not execute privileged bytecode.
 
@@ -19,9 +19,9 @@ CARGO_TARGET_DIR=/home/utkarsh/Work/axiomOS/target python3 scripts/benchmark/rep
 
 Choose an existing writable Cargo target directory with sufficient disk space on other machines. The output directory and its `<output>-adaptation` sibling must not exist. The measurement driver records affinity and requires two distinct physical cores; its defaults are CPU 12 and 14 on the developer host. No scheduler or governor settings are changed. The retained manifest hashes source and measured executables. Raw scheduler misses and latency tails are retained.
 
-`results.tex`, `costs.tex`, `cost-note.tex`, and `adaptation.tex` are generated from raw traces. Verification checks source/PDF build hashes, page limit, anonymity, citations/build warnings, artifact provenance, and trace-derived tables. Visually inspect every rendered page after layout changes. These artifacts contain developer-identifying provenance and must not accompany the anonymous PDF.
+`render_tables.py` renders `results.tex`, `costs.tex`, `cost-note.tex`, and `adaptation.tex` from the validated retained analyses. The original trace analyzers and their derived outputs remain unchanged; `verify.py` checks both their reproduction and the presentation tables. Verification checks source/PDF build hashes, page limit, anonymity, citations/build warnings, artifact provenance, and trace-derived tables. Visually inspect every rendered page after layout changes. The original repository evidence contains developer-identifying provenance and must not accompany the anonymous PDF. Export a separate anonymized snapshot with `scripts/benchmark/package-anonymous-publication.py`; its README states exactly which analyses and source tests can be reproduced.
 
-`neurips_2026.sty` is the unmodified official 2026 style. The manuscript uses `dblblindworkshop` and supplies the workshop title. No OpenReview submission receipt has been obtained.
+`neurips_2026.sty` is the unmodified official 2026 style. The manuscript uses `dblblindworkshop` and supplies the workshop title. The official style hardcodes a main-conference notice for anonymous modes; `main.tex` overrides only that notice text to name the workshop, without changing the style, margins, spacing, or fonts. No OpenReview submission receipt has been obtained.
 
 The separate replay evidence is `docs/performance/evidence/update-adaptation-v1`. Its fixed candidate sequence is generated once by a feedback tuner and replayed through real manager installations and host guard callbacks. The plant and control arithmetic are simulated; callbacks do not execute privileged BPF code. A local paired utility probe compares gains from identical activation state/time, separately from aggregate before/after tracking RMSE. One deliberately long invocation exposes the difference between pointer publication and invocation quiescence; it is a finite witness, not an estimated failure rate.
 
