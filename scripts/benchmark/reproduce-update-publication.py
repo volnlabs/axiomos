@@ -39,6 +39,9 @@ def main():
     destination = args.output.resolve()
     if destination.exists():
         parser.error("output already exists; choose a new directory")
+    adaptation = destination.with_name(destination.name + "-adaptation")
+    if adaptation.exists():
+        parser.error("paired adaptation output already exists; choose a new directory")
     spec = importlib.util.spec_from_file_location("publication_runner",
         ROOT / "scripts/benchmark/update-transaction-runner.py")
     collector = importlib.util.module_from_spec(spec)
@@ -77,9 +80,13 @@ def main():
     shutil.copyfile(destination / "result-table.tex", paper / "results.tex")
     shutil.copyfile(destination / "cost-table.tex", paper / "costs.tex")
     shutil.copyfile(destination / "cost-note.tex", paper / "cost-note.tex")
+    run([sys.executable, ROOT / "scripts/benchmark/reproduce-update-adaptation.py",
+         "--output", adaptation])
+    shutil.copyfile(adaptation / "adaptation-table.tex", paper / "adaptation.tex")
     run(["make", "-C", paper])
     run([sys.executable, paper / "verify.py"],
         env={**os.environ, "UPDATE_PUBLICATION_EVIDENCE": str(destination),
+             "UPDATE_ADAPTATION_EVIDENCE": str(adaptation),
              "UPDATE_PUBLICATION_CHECK_BINARIES": "1"})
 
 

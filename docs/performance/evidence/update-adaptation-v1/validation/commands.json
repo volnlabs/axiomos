@@ -1,0 +1,61 @@
+{
+  "common_environment": {
+    "CARGO_TARGET_DIR": "/home/utkarsh/Work/axiomOS/target"
+  },
+  "commands": [
+    [
+      "cargo",
+      "test",
+      "-p",
+      "kernel",
+      "--test",
+      "bpf_update_adaptation",
+      "--features",
+      "kernel_bpf/embedded-profile,bpf-unsigned-development,bpf-update-diagnostics"
+    ],
+    [
+      "cargo",
+      "test",
+      "-p",
+      "kernel",
+      "--test",
+      "bpf_update_adaptation",
+      "--features",
+      "kernel_bpf/embedded-profile,bpf-unsigned-development,bpf-update-diagnostics",
+      "--",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    [
+      "python3",
+      "-m",
+      "unittest",
+      "scripts/benchmark/test_update_adaptation_analysis.py"
+    ],
+    [
+      "cargo",
+      "fmt",
+      "--all",
+      "--check"
+    ],
+    [
+      "git",
+      "diff",
+      "--check"
+    ],
+    [
+      "python3",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "scripts/benchmark",
+      "-p",
+      "test_update*.py"
+    ]
+  ],
+  "debug_release_comparison": {
+    "records": 72040,
+    "parsed_records_identical": true
+  }
+}

@@ -1,0 +1,1 @@
+["cargo", "test", "--locked", "--release", "-p", "kernel", "--test", "bpf_update_adaptation", "--features", "kernel_bpf/embedded-profile,bpf-unsigned-development,bpf-update-diagnostics", "--no-run", "--message-format=json"]

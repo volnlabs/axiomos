@@ -1,0 +1,4 @@
+protocol,pre_ticks,post_ticks,pre_rmse,post_rmse,activations,useful_activations,guard_version_overlaps,same_version_overlaps,retired_commands_after_publication,transition_skips,execution_skips,busy_attempts,retry_attempts,successful_retries,stale_errors,stale_accepted,accounting_errors,empty_slot_observations,started_invocations,completed_invocations,final_gain,final_committed
+frozen,4000,4000,0.8708698298776048,0.9901907730756009,0,0,0,0,0,0,1,0,0,0,0,0,0,0,7999,7999,1,582000
+atomic,4000,4000,0.8708698298776048,0.9737029321341752,4,3,1,0,1,0,0,0,4,0,4,0,0,0,8000,8000,16,582000
+guarded,4000,4000,0.8708698298776048,0.9737383932884095,4,3,0,0,0,0,1,1,4,1,3,0,0,0,7999,7999,16,582000

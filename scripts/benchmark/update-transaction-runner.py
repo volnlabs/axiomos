@@ -17,7 +17,7 @@ import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-MARKERS = {"UPDATE_TXN": "trace.jsonl", "UPDATE_COST": "cost-trace.jsonl"}
+MARKERS = {"UPDATE_TXN": "trace.jsonl", "UPDATE_COST": "cost-trace.jsonl", "UPDATE_ADAPT": "adaptation-trace.jsonl"}
 
 
 def git(*args: str) -> bytes:

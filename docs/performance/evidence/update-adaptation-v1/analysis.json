@@ -1,0 +1,181 @@
+{
+  "config": {
+    "candidate_count": 4,
+    "control_period_us": 1000,
+    "duration_us": 8000000,
+    "guard_hold_us": 100,
+    "initial_gain": 1,
+    "kind": "config",
+    "long_hold_us": 2000,
+    "long_start_us": 4249000,
+    "mass_change_us": 4000000,
+    "post_ticks": 4000,
+    "pre_ticks": 4000,
+    "schema": 1,
+    "step_us": 100
+  },
+  "initial_committed": 582000,
+  "protocols": {
+    "atomic": {
+      "accounting_errors": 0,
+      "activations": 4,
+      "actual_attempts": 8,
+      "busy_attempts": 0,
+      "completed_invocations": 8000,
+      "empty_slot_observations": 0,
+      "execution_skip_times_us": [],
+      "execution_skips": 0,
+      "final_committed": 582000,
+      "final_gain": 16,
+      "final_installation": [
+        4,
+        5
+      ],
+      "guard_version_overlaps": 1,
+      "local_utility": [
+        {
+          "candidate_rmse": 1.0476473423661357,
+          "predecessor_rmse": 1.1080995736061174,
+          "proposal": 0,
+          "published_us": 4250000,
+          "useful": true
+        },
+        {
+          "candidate_rmse": 0.7416549701914693,
+          "predecessor_rmse": 0.8239807741581028,
+          "proposal": 1,
+          "published_us": 4500000,
+          "useful": true
+        },
+        {
+          "candidate_rmse": 0.4111082062039875,
+          "predecessor_rmse": 0.4891025669095191,
+          "proposal": 2,
+          "published_us": 4750000,
+          "useful": true
+        },
+        {
+          "candidate_rmse": 1.4587377366875933,
+          "predecessor_rmse": 1.4587377366875933,
+          "proposal": 3,
+          "published_us": 5000000,
+          "useful": false
+        }
+      ],
+      "post_rmse": 0.9737029321341752,
+      "post_ticks": 4000,
+      "pre_rmse": 0.8708698298776048,
+      "pre_ticks": 4000,
+      "retired_commands_after_publication": 1,
+      "retry_attempts": 4,
+      "same_version_overlaps": 0,
+      "scheduled_attempt_events": 8,
+      "stale_accepted": 0,
+      "stale_errors": 4,
+      "started_invocations": 8000,
+      "successful_retries": 0,
+      "transition_skips": 0,
+      "useful_activations": 3
+    },
+    "frozen": {
+      "accounting_errors": 0,
+      "activations": 0,
+      "actual_attempts": 0,
+      "busy_attempts": 0,
+      "completed_invocations": 7999,
+      "empty_slot_observations": 0,
+      "execution_skip_times_us": [
+        4250000
+      ],
+      "execution_skips": 1,
+      "final_committed": 582000,
+      "final_gain": 1,
+      "final_installation": [
+        0,
+        1
+      ],
+      "guard_version_overlaps": 0,
+      "local_utility": [],
+      "post_rmse": 0.9901907730756009,
+      "post_ticks": 4000,
+      "pre_rmse": 0.8708698298776048,
+      "pre_ticks": 4000,
+      "retired_commands_after_publication": 0,
+      "retry_attempts": 0,
+      "same_version_overlaps": 0,
+      "scheduled_attempt_events": 8,
+      "stale_accepted": 0,
+      "stale_errors": 0,
+      "started_invocations": 7999,
+      "successful_retries": 0,
+      "transition_skips": 0,
+      "useful_activations": 0
+    },
+    "guarded": {
+      "accounting_errors": 0,
+      "activations": 4,
+      "actual_attempts": 8,
+      "busy_attempts": 1,
+      "completed_invocations": 7999,
+      "empty_slot_observations": 0,
+      "execution_skip_times_us": [
+        4250000
+      ],
+      "execution_skips": 1,
+      "final_committed": 582000,
+      "final_gain": 16,
+      "final_installation": [
+        4,
+        5
+      ],
+      "guard_version_overlaps": 0,
+      "local_utility": [
+        {
+          "candidate_rmse": 1.0470714845125326,
+          "predecessor_rmse": 1.1074906108350833,
+          "proposal": 0,
+          "published_us": 4251000,
+          "useful": true
+        },
+        {
+          "candidate_rmse": 0.7419320518867182,
+          "predecessor_rmse": 0.8242883439762357,
+          "proposal": 1,
+          "published_us": 4500000,
+          "useful": true
+        },
+        {
+          "candidate_rmse": 0.4112525428897974,
+          "predecessor_rmse": 0.4892505588107212,
+          "proposal": 2,
+          "published_us": 4750000,
+          "useful": true
+        },
+        {
+          "candidate_rmse": 1.45866543063038,
+          "predecessor_rmse": 1.45866543063038,
+          "proposal": 3,
+          "published_us": 5000000,
+          "useful": false
+        }
+      ],
+      "post_rmse": 0.9737383932884095,
+      "post_ticks": 4000,
+      "pre_rmse": 0.8708698298776048,
+      "pre_ticks": 4000,
+      "retired_commands_after_publication": 0,
+      "retry_attempts": 4,
+      "same_version_overlaps": 0,
+      "scheduled_attempt_events": 8,
+      "stale_accepted": 0,
+      "stale_errors": 3,
+      "started_invocations": 7999,
+      "successful_retries": 1,
+      "transition_skips": 0,
+      "useful_activations": 3
+    }
+  },
+  "rmse_denominator": "all 4,000 scheduled control ticks in each phase, including skips",
+  "trace_sha256": "1e237e7b02a58e342302c34f24b528a07a83a7ccebeb03a6fd4c482ed4930c39",
+  "utility_scope": "paired 250 ms synchronous counterfactual from each actual activation state"
+}

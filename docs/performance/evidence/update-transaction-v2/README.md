@@ -17,3 +17,5 @@ python3 scripts/benchmark/reproduce-update-publication.py --output /path/to/new-
 Choose two distinct physical cores on another host. Existing output directories are rejected. Generated PDF and these identifying provenance artifacts must not be submitted together for anonymous review.
 
 `validation/` retains separate unit, Loom, cross-compilation and QEMU checks. The QEMU process was intentionally stopped by a 55-second timeout (exit 124) after the replacement/interpreter and later BPF smoke markers passed; it is an idle boot, not a terminating test. These checks are separate from the 80-run hosted experiment. No source change was required after the final checks.
+
+The QEMU marker `interpreter_a_b_a=true` checks one interpreter dispatch after each A/B/A installation; it does not compare distinct returned controller values. Installation receipts establish the sequence. Identity/runtime coupling additionally follows from constructing one immutable payload with the candidate handle and that candidate's runtime; the marker is not a separate measurement of returned-value identity.

@@ -47,6 +47,22 @@ Hosted release campaign: holds 0/10/100/500 us, 1 ms dispatch period, 10 fresh p
 
 Optional replay only after core is stable: real manager/guards/receipts select full captured installation IDs, pure-host first-order velocity simulation with payload shift and frozen online-tuner gain proposals. Commands use the identity and error captured at invocation start, apply in completion order, and use the same zero-order hold policy. No LLM, new runtime API, physical claims, or stateful controller. Start only if core stable by Sep 8 07:29 IST; validated by 13:29; final PDF freeze 15:29; otherwise omit.
 
+## v2 core completed
+
+- Local commit `8c42d3e` adds the shared-check atomic baseline, paired manager campaign, hosted cost matrix, artifact integrity checks, and revised four-page paper. No publication or remote branch action.
+- Retained `update-transaction-v2`: 28 correctness records; 80 fresh cost processes, 80,000 replacement attempts, 244,364 cost records. Source and measured executable hashes remained unchanged during capture.
+- AP and GR each expose one current installation at the ten observed paired checkpoints; the held-predecessor schedule exposes one AP old/new guard overlap and none for GR. Both preserve six rejecting requests. AF/DF remain supporting witnesses.
+- At 500 us hold, AP completes all 10,000 attempts and GR completes 4,982, with 95 GR natural dispatch skips. Full counts, retries, latency distributions, and scheduler misses are retained; no real-time or task-performance claim.
+- Manager, eight Loom cases, BPF tests, embedded/production cross-checks, QEMU interpreter probe and 17 Python oracle/collector tests pass. Separate logs are retained under the v2 evidence directory.
+- Four content pages plus references pass page/anonymity/provenance/table checks; all five pages visually inspected. Core PDF fallback retained in the shared target directory. Optional simulation replay started after core stabilization, before the accepted cutoff.
+
+## Optional replay completed
+
+- Real manager/guard simulation and independent dynamics oracle passed; retained release artifact `update-adaptation-v1` contains 72,040 records, identical to the debug run after parsing.
+- Frozen/AP/GR post-shift RMSE: 0.990190773076 / 0.973702932134 / 0.973738393288. AP records one old/new overlap and one retired command; GR records neither, with one Busy replacement, one skipped tick, and one successful retry. Three of four activated gains improve the separate paired local utility probe for each updating protocol. Empty observations, stale acceptances, and accounting errors are zero.
+- Runtime/Cargo code remains the validated core. One new Rust host integration test, seven analyzer oracle checks (24 Python checks total), and independent semantic review pass. No a-priori task-improvement threshold was imposed.
+- Final paper has four content pages and one references page; input/PDF hashes now prevent a stale PDF from passing verification. No push, PR, merge, or OpenReview action.
+
 ## v1 progress
 
 - Branch/worktree created; original checkout preserved; paper draft copied.
