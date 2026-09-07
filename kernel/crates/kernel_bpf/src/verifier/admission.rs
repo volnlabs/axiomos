@@ -111,6 +111,34 @@ pub struct AdmissionError {
     pub budget_ns_per_s: u64,
 }
 
+/// An exclusive-slot resource delta failed preflight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExclusiveAdmissionError {
+    Admission(AdmissionError),
+    PreviousChargeMismatch {
+        expected_ns_per_s: u64,
+        actual_ns_per_s: u64,
+    },
+    ArithmeticOverflow,
+}
+
+/// A preflight token no longer describes the ledger being committed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExclusiveCommitError {
+    Stale,
+}
+
+/// Opaque, allocation-free exclusive-slot admission update.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ExclusiveAdmissionToken {
+    expected_budget_ns_per_s: u64,
+    expected_cycle_unit_ns: u64,
+    expected_committed_ns_per_s: u64,
+    expected_exclusive_ns_per_s: u64,
+    next_committed_ns_per_s: u64,
+    next_exclusive_ns_per_s: u64,
+}
+
 impl fmt::Display for AdmissionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -132,6 +160,8 @@ pub struct AdmissionLedger {
     cycle_unit_ns: u64,
     /// Utilization currently committed, in ns/s.
     committed_ns_per_s: u64,
+    /// The one exclusive slot's contribution, included in committed_ns_per_s.
+    exclusive_ns_per_s: u64,
     /// (hook, prog) → that attachment's utilization contribution, in ns/s, so a
     /// detach returns exactly what its attach committed.
     per_attachment: BTreeMap<(u32, u32), u64>,
@@ -145,6 +175,7 @@ impl AdmissionLedger {
             budget_ns_per_s,
             cycle_unit_ns,
             committed_ns_per_s: 0,
+            exclusive_ns_per_s: 0,
             per_attachment: BTreeMap::new(),
         }
     }
@@ -155,6 +186,75 @@ impl AdmissionLedger {
         wcet_cycles
             .saturating_mul(self.cycle_unit_ns)
             .saturating_mul(freq_hz)
+    }
+
+    /// Check replacement of the one exclusive slot using its true utilization delta.
+    pub fn preflight_exclusive(
+        &self,
+        hook: u32,
+        previous_wcet_cycles: u64,
+        next_wcet_cycles: u64,
+        freq_hz: u64,
+    ) -> Result<ExclusiveAdmissionToken, ExclusiveAdmissionError> {
+        let checked_contribution = |wcet_cycles: u64| {
+            wcet_cycles
+                .checked_mul(self.cycle_unit_ns)
+                .and_then(|cost| cost.checked_mul(freq_hz))
+                .ok_or(ExclusiveAdmissionError::ArithmeticOverflow)
+        };
+        let previous = checked_contribution(previous_wcet_cycles)?;
+        if previous != self.exclusive_ns_per_s {
+            return Err(ExclusiveAdmissionError::PreviousChargeMismatch {
+                expected_ns_per_s: previous,
+                actual_ns_per_s: self.exclusive_ns_per_s,
+            });
+        }
+        let next = checked_contribution(next_wcet_cycles)?;
+        let committed_without_previous = self
+            .committed_ns_per_s
+            .checked_sub(previous)
+            .ok_or(ExclusiveAdmissionError::ArithmeticOverflow)?;
+        let next_committed = committed_without_previous
+            .checked_add(next)
+            .ok_or(ExclusiveAdmissionError::ArithmeticOverflow)?;
+        if next_committed > self.budget_ns_per_s {
+            return Err(ExclusiveAdmissionError::Admission(AdmissionError {
+                hook,
+                committed_ns_per_s: committed_without_previous,
+                requested_ns_per_s: next,
+                budget_ns_per_s: self.budget_ns_per_s,
+            }));
+        }
+        Ok(ExclusiveAdmissionToken {
+            expected_budget_ns_per_s: self.budget_ns_per_s,
+            expected_cycle_unit_ns: self.cycle_unit_ns,
+            expected_committed_ns_per_s: self.committed_ns_per_s,
+            expected_exclusive_ns_per_s: previous,
+            next_committed_ns_per_s: next_committed,
+            next_exclusive_ns_per_s: next,
+        })
+    }
+
+    /// Commit a fresh preflight token using scalar assignments only.
+    pub fn commit_exclusive(
+        &mut self,
+        token: ExclusiveAdmissionToken,
+    ) -> Result<(), ExclusiveCommitError> {
+        if self.budget_ns_per_s != token.expected_budget_ns_per_s
+            || self.cycle_unit_ns != token.expected_cycle_unit_ns
+            || self.committed_ns_per_s != token.expected_committed_ns_per_s
+            || self.exclusive_ns_per_s != token.expected_exclusive_ns_per_s
+        {
+            return Err(ExclusiveCommitError::Stale);
+        }
+        self.committed_ns_per_s = token.next_committed_ns_per_s;
+        self.exclusive_ns_per_s = token.next_exclusive_ns_per_s;
+        Ok(())
+    }
+
+    /// Utilization currently charged to the one exclusive slot.
+    pub fn exclusive_ns_per_s(&self) -> u64 {
+        self.exclusive_ns_per_s
     }
 
     /// Admit a program of `wcet_cycles` attached to `hook` (prog id `prog`)
@@ -401,5 +501,94 @@ mod tests {
         // 6 ns/unit: a 100-unit program at 10 Hz costs 100*6*10 = 6000 ns/s.
         let ledger = AdmissionLedger::new(u64::MAX, 6);
         assert_eq!(ledger.contribution(100, 10), 6000);
+    }
+
+    #[test]
+    fn exclusive_replacement_charges_only_the_resource_delta() {
+        let mut ledger = AdmissionLedger::new(1000, UNIT_NS);
+        ledger.admit(1, 7, 100, 3).unwrap();
+
+        let bootstrap = ledger.preflight_exclusive(2, 0, 100, 2).unwrap();
+        ledger.commit_exclusive(bootstrap).unwrap();
+        assert_eq!(ledger.exclusive_ns_per_s(), 200);
+        assert_eq!(ledger.committed_ns_per_s(), 500);
+
+        let replacement = ledger.preflight_exclusive(2, 100, 200, 2).unwrap();
+        ledger.commit_exclusive(replacement).unwrap();
+        assert_eq!(ledger.exclusive_ns_per_s(), 400);
+        assert_eq!(ledger.committed_ns_per_s(), 700);
+
+        let err = ledger
+            .admit(1, 8, 100, 4)
+            .expect_err("ordinary admissions include the exclusive charge");
+        assert_eq!(err.committed_ns_per_s, 700);
+        assert_eq!(ledger.committed_ns_per_s(), 700);
+    }
+
+    #[test]
+    fn exclusive_preflight_and_commit_reject_stale_or_overflowed_deltas() {
+        let mut ledger = AdmissionLedger::new(u64::MAX, 2);
+        let bootstrap = ledger.preflight_exclusive(2, 0, 10, 1).unwrap();
+        ledger.commit_exclusive(bootstrap).unwrap();
+
+        assert_eq!(
+            ledger.preflight_exclusive(2, 9, 10, 1),
+            Err(ExclusiveAdmissionError::PreviousChargeMismatch {
+                expected_ns_per_s: 18,
+                actual_ns_per_s: 20,
+            })
+        );
+        assert_eq!(
+            ledger.preflight_exclusive(2, 10, u64::MAX, 1),
+            Err(ExclusiveAdmissionError::ArithmeticOverflow)
+        );
+
+        let stale = ledger.preflight_exclusive(2, 10, 20, 1).unwrap();
+        ledger.admit(1, 9, 1, 1).unwrap();
+        assert_eq!(
+            ledger.commit_exclusive(stale),
+            Err(ExclusiveCommitError::Stale)
+        );
+        assert_eq!(ledger.exclusive_ns_per_s(), 20);
+        assert_eq!(ledger.committed_ns_per_s(), 22);
+
+        let remove = ledger.preflight_exclusive(2, 10, 0, 1).unwrap();
+        ledger.commit_exclusive(remove).unwrap();
+        assert_eq!(ledger.exclusive_ns_per_s(), 0);
+        assert_eq!(ledger.committed_ns_per_s(), 2);
+    }
+
+    #[test]
+    fn exclusive_token_cannot_cross_ledger_configuration() {
+        let source = AdmissionLedger::new(1000, UNIT_NS);
+        let token = source.preflight_exclusive(2, 0, 600, 1).unwrap();
+        let mut lower_budget_different_unit = AdmissionLedger::new(500, 2);
+
+        assert_eq!(
+            lower_budget_different_unit.commit_exclusive(token),
+            Err(ExclusiveCommitError::Stale)
+        );
+        assert_eq!(lower_budget_different_unit.committed_ns_per_s(), 0);
+        assert_eq!(lower_budget_different_unit.exclusive_ns_per_s(), 0);
+    }
+
+    #[test]
+    fn exclusive_quota_rejection_preserves_current_charge() {
+        let mut ledger = AdmissionLedger::new(500, UNIT_NS);
+        ledger.admit(1, 7, 100, 3).unwrap();
+        let bootstrap = ledger.preflight_exclusive(2, 0, 100, 2).unwrap();
+        ledger.commit_exclusive(bootstrap).unwrap();
+
+        assert_eq!(
+            ledger.preflight_exclusive(2, 100, 101, 2),
+            Err(ExclusiveAdmissionError::Admission(AdmissionError {
+                hook: 2,
+                committed_ns_per_s: 300,
+                requested_ns_per_s: 202,
+                budget_ns_per_s: 500,
+            }))
+        );
+        assert_eq!(ledger.exclusive_ns_per_s(), 200);
+        assert_eq!(ledger.committed_ns_per_s(), 500);
     }
 }

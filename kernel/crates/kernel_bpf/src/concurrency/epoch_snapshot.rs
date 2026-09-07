@@ -159,9 +159,19 @@ impl<T> EpochSnapshot<T> {
     /// Calling this while holding a read guard from the same snapshot deadlocks:
     /// the publisher must wait for that guard's epoch to drain.
     pub fn publish(&self, next: Box<T>) {
+        self.replace(Box::into_raw(next));
+    }
+
+    /// Remove the published value. Only the exclusive-slot transition wrapper
+    /// exposes this operation, after it has excluded all readers.
+    pub(super) fn clear(&self) {
+        self.replace(core::ptr::null_mut());
+    }
+
+    fn replace(&self, next: *mut T) {
         let _writer = WriterGuard::acquire(&self.writer);
         let previous_epoch = self.epoch.load(Ordering::SeqCst) & 1;
-        let previous = self.current.swap(Box::into_raw(next), Ordering::SeqCst);
+        let previous = self.current.swap(next, Ordering::SeqCst);
 
         // Readers which start after this point use the other counter. Readers
         // already committed to previous_epoch keep the replaced pointer alive.

@@ -39,7 +39,7 @@ static HEAP_START: VirtAddr = VirtAddr::new(crate::arch::aarch64::mem::kernel::H
 /// Runtime-initialized heap sizes based on available physical memory.
 static HEAP_SIZES: OnceCell<HeapSizes> = OnceCell::uninit();
 
-#[global_allocator]
+#[cfg_attr(target_os = "none", global_allocator)]
 static ALLOCATOR: linked_list_allocator::LockedHeap = linked_list_allocator::LockedHeap::empty();
 
 pub(in crate::mem) fn init(address_space: &AddressSpace, usable_physical_memory_bytes: usize) {

@@ -18,6 +18,12 @@ pub static ACTUATION_MONITOR: Mutex<Monitor<ActiveProfile>> = Mutex::new(Monitor
 static APPLY_LOCK: Mutex<()> = Mutex::new(());
 static NEXT_V04_ESTOP_EVENT: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EstopGateError {
+    Busy,
+    Estopped,
+}
+
 /// Whether the reviewed PWM channel is owned by the signed motor link.
 #[inline]
 pub fn is_motor_channel(chip: u8, channel: u8) -> bool {
@@ -67,6 +73,56 @@ fn with_apply_lock<R>(f: impl FnOnce() -> R) -> R {
         let _apply = APPLY_LOCK.lock();
         f()
     }
+}
+
+/// Run an allocation-free publication commit only while the actuation monitor
+/// is available and not e-stopped. IRQ state is restored on every return path.
+pub(crate) fn try_with_estop_clear<R>(f: impl FnOnce() -> R) -> Result<R, EstopGateError> {
+    #[cfg(target_arch = "aarch64")]
+    let were_enabled = {
+        use crate::arch::aarch64::Aarch64;
+        use crate::arch::traits::Architecture;
+        let enabled = Aarch64::are_interrupts_enabled();
+        if enabled {
+            Aarch64::disable_interrupts();
+        }
+        enabled
+    };
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    let were_enabled = {
+        let enabled = x86_64::instructions::interrupts::are_enabled();
+        if enabled {
+            x86_64::instructions::interrupts::disable();
+        }
+        enabled
+    };
+
+    let result = (|| {
+        let _apply = APPLY_LOCK.try_lock().ok_or(EstopGateError::Busy)?;
+        let monitor = ACTUATION_MONITOR.try_lock().ok_or(EstopGateError::Busy)?;
+        if monitor.is_latched() {
+            return Err(EstopGateError::Estopped);
+        }
+        Ok(f())
+    })();
+
+    #[cfg(target_arch = "aarch64")]
+    if were_enabled {
+        use crate::arch::aarch64::Aarch64;
+        use crate::arch::traits::Architecture;
+        Aarch64::enable_interrupts();
+    }
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    if were_enabled {
+        x86_64::instructions::interrupts::enable();
+    }
+
+    result
+}
+
+#[cfg(feature = "bpf-update-diagnostics")]
+pub fn hold_actuation_gate_for_diagnostics<R>(f: impl FnOnce() -> R) -> R {
+    with_apply_lock(f)
 }
 
 fn apply_pwm_value(chip: u8, channel: u8, value: u32) {

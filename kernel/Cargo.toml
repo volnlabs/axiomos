@@ -3,6 +3,13 @@ name = "kernel"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "kernel"
+path = "src/main.rs"
+test = false
+bench = false
+required-features = ["kernel-bin"]
+
 [dependencies]
 kernel_abi = { path = "crates/kernel_abi" }
 kernel_bpf = { path = "crates/kernel_bpf", default-features = false }
@@ -59,6 +66,7 @@ limine.workspace = true
 
 [features]
 default = []
+kernel-bin = []
 backtrace = []
 x86_64_arch = []
 aarch64_arch = []
@@ -67,8 +75,8 @@ virt = ["aarch64_arch"]
 
 # Physical reality profiles for eBPF subsystem
 # Use --features cloud-profile or --features embedded-profile
-cloud-profile = ["kernel_bpf/cloud-profile"]
-embedded-profile = ["kernel_bpf/embedded-profile", "rpi5"]
+cloud-profile = ["kernel_bpf/cloud-profile", "kernel-bin"]
+embedded-profile = ["kernel_bpf/embedded-profile", "rpi5", "kernel-bin"]
 
 # Convenience aliases
 cloud = ["cloud-profile", "x86_64_arch"]
@@ -90,6 +98,10 @@ bpf-unsigned-development = []
 # One-shot serial markers consumed by the local audit gate. Production images
 # do not enable this feature and compile all `log` macros out in release mode.
 audit-diagnostics = []
+
+# Host/QEMU observation and deterministic transaction failpoints for the
+# continual-update campaign. This does not bypass production validation.
+bpf-update-diagnostics = []
 
 # Raw AArch64 register/UART probes used only during hardware bring-up.
 bringup-diagnostics = []

@@ -31,13 +31,17 @@ use kernel_bpf::actuation::EnvelopeMap;
 use kernel_bpf::attach::{GpioEdge, GpioRouteTable};
 use kernel_bpf::bytecode::insn::BpfInsn;
 use kernel_bpf::bytecode::program::{BpfProgType, BpfProgram};
+#[cfg(feature = "bpf-update-diagnostics")]
+use kernel_bpf::concurrency::exclusive_slot::SlotSkipCounts;
+use kernel_bpf::concurrency::exclusive_slot::{EnterError, ExclusiveSlot};
 use kernel_bpf::execution::{BpfContext, BpfError, Interpreter};
 use kernel_bpf::loader::BpfLoader;
 use kernel_bpf::maps::{ArrayMap, BpfMap, HashMap as BpfHashMap, RingBufMap, TimeSeriesMap};
 use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
-use kernel_bpf::signing::SignatureVerifier;
+use kernel_bpf::signing::{AuthenticationProvenance, SignatureVerifier};
 use kernel_bpf::verifier::admission::{
     commit_attachment, AdmissionLedger, AttachmentCommitError, AttachmentTable,
+    ExclusiveAdmissionError,
 };
 use kernel_bpf::verifier::{MapPerm, Verifier, VerifyConfig};
 use limits::BpfLimits;
@@ -131,8 +135,80 @@ const GENERIC_HOOK_SLOTS: usize = ATTACH_TYPE_SCHED_SWITCH as usize + 1;
 const GPIO_EDGE_SLOTS: usize = 3;
 const GPIO_ROUTE_SLOTS: usize = BPF_GPIO_PIN_COUNT as usize * GPIO_EDGE_SLOTS;
 
+pub type ProgramHandle = u32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlSlot {
+    Timer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstallationId {
+    pub program: ProgramHandle,
+    pub epoch: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatePolicy {
+    Reset,
+    Transfer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstallReceipt {
+    pub previous: Option<InstallationId>,
+    pub installed: InstallationId,
+    pub admission_delta_ns_per_s: i128,
+    pub committed_exclusive_ns_per_s: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallError {
+    StateTransferUnsupported,
+    PersistentStateUnsupported,
+    Busy,
+    EmptySlot,
+    SlotOccupied {
+        current: InstallationId,
+    },
+    StaleInstallation {
+        expected: InstallationId,
+        current: Option<InstallationId>,
+    },
+    CandidateNotLoaded,
+    PermissionDenied,
+    AuthenticationRequired,
+    TimerVerificationFailed,
+    VerifierMetadataChanged,
+    CandidateAttached,
+    CandidateActive,
+    CandidateInUse,
+    AuthorityExceeded,
+    AdmissionRejected,
+    AdmissionAccounting,
+    SnapshotAllocationFailed,
+    EmergencyStopBusy,
+    EmergencyStopActive,
+    EpochExhausted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookRunError {
+    Execution(BpfError),
+    TransitionBusy,
+    ExecutionBusy,
+}
+
+impl From<BpfError> for HookRunError {
+    fn from(error: BpfError) -> Self {
+        Self::Execution(error)
+    }
+}
+
 struct HookProgramList<const N: usize> {
     programs: [Option<Arc<ProgramRuntime>>; N],
+    #[cfg(feature = "bpf-update-diagnostics")]
+    handles: [ProgramHandle; N],
     len: usize,
 }
 
@@ -140,22 +216,37 @@ impl<const N: usize> HookProgramList<N> {
     fn empty() -> Self {
         Self {
             programs: core::array::from_fn(|_| None),
+            #[cfg(feature = "bpf-update-diagnostics")]
+            handles: [0; N],
             len: 0,
         }
     }
 
-    fn push(&mut self, runtime: &Arc<ProgramRuntime>) -> Result<(), BpfError> {
+    fn push(
+        &mut self,
+        _handle: ProgramHandle,
+        runtime: &Arc<ProgramRuntime>,
+    ) -> Result<(), BpfError> {
         let slot = self
             .programs
             .get_mut(self.len)
             .ok_or(BpfError::ResourceLimit)?;
         *slot = Some(runtime.clone());
+        #[cfg(feature = "bpf-update-diagnostics")]
+        {
+            self.handles[self.len] = _handle;
+        }
         self.len += 1;
         Ok(())
     }
 
     fn iter(&self) -> impl Iterator<Item = &Arc<ProgramRuntime>> {
         self.programs[..self.len].iter().flatten()
+    }
+
+    #[cfg(feature = "bpf-update-diagnostics")]
+    fn handles(&self) -> &[ProgramHandle] {
+        &self.handles[..self.len]
     }
 }
 
@@ -165,6 +256,7 @@ struct HookSnapshot {
 }
 
 impl HookSnapshot {
+    #[cfg(test)]
     fn empty() -> Self {
         Self {
             generic: core::array::from_fn(|_| HookProgramList::empty()),
@@ -208,9 +300,45 @@ impl HookSnapshot {
 
 static HOOK_SNAPSHOTS: EpochSnapshot<HookSnapshot> = EpochSnapshot::empty();
 
+struct SlotInstallation {
+    id: InstallationId,
+    owner: u64,
+    runtime: Arc<ProgramRuntime>,
+    wcet_cycles: u64,
+    authority_ceiling: BpfLoadAuthorization,
+}
+
+static TIMER_EXCLUSIVE_SLOT: ExclusiveSlot<SlotInstallation> = ExclusiveSlot::empty();
+
+#[cfg(feature = "bpf-update-diagnostics")]
+static FAIL_NEXT_EXCLUSIVE_SNAPSHOT: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "bpf-update-diagnostics")]
+static FAIL_NEXT_HOOK_SNAPSHOT: AtomicBool = AtomicBool::new(false);
+
 #[cfg(not(test))]
 struct PreparedHookSnapshot {
     snapshot: Box<HookSnapshot>,
+}
+
+struct PreparedSlotInstallation {
+    snapshot: Box<SlotInstallation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoadAuthentication {
+    Runtime(AuthenticationProvenance),
+    KernelImage,
+}
+
+impl LoadAuthentication {
+    const fn permits_exclusive_installation(self) -> bool {
+        match self {
+            Self::Runtime(AuthenticationProvenance::Signed { .. }) | Self::KernelImage => true,
+            Self::Runtime(AuthenticationProvenance::Unsigned) => {
+                cfg!(feature = "bpf-unsigned-development")
+            }
+        }
+    }
 }
 
 struct ProgramEntry {
@@ -219,6 +347,8 @@ struct ProgramEntry {
     charged_bytes: usize,
     owner: u64,
     authorization: BpfLoadAuthorization,
+    authentication: LoadAuthentication,
+    referenced_map_handles: Vec<u32>,
 }
 
 struct MapEntry {
@@ -264,7 +394,7 @@ struct ProgramMapRuntime {
     runtime: Arc<MapRuntime>,
 }
 
-pub(crate) struct ProgramRuntime {
+pub struct ProgramRuntime {
     program: BpfProgram<ActiveProfile>,
     maps: Vec<Option<ProgramMapRuntime>>,
 }
@@ -407,6 +537,9 @@ pub struct BpfManager {
     program_bytes: usize,
     live_maps: usize,
     map_bytes: usize,
+    timer_installation: Option<InstallationId>,
+    timer_epoch: u64,
+    last_install_receipt: Option<InstallReceipt>,
 }
 
 /// Default fire frequency assumed for a hook, in Hz. Every hook is assumed to
@@ -421,6 +554,12 @@ fn hook_frequency_hz(_attach_type: u32) -> u64 {
     } else {
         1_000_000_000 / period
     }
+}
+
+fn authorization_within(candidate: BpfLoadAuthorization, ceiling: BpfLoadAuthorization) -> bool {
+    candidate.caller <= ceiling.caller
+        && (!candidate.allow_actuation || ceiling.allow_actuation)
+        && ceiling.map_access.contains(candidate.map_access)
 }
 
 const fn attach_ctx_data_size(attach_type: u32) -> u32 {
@@ -467,13 +606,43 @@ impl BpfManager {
         Self::new_with_limits(BpfLimits::for_active_profile())
     }
 
+    #[cfg(feature = "bpf-update-diagnostics")]
+    pub fn new_with_admission_budget_for_diagnostics(budget_ns_per_s: u64) -> Self {
+        let mut manager = Self::new();
+        manager.admission = AdmissionLedger::new(
+            budget_ns_per_s,
+            <ActiveProfile as PhysicalProfile>::CYCLE_UNIT_NS,
+        );
+        manager
+    }
+
     #[cfg(not(test))]
     fn prepare_hook_snapshot(&self) -> Result<PreparedHookSnapshot, BpfError> {
-        let mut container = Vec::new();
+        #[cfg(feature = "bpf-update-diagnostics")]
+        if FAIL_NEXT_HOOK_SNAPSHOT.swap(false, Ordering::SeqCst) {
+            return Err(BpfError::OutOfMemory);
+        }
+        let mut container: Vec<HookSnapshot> = Vec::new();
         container
             .try_reserve_exact(1)
             .map_err(|_| BpfError::OutOfMemory)?;
-        container.push(HookSnapshot::empty());
+        let destination = container.as_mut_ptr();
+        // SAFETY: reserve_exact(1) provides storage for one HookSnapshot while
+        // the Vec length remains zero. Each array element is initialized by a
+        // raw pointer write before set_len exposes the complete value.
+        unsafe {
+            let generic = core::ptr::addr_of_mut!((*destination).generic)
+                .cast::<HookProgramList<HOOK_FANOUT_LIMIT>>();
+            for index in 0..GENERIC_HOOK_SLOTS {
+                generic.add(index).write(HookProgramList::empty());
+            }
+            let gpio = core::ptr::addr_of_mut!((*destination).gpio)
+                .cast::<HookProgramList<GPIO_IRQ_FANOUT_LIMIT>>();
+            for index in 0..GPIO_ROUTE_SLOTS {
+                gpio.add(index).write(HookProgramList::empty());
+            }
+            container.set_len(1);
+        }
         let snapshot = container.into_boxed_slice();
         debug_assert_eq!(snapshot.len(), 1);
         let raw = Box::into_raw(snapshot).cast::<HookSnapshot>();
@@ -494,7 +663,7 @@ impl BpfManager {
             for &prog_id in program_ids {
                 if let Some(entry) = self.program_entry(prog_id) {
                     programs
-                        .push(&entry.program)
+                        .push(prog_id, &entry.program)
                         .expect("attach admission enforces the fixed hook fanout");
                 }
             }
@@ -508,13 +677,35 @@ impl BpfManager {
                 self.gpio_routes.for_each_program(0, pin, fired, |prog_id| {
                     if let Some(entry) = self.program_entry(prog_id) {
                         programs
-                            .push(&entry.program)
+                            .push(prog_id, &entry.program)
                             .expect("GPIO route admission enforces the fixed IRQ fanout");
                     }
                 });
             }
         }
         HOOK_SNAPSHOTS.publish(prepared.snapshot);
+    }
+
+    fn prepare_slot_installation(
+        installation: SlotInstallation,
+    ) -> Result<PreparedSlotInstallation, InstallError> {
+        #[cfg(feature = "bpf-update-diagnostics")]
+        if FAIL_NEXT_EXCLUSIVE_SNAPSHOT.swap(false, Ordering::SeqCst) {
+            return Err(InstallError::SnapshotAllocationFailed);
+        }
+        let mut container = Vec::new();
+        container
+            .try_reserve_exact(1)
+            .map_err(|_| InstallError::SnapshotAllocationFailed)?;
+        container.push(installation);
+        let snapshot = container.into_boxed_slice();
+        debug_assert_eq!(snapshot.len(), 1);
+        let raw = Box::into_raw(snapshot).cast::<SlotInstallation>();
+        // SAFETY: a boxed one-element slice has the same allocation layout as
+        // its element.
+        Ok(PreparedSlotInstallation {
+            snapshot: unsafe { Box::from_raw(raw) },
+        })
     }
 
     fn new_with_limits(limits: BpfLimits) -> Self {
@@ -538,6 +729,9 @@ impl BpfManager {
             program_bytes: 0,
             live_maps: 0,
             map_bytes: 0,
+            timer_installation: None,
+            timer_epoch: 0,
+            last_install_receipt: None,
         };
         let envelope = EnvelopeMap::<ActiveProfile>::init_from_profile();
         crate::actuation::ACTUATION_MONITOR
@@ -761,6 +955,33 @@ impl BpfManager {
             Ok(snapshot) => snapshot,
             Err(_) => return false,
         };
+        if self.timer_installation.is_some_and(|installation| {
+            self.program_entry(installation.program)
+                .is_some_and(|entry| entry.owner == owner)
+        }) {
+            let mut slot_transition = match TIMER_EXCLUSIVE_SLOT.try_transition() {
+                Ok(transition) => transition,
+                Err(_) => return false,
+            };
+            let current_wcet = slot_transition
+                .current()
+                .expect("owned installation was present")
+                .wcet_cycles;
+            let admission = match self.admission.preflight_exclusive(
+                ATTACH_TYPE_TIMER,
+                current_wcet,
+                0,
+                hook_frequency_hz(ATTACH_TYPE_TIMER),
+            ) {
+                Ok(admission) => admission,
+                Err(_) => return false,
+            };
+            if self.admission.commit_exclusive(admission).is_err() {
+                return false;
+            }
+            slot_transition.clear();
+            self.timer_installation = None;
+        }
         let programs = &self.programs;
         let program_generations = &self.program_generations;
         let (attachments, admission) = (&mut self.attachments, &mut self.admission);
@@ -903,10 +1124,16 @@ impl BpfManager {
         charge: usize,
         owner: u64,
         authorization: BpfLoadAuthorization,
+        authentication: LoadAuthentication,
     ) -> Result<u32, BpfError> {
         self.ensure_program_quota(owner, charge)?;
         let maps =
             self.program_maps_for_owner(owner, authorization.map_access, referenced_map_handles)?;
+        let mut retained_map_handles = Vec::new();
+        retained_map_handles
+            .try_reserve_exact(referenced_map_handles.len())
+            .map_err(|_| BpfError::OutOfMemory)?;
+        retained_map_handles.extend_from_slice(referenced_map_handles);
         let id = handles::insert(
             &mut self.programs,
             &mut self.program_generations,
@@ -917,6 +1144,8 @@ impl BpfManager {
                 charged_bytes: charge,
                 owner,
                 authorization,
+                authentication,
+                referenced_map_handles: retained_map_handles,
             },
         )?;
         self.live_programs = self
@@ -999,6 +1228,7 @@ impl BpfManager {
                 log::error!("BpfManager: ELF program failed authentication: {}", e);
                 BpfError::SignatureRejected
             })?;
+        let authentication = LoadAuthentication::Runtime(authenticated.provenance());
         let elf_bytes = authenticated.program_data();
 
         let mut loader = BpfLoader::<ActiveProfile>::new();
@@ -1016,9 +1246,9 @@ impl BpfManager {
             // real stack usage (no longer the hardcoded 0). #48.
             let (map_value_sizes, map_perms, map_generations) =
                 self.map_metadata_for_owner(owner, authorization.map_access);
-            #[cfg(feature = "verifier-cost")]
+            #[cfg(all(feature = "verifier-cost", target_os = "none"))]
             let insn_count = loaded_prog.insns().len();
-            #[cfg(feature = "verifier-cost")]
+            #[cfg(all(feature = "verifier-cost", target_os = "none"))]
             let start_cycles = read_cycles();
             let (bpf_prog, stats) = Verifier::<ActiveProfile>::verify_with_stats(
                 loaded_prog.prog_type(),
@@ -1034,7 +1264,7 @@ impl BpfManager {
                 log::error!("BpfManager: ELF program rejected by verifier: {}", e);
                 BpfError::VerificationFailed
             })?;
-            #[cfg(feature = "verifier-cost")]
+            #[cfg(all(feature = "verifier-cost", target_os = "none"))]
             let verify_cycles = read_cycles().wrapping_sub(start_cycles);
 
             let id = self.register_program(
@@ -1044,8 +1274,9 @@ impl BpfManager {
                 charge,
                 owner,
                 authorization,
+                authentication,
             )?;
-            #[cfg(feature = "verifier-cost")]
+            #[cfg(all(feature = "verifier-cost", target_os = "none"))]
             crate::serial_println!(
                 "{}",
                 kernel_bpf::cost_corpus::CostRecord {
@@ -1087,7 +1318,12 @@ impl BpfManager {
             return Err(BpfError::SignatureRejected);
         }
 
-        self.load_verified_raw_program(owner, insns, authorization)
+        self.load_verified_raw_program(
+            owner,
+            insns,
+            authorization,
+            LoadAuthentication::Runtime(AuthenticationProvenance::Unsigned),
+        )
     }
 
     /// Load bytecode compiled into the kernel image.
@@ -1099,7 +1335,12 @@ impl BpfManager {
         &mut self,
         insns: Vec<BpfInsn>,
     ) -> Result<u32, BpfError> {
-        self.load_verified_raw_program(0, insns, BpfLoadAuthorization::kernel())
+        self.load_verified_raw_program(
+            0,
+            insns,
+            BpfLoadAuthorization::kernel(),
+            LoadAuthentication::KernelImage,
+        )
     }
 
     fn load_verified_raw_program(
@@ -1107,6 +1348,7 @@ impl BpfManager {
         owner: u64,
         insns: Vec<BpfInsn>,
         authorization: BpfLoadAuthorization,
+        authentication: LoadAuthentication,
     ) -> Result<u32, BpfError> {
         let charge = insns
             .len()
@@ -1119,9 +1361,9 @@ impl BpfManager {
         // computed rather than trusting a hardcoded 0. #48.
         let (map_value_sizes, map_perms, map_generations) =
             self.map_metadata_for_owner(owner, authorization.map_access);
-        #[cfg(feature = "verifier-cost")]
+        #[cfg(all(feature = "verifier-cost", target_os = "none"))]
         let insn_count = insns.len();
-        #[cfg(feature = "verifier-cost")]
+        #[cfg(all(feature = "verifier-cost", target_os = "none"))]
         let start_cycles = read_cycles();
         let (bpf_prog, stats) = Verifier::<ActiveProfile>::verify_with_stats(
             BpfProgType::Unspec,
@@ -1137,7 +1379,7 @@ impl BpfManager {
             log::error!("BpfManager: raw program rejected by verifier: {}", e);
             BpfError::VerificationFailed
         })?;
-        #[cfg(feature = "verifier-cost")]
+        #[cfg(all(feature = "verifier-cost", target_os = "none"))]
         let verify_cycles = read_cycles().wrapping_sub(start_cycles);
 
         let id = self.register_program(
@@ -1147,8 +1389,9 @@ impl BpfManager {
             charge,
             owner,
             authorization,
+            authentication,
         )?;
-        #[cfg(feature = "verifier-cost")]
+        #[cfg(all(feature = "verifier-cost", target_os = "none"))]
         crate::serial_println!(
             "{}",
             kernel_bpf::cost_corpus::CostRecord {
@@ -1165,6 +1408,266 @@ impl BpfManager {
             self.live_programs
         );
         Ok(id)
+    }
+
+    pub fn try_install_exclusive_for(
+        &mut self,
+        owner: u64,
+        slot: ControlSlot,
+        candidate: ProgramHandle,
+        state: StatePolicy,
+    ) -> Result<InstallReceipt, InstallError> {
+        self.try_update_exclusive_for(owner, slot, None, candidate, state)
+    }
+
+    pub fn try_replace_exclusive_for(
+        &mut self,
+        owner: u64,
+        slot: ControlSlot,
+        expected: InstallationId,
+        candidate: ProgramHandle,
+        state: StatePolicy,
+    ) -> Result<InstallReceipt, InstallError> {
+        self.try_update_exclusive_for(owner, slot, Some(expected), candidate, state)
+    }
+
+    fn try_update_exclusive_for(
+        &mut self,
+        owner: u64,
+        slot: ControlSlot,
+        expected: Option<InstallationId>,
+        candidate: ProgramHandle,
+        state: StatePolicy,
+    ) -> Result<InstallReceipt, InstallError> {
+        if state == StatePolicy::Transfer {
+            return Err(InstallError::StateTransferUnsupported);
+        }
+        let candidate_entry = self
+            .program_entry(candidate)
+            .ok_or(InstallError::CandidateNotLoaded)?;
+        if !candidate_entry.referenced_map_handles.is_empty() {
+            return Err(InstallError::PersistentStateUnsupported);
+        }
+
+        let mut transition = match slot {
+            ControlSlot::Timer => TIMER_EXCLUSIVE_SLOT
+                .try_transition()
+                .map_err(|_| InstallError::Busy)?,
+        };
+        let current = transition.current();
+        match (expected, current) {
+            (None, Some(current)) => {
+                return Err(InstallError::SlotOccupied {
+                    current: current.id,
+                });
+            }
+            (Some(expected), current) if current.map(|entry| entry.id) != Some(expected) => {
+                return Err(InstallError::StaleInstallation {
+                    expected,
+                    current: current.map(|entry| entry.id),
+                });
+            }
+            (Some(_), None) => return Err(InstallError::EmptySlot),
+            _ => {}
+        }
+
+        let (previous, previous_wcet_cycles, authority_ceiling) = match current {
+            Some(current) => {
+                if current.owner != owner {
+                    return Err(InstallError::PermissionDenied);
+                }
+                (
+                    Some(current.id),
+                    current.wcet_cycles,
+                    current.authority_ceiling,
+                )
+            }
+            None => (None, 0, candidate_entry.authorization),
+        };
+        if previous.is_some_and(|id| id.program == candidate) {
+            return Err(InstallError::CandidateActive);
+        }
+        if candidate_entry.owner != owner {
+            return Err(InstallError::PermissionDenied);
+        }
+        if !candidate_entry
+            .authentication
+            .permits_exclusive_installation()
+        {
+            return Err(InstallError::AuthenticationRequired);
+        }
+        if self
+            .attachments
+            .values()
+            .any(|programs| programs.contains(&candidate))
+        {
+            return Err(InstallError::CandidateAttached);
+        }
+        if Arc::strong_count(&candidate_entry.program) != 1 {
+            return Err(InstallError::CandidateInUse);
+        }
+        if !authorization_within(candidate_entry.authorization, authority_ceiling) {
+            return Err(InstallError::AuthorityExceeded);
+        }
+
+        let (map_value_sizes, map_perms, map_generations) =
+            self.map_metadata_for_owner(owner, candidate_entry.authorization.map_access);
+        let mut verify_config = self.verify_config_with_ctx_data(
+            &map_value_sizes,
+            &map_perms,
+            &map_generations,
+            VERIFY_CTX_DATA_SIZE_NONE,
+            candidate_entry.authorization,
+        );
+        verify_config.forbid_logging_helpers = true;
+        let (_, stats) = Verifier::<ActiveProfile>::verify_with_stats(
+            candidate_entry.program.program.prog_type(),
+            candidate_entry.program.program.instructions(),
+            verify_config,
+        )
+        .map_err(|_| InstallError::TimerVerificationFailed)?;
+        if stats.referenced_map_handles != candidate_entry.referenced_map_handles {
+            return Err(InstallError::VerifierMetadataChanged);
+        }
+
+        let frequency_hz = hook_frequency_hz(ATTACH_TYPE_TIMER);
+        let admission = self
+            .admission
+            .preflight_exclusive(
+                ATTACH_TYPE_TIMER,
+                previous_wcet_cycles,
+                candidate_entry.wcet_cycles,
+                frequency_hz,
+            )
+            .map_err(|error| match error {
+                ExclusiveAdmissionError::Admission(_) => InstallError::AdmissionRejected,
+                ExclusiveAdmissionError::PreviousChargeMismatch { .. }
+                | ExclusiveAdmissionError::ArithmeticOverflow => InstallError::AdmissionAccounting,
+            })?;
+        let next_epoch = self
+            .timer_epoch
+            .checked_add(1)
+            .ok_or(InstallError::EpochExhausted)?;
+        let installed = InstallationId {
+            program: candidate,
+            epoch: next_epoch,
+        };
+        let next_charge = self
+            .admission
+            .contribution(candidate_entry.wcet_cycles, frequency_hz);
+        let previous_charge = self
+            .admission
+            .contribution(previous_wcet_cycles, frequency_hz);
+        let receipt = InstallReceipt {
+            previous,
+            installed,
+            admission_delta_ns_per_s: i128::from(next_charge) - i128::from(previous_charge),
+            committed_exclusive_ns_per_s: next_charge,
+        };
+        let prepared = Self::prepare_slot_installation(SlotInstallation {
+            id: installed,
+            owner,
+            runtime: candidate_entry.program.clone(),
+            wcet_cycles: candidate_entry.wcet_cycles,
+            authority_ceiling,
+        })?;
+
+        let committed = crate::actuation::try_with_estop_clear(|| {
+            self.admission
+                .commit_exclusive(admission)
+                .map_err(|_| InstallError::AdmissionAccounting)?;
+            transition.publish(prepared.snapshot);
+            self.timer_epoch = next_epoch;
+            self.timer_installation = Some(installed);
+            self.last_install_receipt = Some(receipt);
+            Ok(receipt)
+        })
+        .map_err(|error| match error {
+            crate::actuation::EstopGateError::Busy => InstallError::EmergencyStopBusy,
+            crate::actuation::EstopGateError::Estopped => InstallError::EmergencyStopActive,
+        })?;
+        committed
+    }
+
+    #[cfg(feature = "bpf-update-diagnostics")]
+    pub fn fail_next_exclusive_snapshot_for_diagnostics(&mut self) {
+        FAIL_NEXT_EXCLUSIVE_SNAPSHOT.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(feature = "bpf-update-diagnostics")]
+    pub fn fail_next_hook_snapshot_for_diagnostics(&mut self) {
+        FAIL_NEXT_HOOK_SNAPSHOT.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(feature = "bpf-update-diagnostics")]
+    pub fn force_timer_epoch_for_diagnostics(&mut self, epoch: u64) {
+        self.timer_epoch = epoch;
+    }
+
+    #[cfg(feature = "bpf-update-diagnostics")]
+    pub fn clear_exclusive_for_diagnostics(
+        &mut self,
+        owner: u64,
+        expected: InstallationId,
+    ) -> Result<(), InstallError> {
+        let mut transition = TIMER_EXCLUSIVE_SLOT
+            .try_transition()
+            .map_err(|_| InstallError::Busy)?;
+        let current = transition.current().ok_or(InstallError::EmptySlot)?;
+        if current.id != expected {
+            return Err(InstallError::StaleInstallation {
+                expected,
+                current: Some(current.id),
+            });
+        }
+        if current.owner != owner {
+            return Err(InstallError::PermissionDenied);
+        }
+        let admission = self
+            .admission
+            .preflight_exclusive(
+                ATTACH_TYPE_TIMER,
+                current.wcet_cycles,
+                0,
+                hook_frequency_hz(ATTACH_TYPE_TIMER),
+            )
+            .map_err(|_| InstallError::AdmissionAccounting)?;
+        self.admission
+            .commit_exclusive(admission)
+            .map_err(|_| InstallError::AdmissionAccounting)?;
+        transition.clear();
+        self.timer_installation = None;
+        Ok(())
+    }
+
+    #[cfg(feature = "bpf-update-diagnostics")]
+    pub const fn exclusive_timer_identity(&self) -> Option<InstallationId> {
+        self.timer_installation
+    }
+
+    #[cfg(feature = "bpf-update-diagnostics")]
+    pub const fn last_install_receipt(&self) -> Option<InstallReceipt> {
+        self.last_install_receipt
+    }
+
+    #[cfg(feature = "bpf-update-diagnostics")]
+    pub fn exclusive_slot_skips(&self) -> SlotSkipCounts {
+        TIMER_EXCLUSIVE_SLOT.skipped()
+    }
+
+    #[cfg(feature = "bpf-update-diagnostics")]
+    pub fn committed_exclusive_ns_per_s(&self) -> u64 {
+        self.admission.exclusive_ns_per_s()
+    }
+
+    #[cfg(feature = "bpf-update-diagnostics")]
+    pub fn committed_total_ns_per_s(&self) -> u64 {
+        self.admission.committed_ns_per_s()
+    }
+
+    #[cfg(feature = "bpf-update-diagnostics")]
+    pub fn reclaim_owner_for_diagnostics(&mut self, owner: u64) -> bool {
+        self.reclaim_owner(owner)
     }
 
     pub fn attach(&mut self, attach_type: u32, prog_id: u32) -> Result<(), BpfError> {
@@ -1194,6 +1697,12 @@ impl BpfManager {
             );
             return Err(BpfError::NotLoaded);
         };
+        if self
+            .timer_installation
+            .is_some_and(|installation| installation.program == prog_id)
+        {
+            return Err(BpfError::ObjectBusy);
+        }
 
         let (map_value_sizes, map_perms, map_generations) =
             self.map_metadata_for_owner(owner, program_entry.authorization.map_access);
@@ -1339,6 +1848,12 @@ impl BpfManager {
     pub fn unload_program_for(&mut self, owner: u64, prog_id: u32) -> Result<(), BpfError> {
         self.ensure_program_owner(owner, prog_id)?;
         if self
+            .timer_installation
+            .is_some_and(|installation| installation.program == prog_id)
+        {
+            return Err(BpfError::ObjectBusy);
+        }
+        if self
             .attachments
             .values()
             .any(|programs| programs.contains(&prog_id))
@@ -1366,6 +1881,12 @@ impl BpfManager {
     }
 
     pub fn execute(&self, program_id: u32, ctx: &BpfContext<'_>) -> Result<u64, BpfError> {
+        if self
+            .timer_installation
+            .is_some_and(|installation| installation.program == program_id)
+        {
+            return Err(BpfError::ObjectBusy);
+        }
         let program = self.program_entry(program_id).ok_or(BpfError::NotLoaded)?;
 
         Self::execute_program(&program.program, ctx)
@@ -1403,6 +1924,12 @@ impl BpfManager {
         prog_id: u32,
     ) -> Result<Arc<ProgramRuntime>, BpfError> {
         self.ensure_program_owner(owner, prog_id)?;
+        if self
+            .timer_installation
+            .is_some_and(|installation| installation.program == prog_id)
+        {
+            return Err(BpfError::ObjectBusy);
+        }
         self.get_program(prog_id).ok_or(BpfError::NotLoaded)
     }
 
@@ -1488,7 +2015,8 @@ impl BpfManager {
 
     /// Record a GPIO attachment route. Called from `BPF_PROG_ATTACH` after the
     /// pin IRQ is armed.
-    pub fn register_gpio_route(
+    #[cfg(test)]
+    fn register_gpio_route(
         &mut self,
         chip: u8,
         pin: u8,
@@ -1536,14 +2064,52 @@ impl BpfManager {
         attach_type: u32,
         ctx: &BpfContext<'_>,
         _hook_name: &str,
-    ) -> Result<usize, BpfError> {
-        let Some(snapshot) = HOOK_SNAPSHOTS.read() else {
-            return Ok(0);
+    ) -> Result<usize, HookRunError> {
+        let count = if let Some(snapshot) = HOOK_SNAPSHOTS.read() {
+            if let Some(programs) = snapshot.generic(attach_type) {
+                Self::run_snapshot(programs.iter(), ctx)?
+            } else {
+                0
+            }
+        } else {
+            0
         };
-        let Some(programs) = snapshot.generic(attach_type) else {
-            return Ok(0);
+        if attach_type != ATTACH_TYPE_TIMER {
+            return Ok(count);
+        }
+        let installation = match TIMER_EXCLUSIVE_SLOT.try_enter() {
+            Ok(installation) => installation,
+            Err(EnterError::Empty) => return Ok(count),
+            Err(EnterError::TransitionBusy) => return Err(HookRunError::TransitionBusy),
+            Err(EnterError::ExecutionBusy) => return Err(HookRunError::ExecutionBusy),
         };
-        Self::run_snapshot(programs.iter(), ctx)
+        Self::execute_program(&installation.runtime, ctx)?;
+        Ok(count + 1)
+    }
+
+    #[cfg(feature = "bpf-update-diagnostics")]
+    pub fn observe_timer_exclusive<R>(
+        f: impl FnOnce(InstallationId) -> R,
+    ) -> Result<R, HookRunError> {
+        let installation = TIMER_EXCLUSIVE_SLOT
+            .try_enter()
+            .map_err(|error| match error {
+                EnterError::TransitionBusy => HookRunError::TransitionBusy,
+                EnterError::ExecutionBusy => HookRunError::ExecutionBusy,
+                EnterError::Empty => HookRunError::Execution(BpfError::NotLoaded),
+            })?;
+        Ok(f(installation.id))
+    }
+
+    #[cfg(feature = "bpf-update-diagnostics")]
+    pub fn observe_hook_snapshot<R>(
+        attach_type: u32,
+        f: impl FnOnce(&[ProgramHandle]) -> R,
+    ) -> Option<R> {
+        let snapshot = HOOK_SNAPSHOTS.read()?;
+        snapshot
+            .generic(attach_type)
+            .map(|programs| f(programs.handles()))
     }
 
     fn run_snapshot<'a>(
@@ -2239,12 +2805,12 @@ mod tests {
         snapshot
             .generic_mut(ATTACH_TYPE_TIMER)
             .unwrap()
-            .push(&runtime)
+            .push(program_id, &runtime)
             .unwrap();
         snapshot
             .gpio_mut(0, 17, GpioEdge::Rising as u32)
             .unwrap()
-            .push(&runtime)
+            .push(program_id, &runtime)
             .unwrap();
 
         assert_eq!(
@@ -2264,9 +2830,12 @@ mod tests {
 
         let timer = snapshot.generic_mut(ATTACH_TYPE_TIMER).unwrap();
         for _ in 1..HOOK_FANOUT_LIMIT {
-            timer.push(&runtime).unwrap();
+            timer.push(program_id, &runtime).unwrap();
         }
-        assert_eq!(timer.push(&runtime), Err(BpfError::ResourceLimit));
+        assert_eq!(
+            timer.push(program_id, &runtime),
+            Err(BpfError::ResourceLimit)
+        );
     }
 
     #[test]

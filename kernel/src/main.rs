@@ -97,6 +97,13 @@ fn hlt() {
 #[cfg(all(feature = "audit-fault-injection", target_arch = "x86_64"))]
 mod audit_fault_probe;
 
+#[cfg(all(
+    feature = "bpf-update-diagnostics",
+    feature = "bpf-unsigned-development",
+    target_arch = "x86_64"
+))]
+mod update_transaction_probe;
+
 #[cfg(target_arch = "x86_64")]
 // SAFETY: We export "kernel_main" as the symbol name for the bootloader to find.
 // This symbol name is unique and required by the Limine protocol.
@@ -156,6 +163,13 @@ unsafe extern "C" fn main() -> ! {
         // greps the serial capture for this exact string before
         // declaring PASS.
         serial_println!("QEMU_BOOT_OK");
+
+        #[cfg(all(
+            feature = "bpf-update-diagnostics",
+            feature = "bpf-unsigned-development",
+            target_arch = "x86_64"
+        ))]
+        update_transaction_probe::run_probe();
 
         // Audit-fault-injection probe (gated feature). Exercises the
         // PhysicalMemory facade under controller-armed fault scenarios.

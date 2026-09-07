@@ -22,6 +22,9 @@
 #![cfg(feature = "loom-model")]
 
 use kernel_bpf::concurrency::epoch_snapshot::EpochSnapshot;
+use kernel_bpf::concurrency::exclusive_slot::{
+    EnterError, ExclusiveSlot, SlotSkipCounts, TransitionError,
+};
 use loom::sync::Arc;
 use loom::sync::atomic::{AtomicUsize, Ordering};
 use loom::thread;
@@ -170,6 +173,149 @@ fn saturated_reader_counter_fails_closed_without_wrapping() {
 struct Tracked {
     generation: usize,
     drops: Arc<AtomicUsize>,
+}
+
+#[test]
+fn exclusive_slot_reports_every_skipped_invocation() {
+    loom::model(|| {
+        let slot = ExclusiveSlot::<usize>::empty();
+
+        assert_eq!(slot.try_enter().unwrap_err(), EnterError::Empty);
+
+        let mut bootstrap = slot.try_transition().unwrap();
+        assert!(bootstrap.current().is_none());
+        bootstrap.publish(Box::new(11));
+        assert_eq!(slot.try_enter().unwrap_err(), EnterError::TransitionBusy);
+        drop(bootstrap);
+
+        let invocation = slot.try_enter().unwrap();
+        assert_eq!(*invocation, 11);
+        assert_eq!(slot.try_enter().unwrap_err(), EnterError::ExecutionBusy);
+        assert_eq!(slot.try_transition().unwrap_err(), TransitionError::Busy);
+        drop(invocation);
+
+        let mut transition = slot.try_transition().unwrap();
+        assert_eq!(transition.current(), Some(&11));
+        assert_eq!(slot.try_enter().unwrap_err(), EnterError::TransitionBusy);
+        transition.publish(Box::new(12));
+        assert_eq!(slot.try_enter().unwrap_err(), EnterError::TransitionBusy);
+        drop(transition);
+
+        let final_invocation = slot.try_enter().unwrap();
+        assert_eq!(*final_invocation, 12);
+        drop(final_invocation);
+
+        let mut teardown = slot.try_transition().unwrap();
+        assert_eq!(teardown.current(), Some(&12));
+        teardown.clear();
+        assert_eq!(slot.try_enter().unwrap_err(), EnterError::TransitionBusy);
+        drop(teardown);
+        assert_eq!(slot.try_enter().unwrap_err(), EnterError::Empty);
+        let empty_transition = slot
+            .try_transition()
+            .expect("empty entry failure must release the active state");
+        assert!(empty_transition.current().is_none());
+        drop(empty_transition);
+        assert_eq!(
+            slot.skipped(),
+            SlotSkipCounts {
+                transition_busy: 4,
+                execution_busy: 1,
+                empty: 2,
+            }
+        );
+    });
+}
+
+#[test]
+fn exclusive_slot_allows_only_one_of_two_competing_invocations() {
+    loom::model(|| {
+        let slot = Arc::new(ExclusiveSlot::<usize>::empty());
+        let mut bootstrap = slot.try_transition().unwrap();
+        bootstrap.publish(Box::new(7));
+        drop(bootstrap);
+
+        let attempted = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
+        let successes = Arc::new(AtomicUsize::new(0));
+        let busy = Arc::new(AtomicUsize::new(0));
+        let mut threads = Vec::new();
+        for _ in 0..2 {
+            let slot = slot.clone();
+            let attempted = attempted.clone();
+            let active = active.clone();
+            let successes = successes.clone();
+            let busy = busy.clone();
+            threads.push(thread::spawn(move || match slot.try_enter() {
+                Ok(value) => {
+                    assert_eq!(active.fetch_add(1, Ordering::SeqCst), 0);
+                    successes.fetch_add(1, Ordering::SeqCst);
+                    attempted.fetch_add(1, Ordering::SeqCst);
+                    while attempted.load(Ordering::SeqCst) != 2 {
+                        thread::yield_now();
+                    }
+                    assert_eq!(*value, 7);
+                    assert_eq!(active.fetch_sub(1, Ordering::SeqCst), 1);
+                    drop(value);
+                }
+                Err(EnterError::ExecutionBusy) => {
+                    busy.fetch_add(1, Ordering::SeqCst);
+                    attempted.fetch_add(1, Ordering::SeqCst);
+                }
+                Err(other) => panic!("unexpected invocation result: {other:?}"),
+            }));
+        }
+
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(successes.load(Ordering::SeqCst), 1);
+        assert_eq!(busy.load(Ordering::SeqCst), 1);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(slot.skipped().execution_busy, 1);
+    });
+}
+
+#[test]
+fn exclusive_slot_enter_transition_race_never_overlaps() {
+    loom::model(|| {
+        let slot = Arc::new(ExclusiveSlot::<usize>::empty());
+        let mut bootstrap = slot.try_transition().unwrap();
+        bootstrap.publish(Box::new(0));
+        drop(bootstrap);
+
+        let executing = Arc::new(AtomicUsize::new(0));
+        let reader_slot = slot.clone();
+        let reader_executing = executing.clone();
+        let reader = thread::spawn(move || match reader_slot.try_enter() {
+            Ok(value) => {
+                assert_eq!(reader_executing.fetch_add(1, Ordering::SeqCst), 0);
+                thread::yield_now();
+                assert!(*value == 0 || *value == 1);
+                assert_eq!(reader_executing.fetch_sub(1, Ordering::SeqCst), 1);
+                drop(value);
+            }
+            Err(EnterError::TransitionBusy) => {}
+            Err(other) => panic!("unexpected reader result: {other:?}"),
+        });
+
+        let writer_slot = slot.clone();
+        let writer_executing = executing.clone();
+        let writer = thread::spawn(move || match writer_slot.try_transition() {
+            Ok(mut transition) => {
+                assert_eq!(writer_executing.load(Ordering::SeqCst), 0);
+                transition.publish(Box::new(1));
+                assert_eq!(writer_executing.load(Ordering::SeqCst), 0);
+            }
+            Err(TransitionError::Busy) => {}
+        });
+
+        reader.join().unwrap();
+        writer.join().unwrap();
+        assert_eq!(executing.load(Ordering::SeqCst), 0);
+        let final_value = slot.try_enter().unwrap();
+        assert!(*final_value == 0 || *final_value == 1);
+    });
 }
 
 impl Drop for Tracked {

@@ -43,7 +43,10 @@ impl BpfLimits {
         }
     }
 
-    #[cfg(all(feature = "embedded-profile", not(feature = "cloud-profile")))]
+    #[cfg(all(
+        not(feature = "cloud-profile"),
+        any(feature = "embedded-profile", feature = "bpf-update-diagnostics")
+    ))]
     pub(super) const fn for_active_profile() -> Self {
         Self {
             max_live_programs: 32,
