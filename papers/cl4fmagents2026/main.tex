@@ -21,7 +21,7 @@
 \maketitle
 
 \begin{abstract}
-Adaptation should not imply deployment: a better controller can still be installed unreliably. We define an executor contract combining expected installation identity, invocation quiescence, stateless admission, authority revalidation, and resource-atomic publication. A prototype implements it for one runtime slot. In a forced held-reader schedule, atomic publication makes the candidate current while a predecessor invocation remains live; guarded replacement returns \texttt{Busy} and admits no old/new invocation overlap. Across six rejection cases tested per protocol, both preserve the predecessor installation. Hosted measurements quantify replacement costs, retries, skipped dispatches, and retained bytecode. A payload-shift simulation replays frozen gain proposals to separate task quality from installation correctness. Foundation-model adaptation, downstream command fencing, and physical safety remain unevaluated.
+Adaptation should not imply deployment: a better controller can still be installed unreliably. We define an executor contract combining expected installation identity, invocation quiescence, stateless admission, authority revalidation, and resource-atomic publication for one runtime slot. In a forced held-reader schedule, atomic publication (AP) makes the candidate current while a predecessor invocation remains live; guarded replacement (GR) returns \texttt{Busy} without old/new invocation overlap. Both preserve the predecessor across six rejection cases per protocol. Hosted measurements quantify replacement and availability costs. In a payload-shift replay, post-shift RMSE rounds to 0.974 for both, yet AP applies one retired predecessor command and GR none: task quality alone does not establish installation correctness. Foundation-model adaptation, downstream command fencing, and physical safety remain unevaluated.
 \end{abstract}
 
 \section{The update is part of the execution contract}
@@ -81,7 +81,7 @@ Attach-first and detach-first remain supporting failure witnesses: stopping betw
 Release builds use identical preloaded candidates. Dispatcher and updater are pinned to separate physical cores of an AMD Ryzen 7 7735HS under normal Linux scheduling and frequency scaling. Dispatch period is 1\,ms; imposed guard holds are 0/10/100/500\,$\mu$s, not bytecode runtimes. Each protocol/hold regime has ten fresh processes with 1,000 attempts after excluded warmup. A deterministic phase sweep spans the period. \texttt{Busy} retains the same logical request; only success advances expected identity and candidate.
 
 \begin{table}[!ht]
-\caption{Hosted replacement cost and availability. Each row aggregates ten fresh processes per protocol. Latency cells report the median across process-level medians and process-level p99s. First-try denominators count logical replacement requests started; the skip rate divides natural skips by successful activations. Natural skips exclude forced \texttt{TransitionBusy} probes. Raw counts are retained in the supplement; these are not real-time guarantees.}
+\caption{Hosted replacement cost and availability (ten fresh processes per protocol and row). Cells give medians across process-level medians/p99s of successful API calls only. GR excludes failed \texttt{Busy} calls and retry waiting; first-try success measures retry incidence, not end-to-end delay. First-try denominators count logical requests started; natural skips divide by successful activations and exclude forced \texttt{TransitionBusy} probes. Raw counts are in the supplement; no real-time guarantees.}
 \label{tab:costs}
 \centering
 \small
@@ -90,7 +90,7 @@ Release builds use identical preloaded candidates. Dispatcher and updater are pi
 
 \input{cost-note.tex}
 
-Timing uses \texttt{CLOCK\_MONOTONIC\_RAW}, preallocated buffers, and no timed JSON emission. Clock overhead is retained without subtraction. Latencies include verification through reclamation; observer costs exclude BPF execution. Raw per-process count/median/p99/maximum, lateness, holds, missed releases, and retries are retained. First-try fractions count logical requests started; skips/update uses successful activations.
+Timing uses \texttt{CLOCK\_MONOTONIC\_RAW}, preallocated buffers, and no timed JSON emission. Clock overhead is retained without subtraction. Latencies include verification through reclamation; observer costs exclude BPF execution. Raw per-process count/median/p99/maximum, lateness, holds, missed releases, and retries are retained.
 
 \paragraph{Installation-conditioned control replay.}
 An eight-second host simulation integrates $m\dot v=u-v$ by 100\,$\mu$s Euler steps, with mass $1\rightarrow2$ at four seconds and reference alternating $\pm1$ each second. Control ticks every millisecond use $u=\mathrm{clip}(k(r-v),-4,4)$. A seed tuner, starting at $k=1$, doubles gain up to 16 when recent 250\,ms tracking RMSE exceeds 0.1, at 4.25, 4.5, 4.75, and 5 seconds. We freeze these proposals before replaying frozen control, AP, and GR.
@@ -104,6 +104,8 @@ Real manager installations and guards select the gain; host code computes contro
 \small
 \input{adaptation.tex}
 \end{table}
+
+AP and GR both round to 0.974 post-shift RMSE, but AP admits one old/new invocation overlap and applies one retired predecessor command, while GR admits neither. At this reporting precision, aggregate task RMSE therefore hides the installation defect. For each updating protocol, only three of four activations improve paired-probe RMSE: correct installation does not imply useful adaptation.
 
 The anonymous supplement uses the local revision label \texttt{artifact-r1}, with source, raw traces, derived tables, and hashes of the anonymized files.
 
