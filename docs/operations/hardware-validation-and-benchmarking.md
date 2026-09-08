@@ -241,6 +241,38 @@ cargo xtask bench verifier -- "$CAMPAIGN/verifier-cost.log" \
 - [ ] Repeat after cold boot, warm boot, and representative non-critical load.
   Do not call a single best run a latency bound.
 
+#### Unloaded repeated GPIO reflex bring-up
+
+Build `embedded-rpi5,bench-reflex-rearm` separately. With both boards unpowered,
+remove the manual Pi 3.3 V stimulus and any static GPIO24-high jumper. Connect
+Shrike GP22 through 220 ohm to Pi GPIO23 (physical16), and GP21 through a second
+220 ohm to GPIO24 (physical18). Share ground; analyzer D0 observes GPIO23 and
+D1 observes GPIO12 (physical32). Keep all motors, drivers and actuators
+physically disconnected. Shrike runs its retained MicroPython stimulus firmware;
+this does not test the AxiomOS MCU firmware or FPGA runtime.
+
+Connect Shrike USB first, leaving Pi power off. Run the existing harness with
+explicit serial ports and `RUN_DIR` as required by the campaign:
+
+```sh
+ACTUATORS_MOTORS_DISCONNECTED=YES SAMPLERATE=1m PULSE_COUNT=5 \
+  scripts/hil/shrike-gpio23-pulse.sh
+```
+
+Power Pi only at `UART RECORDING`. The harness holds the sensor LOW and releases
+the e-stop input before boot, checks initial output arming, waits for signed-load
+and diagnostic readiness, and starts pulses only after live analyzer data.
+It ends with both Shrike signals LOW and requests the same state on host cleanup.
+A failed cleanup requires powering off Pi. This host/MCU procedure is not an
+independent physical safety gate and must remain unloaded.
+
+The first 1 MHz run is a functional capture, not a timing acceptance result.
+Review every GPIO23 rising edge against a GPIO12 falling response and subsequent
+re-arm, plus the final LOW output. The script checks correlated software samples
+but does not declare physical acceptance. Retain all logs, raw capture, image and
+harness identities; use 24 MHz with recorded clock accuracy for subsequent timing
+work and the required campaign counts, not the five-pulse bring-up default.
+
 #### V03-D unloaded e-stop diagnostic
 
 The repeated e-stop test uses an explicit diagnostic feature that re-arms the

@@ -20,6 +20,7 @@ run_step command-smoke python3 -B scripts/verify/command-smoke.py
 run_step tooling-integration-tests python3 -B tests/scripts/test_xtask_cli.py
 run_step quality-provenance-tests python3 -B tests/scripts/test_quality.py
 run_step gpio23-probe-prompt-tests python3 -B tests/scripts/test_gpio23_probe.py
+run_step shrike-gpio23-probe-tests python3 -B tests/scripts/test_shrike_gpio23_probe.py
 run_step quality-boundary-static python3 -B scripts/verify/quality.py --check
 run_step artifact-provenance-static python3 scripts/verify/artifact-provenance.py
 run_step target-boundary-static python3 scripts/verify/target-boundary.py
