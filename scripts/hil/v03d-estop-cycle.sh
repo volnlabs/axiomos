@@ -1,269 +1,156 @@
 #!/usr/bin/env bash
-# V03-D physical e-stop latency HIL runner.
-#
-# Required wiring (all signals are 3.3 V only; actuators and motors MUST stay
-# disconnected for this bench):
-#   Shrike GPIO21 --[ 220 ohm ]--> Pi GPIO24 / physical pin 18 (active-low e-stop)
-#   Shrike GND -------------------> Pi GND
-#   Logic analyzer D0 ------------> Pi GPIO24 / physical pin 18
-#   Logic analyzer D1 ------------> Pi GPIO12 (bench output)
-#   Logic analyzer GND -----------> common GND
-#
-# GPIO21 is held high before the Pi boots (e-stop released).  Once the kernel
-# announces PI5_BENCH_READY, it generates N presses: N-1 low/high cycles and
-# one final low.  Thus every press after the first is preceded by the kernel's
-# GPIO12 re-arm and the run ends electrically safe.
+# Unloaded e-stop capture: GP21 -> 220 ohm -> Pi pin18/GPIO24, analyzer D0.
+# Analyzer D1 -> Pi pin32/GPIO12; common ground. GP22 remains LOW.
+# No motors/drivers/actuators or static GPIO24-to-3.3V jumper permitted.
+# Requires bench-estop-rearm diagnostic image: releases automatically rearm.
+# Continuous capture includes released baseline and final asserted LOW state.
 set -uo pipefail
 
-REPO="$(git rev-parse --show-toplevel)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUN_DIR="${RUN_DIR:-$REPO/artifacts/runs/axiomos-hil-v03d}"
 PI_UART="${PI_UART:-/dev/serial/by-id/usb-Raspberry_Pi_Debug_Probe__CMSIS-DAP__E6633861A355B838-if01}"
 SHRIKE_UART="${SHRIKE_UART:-/dev/serial/by-id/usb-SHRIKE_Board_in_Micropython_Mode_de65143857942625-if00}"
-LOGIC_CONN="${LOGIC_CONN:-}"
-# V03-D acceptance is explicitly a 24 MHz measurement; the reducer uses the
-# same fixed rate for its sample-index-to-time conversion.
-SAMPLERATE="24m"
+MPREMOTE="${MPREMOTE:-mpremote}"
+LOGIC_CONN="${LOGIC_CONN:-fx2lafw}"
+SAMPLERATE="${SAMPLERATE:-24m}"
+UART_SECONDS="${UART_SECONDS:-240}"
+READY_TIMEOUT="${READY_TIMEOUT:-120}"
+ANALYZER_READY_TIMEOUT="${ANALYZER_READY_TIMEOUT:-10}"
 PRESS_COUNT="${PRESS_COUNT:-100}"
 PRESS_LOW_MS="${PRESS_LOW_MS:-25}"
 REARM_HIGH_MS="${REARM_HIGH_MS:-75}"
 FINAL_LOW_MS="${FINAL_LOW_MS:-100}"
-CAPTURE_MARGIN_MS="${CAPTURE_MARGIN_MS:-1000}"
-UART_SECONDS="${UART_SECONDS:-90}"
-READY_TIMEOUT="${READY_TIMEOUT:-45}"
+CAPTURE_MARGIN_MS=5000
 
-EXPECTED=(PI5_BENCH_READY PI5_V03D_READY)
-FORBIDDEN=(PI5_BENCH_FAIL panic fatal watchdog)
-UART_PID=""
-LOGIC_PID=""
-SHRIKE_TOUCHED=0
-
-wiring_instructions() {
-    cat >&2 <<'EOF'
-ABORT: V03-D is permitted only with actuators and motors disconnected.
-
-Required wiring:
-  REMOVE any GPIO24-to-3.3V or other static-high jumper first.
-  Shrike GPIO21 -> 220 ohm -> Pi GPIO24 / physical pin 18 (active-low e-stop)
-  Shrike GND ----------------> Pi GND (common ground)
-  Logic analyzer D0 ---------> Pi GPIO24 / physical pin 18
-  Logic analyzer D1 ---------> Pi GPIO12 (bench output)
-  Logic analyzer GND --------> common ground
-
-Do not connect a motor driver, motor, or actuator to this bench.  After
-disconnecting them, re-run with ACTUATORS_MOTORS_DISCONNECTED=YES.
-EOF
-}
-
-die() {
-    echo "ABORT: $*" >&2
-    exit 1
-}
-
-is_uint() {
-    case "$1" in
-        ''|*[!0-9]*) return 1 ;;
-        *) return 0 ;;
-    esac
-}
-
-require_rw() {
-    local path="$1" label="$2" target
-    test -e "$path" || die "$label missing: $path"
-    target="$(readlink -f "$path")"
-    if ! test -r "$path" || ! test -w "$path"; then
-        echo "$label needs ACL on $target" >&2
-        sudo setfacl -m "u:$(id -un):rw" "$target"
-    fi
-}
-
-set_shrike_low() {
-    mpremote connect "$SHRIKE_UART" exec \
-      "from machine import Pin; p=Pin(21, Pin.OUT); p.value(0); print('GPIO21_LOW')" \
-      >/dev/null 2>&1
-}
-
-cleanup() {
-    # An asserted active-low e-stop is the only acceptable cleanup state.
-    if [ "$SHRIKE_TOUCHED" -eq 1 ]; then
-        set_shrike_low || true
-    fi
-    if [ -n "$LOGIC_PID" ]; then
-        kill "$LOGIC_PID" 2>/dev/null || true
-        wait "$LOGIC_PID" 2>/dev/null || true
-    fi
-    if [ -n "$UART_PID" ]; then
-        kill "$UART_PID" 2>/dev/null || true
-        wait "$UART_PID" 2>/dev/null || true
-    fi
-}
-trap cleanup EXIT INT TERM
-
-if [ "${ACTUATORS_MOTORS_DISCONNECTED:-}" != "YES" ]; then
-    wiring_instructions
-    exit 1
-fi
-
-for value in "$PRESS_COUNT" "$PRESS_LOW_MS" "$REARM_HIGH_MS" "$FINAL_LOW_MS" \
-             "$CAPTURE_MARGIN_MS" "$UART_SECONDS" "$READY_TIMEOUT"; do
-    is_uint "$value" || die "numeric settings must be non-negative integers"
+die() { echo "ABORT: $*" >&2; exit 1; }
+[ "${ACTUATORS_MOTORS_DISCONNECTED:-}" = YES ] || die "disconnect motors, drivers and actuators; set ACTUATORS_MOTORS_DISCONNECTED=YES"
+for value in "$FINAL_LOW_MS" "$PRESS_COUNT" "$PRESS_LOW_MS" "$REARM_HIGH_MS" "$UART_SECONDS" "$READY_TIMEOUT" "$ANALYZER_READY_TIMEOUT"; do
+    [[ "$value" =~ ^[1-9][0-9]{0,4}$ ]] || die "counts and durations must be positive decimal integers <= 99999"
 done
-[ "$PRESS_COUNT" -ge 100 ] || die "PRESS_COUNT must be >= 100 (got $PRESS_COUNT)"
-[ "$PRESS_LOW_MS" -gt 0 ] || die "PRESS_LOW_MS must be > 0"
-[ "$REARM_HIGH_MS" -gt 0 ] || die "REARM_HIGH_MS must be > 0"
-
-command -v sigrok-cli >/dev/null || die "sigrok-cli not found"
-command -v mpremote >/dev/null || die "mpremote not found"
-command -v sha256sum >/dev/null || die "sha256sum not found"
-
-require_rw "$PI_UART" "Pi UART"
-require_rw "$SHRIKE_UART" "Shrike UART"
-
-PI_DEV="$(readlink -f "$PI_UART")"
-SHRIKE_DEV="$(readlink -f "$SHRIKE_UART")"
-if fuser "$PI_DEV" >/dev/null 2>&1; then
-    echo "ABORT: Pi serial port is already in use:" >&2
-    fuser -v "$PI_DEV" || true
-    exit 1
-fi
-if fuser "$SHRIKE_DEV" >/dev/null 2>&1; then
-    echo "ABORT: Shrike serial port is already in use:" >&2
-    fuser -v "$SHRIKE_DEV" || true
-    exit 1
-fi
-
-mkdir -p "$RUN_DIR"
+[ "$PRESS_COUNT" -ge 100 ] || die "PRESS_COUNT must be >= 100"
+case "$SAMPLERATE" in
+    24m) SAMPLES_PER_MS=24000 ;;
+    *) die "e-stop capture requires 24m" ;;
+esac
+CAPTURE_MS=$(((PRESS_COUNT - 1) * (PRESS_LOW_MS + REARM_HIGH_MS) + FINAL_LOW_MS + CAPTURE_MARGIN_MS))
+CAPTURE_SAMPLES=$((CAPTURE_MS * SAMPLES_PER_MS))
+CAPTURE_SECONDS=$(((CAPTURE_MS + 999) / 1000 + 10))
+for command in "$MPREMOTE" sigrok-cli fuser rg timeout python3; do
+    command -v "$command" >/dev/null || die "missing command: $command"
+done
+for port in "$PI_UART" "$SHRIKE_UART"; do
+    [ -r "$port" ] && [ -w "$port" ] || die "no read/write access to $port; run with sudo"
+    ! fuser "$port" >/dev/null 2>&1 || die "port already open: $port; stop the other reader first"
+done
+mkdir -p "$RUN_DIR" || exit 1
 idx=0
-for file in "$RUN_DIR"/v03d-estop-cycle-*-uart.log; do
-    number="${file##*/v03d-estop-cycle-}"
-    number="${number%%-*}"
-    case "$number" in
-        ''|*[!0-9]*) continue ;;
-    esac
-    [ "$((10#$number))" -gt "$idx" ] && idx=$((10#$number))
+for file in "$RUN_DIR"/v03d-estop-cycle-*; do
+    number=${file##*/v03d-estop-cycle-}; number=${number%%[-.]*}
+    [[ "$number" =~ ^[0-9]+$ ]] || continue
+    [ "$((10#$number))" -le "$idx" ] || idx=$((10#$number))
 done
-RUN="$(printf '%02d' "$((idx + 1))")"
-UART_LOG="$RUN_DIR/v03d-estop-cycle-$RUN-uart.log"
-LOGIC_LOG="$RUN_DIR/v03d-estop-cycle-$RUN.sr"
-
-if [ -z "$LOGIC_CONN" ]; then
-    LOGIC_CONN="$(sigrok-cli --scan |
-        sed -n 's/^\(fx2lafw[^ ]*\) - Saleae Logic.*/\1/p' |
-        head -n 1)"
-fi
-[ -n "$LOGIC_CONN" ] || {
-    echo "ABORT: logic analyzer not found" >&2
-    sigrok-cli --scan || true
-    exit 1
+PREFIX="$RUN_DIR/v03d-estop-cycle-$(printf '%02d' "$((idx + 1))")"
+UART_LOG="$PREFIX-uart.log"
+LOGIC_LOG="$PREFIX.sr"
+ANALYZER_LOG="$PREFIX-analyzer.log"
+SHRIKE_LOG="$PREFIX-shrike.log"
+printf 'rate=%s samples=%s count=%s press_low_ms=%s rearm_high_ms=%s final_low_ms=%s\n' \
+    "$SAMPLERATE" "$CAPTURE_SAMPLES" "$PRESS_COUNT" "$PRESS_LOW_MS" "$REARM_HIGH_MS" "$FINAL_LOW_MS" > "$PREFIX-config.txt" || die "could not retain capture configuration"
+UART_PID=""; LOGIC_PID=""; PRESS_PID=""; SHRIKE_TOUCHED=0
+set_safe() {
+    timeout --signal=TERM --kill-after=2s 12s "$MPREMOTE" connect "$SHRIKE_UART" resume exec \
+        "from machine import Pin; p=Pin(22, Pin.OUT, value=0); e=Pin(21, Pin.OUT, value=0); print('GPIO_SAFE', p.value(), e.value())" >> "$SHRIKE_LOG" 2>&1
 }
+cleanup() {
+    local status=$?
+    for pid in "$PRESS_PID" "$LOGIC_PID" "$UART_PID"; do
+        if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
+    done
+    if [ "$SHRIKE_TOUCHED" -eq 1 ] && ! set_safe; then
+        echo "ABORT: could not set Shrike outputs LOW; power off the Pi." >&2
+        status=1
+    fi
+    return "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-# 24 MHz is 24,000 samples/ms.  The capture starts on the first falling D0
-# edge and includes every low/high interval plus a post-final-low margin.
-CAPTURE_MS=$((PRESS_COUNT * PRESS_LOW_MS + (PRESS_COUNT - 1) * REARM_HIGH_MS + FINAL_LOW_MS + CAPTURE_MARGIN_MS))
-CAPTURE_SAMPLES=$((CAPTURE_MS * 24000))
-
-echo "V03-D run $RUN"
-echo "  UART:  $UART_LOG"
-echo "  logic: $LOGIC_LOG"
-echo "  samplerate: $SAMPLERATE; post-trigger capture: ${CAPTURE_MS} ms (${CAPTURE_SAMPLES} samples)"
-echo "  N=$PRESS_COUNT, GPIO21 low=${PRESS_LOW_MS} ms, re-arm high=${REARM_HIGH_MS} ms"
-echo
-echo "Confirmed: actuators/motors disconnected. Required wiring:"
-echo "  GPIO24 static-high/3.3V jumper removed"
-echo "  Shrike GPIO21 -> 220 ohm -> Pi GPIO24 / physical pin 18"
-echo "  Shrike GND -> Pi GND; analyzer D0=GPIO24, D1=GPIO12, analyzer GND=common"
-
-echo "Holding Shrike GPIO21 HIGH (e-stop released) before Pi boot..."
 SHRIKE_TOUCHED=1
-mpremote connect "$SHRIKE_UART" exec \
-  "from machine import Pin; p=Pin(21, Pin.OUT); p.value(1); print('GPIO21_HIGH', p.value())" ||
-  die "could not drive Shrike GPIO21 high"
-
-stty -F "$PI_UART" 115200 cs8 -cstopb -parenb -ixon -ixoff -crtscts raw -echo
-timeout --signal=INT --kill-after=2s "${UART_SECONDS}s" \
-  stdbuf -o0 cat "$PI_UART" |
-  stdbuf -o0 tr -d '\r' |
-  stdbuf -o0 tee "$UART_LOG" &
+timeout --signal=TERM --kill-after=2s 12s "$MPREMOTE" connect "$SHRIKE_UART" resume exec \
+    "from machine import Pin; p=Pin(22, Pin.OUT, value=0); e=Pin(21, Pin.OUT, value=1); print('GPIO_READY', p.value(), e.value())" > "$SHRIKE_LOG" 2>&1 || die "Shrike initialization failed"
+stty -F "$PI_UART" 115200 cs8 -cstopb -parenb -ixon -ixoff -crtscts raw -echo || die "UART setup failed"
+timeout --signal=TERM --kill-after=2s "${UART_SECONDS}s" cat "$PI_UART" > "$UART_LOG" &
 UART_PID=$!
-
-echo
-echo "GPIO21 is HIGH. Power/boot the Pi now; waiting for PI5_BENCH_READY..."
+echo "UART RECORDING — POWER ON THE PI NOW. Do not touch the stimulus."
+echo "Recording to $PREFIX; $PRESS_COUNT e-stop presses will be automatic."
+check_uart() {
+    kill -0 "$UART_PID" 2>/dev/null || die "UART capture ended early"
+    ! rg -aiq 'PI5_BENCH_FAIL|PI5_BENCH_LOG_LOSS|PI5_MC|PI5_GPIO_IRQ_PROVEN|PI5_REFLEX_REARM|panic|fatal|watchdog|SIGNED_BPF_(INPUT_MISSING|INPUT_INVALID|LOAD_REJECTED)' "$UART_LOG" || die "kernel failure marker"
+}
 waited=0
-until rg -aq 'PI5_BENCH_READY' "$UART_LOG" 2>/dev/null; do
-    if rg -aiq 'PI5_BENCH_FAIL|panic|fatal|watchdog' "$UART_LOG" 2>/dev/null; then
-        die "Pi emitted a forbidden marker before PI5_BENCH_READY"
-    fi
-    [ "$waited" -lt "$READY_TIMEOUT" ] || die "no PI5_BENCH_READY after ${READY_TIMEOUT}s"
-    sleep 1
-    waited=$((waited + 1))
+until rg -aq 'PI5_BENCH_READY' "$UART_LOG" && rg -aq 'SIGNED_BPF_LOAD_OK' "$UART_LOG"; do
+    check_uart
+    [ "$waited" -lt "$((READY_TIMEOUT * 10))" ] || die "boot readiness timeout"
+    sleep 0.1; waited=$((waited + 1))
 done
+check_uart
+rg -aq 'PI5_BENCH_LOG_MODE deferred=true' "$UART_LOG" || die "wrong image: deferred bench logging required"
+rg -aq 'PI5_V03D_READY output=gpio auto_rearm=true' "$UART_LOG" || die "wrong image: bench-estop-rearm required"
+rg -aq 'PI5_OUT_ARM mode=gpio gpio=12 code=0 estop_asserted=false' "$UART_LOG" || die "initial output arm denied; check e-stop wiring"
+! rg -aq 'PI5_GPIO_IRQ_PROVEN' "$UART_LOG" || die "unexpected sensor edge before capture; cold boot required"
 
-if ! rg -aq 'PI5_V03D_READY output=gpio auto_rearm=true' "$UART_LOG"; then
-    die "image is not the GPIO V03-D auto-rearm diagnostic build"
-fi
-
-echo "PI5_BENCH_READY seen; arming 24 MHz D0/D1 capture on D0 falling edge..."
-timeout --signal=INT --kill-after=2s "$((CAPTURE_MS / 1000 + 15))s" \
-  sigrok-cli -d "$LOGIC_CONN" -c "samplerate=$SAMPLERATE" -C D0,D1 \
-    -t D0=f --samples "$CAPTURE_SAMPLES" -O srzip -o "$LOGIC_LOG" &
+# Continuous capture includes idle baseline, every pulse and the final stop.
+# Do not trigger on an edge that we have not yet authorized Shrike to generate.
+timeout --signal=TERM --kill-after=2s "${CAPTURE_SECONDS}s" \
+    sigrok-cli -l 4 -d "$LOGIC_CONN" -c "samplerate=$SAMPLERATE" -C D0,D1 \
+    --samples "$CAPTURE_SAMPLES" -O srzip -o "$LOGIC_LOG" > "$ANALYZER_LOG" 2>&1 &
 LOGIC_PID=$!
-sleep 1
-
-echo "Generating $PRESS_COUNT active-low presses; final state is GPIO21 LOW/safe..."
-mpremote connect "$SHRIKE_UART" exec \
-  "from machine import Pin; import time
-p=Pin(21, Pin.OUT); p.value(1); print('V03D_PRESS_START')
-for _ in range($((PRESS_COUNT - 1))):
-    p.value(0); time.sleep_ms($PRESS_LOW_MS)
-    p.value(1); time.sleep_ms($REARM_HIGH_MS)
-p.value(0); time.sleep_ms($FINAL_LOW_MS); print('V03D_PRESS_DONE', p.value())" ||
-  die "Shrike press cycle failed"
-
-wait "$LOGIC_PID"
-LOGIC_STATUS=$?
+waited=0
+until rg -q 'Received SR_DF_LOGIC' "$ANALYZER_LOG"; do
+    check_uart
+    kill -0 "$LOGIC_PID" 2>/dev/null || die "analyzer exited before delivering data"
+    [ "$waited" -lt "$((ANALYZER_READY_TIMEOUT * 10))" ] || die "analyzer data timeout"
+    sleep 0.1; waited=$((waited + 1))
+done
+check_uart
+kill -0 "$LOGIC_PID" 2>/dev/null || die "analyzer ended before e-stop presses"
+! rg -aq 'PI5_GPIO_IRQ_PROVEN' "$UART_LOG" || die "unexpected edge before e-stop presses"
+echo "CAPTURE ACTIVE — sending $PRESS_COUNT e-stop presses automatically. Keep hands off."
+timeout --signal=TERM --kill-after=2s "${CAPTURE_SECONDS}s" \
+    "$MPREMOTE" connect "$SHRIKE_UART" resume exec \
+    "from machine import Pin; import time
+p=Pin(22, Pin.OUT, value=0); e=Pin(21, Pin.OUT)
+try:
+    print('V03D_PRESS_START')
+    for _ in range($((PRESS_COUNT - 1))):
+        e.value(0); time.sleep_ms($PRESS_LOW_MS)
+        e.value(1); time.sleep_ms($REARM_HIGH_MS)
+    e.value(0); time.sleep_ms($FINAL_LOW_MS)
+finally:
+    p.value(0); e.value(0)
+print('V03D_PRESS_DONE', p.value(), e.value())" >> "$SHRIKE_LOG" 2>&1 &
+PRESS_PID=$!
+while kill -0 "$PRESS_PID" 2>/dev/null; do
+    check_uart
+    kill -0 "$LOGIC_PID" 2>/dev/null || die "capture ended before e-stop presses completed"
+    sleep 0.1
+done
+wait "$PRESS_PID" || die "Shrike pulse command failed"
+PRESS_PID=""
+rg -q 'V03D_PRESS_DONE 0 0' "$SHRIKE_LOG" || die "Shrike did not confirm pulse completion and final LOW state"
+while kill -0 "$LOGIC_PID" 2>/dev/null; do check_uart; sleep 0.1; done
+wait "$LOGIC_PID" || die "analyzer failed"
 LOGIC_PID=""
-wait "$UART_PID" || true
+check_uart
+set_safe || die "could not assert final e-stop; power off Pi"
+SHRIKE_TOUCHED=0
+kill "$UART_PID" 2>/dev/null || true
+wait "$UART_PID" 2>/dev/null || true
 UART_PID=""
-
-echo
-echo "logic-analyzer exit: $LOGIC_STATUS"
-ls -lh "$UART_LOG" "$LOGIC_LOG" 2>/dev/null || true
-sha256sum "$UART_LOG" "$LOGIC_LOG" 2>/dev/null || true
-
-echo
-rg -a -n 'PI5_BENCH_READY|PI5_V03D_READY|PI5_MB|PI5_ESTOP_REARM|PI5_BENCH_FAIL|panic|fatal|watchdog' \
-  "$UART_LOG" || true
-
-ok=1
-for marker in "${EXPECTED[@]}"; do
-    if rg -aq "$marker" "$UART_LOG"; then
-        echo "ok      $marker"
-    else
-        echo "MISSING $marker"
-        ok=0
-    fi
-done
-for marker in "${FORBIDDEN[@]}"; do
-    if rg -aiq "$marker" "$UART_LOG"; then
-        echo "FORBIDDEN MARKER PRESENT: $marker"
-        ok=0
-    fi
-done
-
-if ! python3 -B "$REPO/scripts/benchmark/analyze-v03.py" \
-    --estop "$UART_LOG" --estop-count "$PRESS_COUNT"; then
-    ok=0
-fi
-
-if [ "$LOGIC_STATUS" -ne 0 ] || [ ! -s "$LOGIC_LOG" ]; then
-    echo "LOGIC_CAPTURE_INCOMPLETE"
-    ok=0
-elif ! "$REPO/scripts/hil/v03d-reduce.py" --count "$PRESS_COUNT" "$LOGIC_LOG"; then
-    ok=0
-fi
-
-if [ "$ok" -eq 1 ]; then
-    echo "PASS: V03-D GPIO24 active-low e-stop -> GPIO12 LOW, N=$PRESS_COUNT"
-    exit 0
-fi
-echo "FAIL: V03-D e-stop HIL run (GPIO21 remains LOW/safe)"
-exit 1
+sha256sum "$UART_LOG" "$LOGIC_LOG" "$ANALYZER_LOG" "$SHRIKE_LOG" "$PREFIX-config.txt" | tee "$PREFIX.sha256" || die "could not hash capture artifacts"
+rg -a 'PI5_OUT_ARM|PI5_MB|PI5_ESTOP_REARM' "$UART_LOG" || true
+python3 -B "$REPO/scripts/benchmark/analyze-v03.py" --estop "$UART_LOG" --estop-count "$PRESS_COUNT" || die "software cycle correlation failed; retain capture for diagnosis"
+python3 -B "$REPO/scripts/hil/v03d-reduce.py" --count "$PRESS_COUNT" "$LOGIC_LOG" || die "physical e-stop correlation/latency failed; retain capture"
+echo "PASS: unloaded GPIO24-to-GPIO12 e-stop capture; $PRESS_COUNT presses, measured max < 1 ms."
+echo "Shrike reports GPIO22=LOW and GPIO21=LOW (e-stop asserted). Power off the Pi."

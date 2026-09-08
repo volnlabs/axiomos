@@ -9,17 +9,22 @@ missing/extra edges, missing re-arms, out-of-order responses, unsafe final
 levels, fewer than N=100 samples, and a maximum latency of 1 ms or more.
 """
 import argparse
-import csv
 import math
 import re
-import subprocess
 import sys
+import tempfile
+import unittest
+import zipfile
 from dataclasses import dataclass
-from typing import Iterable
 
 SAMPLE_RATE_HZ = 24_000_000
 LIMIT_NS = 1_000_000
-SAMPLE_RATE = re.compile(r"^;\s*Samplerate:\s*24\s*MHz\s*$", re.MULTILINE)
+SAMPLERATE = re.compile(r"^\s*(?:24\s*MHz|24000000)\s*$", re.IGNORECASE)
+EDGE_TABLE = bytes.maketrans(bytes(range(256)), bytes(value & 3 for value in range(256)))
+D0_FALL = re.compile(b"(?<=[\x01\x03])[\x00\x02]")
+D0_RISE = re.compile(b"(?<=[\x00\x02])[\x01\x03]")
+D1_FALL = re.compile(b"(?<=[\x02\x03])[\x00\x01]")
+D1_RISE = re.compile(b"(?<=[\x00\x01])[\x02\x03]")
 
 
 @dataclass
@@ -30,57 +35,6 @@ class Edges:
     d1_rises: list[int]
     initial: tuple[int, int] | None
     final: tuple[int, int] | None
-
-
-def level(value: str) -> int | None:
-    value = value.strip().lower()
-    if value in {"0", "low", "l", "false"}:
-        return 0
-    if value in {"1", "high", "h", "true"}:
-        return 1
-    return None
-
-
-def parse_csv(rows: Iterable[list[str]]) -> Edges:
-    """Parse sigrok CSV rows and synthesize its trigger edge at sample zero.
-
-    With a D0=f trigger, sigrok begins the stored post-trigger stream with D0
-    low and D1 high.  The edge itself happened just before sample 0, so include
-    that first physical press explicitly instead of silently losing it.
-    """
-    d0_falls: list[int] = []
-    d0_rises: list[int] = []
-    d1_falls: list[int] = []
-    d1_rises: list[int] = []
-    previous: tuple[int, int] | None = None
-    initial: tuple[int, int] | None = None
-    samples = 0
-
-    for row in rows:
-        if len(row) < 2:
-            continue
-        d0 = level(row[-2])
-        d1 = level(row[-1])
-        if d0 is None or d1 is None:
-            continue  # CSV heading/comment
-        current = (d0, d1)
-        if previous is None:
-            initial = current
-            if current == (0, 1):
-                d0_falls.append(0)
-        else:
-            if previous[0] == 1 and d0 == 0:
-                d0_falls.append(samples)
-            elif previous[0] == 0 and d0 == 1:
-                d0_rises.append(samples)
-            if previous[1] == 1 and d1 == 0:
-                d1_falls.append(samples)
-            elif previous[1] == 0 and d1 == 1:
-                d1_rises.append(samples)
-        previous = current
-        samples += 1
-
-    return Edges(d0_falls, d0_rises, d1_falls, d1_rises, initial, previous)
 
 
 def pct(values: list[int], percentile: float) -> int:
@@ -95,9 +49,9 @@ def ns(sample: int) -> int:
 
 def validate(edges: Edges, expected_count: int) -> tuple[list[int], list[str]]:
     errors: list[str] = []
-    if edges.initial != (0, 1):
+    if edges.initial != (1, 1):
         errors.append(
-            "capture must begin D0=0/D1=1 after the D0 falling trigger; "
+            "capture must begin D0=1/D1=1 before the first D0 falling edge; "
             f"got {edges.initial!r}"
         )
     if edges.final != (0, 0):
@@ -145,23 +99,95 @@ def validate(edges: Edges, expected_count: int) -> tuple[list[int], list[str]]:
     return latencies, errors
 
 
-def read_capture(path: str) -> Edges:
+def _srzip_metadata(text: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    section = ""
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(";"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].lower()
+        elif "=" in line and section == "device 1":
+            key, value = line.split("=", 1)
+            values[key.strip().lower()] = value.strip()
+    return values
+
+
+def _parse_srzip(path: str) -> Edges:
     try:
-        result = subprocess.run(
-            ["sigrok-cli", "-i", path, "-O", "csv"],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except FileNotFoundError:
-        raise RuntimeError("sigrok-cli not found") from None
-    except subprocess.CalledProcessError as exc:
-        detail = exc.stderr.strip() or f"exit {exc.returncode}"
-        raise RuntimeError(f"sigrok-cli could not export {path}: {detail}") from None
-    if SAMPLE_RATE.search(result.stdout) is None:
-        raise RuntimeError("capture does not declare the required 24 MHz samplerate")
-    return parse_csv(csv.reader(result.stdout.splitlines()))
+        archive = zipfile.ZipFile(path)
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise RuntimeError(f"invalid srzip capture: {exc}") from None
+    with archive:
+        try:
+            metadata = archive.read("metadata").decode("utf-8")
+        except (KeyError, UnicodeDecodeError) as exc:
+            raise RuntimeError("srzip metadata is missing or invalid") from None
+        values = _srzip_metadata(metadata)
+        if not SAMPLERATE.fullmatch(values.get("samplerate", "")):
+            raise RuntimeError("capture does not declare the required 24 MHz samplerate")
+        if values.get("unitsize") != "1":
+            raise RuntimeError("capture must use unitsize=1")
+        try:
+            total_probes = int(values["total probes"])
+        except (KeyError, ValueError):
+            raise RuntimeError("capture must declare a valid probe count") from None
+        if total_probes < 2:
+            raise RuntimeError("capture must declare at least two probes")
+        if values.get("probe1") != "D0" or values.get("probe2") != "D1":
+            raise RuntimeError("capture probes must be probe1=D0 and probe2=D1")
+        capturefile = values.get("capturefile")
+        if not capturefile:
+            raise RuntimeError("srzip capturefile is missing")
+        names = [info.filename for info in archive.infolist()]
+        direct = [name for name in names if name == capturefile]
+        numbered = [
+            name for name in names
+            if name.startswith(capturefile + "-") and name[len(capturefile) + 1:].isdigit()
+        ]
+        if direct and numbered:
+            raise RuntimeError("srzip capturefile mixes unsuffixed and numbered raw chunks")
+        if direct:
+            members = direct
+        else:
+            chunk_numbers = sorted(int(name.rsplit("-", 1)[1]) for name in numbered)
+            if chunk_numbers != list(range(1, len(chunk_numbers) + 1)):
+                raise RuntimeError("srzip numbered raw chunks are missing or duplicated")
+            members = [f"{capturefile}-{number}" for number in chunk_numbers]
+        if not members:
+            raise RuntimeError(f"srzip capturefile {capturefile!r} is missing")
+
+        d0_falls: list[int] = []
+        d0_rises: list[int] = []
+        d1_falls: list[int] = []
+        d1_rises: list[int] = []
+        previous: tuple[int, int] | None = None
+        initial: tuple[int, int] | None = None
+        samples = 0
+        carry = b""
+        try:
+            for member in members:
+                with archive.open(member) as raw:
+                    while chunk := raw.read(1024 * 1024):
+                        data = (carry + chunk).translate(EDGE_TABLE)
+                        base = samples - len(carry)
+                        if initial is None:
+                            initial = (data[0] & 1, (data[0] >> 1) & 1)
+                        d0_falls.extend(base + match.start() for match in D0_FALL.finditer(data))
+                        d0_rises.extend(base + match.start() for match in D0_RISE.finditer(data))
+                        d1_falls.extend(base + match.start() for match in D1_FALL.finditer(data))
+                        d1_rises.extend(base + match.start() for match in D1_RISE.finditer(data))
+                        samples += len(data) - len(carry)
+                        carry = data[-1:]
+        except (OSError, zipfile.BadZipFile) as exc:
+            raise RuntimeError(f"srzip raw data is unreadable: {exc}") from None
+        previous = None if not carry else (carry[0] & 1, (carry[0] >> 1) & 1)
+        return Edges(d0_falls, d0_rises, d1_falls, d1_rises, initial, previous)
+
+
+def read_capture(path: str) -> Edges:
+    return _parse_srzip(path)
 
 
 def summarize(latencies: list[int]) -> None:
@@ -175,11 +201,109 @@ def summarize(latencies: list[int]) -> None:
         print(f"  {label:>6}: {value:>9} ns ({value / 1000:.3f} us)")
 
 
+def _write_test_srzip(path: str, raw: bytes, *, samplerate: str = "24 MHz",
+                      probes: tuple[str, str] = ("D0", "D1"), unitsize: str = "1",
+                      numbered_chunks: tuple[bytes, ...] | None = None) -> None:
+    metadata = (
+        "[global]\n"
+        "[device 1]\n"
+        "capturefile=logic-1\n"
+        f"total probes={len(probes)}\n"
+        f"samplerate={samplerate}\n"
+        f"unitsize={unitsize}\n"
+        f"probe1={probes[0]}\nprobe2={probes[1]}\n"
+    )
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("metadata", metadata)
+        if numbered_chunks is None:
+            archive.writestr("logic-1", raw)
+        else:
+            for number, chunk in enumerate(numbered_chunks, 1):
+                archive.writestr(f"logic-1-{number}", chunk)
+
+
+class ReducerSelfTests(unittest.TestCase):
+    def test_streams_chunk_boundary_and_validates_continuous_capture(self):
+        raw = bytearray(b"\x03" * (1024 * 1024 - 1))
+        for index in range(100):
+            raw.extend((2, 0, 1, 3) if index < 99 else (2, 0))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = f"{tmp}/capture.sr"
+            _write_test_srzip(path, bytes(raw))
+            edges = read_capture(path)
+        latencies, errors = validate(edges, 100)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(latencies), 100)
+
+    def test_numbered_chunks_are_contiguous_and_preserve_cross_chunk_edges(self):
+        raw = bytes((3, 2, 0, 1, 3) * 99 + (2, 0))
+        with tempfile.TemporaryDirectory() as tmp:
+            valid = f"{tmp}/numbered.sr"
+            _write_test_srzip(valid, b"", numbered_chunks=(raw[:1], raw[1:]))
+            edges = read_capture(valid)
+            self.assertEqual(validate(edges, 100)[1], [])
+
+            missing = f"{tmp}/missing-chunk.sr"
+            metadata = (
+                "[global]\n[device 1]\ncapturefile=logic-1\n"
+                "total probes=2\nsamplerate=24 MHz\nunitsize=1\n"
+                "probe1=D0\nprobe2=D1\n"
+            )
+            with zipfile.ZipFile(missing, "w") as archive:
+                archive.writestr("metadata", metadata)
+                archive.writestr("logic-1-1", raw[:1])
+                archive.writestr("logic-1-3", raw[1:])
+            with self.assertRaisesRegex(RuntimeError, "missing or duplicated"):
+                read_capture(missing)
+
+    def test_rejects_missing_edge_wrong_metadata_and_initial_state(self):
+        raw = bytearray((3, 2, 0, 1, 3) * 98 + (2, 3) + (2, 0))
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = f"{tmp}/missing.sr"
+            _write_test_srzip(missing, bytes(raw))
+            edges = read_capture(missing)
+            self.assertTrue(any("D1 falls (safe responses)" in error for error in validate(edges, 100)[1]))
+
+            wrong_rate = f"{tmp}/rate.sr"
+            _write_test_srzip(wrong_rate, bytes(raw), samplerate="1 MHz")
+            with self.assertRaisesRegex(RuntimeError, "24 MHz"):
+                read_capture(wrong_rate)
+
+            wrong_probe = f"{tmp}/probe.sr"
+            _write_test_srzip(wrong_probe, bytes(raw), probes=("D1", "D0"))
+            with self.assertRaisesRegex(RuntimeError, "probe1=D0"):
+                read_capture(wrong_probe)
+
+            wrong_unitsize = f"{tmp}/unitsize.sr"
+            _write_test_srzip(wrong_unitsize, bytes(raw), unitsize="2")
+            with self.assertRaisesRegex(RuntimeError, "unitsize=1"):
+                read_capture(wrong_unitsize)
+
+            initial_wrong = f"{tmp}/initial.sr"
+            _write_test_srzip(initial_wrong, bytes((2,)) + bytes(raw))
+            initial_edges = read_capture(initial_wrong)
+            self.assertTrue(any("must begin" in error for error in validate(initial_edges, 100)[1]))
+
+    def test_rejects_output_rearm_before_physical_release(self):
+        raw = bytearray((3, 2, 0, 3, 1, 3) * 99 + (2, 0))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = f"{tmp}/unsafe.sr"
+            _write_test_srzip(path, bytes(raw))
+            edges = read_capture(path)
+        self.assertTrue(any("sequence is misaligned" in error for error in validate(edges, 100)[1]))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--count", type=int, default=100, help="expected press count (default: 100)")
-    parser.add_argument("captures", nargs="+", help="sigrok .sr captures")
+    parser.add_argument("--self-test", action="store_true", help="run reducer self-tests")
+    parser.add_argument("captures", nargs="*", help="sigrok .sr captures")
     args = parser.parse_args()
+    if args.self_test:
+        result = unittest.main(argv=[__file__], exit=False)
+        return 0 if result.result.wasSuccessful() else 1
+    if not args.captures:
+        parser.error("provide at least one .sr capture")
     if args.count < 100:
         parser.error("--count must be >= 100")
 
