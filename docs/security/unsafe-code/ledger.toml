@@ -1,6 +1,10 @@
 version = 1
-baseline_sites = 687
-baseline_fingerprint = "sha256:cdae2e945927d47929cf55924a1a830672602e1b3321c216dc8ada76a03d15d4"
+baseline_sites = 693
+baseline_fingerprint = "sha256:a7ba38a0b2e7437b83e1ebe662021e7aad7d93404a6c9feb38df67a17ef618f3"
+
+# 2026-09-09: reviewed prerequisite delta: seven motor-pair no_mangle
+# attributes (production helper and isolated test/fuzz stubs), minus one
+# removed direct PWM MMIO block. Existing obligation rules cover each site.
 
 # Rules are evaluated in order. Keep narrow, high-risk obligations before broad
 # subsystem rules. The first matching rule supplies every site-level field.
