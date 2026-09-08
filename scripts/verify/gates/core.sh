@@ -21,6 +21,7 @@ run_step tooling-integration-tests python3 -B tests/scripts/test_xtask_cli.py
 run_step quality-provenance-tests python3 -B tests/scripts/test_quality.py
 run_step gpio23-probe-prompt-tests python3 -B tests/scripts/test_gpio23_probe.py
 run_step shrike-gpio23-probe-tests python3 -B tests/scripts/test_shrike_gpio23_probe.py
+run_step bench-console-tests env EMBEDDED_DISK_PATH=/dev/null cargo test --locked -p kernel --lib --features embedded-profile serial::bench_buffer
 run_step quality-boundary-static python3 -B scripts/verify/quality.py --check
 run_step artifact-provenance-static python3 scripts/verify/artifact-provenance.py
 run_step target-boundary-static python3 scripts/verify/target-boundary.py

@@ -133,6 +133,16 @@ impl Rp1Uart {
         self.reg_dr().write(c as u32);
     }
 
+    /// Send one raw byte only if the FIFO has room; never poll for space.
+    #[cfg(feature = "bench")]
+    pub fn try_putc(&self, byte: u8) -> bool {
+        if !self.can_write() {
+            return false;
+        }
+        self.reg_dr().write(u32::from(byte));
+        true
+    }
+
     /// Receive a single byte (blocking)
     pub fn getc(&self) -> u8 {
         // Wait for RX FIFO to have data

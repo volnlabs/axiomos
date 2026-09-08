@@ -64,16 +64,13 @@ with event_log.open("a", encoding="utf-8") as stream:
 '''
 
 
-MOCK_SLEEP = "#!/bin/sh\nexit 0\n"
-
-
 class ShrikeGpio23PulseTests(unittest.TestCase):
     def run_harness(self, mode: str, uart: bytes, timeout: float = 12.0) -> tuple[str, str, str]:
         with tempfile.TemporaryDirectory(prefix="shrike-gpio23-test-") as directory:
             root = Path(directory)
             bin_dir = root / "bin"
             bin_dir.mkdir()
-            for name, source in (("sigrok-cli", MOCK_SIGROK), ("mpremote", MOCK_MPREMOTE), ("sleep", MOCK_SLEEP)):
+            for name, source in (("sigrok-cli", MOCK_SIGROK), ("mpremote", MOCK_MPREMOTE)):
                 path = bin_dir / name
                 path.write_text(source, encoding="utf-8")
                 path.chmod(path.stat().st_mode | stat.S_IXUSR)
@@ -140,35 +137,35 @@ class ShrikeGpio23PulseTests(unittest.TestCase):
 
     def test_missing_signed_marker_never_dispatches_pulses(self) -> None:
         _, commands, _ = self.run_harness(
-            "data", b"PI5_BENCH_READY\nPI5_V03B_READY output=gpio sample_ids=true auto_rearm=true\nPI5_OUT_ARM mode=gpio gpio=12 code=0 estop_asserted=false\n"
+            "data", b"PI5_BENCH_READY\nPI5_BENCH_LOG_MODE deferred=true\nPI5_V03B_READY output=gpio sample_ids=true auto_rearm=true\nPI5_OUT_ARM mode=gpio gpio=12 code=0 estop_asserted=false\n"
         )
         self.assertNotIn("MULTIPULSE_START", commands)
 
     def test_panic_never_dispatches_pulses(self) -> None:
         _, commands, _ = self.run_harness(
             "data",
-            b"PI5_BENCH_READY\nSIGNED_BPF_LOAD_OK\npanic: boot failure\nPI5_V03B_READY output=gpio sample_ids=true auto_rearm=true\nPI5_OUT_ARM mode=gpio gpio=12 code=0 estop_asserted=false\n",
+            b"PI5_BENCH_READY\nPI5_BENCH_LOG_MODE deferred=true\nSIGNED_BPF_LOAD_OK\npanic: boot failure\nPI5_V03B_READY output=gpio sample_ids=true auto_rearm=true\nPI5_OUT_ARM mode=gpio gpio=12 code=0 estop_asserted=false\n",
         )
         self.assertNotIn("MULTIPULSE_START", commands)
 
     def test_analyzer_failure_never_dispatches_pulses(self) -> None:
         _, commands, _ = self.run_harness(
             "fail",
-            b"PI5_BENCH_READY\nSIGNED_BPF_LOAD_OK\nPI5_V03B_READY output=gpio sample_ids=true auto_rearm=true\nPI5_OUT_ARM mode=gpio gpio=12 code=0 estop_asserted=false\n",
+            b"PI5_BENCH_READY\nPI5_BENCH_LOG_MODE deferred=true\nSIGNED_BPF_LOAD_OK\nPI5_V03B_READY output=gpio sample_ids=true auto_rearm=true\nPI5_OUT_ARM mode=gpio gpio=12 code=0 estop_asserted=false\n",
         )
         self.assertNotIn("MULTIPULSE_START", commands)
 
     def test_header_only_analyzer_never_dispatches_pulses(self) -> None:
         _, commands, _ = self.run_harness(
             "header",
-            b"PI5_BENCH_READY\nSIGNED_BPF_LOAD_OK\nPI5_V03B_READY output=gpio sample_ids=true auto_rearm=true\nPI5_OUT_ARM mode=gpio gpio=12 code=0 estop_asserted=false\n",
+            b"PI5_BENCH_READY\nPI5_BENCH_LOG_MODE deferred=true\nSIGNED_BPF_LOAD_OK\nPI5_V03B_READY output=gpio sample_ids=true auto_rearm=true\nPI5_OUT_ARM mode=gpio gpio=12 code=0 estop_asserted=false\n",
         )
         self.assertNotIn("MULTIPULSE_START", commands)
 
     def test_pulses_follow_live_data_and_cleanup_drives_both_low(self) -> None:
         _, commands, events = self.run_harness(
             "data",
-            b"PI5_BENCH_READY\nSIGNED_BPF_LOAD_OK\nPI5_V03B_READY output=gpio sample_ids=true auto_rearm=true\nPI5_OUT_ARM mode=gpio gpio=12 code=0 estop_asserted=false\n",
+            b"PI5_BENCH_READY\nPI5_BENCH_LOG_MODE deferred=true\nSIGNED_BPF_LOAD_OK\nPI5_V03B_READY output=gpio sample_ids=true auto_rearm=true\nPI5_OUT_ARM mode=gpio gpio=12 code=0 estop_asserted=false\n",
         )
         self.assertIn("MULTIPULSE_START", commands)
         self.assertIn("MULTIPULSE_DONE", commands)

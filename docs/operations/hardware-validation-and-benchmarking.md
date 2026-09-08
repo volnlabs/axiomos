@@ -241,6 +241,24 @@ cargo xtask bench verifier -- "$CAMPAIGN/verifier-cost.log" \
 - [ ] Repeat after cold boot, warm boot, and representative non-critical load.
   Do not call a single best run a latency bound.
 
+Bench images switch to a bounded deferred console after bench initialization:
+16 KiB of queued bytes plus one pending byte, a 1024-byte formatted-record limit,
+and at most 64 nonblocking UART send attempts per 100 Hz timer tick. The existing
+byte ring is reused; a full UART never causes this drain to wait. Formatting and
+queue work still execute with IRQs masked, so this is not a zero-overhead or WCET
+claim. Oversized, full-buffer or contended records produce
+`PI5_BENCH_LOG_LOSS dropped_records=N`; any loss invalidates serial-derived evidence.
+Boot-fatal, panic and fatal-halt diagnostics bypass the buffer because another
+timer tick is not guaranteed. The normal non-bench console is unchanged; timing
+results apply to the identified diagnostic image, not automatically to production.
+
+`PI5_BENCH_TIMING` records the counter frequency and the software endpoints:
+M-C starts at the GPIO handler stamp and ends after issuing the local output
+write; M-B ends after issuing all local safe writes, before link notification
+or logging. Neither is a physical-edge-to-motor measurement. Capture the input
+and output electrically for that claim. The sensor reducer checks cycle
+correlation; it does not establish latency thresholds merely by succeeding.
+
 #### Unloaded repeated GPIO reflex bring-up
 
 Build `embedded-rpi5,bench-reflex-rearm` separately. With both boards unpowered,
@@ -249,7 +267,7 @@ Shrike GP22 through 220 ohm to Pi GPIO23 (physical16), and GP21 through a second
 220 ohm to GPIO24 (physical18). Share ground; analyzer D0 observes GPIO23 and
 D1 observes GPIO12 (physical32). Keep all motors, drivers and actuators
 physically disconnected. Shrike runs its retained MicroPython stimulus firmware;
-this does not test the AxiomOS MCU firmware or FPGA runtime.
+this does not test the axiomos MCU firmware or FPGA runtime.
 
 Connect Shrike USB first, leaving Pi power off. Run the existing harness with
 explicit serial ports and `RUN_DIR` as required by the campaign:

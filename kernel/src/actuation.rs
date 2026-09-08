@@ -200,9 +200,11 @@ fn guard_pwm_value_with(
             (before, after, value, code)
         };
         #[cfg(feature = "bench")]
-        crate::bench::report_monitor_overhead(crate::bench::now_cycles().wrapping_sub(bench_t0));
+        let monitor_cycles = crate::bench::now_cycles().wrapping_sub(bench_t0);
 
         let (applied, code) = apply_pwm_routed(chip, channel, value, code);
+        #[cfg(feature = "bench")]
+        let applied_at = crate::bench::now_cycles();
         if !applied {
             if let (Some(before), Some(after)) = (before, after) {
                 let mut monitor = ACTUATION_MONITOR.lock();
@@ -213,7 +215,7 @@ fn guard_pwm_value_with(
         }
         #[cfg(feature = "bench")]
         if applied {
-            crate::bench::report_edge_to_actuate("pwm", channel, value);
+            crate::bench::report_edge_to_actuate("pwm", channel, value, monitor_cycles, applied_at);
         }
 
         code
@@ -348,11 +350,14 @@ pub fn guard_gpio_with(pin: u8, level: u32, authority: Authority, source: AuditS
             )
             .apply();
         #[cfg(feature = "bench")]
-        crate::bench::report_monitor_overhead(crate::bench::now_cycles().wrapping_sub(bench_t0));
+        let monitor_cycles = crate::bench::now_cycles().wrapping_sub(bench_t0);
 
         apply_gpio_value(pin, value);
         #[cfg(feature = "bench")]
-        crate::bench::report_edge_to_actuate("gpio", pin, value);
+        {
+            let applied_at = crate::bench::now_cycles();
+            crate::bench::report_edge_to_actuate("gpio", pin, value, monitor_cycles, applied_at);
+        }
 
         code
     })
@@ -387,6 +392,21 @@ pub fn trigger_estop(source: AuditSource) -> i64 {
 }
 
 pub fn operator_estop(action: EstopAction) -> i64 {
+    operator_estop_with_local_safe(action, || {})
+}
+
+/// Bench endpoint: local safe writes issued, before link notification or logs.
+/// This is not an acknowledgement from an external MCU, FPGA or physical pad.
+#[cfg(feature = "bench")]
+pub(crate) fn operator_estop_timed(action: EstopAction) -> (i64, Option<u64>) {
+    let mut applied_at = None;
+    let code = operator_estop_with_local_safe(action, || {
+        applied_at = Some(crate::bench::now_cycles());
+    });
+    (code, applied_at)
+}
+
+fn operator_estop_with_local_safe(action: EstopAction, local_safe: impl FnOnce()) -> i64 {
     let (code, stage, now) = with_apply_lock(|| {
         let now = crate::time::get_kernel_time_ns();
         let mut monitor = ACTUATION_MONITOR.lock();
@@ -398,6 +418,7 @@ pub fn operator_estop(action: EstopAction) -> i64 {
                 for drive in drives.iter() {
                     apply_safe_drive(drive);
                 }
+                local_safe();
                 notify_link_estop(true);
                 (0, (!was_latched).then_some("assert"), now)
             }

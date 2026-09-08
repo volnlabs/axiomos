@@ -61,6 +61,7 @@ pub fn is_bench_pwm_output(chip: u8, channel: u8) -> bool {
 #[inline]
 #[cfg(any(
     feature = "bench-estop-rearm",
+    feature = "bench-reflex-rearm",
     all(target_arch = "aarch64", feature = "rpi5")
 ))]
 fn arm_reflex_output() -> (&'static str, i64) {
@@ -150,32 +151,26 @@ pub fn take_gpio_irq_entry() -> Option<(u64, u64)> {
     (sample_id != 0 && entry != 0).then_some((sample_id, entry))
 }
 
-/// Report monitor decision overhead (M-A). Logged on every guarded actuation.
-/// Emits a compact serial marker so a host reducer can build the distribution
-/// (`log::info` does not reach the Pi UART).
-#[inline]
-pub fn report_monitor_overhead(decide_cycles: u64) {
-    let sample_id = GPIO_IRQ_SAMPLE_ID.load(Ordering::Acquire);
-    if sample_id != 0 {
-        crate::serial_println!(
-            "PI5_MA sample_id={} monitor_ns={}",
-            sample_id,
-            cycles_to_ns(decide_cycles)
-        );
-    }
-}
-
-/// Report edge->actuate latency for the GPIO IRQ currently in flight (M-C).
-/// No-op outside a GPIO IRQ (when no entry stamp is set); consumes the stamp so
-/// a later non-IRQ actuation cannot reuse it.
-pub fn report_edge_to_actuate(kind: &str, channel: u8, value: u32) {
+/// Report M-A and M-C only after the local output write has been issued and
+/// timestamped. M-C begins at this GPIO handler's software stamp, not at the
+/// external sensor edge; physical edge latency requires the analyzer.
+pub fn report_edge_to_actuate(
+    kind: &str,
+    channel: u8,
+    value: u32,
+    monitor_cycles: u64,
+    applied_at: u64,
+) {
     let Some((sample_id, start)) = take_gpio_irq_entry() else {
         return;
     };
-    let ns = cycles_to_ns(now_cycles().wrapping_sub(start));
+    let ns = cycles_to_ns(applied_at.wrapping_sub(start));
     REFLEX_SAMPLE_ID.store(sample_id, Ordering::Release);
-    // Compact serial marker for the V03-B latency distribution (edge -> actuate,
-    // M-C). One line per sensor edge; the host reducer parses `ns=`.
+    crate::serial_println!(
+        "PI5_MA sample_id={} monitor_ns={}",
+        sample_id,
+        cycles_to_ns(monitor_cycles)
+    );
     crate::serial_println!(
         "PI5_MC sample_id={} ns={} kind={} ch={} val={}",
         sample_id,
@@ -206,21 +201,23 @@ pub fn rearm_reflex_after_sample() {
 /// Handle the physical e-stop button (M-B), called from the GPIO IRQ handler
 /// with `pressed` already resolved from the edge/level. Pressed => operator
 /// trigger; released => operator release. Routes through the kernel-owned e-stop,
-/// the same path as `sys_estop`. M-B is timed from IRQ entry to "all channels
-/// safe", and the IRQ-entry stamp is consumed here either way so it cannot leak
-/// into a later actuation's M-C line.
+/// the same path as `sys_estop`. M-B ends after the local safe writes are
+/// issued, before link notification or logging. It does not measure physical
+/// pad propagation or downstream motor shutdown. The entry stamp is consumed
+/// either way so it cannot leak into another actuation's M-C line.
 pub fn handle_estop_button(pressed: bool) {
     use kernel_bpf::actuation::EstopAction;
     let entry = take_gpio_irq_entry();
     if pressed {
-        crate::actuation::operator_estop(EstopAction::Trigger);
+        let (code, applied_at) = crate::actuation::operator_estop_timed(EstopAction::Trigger);
         if let Some((sample_id, entry)) = entry {
             ESTOP_SAMPLE_ID.store(sample_id, Ordering::Release);
-            let ns = cycles_to_ns(now_cycles().wrapping_sub(entry));
-            log::info!("[bench] M-B estop irq-entry->safe latency_ns={}", ns);
-            // Emit only after operator_estop(Trigger) has applied every safe
-            // drive and returned, so this is the physical press -> safe latency.
-            crate::serial_println!("PI5_MB sample_id={} ns={}", sample_id, ns);
+            if let (0, Some(applied_at)) = (code, applied_at) {
+                let ns = cycles_to_ns(applied_at.wrapping_sub(entry));
+                crate::serial_println!("PI5_MB sample_id={} ns={}", sample_id, ns);
+            } else {
+                crate::serial_println!("PI5_BENCH_FAIL stage=estop_apply sample_id={}", sample_id);
+            }
         }
     } else {
         let release_code = crate::actuation::operator_estop(EstopAction::Release);
@@ -452,6 +449,11 @@ pub fn init() -> bool {
             return false;
         }
     };
+
+    crate::serial_println!(
+        "PI5_BENCH_TIMING mc=handler_to_local_write mb=handler_to_local_safe_writes counter_hz={}",
+        counter_freq()
+    );
 
     // V03-C: prove on-device that no invalid/out-of-envelope request escapes the
     // monitor. Runs before the reflex is armed; monitor-decision only, no MMIO.

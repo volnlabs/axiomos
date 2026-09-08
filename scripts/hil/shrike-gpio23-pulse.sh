@@ -87,7 +87,7 @@ echo "UART RECORDING — POWER ON THE PI NOW. Do not touch the stimulus."
 echo "Recording to $PREFIX; $PULSE_COUNT pulses will be automatic."
 check_uart() {
     kill -0 "$UART_PID" 2>/dev/null || die "UART capture ended early"
-    ! rg -aiq 'PI5_BENCH_FAIL|panic|fatal|watchdog|SIGNED_BPF_(INPUT_MISSING|INPUT_INVALID|LOAD_REJECTED)' "$UART_LOG" || die "kernel failure marker"
+    ! rg -aiq 'PI5_BENCH_FAIL|PI5_BENCH_LOG_LOSS|panic|fatal|watchdog|SIGNED_BPF_(INPUT_MISSING|INPUT_INVALID|LOAD_REJECTED)' "$UART_LOG" || die "kernel failure marker"
 }
 waited=0
 until rg -aq 'PI5_BENCH_READY' "$UART_LOG" && rg -aq 'SIGNED_BPF_LOAD_OK' "$UART_LOG"; do
@@ -96,6 +96,7 @@ until rg -aq 'PI5_BENCH_READY' "$UART_LOG" && rg -aq 'SIGNED_BPF_LOAD_OK' "$UART
     sleep 0.1; waited=$((waited + 1))
 done
 check_uart
+rg -aq 'PI5_BENCH_LOG_MODE deferred=true' "$UART_LOG" || die "wrong image: deferred bench logging required"
 rg -aq 'PI5_V03B_READY output=gpio sample_ids=true auto_rearm=true' "$UART_LOG" || die "wrong image: bench-reflex-rearm required"
 rg -aq 'PI5_OUT_ARM mode=gpio gpio=12 code=0 estop_asserted=false' "$UART_LOG" || die "initial output arm denied; check e-stop wiring"
 ! rg -aq 'PI5_GPIO_IRQ_PROVEN' "$UART_LOG" || die "unexpected sensor edge before capture; cold boot required"

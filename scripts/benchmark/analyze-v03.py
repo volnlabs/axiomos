@@ -8,6 +8,9 @@ import re
 import statistics
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
+from unittest.mock import patch
 from pathlib import Path
 
 SERIAL_PATTERNS = {
@@ -41,6 +44,7 @@ CONTAINMENT_SUMMARY_PATTERN = re.compile(
     r"PI5_V03C_SUMMARY\s+n=(\d+)\s+escapes=(\d+)\s+safed=(\d+)\s+"
     r"clamps=(\d+)\s+seed=(0x[0-9a-fA-F]+)"
 )
+BENCH_LOG_LOSS_PATTERN = re.compile(r"PI5_BENCH_LOG_LOSS\s+dropped_records=(\d+)")
 
 LOGIC_ALIASES = {
     "time_s": ("time_s", "time", "time [s]", "time(s)", "seconds"),
@@ -284,6 +288,31 @@ class AnalyzerSelfTest(unittest.TestCase):
         self.assertTrue(validate_containment([records[1].copy() | {"intended_output": 1}]))
         self.assertTrue(validate_containment([records[0].copy() | {"applied": 999, "intended_output": 999}]))
 
+    def test_sensor_cli_pass_names_cycle_correlation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            serial = Path(tmp) / "sensor.log"
+            serial.write_text(
+                "PI5_MA sample_id=1 monitor_ns=120\n"
+                "PI5_MC sample_id=1 ns=210 kind=gpio ch=12 val=0\n"
+                "PI5_REFLEX_REARM sample_id=1 mode=gpio code=0\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with patch("sys.argv", [__file__, "--sensor", str(serial), "--sensor-count", "1"]), redirect_stdout(output):
+                self.assertEqual(main(), 0)
+            self.assertIn("PASS: selected checks satisfied: sensor cycle correlation", output.getvalue())
+            self.assertNotIn("timing thresholds", output.getvalue())
+
+    def test_log_loss_uses_cumulative_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            serial = Path(tmp) / "bench.log"
+            serial.write_text(
+                "PI5_BENCH_LOG_LOSS dropped_records=1\n"
+                "PI5_BENCH_LOG_LOSS dropped_records=2\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(validate_log_loss(serial), ["serial log loss: dropped_records=2"])
+
 
 def parse_serial(path: Path) -> dict[str, list[int]]:
     samples: dict[str, list[int]] = {
@@ -401,6 +430,12 @@ def validate_sensor_cycles(path: Path, expected_count: int = 10_000) -> list[str
     if rearm_ids != mc_ids:
         errors.append(f"reflex re-arm IDs {rearm_ids} do not match M-C IDs {mc_ids}")
     return errors
+
+
+def validate_log_loss(path: Path) -> list[str]:
+    losses = [int(match.group(1)) for match in BENCH_LOG_LOSS_PATTERN.finditer(path.read_text(encoding="utf-8"))]
+    dropped = max(losses, default=0)
+    return [f"serial log loss: dropped_records={dropped}"] if dropped else []
 
 
 def _nearest_rank(values: list[int], quantile: float) -> int:
@@ -632,8 +667,15 @@ def main() -> int:
         parser.error("provide --serial, --pairs, --sensor, --estop, --containment, --logic, or --self-test")
 
     failures: list[str] = []
+    checks: list[str] = []
+
+    if args.serial or args.pairs or args.estop or args.sensor or args.containment:
+        serial_paths = [path for path in (args.serial, args.pairs, args.estop, args.sensor, args.containment) if path]
+        for path in serial_paths:
+            failures.extend(validate_log_loss(path))
 
     if args.serial:
+        checks.append("serial timing thresholds")
         samples = parse_serial(args.serial)
         for name in ("M-A", "M-B", "M-C"):
             print(_format_stats(name, samples[name]))
@@ -644,6 +686,7 @@ def main() -> int:
             print(f"M-C median {mc_median} ns misses 500 ns target; fallback claim applies")
 
     if args.logic:
+        checks.append("logic measured criteria")
         try:
             logic_latencies = parse_logic(args.logic)
         except ValueError as error:
@@ -662,6 +705,7 @@ def main() -> int:
                 )
 
     if args.pairs:
+        checks.append("paired timing threshold")
         try:
             pairs = parse_pairs(args.pairs)
         except ValueError as error:
@@ -673,12 +717,15 @@ def main() -> int:
             failures.extend(validate_pairs(pairs))
 
     if args.estop:
+        checks.append("e-stop cycle/re-arm checks")
         failures.extend(validate_estop_cycles(args.estop, args.estop_count))
 
     if args.sensor:
+        checks.append("sensor cycle correlation")
         failures.extend(validate_sensor_cycles(args.sensor, args.sensor_count))
 
     if args.containment:
+        checks.append("containment decision model")
         try:
             records = parse_containment(args.containment, args.containment_count)
         except ValueError as error:
@@ -698,7 +745,7 @@ def main() -> int:
             print(f"- {failure}")
         return 1
 
-    print("PASS: v0.3 bench thresholds satisfied")
+    print(f"PASS: selected checks satisfied: {', '.join(checks)}")
     return 0
 
 

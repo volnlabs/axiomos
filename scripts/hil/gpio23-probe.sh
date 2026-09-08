@@ -87,7 +87,7 @@ check_uart() {
         echo "ABORT: UART capture ended before the test completed." >&2
         exit 1
     fi
-    if rg -aiq 'PI5_BENCH_FAIL|panic|fatal|watchdog|SIGNED_BPF_(INPUT_MISSING|INPUT_INVALID|LOAD_REJECTED)' "$UART_LOG"; then
+    if rg -aiq 'PI5_BENCH_FAIL|PI5_BENCH_LOG_LOSS|panic|fatal|watchdog|SIGNED_BPF_(INPUT_MISSING|INPUT_INVALID|LOAD_REJECTED)' "$UART_LOG"; then
         echo "ABORT: kernel failure marker; leave the stimulus disconnected." >&2
         exit 1
     fi
