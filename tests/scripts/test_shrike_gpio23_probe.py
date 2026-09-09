@@ -31,6 +31,8 @@ if "-i" in sys.argv:
     print("; mock csv", flush=True)
     print("0,0,0", flush=True)
     raise SystemExit(0)
+assert "-t" not in sys.argv
+assert sys.argv[sys.argv.index("-l") + 1] == "4"
 output = pathlib.Path(sys.argv[sys.argv.index("-o") + 1])
 output.write_bytes(b"mock capture\n")
 if mode == "fail":
@@ -54,18 +56,26 @@ import sys
 
 log = pathlib.Path(os.environ["MPREMOTE_LOG"])
 event_log = pathlib.Path(os.environ["EVENT_LOG"])
+assert "resume" in sys.argv
 code = sys.argv[sys.argv.index("exec") + 1] if "exec" in sys.argv else ""
+compile(code, "stimulus", "exec")
 with log.open("a", encoding="utf-8") as stream:
     stream.write(code.replace("\n", "\\n") + "\n")
     stream.flush()
 with event_log.open("a", encoding="utf-8") as stream:
     stream.write("MPREMOTE_" + ("PULSE" if "MULTIPULSE_START" in code else "SETUP") + "\n")
     stream.flush()
+if "MULTIPULSE_START" in code:
+    print("MULTIPULSE_START\nMULTIPULSE_DONE 0 0")
+elif "GPIO_SAFE" in code:
+    print("GPIO_SAFE 0 0")
+else:
+    print("GPIO_READY 0 1")
 '''
 
 
 class ShrikeGpio23PulseTests(unittest.TestCase):
-    def run_harness(self, mode: str, uart: bytes, timeout: float = 12.0) -> tuple[str, str, str]:
+    def run_harness(self, mode: str, uart: bytes, output_mode: str = "gpio", pulse_count: str = "2", timeout: float = 12.0) -> tuple[str, str, str]:
         with tempfile.TemporaryDirectory(prefix="shrike-gpio23-test-") as directory:
             root = Path(directory)
             bin_dir = root / "bin"
@@ -94,11 +104,12 @@ class ShrikeGpio23PulseTests(unittest.TestCase):
                     "EVENT_LOG": str(event_log),
                     "MPREMOTE_LOG": str(mpremote_log),
                     "SIGROK_MODE": mode,
+                    "OUTPUT_MODE": output_mode,
                     "LOGIC_CONN": "fx2lafw",
                     "READY_TIMEOUT": "1",
                     "ANALYZER_READY_TIMEOUT": "1",
                     "UART_SECONDS": "10",
-                    "PULSE_COUNT": "2",
+                    "PULSE_COUNT": pulse_count,
                     "PULSE_HIGH_MS": "20",
                     "PULSE_LOW_MS": "20",
                     "ACTUATORS_MOTORS_DISCONNECTED": "YES",
@@ -118,7 +129,17 @@ class ShrikeGpio23PulseTests(unittest.TestCase):
                 deadline = time.monotonic() + 3
                 while time.monotonic() < deadline and not list(run_dir.glob("*uart.log")):
                     time.sleep(0.01)
-                os.write(master, uart)
+                if output_mode == "pwm" and b"PI5_GPIO_IRQ_PROVEN" in uart:
+                    prefix, tail = uart.split(b"PI5_GPIO_IRQ_PROVEN", 1)
+                    os.write(master, prefix)
+                    deadline = time.monotonic() + 3
+                    while time.monotonic() < deadline:
+                        if event_log.exists() and "MPREMOTE_PULSE" in event_log.read_text(encoding="utf-8"):
+                            break
+                        time.sleep(0.01)
+                    os.write(master, b"PI5_GPIO_IRQ_PROVEN" + tail)
+                else:
+                    os.write(master, uart)
 
             feeder = threading.Thread(target=feed_uart, daemon=True)
             feeder.start()
@@ -130,13 +151,13 @@ class ShrikeGpio23PulseTests(unittest.TestCase):
             finally:
                 os.close(master)
             return (
-                output,
+                f"RETURN_CODE={process.returncode}\n" + output,
                 mpremote_log.read_text(encoding="utf-8") if mpremote_log.exists() else "",
                 event_log.read_text(encoding="utf-8") if event_log.exists() else "",
             )
 
     def test_missing_signed_marker_never_dispatches_pulses(self) -> None:
-        _, commands, _ = self.run_harness(
+        output, commands, _ = self.run_harness(
             "data", b"PI5_BENCH_READY\nPI5_BENCH_LOG_MODE deferred=true\nPI5_V03B_READY output=gpio sample_ids=true auto_rearm=true\nPI5_OUT_ARM mode=gpio gpio=12 code=0 estop_asserted=false\n"
         )
         self.assertNotIn("MULTIPULSE_START", commands)
@@ -174,6 +195,44 @@ class ShrikeGpio23PulseTests(unittest.TestCase):
         self.assertTrue(cleanup)
         self.assertIn("Pin(22, Pin.OUT, value=0)", cleanup[-1])
         self.assertIn("Pin(21, Pin.OUT, value=0)", cleanup[-1])
+
+    def test_pwm_requires_one_pulse_and_correlates_one_pair_without_rearm(self) -> None:
+        output, commands, _ = self.run_harness(
+            "data",
+            b"PI5_BENCH_READY\nSIGNED_BPF_LOAD_OK\nPI5_BENCH_LOG_MODE deferred=true\n"
+            b"PI5_PWM_READY carrier_request_hz=10000 requested_duty_percent=50 auto_rearm=false\n"
+            b"PI5_OUT_ARM mode=pwm gpio=12 code=0 estop_asserted=false\n"
+            b"PI5_GPIO_IRQ_PROVEN\nPI5_MA sample_id=7 monitor_ns=10\nPI5_MC sample_id=7 ns=20 kind=pwm ch=1 val=0\n",
+            output_mode="pwm",
+            pulse_count="1",
+        )
+        self.assertIn("MULTIPULSE_START", commands)
+        self.assertIn("RETURN_CODE=0", output)
+        self.assertIn("CAPTURE COMPLETE: PWM smoke software correlation only", output)
+        self.assertNotIn("PI5_REFLEX_REARM", commands)
+
+    def test_pwm_rejects_extra_response_or_rearm(self) -> None:
+        base = (
+            b"PI5_BENCH_READY\nSIGNED_BPF_LOAD_OK\nPI5_BENCH_LOG_MODE deferred=true\n"
+            b"PI5_PWM_READY carrier_request_hz=10000 requested_duty_percent=50 auto_rearm=false\n"
+            b"PI5_OUT_ARM mode=pwm gpio=12 code=0 estop_asserted=false\n"
+            b"PI5_GPIO_IRQ_PROVEN\nPI5_MA sample_id=7 monitor_ns=10\nPI5_MC sample_id=7 ns=20 kind=pwm ch=1 val=0\n"
+        )
+        for extra in (
+            b"PI5_MC sample_id=8 ns=20 kind=gpio ch=12 val=0\n",
+            b"PI5_ESTOP_REARM sample_id=7 mode=pwm code=0\n",
+        ):
+            with self.subTest(extra=extra):
+                output, _, _ = self.run_harness("data", base + extra, output_mode="pwm", pulse_count="1")
+                self.assertIn("RETURN_CODE=1", output)
+                self.assertIn("PWM software correlation failed", output)
+
+    def test_pwm_rejects_multi_pulse_request(self) -> None:
+        output, commands, _ = self.run_harness(
+            "data", b"", output_mode="pwm", pulse_count="2"
+        )
+        self.assertIn("PULSE_COUNT=1", output)
+        self.assertNotIn("MULTIPULSE_START", commands)
 
 
 if __name__ == "__main__":

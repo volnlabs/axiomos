@@ -17,14 +17,24 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+#[cfg(all(
+    feature = "bench-pwm",
+    any(
+        feature = "bench-reflex-rearm",
+        feature = "bench-estop-rearm",
+        feature = "bench-paired-overhead"
+    )
+))]
+compile_error!("bench-pwm is a one-shot unloaded diagnostic; do not combine it with rearm or paired-overhead benches");
+
 /// Sensor pin: the reflex fires on this pin's rising edge.
 pub const REFLEX_SENSOR_PIN: u8 = 23;
 /// E-stop button pin (NC-held-high; open/press/broken wire pulls low).
 pub const ESTOP_BUTTON_PIN: u8 = 24;
-/// PWM controller the reflex and demo drive (PWM0).
-/// Reflex-output PWM carrier. At 100% duty this holds GPIO12 high until the
-/// reflex writes duty 0, giving V03-B a single GPIO12 falling edge to measure.
+/// Requested PWM carrier frequency. Measure the physical period separately.
 pub const BENCH_PWM_FREQ_HZ: u32 = 10_000;
+/// A visible carrier through the ordinary monitor envelope, not DC high.
+pub const BENCH_PWM_DUTY_PERCENT: u32 = 50;
 pub const BENCH_PWM_CHIP: u32 = 0;
 /// PWM channel the reflex and demo drive, in the monitor's 1-based numbering.
 /// Channel 1 maps to RP1 PWM0 hardware channel 0 = GPIO12 (Alt0).
@@ -45,7 +55,10 @@ pub enum ReflexOutput {
 
 /// Selects the reflex output path for this build. Two experiments on one rig;
 /// build one image per mode and report both latency numbers.
+#[cfg(not(feature = "bench-pwm"))]
 pub const BENCH_REFLEX_OUTPUT: ReflexOutput = ReflexOutput::Gpio;
+#[cfg(feature = "bench-pwm")]
+pub const BENCH_REFLEX_OUTPUT: ReflexOutput = ReflexOutput::Pwm;
 
 /// True when an actuation targets the local PWM output reserved for Task 11.
 #[inline]
@@ -69,7 +82,11 @@ fn arm_reflex_output() -> (&'static str, i64) {
         ReflexOutput::Gpio => ("gpio", crate::actuation::guard_gpio(BENCH_PWM_PIN, 1)),
         ReflexOutput::Pwm => (
             "pwm",
-            crate::actuation::guard_pwm(BENCH_PWM_CHIP as u8, BENCH_PWM_CHANNEL as u8, 100),
+            crate::actuation::guard_pwm(
+                BENCH_PWM_CHIP as u8,
+                BENCH_PWM_CHANNEL as u8,
+                BENCH_PWM_DUTY_PERCENT,
+            ),
         ),
     }
 }
@@ -459,54 +476,23 @@ pub fn init() -> bool {
     // monitor. Runs before the reflex is armed; monitor-decision only, no MMIO.
     run_containment_corpus();
 
-    // Configure the reflex output pin (GPIO12). GPIO mode drives it as a plain
-    // GPIO output; PWM mode routes it to the PWM0 peripheral (Alt0).
-    match BENCH_REFLEX_OUTPUT {
-        ReflexOutput::Gpio => gpio.configure_output(BENCH_PWM_PIN, false),
-        ReflexOutput::Pwm => gpio.configure_peripheral_output(BENCH_PWM_PIN, GpioFunction::Alt0),
-    }
+    // Keep the pad GPIO-low while preparing PWM, including on a warm reboot.
+    // No direct high-output self-test: nonzero actuation goes through ARM-A.
+    gpio.configure_output(BENCH_PWM_PIN, false);
 
     #[cfg(feature = "bench-paired-overhead")]
     run_paired_overhead();
 
-    // Pad-driver self-test: force the pad high then low via the CTRL override,
-    // bypassing PWM. If this toggles the read-back level but the PWM duty test
-    // below does not, the pad + readback are fine and the PWM counter/clock is
-    // the dead layer. Restores normal (peripheral-driven) output after.
-    gpio.force_output_override(BENCH_PWM_PIN, Some(true));
-    let pad_drive_high = gpio.interrupt_state(BENCH_PWM_PIN).status;
-    gpio.force_output_override(BENCH_PWM_PIN, Some(false));
-    let pad_drive_low = gpio.interrupt_state(BENCH_PWM_PIN).status;
-    gpio.force_output_override(BENCH_PWM_PIN, None);
-    crate::serial_println!(
-        "PI5_PAD_SELFTEST drive_high=0x{:08x} drive_low=0x{:08x} toggled={}",
-        pad_drive_high,
-        pad_drive_low,
-        pad_drive_high != pad_drive_low
-    );
-
-    // PWM mode only: enable the PWM0 functional clock and the channel (output
-    // held LOW), then self-test the output by driving DC high/low. The HIGH arm
-    // later goes through the e-stop-guarded actuation path, never a raw write.
     if BENCH_REFLEX_OUTPUT == ReflexOutput::Pwm {
-        use crate::arch::aarch64::platform::rpi5::pwm::{enable_pwm0_clock, pwm0_clock_ctrl, PWM0};
+        use crate::arch::aarch64::platform::rpi5::pwm::{enable_pwm0_clock, PWM0};
         enable_pwm0_clock();
         let pwm = PWM0.lock();
+        pwm.disable(BENCH_PWM_CHANNEL as u8);
         pwm.set_frequency(BENCH_PWM_CHANNEL as u8, BENCH_PWM_FREQ_HZ);
         pwm.set_duty_cycle(BENCH_PWM_CHANNEL as u8, 0);
         pwm.enable(BENCH_PWM_CHANNEL as u8);
-
-        pwm.set_duty_cycle(BENCH_PWM_CHANNEL as u8, 100);
-        let status_high = gpio.interrupt_state(BENCH_PWM_PIN).status;
-        pwm.set_duty_cycle(BENCH_PWM_CHANNEL as u8, 0);
-        let status_low = gpio.interrupt_state(BENCH_PWM_PIN).status;
-        crate::serial_println!(
-            "PI5_PWM_SELFTEST clk_ctrl=0x{:08x} status_high=0x{:08x} status_low=0x{:08x} toggled={}",
-            pwm0_clock_ctrl(),
-            status_high,
-            status_low,
-            status_high != status_low
-        );
+        drop(pwm);
+        gpio.configure_peripheral_output(BENCH_PWM_PIN, GpioFunction::Alt0);
     }
     gpio.configure_input(REFLEX_SENSOR_PIN);
     gpio.configure_input(ESTOP_BUTTON_PIN);
@@ -575,6 +561,12 @@ pub fn init() -> bool {
                 initial_estop_pressed,
                 gpio.ctrl_readback(BENCH_PWM_PIN),
                 gpio.pad_readback(BENCH_PWM_PIN)
+            );
+            #[cfg(feature = "bench-pwm")]
+            crate::serial_println!(
+                "PI5_PWM_READY carrier_request_hz={} requested_duty_percent={} auto_rearm=false",
+                BENCH_PWM_FREQ_HZ,
+                BENCH_PWM_DUTY_PERCENT
             );
             #[cfg(feature = "bench-estop-rearm")]
             crate::serial_println!("PI5_V03D_READY output={} auto_rearm=true", mode);

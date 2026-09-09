@@ -106,6 +106,10 @@ audit-fault-injection = ["kernel_physical_memory/fault-injection"]
 # Enable alongside a profile, e.g. `--features embedded-rpi5,bench`.
 bench = []
 
+# Unloaded one-shot PWM carrier/stop diagnostic on GPIO12.
+# Reserves PWM0/channel1 for local output; incompatible with auto-rearm benches.
+bench-pwm = ["bench"]
+
 # Unloaded-HIL-only diagnostic: after a successful physical GPIO24 e-stop
 # release IRQ, re-arm the bench reflex output through the monitored guard path.
 # Never enable this in production; it implies `bench` but is otherwise opt-in.

@@ -4,7 +4,8 @@
 # Shrike GP21 -> 220 ohm -> Pi pin18/GPIO24 (active-low e-stop).
 # Analyzer D1 (input2) -> Pi pin32/GPIO12. All grounds common.
 # No motors/drivers/actuators or static GPIO24-to-3.3V jumper permitted.
-# Requires bench-reflex-rearm: GP21 is released before boot for initial arming,
+# GPIO mode requires bench-reflex-rearm; PWM mode requires one-shot bench-pwm.
+# GP21 is released before boot for initial arming,
 # then asserted in the pulse program's finally block and host cleanup.
 set -uo pipefail
 
@@ -13,6 +14,7 @@ RUN_DIR="${RUN_DIR:-$REPO/artifacts/runs/axiomos-hil-20260720T134903Z/03-gpio}"
 PI_UART="${PI_UART:-/dev/serial/by-id/usb-Raspberry_Pi_Debug_Probe__CMSIS-DAP__E6633861A355B838-if01}"
 SHRIKE_UART="${SHRIKE_UART:-/dev/serial/by-id/usb-SHRIKE_Board_in_Micropython_Mode_de65143857942625-if00}"
 MPREMOTE="${MPREMOTE:-mpremote}"
+OUTPUT_MODE="${OUTPUT_MODE:-gpio}"
 LOGIC_CONN="${LOGIC_CONN:-fx2lafw}"
 SAMPLERATE="${SAMPLERATE:-24m}"
 UART_SECONDS="${UART_SECONDS:-240}"
@@ -32,6 +34,11 @@ case "$SAMPLERATE" in
     1m) SAMPLES_PER_MS=1000 ;;
     24m) SAMPLES_PER_MS=24000 ;;
     *) die "supported capture rates: 1m (functional) or 24m (timing capture)" ;;
+esac
+case "$OUTPUT_MODE" in
+    gpio) ;;
+    pwm) [ "$PULSE_COUNT" -eq 1 ] || die "OUTPUT_MODE=pwm requires PULSE_COUNT=1" ;;
+    *) die "OUTPUT_MODE must be gpio or pwm" ;;
 esac
 CAPTURE_MS=$((PULSE_COUNT * (PULSE_HIGH_MS + PULSE_LOW_MS) + CAPTURE_MARGIN_MS))
 CAPTURE_SAMPLES=$((CAPTURE_MS * SAMPLES_PER_MS))
@@ -55,8 +62,8 @@ UART_LOG="$PREFIX-uart.log"
 LOGIC_LOG="$PREFIX.sr"
 ANALYZER_LOG="$PREFIX-analyzer.log"
 SHRIKE_LOG="$PREFIX-shrike.log"
-printf 'rate=%s samples=%s count=%s high_ms=%s low_ms=%s\n' \
-    "$SAMPLERATE" "$CAPTURE_SAMPLES" "$PULSE_COUNT" "$PULSE_HIGH_MS" "$PULSE_LOW_MS" > "$PREFIX-config.txt" || die "could not retain capture configuration"
+printf 'rate=%s samples=%s count=%s high_ms=%s low_ms=%s output_mode=%s\n' \
+    "$SAMPLERATE" "$CAPTURE_SAMPLES" "$PULSE_COUNT" "$PULSE_HIGH_MS" "$PULSE_LOW_MS" "$OUTPUT_MODE" > "$PREFIX-config.txt" || die "could not retain capture configuration"
 UART_PID=""; LOGIC_PID=""; PULSE_PID=""; SHRIKE_TOUCHED=0
 set_safe() {
     timeout --signal=TERM --kill-after=2s 12s "$MPREMOTE" connect "$SHRIKE_UART" resume exec \
@@ -97,8 +104,13 @@ until rg -aq 'PI5_BENCH_READY' "$UART_LOG" && rg -aq 'SIGNED_BPF_LOAD_OK' "$UART
 done
 check_uart
 rg -aq 'PI5_BENCH_LOG_MODE deferred=true' "$UART_LOG" || die "wrong image: deferred bench logging required"
-rg -aq 'PI5_V03B_READY output=gpio sample_ids=true auto_rearm=true' "$UART_LOG" || die "wrong image: bench-reflex-rearm required"
-rg -aq 'PI5_OUT_ARM mode=gpio gpio=12 code=0 estop_asserted=false' "$UART_LOG" || die "initial output arm denied; check e-stop wiring"
+if [ "$OUTPUT_MODE" = gpio ]; then
+    rg -aq 'PI5_V03B_READY output=gpio sample_ids=true auto_rearm=true' "$UART_LOG" || die "wrong image: bench-reflex-rearm required"
+    rg -aq 'PI5_OUT_ARM mode=gpio gpio=12 code=0 estop_asserted=false' "$UART_LOG" || die "initial output arm denied; check e-stop wiring"
+else
+    rg -aq 'PI5_PWM_READY carrier_request_hz=10000 requested_duty_percent=50 auto_rearm=false' "$UART_LOG" || die "wrong image: PWM smoke build required"
+    rg -aq 'PI5_OUT_ARM mode=pwm gpio=12 code=0 estop_asserted=false' "$UART_LOG" || die "initial PWM arm denied; check e-stop wiring"
+fi
 ! rg -aq 'PI5_GPIO_IRQ_PROVEN' "$UART_LOG" || die "unexpected sensor edge before capture; cold boot required"
 
 # Continuous capture includes idle baseline, every pulse and the final stop.
@@ -149,7 +161,21 @@ kill "$UART_PID" 2>/dev/null || true
 wait "$UART_PID" 2>/dev/null || true
 UART_PID=""
 sha256sum "$UART_LOG" "$LOGIC_LOG" "$ANALYZER_LOG" "$SHRIKE_LOG" "$PREFIX-config.txt" | tee "$PREFIX.sha256" || die "could not hash capture artifacts"
-rg -a 'PI5_OUT_ARM|PI5_GPIO_IRQ_PROVEN|PI5_REFLEX_REARM|PI5_MC|PI5_MA sample_id=' "$UART_LOG" || true
-python3 -B "$REPO/scripts/benchmark/analyze-v03.py" --sensor "$UART_LOG" --sensor-count "$PULSE_COUNT" || die "software cycle correlation failed; retain capture for diagnosis"
-echo "CAPTURE COMPLETE: software cycles checked; physical waveform review is required."
+rg -a 'PI5_OUT_ARM|PI5_GPIO_IRQ_PROVEN|PI5_REFLEX_REARM|PI5_ESTOP_REARM|PI5_MC|PI5_MA sample_id=' "$UART_LOG" || true
+if [ "$OUTPUT_MODE" = pwm ]; then
+    python3 - "$UART_LOG" <<'PY' || die "PWM software correlation failed; retain capture for diagnosis"
+import re, sys
+text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+ma = re.findall(r"PI5_MA sample_id=(\d+) monitor_ns=\d+", text)
+mc = re.findall(r"PI5_MC sample_id=(\d+) ns=\d+ kind=pwm ch=1 val=0", text)
+if len(ma) != 1 or len(mc) != 1 or ma != mc or text.count("PI5_MC ") != 1 or text.count("PI5_GPIO_IRQ_PROVEN") != 1:
+    raise SystemExit("need exactly one correlated PWM M-A/M-C pair and GPIO route proof")
+if "PI5_REFLEX_REARM" in text or "PI5_ESTOP_REARM" in text:
+    raise SystemExit("PWM smoke must not re-arm")
+PY
+    echo "CAPTURE COMPLETE: PWM smoke software correlation only; physical carrier/stop review required."
+else
+    python3 -B "$REPO/scripts/benchmark/analyze-v03.py" --sensor "$UART_LOG" --sensor-count "$PULSE_COUNT" || die "software cycle correlation failed; retain capture for diagnosis"
+    echo "CAPTURE COMPLETE: software cycles checked; physical waveform review is required."
+fi
 echo "Shrike reports GPIO22=LOW and GPIO21=LOW (e-stop asserted). Power off the Pi."

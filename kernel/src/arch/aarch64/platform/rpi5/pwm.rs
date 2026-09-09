@@ -37,9 +37,9 @@ const CLK_SRC_AUX_SEL: u32 = 1;
 /// AUXSRC index 2 selects the crystal oscillator (xosc), which feeds PWM0
 /// directly with no PLL.
 const CLK_AUXSRC_XOSC: u32 = 2;
-/// Integer divider written to DIV_INT (÷N). ÷1 may be an invalid/bypass value
-/// that stops the counter, so use ÷2 (a known-valid mid divider).
-const CLK_PWM0_DIV_INT_VALUE: u32 = 2;
+/// DIV_INT is a direct integer divider (Linux clk-rp1.c). Divide by one so
+/// the configured xosc clock agrees with RP1_PWM_CLOCK_HZ used for RANGE.
+const CLK_PWM0_DIV_INT_VALUE: u32 = 1;
 
 /// Enable the RP1 PWM0 functional clock from the crystal oscillator.
 ///
@@ -81,7 +81,7 @@ pub fn pwm0_clock_ctrl() -> u32 {
 }
 
 /// Read back (DIV_INT, DIV_FRAC). Bring-up diagnostics: confirms the divider
-/// write landed and is a sane value (not 0 / not a bypass).
+/// write landed (expected integer 1, fractional 0).
 pub fn pwm0_clock_div() -> (u32, u32) {
     // SAFETY: CLOCKS block is inside the mapped RP1 peripheral aperture.
     unsafe {

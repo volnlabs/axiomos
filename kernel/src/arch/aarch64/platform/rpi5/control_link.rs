@@ -66,6 +66,12 @@ static LINK_UNINITIALIZED_REPORTED: core::sync::atomic::AtomicBool =
 /// link-owned motor. Unmapped channels keep local RP1 PWM.
 #[must_use]
 pub fn motor_side(chip: u8, channel: u8) -> Option<MotorSide> {
+    // The unloaded PWM diagnostic reserves exactly this channel for local RP1
+    // output. Ordinary builds retain signed-pair-only motor ownership.
+    #[cfg(feature = "bench-pwm")]
+    if crate::bench::is_bench_pwm_output(chip, channel) {
+        return None;
+    }
     if chip != MOTOR_CHIP {
         return None;
     }
