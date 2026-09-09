@@ -21,10 +21,7 @@ SAMPLE_RATE_HZ = 24_000_000
 LIMIT_NS = 1_000_000
 SAMPLERATE = re.compile(r"^\s*(?:24\s*MHz|24000000)\s*$", re.IGNORECASE)
 EDGE_TABLE = bytes.maketrans(bytes(range(256)), bytes(value & 3 for value in range(256)))
-D0_FALL = re.compile(b"(?<=[\x01\x03])[\x00\x02]")
-D0_RISE = re.compile(b"(?<=[\x00\x02])[\x01\x03]")
-D1_FALL = re.compile(b"(?<=[\x02\x03])[\x00\x01]")
-D1_RISE = re.compile(b"(?<=[\x00\x01])[\x02\x03]")
+LEVEL_RUNS = re.compile(b"\x00+|\x01+|\x02+|\x03+")
 
 
 @dataclass
@@ -162,27 +159,31 @@ def _parse_srzip(path: str) -> Edges:
         d0_rises: list[int] = []
         d1_falls: list[int] = []
         d1_rises: list[int] = []
-        previous: tuple[int, int] | None = None
+        previous_value: int | None = None
         initial: tuple[int, int] | None = None
         samples = 0
-        carry = b""
         try:
             for member in members:
                 with archive.open(member) as raw:
                     while chunk := raw.read(1024 * 1024):
-                        data = (carry + chunk).translate(EDGE_TABLE)
-                        base = samples - len(carry)
+                        data = chunk.translate(EDGE_TABLE)
                         if initial is None:
                             initial = (data[0] & 1, (data[0] >> 1) & 1)
-                        d0_falls.extend(base + match.start() for match in D0_FALL.finditer(data))
-                        d0_rises.extend(base + match.start() for match in D0_RISE.finditer(data))
-                        d1_falls.extend(base + match.start() for match in D1_FALL.finditer(data))
-                        d1_rises.extend(base + match.start() for match in D1_RISE.finditer(data))
-                        samples += len(data) - len(carry)
-                        carry = data[-1:]
+                        # Scan constant levels once in C; do Python work only at edges.
+                        for run in LEVEL_RUNS.finditer(data):
+                            value = data[run.start()]
+                            at = samples + run.start()
+                            if previous_value is not None:
+                                changed = value ^ previous_value
+                                if changed & 1:
+                                    (d0_rises if value & 1 else d0_falls).append(at)
+                                if changed & 2:
+                                    (d1_rises if value & 2 else d1_falls).append(at)
+                            previous_value = value
+                        samples += len(data)
         except (OSError, zipfile.BadZipFile) as exc:
             raise RuntimeError(f"srzip raw data is unreadable: {exc}") from None
-        previous = None if not carry else (carry[0] & 1, (carry[0] >> 1) & 1)
+        previous = None if previous_value is None else (previous_value & 1, (previous_value >> 1) & 1)
         return Edges(d0_falls, d0_rises, d1_falls, d1_rises, initial, previous)
 
 
@@ -314,6 +315,7 @@ def main() -> int:
             errors.append(f"{path}: expected a .sr capture")
             continue
         try:
+            print(f"Reading physical waveform: {path}", flush=True)
             edges = read_capture(path)
         except RuntimeError as exc:
             errors.append(f"{path}: {exc}")
