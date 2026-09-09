@@ -16,6 +16,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
 TARGET="aarch64-unknown-none"
+TARGET_DIR="${CARGO_TARGET_DIR:-$PROJECT_DIR/target}"
+[[ "$TARGET_DIR" = /* ]] || TARGET_DIR="$PROJECT_DIR/$TARGET_DIR"
 PROFILE="${1:-release}"
 FEATURES="${2:-embedded-rpi5}"
 
@@ -46,7 +48,8 @@ fi
 
 # Step 1: Build disk image with userspace binaries
 echo "Building userspace binaries and disk image..."
-ARTIFACT_PATHS=$(mktemp "$PROJECT_DIR/target/rpi5-artifacts.XXXXXX")
+mkdir -p "$TARGET_DIR"
+ARTIFACT_PATHS=$(mktemp "$TARGET_DIR/rpi5-artifacts.XXXXXX")
 trap 'rm -f "$ARTIFACT_PATHS"' EXIT
 export AXIOM_ARTIFACT_PATHS="$ARTIFACT_PATHS"
 
@@ -71,10 +74,10 @@ export AXIOM_DISK_IMAGE="$DISK_PATH"
 echo "Building kernel (AXIOM_DISK_IMAGE=$AXIOM_DISK_IMAGE)..."
 if [ "$PROFILE" = "release" ]; then
     cargo build --target "$TARGET" --features "$FEATURES" --release -p kernel
-    BUILD_DIR="target/$TARGET/release"
+    BUILD_DIR="$TARGET_DIR/$TARGET/release"
 else
     cargo build --target "$TARGET" --features "$FEATURES" -p kernel
-    BUILD_DIR="target/$TARGET/debug"
+    BUILD_DIR="$TARGET_DIR/$TARGET/debug"
 fi
 
 # Check if llvm-objcopy is available

@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Offline, unloaded PWM containment check: D0=GPIO23, D1=GPIO12, 24 MHz.
 
-Requires one sensor pulse: 50% baseline -> UINT_MAX clamped to 90% -> invalid
+By default, requires one sensor pulse: 50% baseline -> UINT_MAX clamped to 90% -> invalid
 channel rejected with 90% retained -> final LOW. The 1 ms settling allowance
 is functional, not a latency gate. D0 does not capture the e-stop input;
 this reducer cannot measure physical e-stop latency or establish WCET.
 The matching analyzer log must confirm acquisition completion (SR_DF_END).
+--corpus --count N repeats all five deterministic request cases (N=5..100,
+a multiple of five), retaining 90% through every subsequent sensor pulse.
 """
 import argparse
+from bisect import bisect_left, bisect_right
 import json
 from pathlib import Path
 import re
@@ -22,6 +25,8 @@ SETTLE = RATE // 1000  # Functional allowance, never a latency/WCET claim.
 RETAIN = RATE // 100  # At least 10 ms after the rejected request.
 FINAL_LOW = RATE // 10
 TOLERANCE = 2  # Logic-analyzer sample quantization, not a calibrated clock.
+DUTIES = (91, 100, 255, 65535, 4294967295)
+CHANNELS = (0, 3, 257, 65537, 4294967295)
 
 
 def read_capture(path):
@@ -37,23 +42,39 @@ def read_capture(path):
     return edges, samples
 
 
-def validate_uart(text):
+def validate_uart(text, count=1, corpus=False):
+    if (corpus and not (0 < count <= 100 and count % 5 == 0)) or (not corpus and count != 1):
+        return ["count must be 1 normally, or a positive multiple of 5 <=100 for corpus"]
     errors = []
     if text.count("PI5_GPIO_IRQ_PROVEN") != 1:
         errors.append("UART needs exactly one GPIO IRQ route proof")
-    expected = [
-        "sample_id=1 chip=0 channel=1 requested=4294967295 code=0 range=5000 duty=4500",
-        "sample_id=2 chip=0 channel=3 requested=4294967295 code=-1 range=5000 duty=4500",
-    ]
+    expected = []
+    for j in range(count):
+        duty = DUTIES[j % 5] if corpus else 4294967295
+        channel = CHANNELS[j % 5] if corpus else 3
+        expected.extend([
+            f"sample_id={2*j+1} chip=0 channel=1 requested={duty} code=0 range=5000 duty=4500",
+            f"sample_id={2*j+2} chip=0 channel={channel} requested=4294967295 code=-1 range=5000 duty=4500",
+        ])
     records = re.findall(r"PI5_PWM_REQUEST\b([^\r\n]*)", text)
     if [record.strip() for record in records] != expected:
-        errors.append("UART needs exactly sample 1 clamp and sample 2 invalid-channel rejection requests")
+        errors.append(f"UART needs exactly {2*count} ordered requests matching the expected clamp/rejection cases")
     ma = re.findall(r"PI5_MA\b([^\r\n]*)", text)
-    if len(ma) != 1 or not re.fullmatch(r" sample_id=1 monitor_ns=\d+", ma[0]):
-        errors.append("UART needs exactly one M-A record for sample 1")
+    if len(ma) != count or any(not re.fullmatch(fr" sample_id={2*j+1} monitor_ns=\d+", record)
+                                               for j, record in enumerate(ma)):
+        errors.append(f"UART needs exactly {count} M-A records with ordered odd sample IDs")
     mc = re.findall(r"PI5_MC\b([^\r\n]*)", text)
-    if len(mc) != 1 or not re.fullmatch(r" sample_id=1 ns=\d+ kind=pwm ch=1 val=90", mc[0]):
-        errors.append("UART needs exactly one M-C record for sample 1, PWM ch=1 val=90")
+    if len(mc) != count or any(not re.fullmatch(fr" sample_id={2*j+1} ns=\d+ kind=pwm ch=1 val=90", record)
+                                               for j, record in enumerate(mc)):
+        errors.append(f"UART needs exactly {count} M-C records with ordered odd sample IDs, PWM ch=1 val=90")
+    corpus_ready = "PI5_PWM_CORPUS_READY cases=5 requests_per_pulse=2"
+    if corpus:
+        if text.count("PI5_PWM_CORPUS_READY") != 1 or corpus_ready not in text:
+            errors.append("UART needs exactly one five-case PWM corpus readiness marker")
+        elif records and text.find(corpus_ready) > text.find("PI5_PWM_REQUEST"):
+            errors.append("UART requests precede corpus readiness")
+    elif "PI5_PWM_CORPUS_READY" in text:
+        errors.append("corpus UART requires --corpus")
     ready = "PI5_PWM_CONTAINMENT_READY requested=4294967295 clamp_percent=90 reject_channel=3"
     arm = "PI5_OUT_ARM mode=pwm gpio=12 code=0 estop_asserted=false"
     if (text.count("PI5_PWM_CONTAINMENT_READY") != 1 or ready not in text or
@@ -68,8 +89,8 @@ def validate_uart(text):
         errors.append("UART requests precede initial arm/readiness")
     estop = re.findall(r"V04_ESTOP event_id=\d+ source=operator stage=assert ts_ns=\d+", text)
     mb = re.findall(r"PI5_MB\b([^\r\n]*)", text)
-    if len(estop) != 1 or len(mb) != 1 or not re.fullmatch(r" sample_id=3 ns=\d+", mb[0]):
-        errors.append("UART needs one final operator e-stop assertion and M-B sample 3")
+    if len(estop) != 1 or len(mb) != 1 or not re.fullmatch(fr" sample_id={2*count+1} ns=\d+", mb[0]):
+        errors.append(f"UART needs one final operator e-stop assertion and M-B sample {2*count+1}")
     elif records and not text.rfind("PI5_PWM_REQUEST") < text.find(estop[0]) < text.find("PI5_MB"):
         errors.append("UART final operator stop must follow both PWM requests")
     if "PI5_PWM_REQUEST" in text and re.search(r"V04_ESTOP.*stage=release", text[text.find("PI5_PWM_REQUEST"):]):
@@ -77,18 +98,21 @@ def validate_uart(text):
     return errors
 
 
-def validate_waveform(edges, samples):
+def validate_waveform(edges, samples, count=1):
     errors = []
     summary = {"sample_rate_hz_nominal": RATE, "samples": samples}
     if edges.initial not in ((0, 0), (0, 1)) or edges.final != (0, 0):
         errors.append("D0 must begin/end LOW and D1 must end LOW")
-    if len(edges.d0_rises) != 1 or len(edges.d0_falls) != 1:
-        errors.append("D0 must have exactly one rise and one fall (GPIO23 sensor probe)")
+    if len(edges.d0_rises) != count or len(edges.d0_falls) != count:
+        errors.append(f"D0 must have exactly {count} rises and {count} falls (GPIO23 sensor probe)")
         return summary, errors
+    previous = 0
+    for rise, fall in zip(edges.d0_rises, edges.d0_falls):
+        if not previous < rise < fall < samples:
+            errors.append("D0 sensor pulses must alternate strictly within capture")
+            return summary, errors
+        previous = fall
     rise, fall = edges.d0_rises[0], edges.d0_falls[0]
-    if not 0 < rise < fall < samples:
-        errors.append("D0 sensor pulse is out of order or outside capture")
-        return summary, errors
     events = sorted([(sample, 1) for sample in edges.d1_rises] +
                     [(sample, 0) for sample in edges.d1_falls])
     if not events or edges.initial is None:
@@ -110,13 +134,20 @@ def validate_waveform(edges, samples):
               for i in range(len(events) - 2) if events[i][1] == 1]
     baseline = [cycle for cycle in cycles if cycle[2] <= rise]
     clamped = [cycle for cycle in cycles if cycle[0] >= rise + SETTLE and cycle[2] <= fall]
-    retained = [cycle for cycle in cycles if cycle[0] >= fall]
+    retained_counts, retention_ms = [], []
+    boundaries = edges.d0_rises[1:] + [events[-1][0]]
+    for j, (rejected, boundary) in enumerate(zip(edges.d0_falls, boundaries)):
+        first = bisect_left(cycles, rejected, key=lambda cycle: cycle[0])
+        last = bisect_right(cycles, boundary, key=lambda cycle: cycle[2]) - 1
+        duration = cycles[last][2] - cycles[first][0] if first <= last else 0
+        retained_counts.append(max(0, last - first + 1))
+        retention_ms.append(duration * 1000 / RATE)
+        if duration < RETAIN:
+            errors.append(f"pulse {j+1}: rejected request must retain 90% carrier for >=10 ms before next rise/stop")
     if len(baseline) < 10:
         errors.append("need >=10 complete 50% carrier cycles before D0 rises")
     if len(clamped) < 10:
         errors.append("need >=10 complete 90% carrier cycles after settling and before D0 falls")
-    if not retained or retained[-1][2] - retained[0][0] < RETAIN:
-        errors.append("rejected request must retain 90% carrier for >=10 ms")
     for start, high_end, end in cycles:
         period, high = end - start, high_end - start
         if not PERIOD_MIN <= period <= PERIOD_MAX:
@@ -142,7 +173,7 @@ def validate_waveform(edges, samples):
     final_low = samples - stop
     if final_low < FINAL_LOW:
         errors.append("final D1 LOW must last >=100 ms")
-    if stop <= fall + RETAIN:
+    if stop <= edges.d0_falls[-1] + RETAIN:
         errors.append("final stop occurred before >=10 ms rejection retention")
     if baseline and events[0][0] > (baseline[0][2] - baseline[0][0]) / 2 + TOLERANCE:
         errors.append("initial carrier is absent or initial partial pulse exceeds 50%")
@@ -152,7 +183,8 @@ def validate_waveform(edges, samples):
         if last_high * 10 > last_period * 9 + TOLERANCE * 10:
             errors.append("final high pulse exceeds 90% envelope")
     summary.update(baseline_cycles=len(baseline), clamped_cycles=len(clamped),
-                   retained_cycles=len(retained), final_low_ms=final_low * 1000 / RATE,
+                   retained_cycles=sum(retained_counts), retention_ms_per_pulse=retention_ms,
+                   pulses=count, final_low_ms=final_low * 1000 / RATE,
                    sensor_rise_sample=rise, sensor_fall_sample=fall,
                    final_output_fall_sample=stop,
                    functional_settling_allowance_ms=1)
@@ -225,6 +257,59 @@ def self_test():
                     uart.replace("PI5_MB sample_id=3", "PI5_MB sample_id=4"),
                     uart.replace("source=operator stage=assert", "source=operator stage=release")):
         assert validate_uart(corrupt), "accepted invalid UART"
+    # Corpus fixtures spell out the five cases independently of validator constants.
+    count = 5
+    corpus_uart = uart.split("PI5_MA")[0] + "PI5_PWM_CORPUS_READY cases=5 requests_per_pulse=2\n"
+    for j, (duty, channel) in enumerate(zip((91, 100, 255, 65535, 4294967295),
+                                           (0, 3, 257, 65537, 4294967295))):
+        corpus_uart += (f"PI5_MA sample_id={2*j+1} monitor_ns=40\n"
+                       f"PI5_MC sample_id={2*j+1} ns=100 kind=pwm ch=1 val=90\n"
+                       f"PI5_PWM_REQUEST sample_id={2*j+1} chip=0 channel=1 requested={duty} code=0 range=5000 duty=4500\n"
+                       f"PI5_PWM_REQUEST sample_id={2*j+2} chip=0 channel={channel} requested=4294967295 code=-1 range=5000 duty=4500\n")
+    corpus_uart += "V04_ESTOP event_id=1 source=operator stage=assert ts_ns=1000000\nPI5_MB sample_id=11 ns=200\n"
+    assert not validate_uart(corpus_uart, count, True), validate_uart(corpus_uart, count, True)
+    prefix, body = corpus_uart.split("PI5_MA", 1)
+    body, ending = ("PI5_MA" + body).split("V04_ESTOP", 1)
+    repeated_uart = (prefix + body + re.sub(r"sample_id=(\d+)",
+                     lambda match: f"sample_id={int(match[1]) + 10}", body) +
+                     "V04_ESTOP" + ending.replace("sample_id=11", "sample_id=21"))
+    assert not validate_uart(repeated_uart, 10, True), "rejected repeated five-case matrix"
+    for corrupt in (corpus_uart.replace("sample_id=6", "sample_id=4"),
+                    corpus_uart.replace("channel=257", "channel=3"),
+                    corpus_uart.replace("requested=91 ", "requested=100 "),
+                    corpus_uart.replace("PI5_MA sample_id=5 monitor_ns=40\n", ""),
+                    corpus_uart.replace("PI5_PWM_CORPUS_READY", "MISSING_CORPUS_MARKER"),
+                    corpus_uart + "PI5_PWM_REQUEST sample_id=10 chip=0 channel=4294967295 requested=4294967295 code=-1 range=5000 duty=4500\n"):
+        assert validate_uart(corrupt, count, True), "accepted corrupted corpus IDs/cases"
+    for bad_count in (0, 1, 6, 105):
+        assert validate_uart(corpus_uart, bad_count, True), "accepted invalid corpus count"
+    assert validate_uart(corpus_uart), "accepted corpus as ordinary smoke"
+    corpus = fixture()
+    corpus.d0_rises = [(30 + j * 210) * period for j in range(count)]
+    corpus.d0_falls = [(100 + j * 210) * period for j in range(count)]
+    corpus.d1_rises = [120 + i * period for i in range(count * 210 + 30)]
+    corpus.d1_falls = [start + (1200 if i < 30 else 2160) for i, start in enumerate(corpus.d1_rises)]
+    corpus_samples = corpus.d1_falls[-1] + FINAL_LOW
+    assert not validate_waveform(corpus, corpus_samples, count)[1], validate_waveform(corpus, corpus_samples, count)
+    for mode in ("missing pulse", "duplicate pulse", "short retention", "rejection drop", "discontinuity", "100% duty"):
+        broken = copy.deepcopy(corpus)
+        if mode == "missing pulse":
+            broken.d0_rises.pop()
+            broken.d0_falls.pop()
+        elif mode == "duplicate pulse":
+            broken.d0_rises[2] = broken.d0_rises[1]
+            broken.d0_falls[2] = broken.d0_falls[1]
+        elif mode == "short retention":
+            broken.d0_falls[1] = broken.d0_rises[2] - RETAIN // 2
+        elif mode == "rejection drop":
+            broken.d1_falls[350] = broken.d1_rises[350] + 1200
+        elif mode == "discontinuity":
+            del broken.d1_rises[350]
+            del broken.d1_falls[350]
+        else:
+            del broken.d1_rises[350:390]
+            del broken.d1_falls[349:389]
+        assert validate_waveform(broken, corpus_samples, count)[1], f"accepted corpus {mode}"
     # Exercise the reused srzip reader and total-length accounting across chunks.
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "capture.sr"
@@ -247,6 +332,20 @@ def self_test():
         incomplete = subprocess.run(command, text=True, capture_output=True)
         assert incomplete.returncode == 1, "accepted capture without SR_DF_END"
         assert any("SR_DF_END" in error for error in json.loads(incomplete.stdout)["errors"])
+        # Exercise corpus CLI/count validation through an actual generated capture.
+        raw = bytearray(corpus_samples)
+        for start, end in zip(corpus.d1_rises, corpus.d1_falls):
+            raw[start:end] = b"\x02" * (end - start)
+        for start, end in zip(corpus.d0_rises, corpus.d0_falls):
+            raw[start:end] = bytes(value | 1 for value in raw[start:end])
+        _CAPTURE["_write_test_srzip"](str(path), bytes(raw))
+        uart_path.write_text(corpus_uart)
+        analyzer_path.write_text("Received SR_DF_END\n")
+        complete = subprocess.run(command + ["--corpus", "--count", "5"], text=True, capture_output=True)
+        assert complete.returncode == 0, complete.stdout + complete.stderr
+        assert json.loads(complete.stdout)["requests"] == 10
+        for arguments in (["--count", "5"], ["--corpus", "--count", "6"], ["--corpus", "--count", "105"]):
+            assert subprocess.run(command + arguments, capture_output=True).returncode == 2
         _CAPTURE["_write_test_srzip"](str(path), bytes(raw), probes=("D1", "D0"))
         try:
             read_capture(path)
@@ -264,21 +363,25 @@ def main():
     parser.add_argument("--analyzer", type=Path, help="matching analyzer log with Received SR_DF_END")
     parser.add_argument("--json", action="store_true", help="emit machine-readable result")
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--corpus", action="store_true", help="validate all five deterministic cases repeatedly")
+    parser.add_argument("--count", type=int, default=1, help="pulse count: 1 normally; corpus multiple of 5, <=100")
     args = parser.parse_args()
     if args.self_test:
         self_test()
         return 0
+    if (args.corpus and not (0 < args.count <= 100 and args.count % 5 == 0)) or (not args.corpus and args.count != 1):
+        parser.error("--count must be 1 normally, or a positive multiple of 5 <=100 with --corpus")
     if not args.capture or not args.uart or not args.analyzer:
         parser.error("capture.sr, --uart, and --analyzer are required")
     result = {"scope": "offline unloaded PWM functional containment; no WCET or physical e-stop latency"}
     try:
         edges, samples = read_capture(args.capture)
-        summary, errors = validate_waveform(edges, samples)
-        errors += validate_uart(args.uart.read_text(encoding="utf-8", errors="replace"))
+        summary, errors = validate_waveform(edges, samples, args.count)
+        errors += validate_uart(args.uart.read_text(encoding="utf-8", errors="replace"), args.count, args.corpus)
         complete = "Received SR_DF_END" in args.analyzer.read_text(encoding="utf-8", errors="replace")
         if not complete:
             errors.append("analyzer log lacks Received SR_DF_END acquisition completion")
-        result.update(summary, acquisition_complete=complete)
+        result.update(summary, acquisition_complete=complete, corpus=args.corpus, requests=2*args.count)
     except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
         errors = [str(exc)]
     result.update(verdict="FAIL" if errors else "PASS", errors=errors)

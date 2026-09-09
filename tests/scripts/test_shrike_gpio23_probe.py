@@ -30,6 +30,16 @@ CONTAINMENT_UART = (
 )
 
 
+def corpus_uart():
+    prefix = CONTAINMENT_UART.split(b"PI5_GPIO_IRQ_PROVEN", 1)[0]
+    text = prefix.decode() + "PI5_PWM_CORPUS_READY cases=5 requests_per_pulse=2\nPI5_GPIO_IRQ_PROVEN\n"
+    for j, (duty, channel) in enumerate(zip((91, 100, 255, 65535, 4294967295), (0, 3, 257, 65537, 4294967295))):
+        text += f"PI5_MA sample_id={2*j+1} monitor_ns=10\nPI5_MC sample_id={2*j+1} ns=20 kind=pwm ch=1 val=90\n"
+        text += f"PI5_PWM_REQUEST sample_id={2*j+1} chip=0 channel=1 requested={duty} code=0 range=5000 duty=4500\n"
+        text += f"PI5_PWM_REQUEST sample_id={2*j+2} chip=0 channel={channel} requested=4294967295 code=-1 range=5000 duty=4500\n"
+    return (text + "V04_ESTOP event_id=1 source=operator stage=assert ts_ns=300\nPI5_MB sample_id=11 ns=20\n").encode()
+
+
 MOCK_SIGROK = r'''#!/usr/bin/env python3
 import os
 import pathlib
@@ -119,7 +129,7 @@ class ShrikeGpio23PulseTests(unittest.TestCase):
                     "LOGIC_CONN": "fx2lafw",
                     "READY_TIMEOUT": "1",
                     "ANALYZER_READY_TIMEOUT": "1",
-                    "UART_SECONDS": "10",
+                    "UART_SECONDS": "60",
                     "PULSE_COUNT": pulse_count,
                     "PULSE_HIGH_MS": high_ms,
                     "PULSE_LOW_MS": low_ms,
@@ -143,7 +153,7 @@ class ShrikeGpio23PulseTests(unittest.TestCase):
                     if process.poll() is not None:
                         return
                     time.sleep(0.01)
-                if output_mode in ("pwm", "pwm-containment") and b"PI5_GPIO_IRQ_PROVEN" in uart:
+                if output_mode in ("pwm", "pwm-containment", "pwm-corpus") and b"PI5_GPIO_IRQ_PROVEN" in uart:
                     prefix, tail = uart.split(b"PI5_GPIO_IRQ_PROVEN", 1)
                     os.write(master, prefix)
                     deadline = time.monotonic() + 3
@@ -308,6 +318,26 @@ class ShrikeGpio23PulseTests(unittest.TestCase):
                 self.assertIn("MULTIPULSE_START", commands)
                 self.assertIn("RETURN_CODE=1", output)
                 self.assertIn("containment software correlation failed", output)
+
+    def test_corpus_correlates_all_requests_and_rejects_missing_request(self):
+        uart = corpus_uart()
+        output, commands, _ = self.run_harness("data", uart, output_mode="pwm-corpus", pulse_count="5")
+        self.assertIn("RETURN_CODE=0", output)
+        self.assertIn("waveform review required", output)
+        self.assertIn("for _ in range(5)", commands)
+        bad = b"\n".join(line for line in uart.split(b"\n") if not line.startswith(b"PI5_PWM_REQUEST sample_id=8 "))
+        output, _, _ = self.run_harness("data", bad, output_mode="pwm-corpus", pulse_count="5")
+        self.assertIn("RETURN_CODE=1", output)
+        self.assertIn("corpus software correlation failed", output)
+
+    def test_corpus_requires_matching_image_and_bounded_count_before_stimulus(self):
+        for uart, count in ((CONTAINMENT_UART, "5"), (corpus_uart(), "1"), (corpus_uart(), "105")):
+            output, commands, _ = self.run_harness("data", uart, output_mode="pwm-corpus", pulse_count=count)
+            self.assertIn("RETURN_CODE=1", output)
+            self.assertNotIn("MULTIPULSE_START", commands)
+        output, commands, _ = self.run_harness("data", corpus_uart(), output_mode="pwm-containment", pulse_count="1")
+        self.assertIn("RETURN_CODE=1", output)
+        self.assertNotIn("MULTIPULSE_START", commands)
 
 
 if __name__ == "__main__":

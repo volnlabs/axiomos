@@ -38,16 +38,23 @@ esac
 case "$OUTPUT_MODE" in
     gpio) ;;
     pwm) [ "$PULSE_COUNT" -eq 1 ] || die "OUTPUT_MODE=pwm requires PULSE_COUNT=1" ;;
-    pwm-containment)
-        [ "$PULSE_COUNT" -eq 1 ] || die "OUTPUT_MODE=pwm-containment requires PULSE_COUNT=1"
+    pwm-containment|pwm-corpus)
+        if [ "$OUTPUT_MODE" = pwm-containment ]; then
+            [ "$PULSE_COUNT" -eq 1 ] || die "OUTPUT_MODE=pwm-containment requires PULSE_COUNT=1"
+        else
+            [ "$PULSE_COUNT" -le 100 ] && [ "$((PULSE_COUNT % 5))" -eq 0 ] || die "PWM corpus requires PULSE_COUNT to be a multiple of 5 <=100"
+        fi
         [ "$SAMPLERATE" = 24m ] || die "PWM containment requires SAMPLERATE=24m"
         [ "$PULSE_HIGH_MS" -ge 100 ] && [ "$PULSE_LOW_MS" -ge 100 ] || die "PWM containment requires high and low durations >= 100ms"
         ;;
-    *) die "OUTPUT_MODE must be gpio, pwm or pwm-containment" ;;
+    *) die "OUTPUT_MODE must be gpio, pwm, pwm-containment or pwm-corpus" ;;
 esac
 CAPTURE_MS=$((PULSE_COUNT * (PULSE_HIGH_MS + PULSE_LOW_MS) + CAPTURE_MARGIN_MS))
 CAPTURE_SAMPLES=$((CAPTURE_MS * SAMPLES_PER_MS))
 CAPTURE_SECONDS=$(((CAPTURE_MS + 999) / 1000 + 10))
+if [ "$OUTPUT_MODE" = pwm-corpus ]; then
+    [ "$UART_SECONDS" -ge "$((READY_TIMEOUT + (CAPTURE_MS + 999) / 1000 + 30))" ] || die "UART_SECONDS must cover readiness, capture and 30s margin"
+fi
 for command in "$MPREMOTE" sigrok-cli fuser rg timeout python3; do
     command -v "$command" >/dev/null || die "missing command: $command"
 done
@@ -102,6 +109,8 @@ check_uart() {
     ! rg -aiq 'PI5_BENCH_FAIL|PI5_BENCH_LOG_LOSS|panic|fatal|watchdog|SIGNED_BPF_(INPUT_MISSING|INPUT_INVALID|LOAD_REJECTED)' "$UART_LOG" || die "kernel failure marker"
     if [ "$OUTPUT_MODE" = pwm ]; then
         ! rg -aq 'PI5_PWM_CONTAINMENT_READY' "$UART_LOG" || die "wrong image: containment image requires OUTPUT_MODE=pwm-containment"
+    elif [ "$OUTPUT_MODE" = pwm-containment ]; then
+        ! rg -aq 'PI5_PWM_CORPUS_READY' "$UART_LOG" || die "wrong image: corpus image requires OUTPUT_MODE=pwm-corpus"
     fi
 }
 waited=0
@@ -118,11 +127,15 @@ if [ "$OUTPUT_MODE" = gpio ]; then
 else
     rg -aq 'PI5_PWM_READY carrier_request_hz=10000 requested_duty_percent=50 auto_rearm=false' "$UART_LOG" || die "wrong image: PWM smoke build required"
     rg -aq 'PI5_OUT_ARM mode=pwm gpio=12 code=0 estop_asserted=false' "$UART_LOG" || die "initial PWM arm denied; check e-stop wiring"
-    if [ "$OUTPUT_MODE" = pwm-containment ]; then
+    if [[ "$OUTPUT_MODE" = pwm-containment || "$OUTPUT_MODE" = pwm-corpus ]]; then
         rg -aqx 'PI5_PWM_CONTAINMENT_READY requested=4294967295 clamp_percent=90 reject_channel=3\r?' "$UART_LOG" &&
             [ "$(rg -ac 'PI5_PWM_CONTAINMENT_READY' "$UART_LOG")" -eq 1 ] || die "wrong image: PWM containment marker required"
         rg -aqx 'PI5_OUT_ARM mode=pwm gpio=12 code=0 estop_asserted=false gpio12_ctrl=0x0000c080 gpio12_pad=0x[0-9a-f]{8}\r?' "$UART_LOG" || die "PWM containment GPIO12 mux readback mismatch"
     fi
+fi
+if [ "$OUTPUT_MODE" = pwm-corpus ]; then
+    rg -aqx 'PI5_PWM_CORPUS_READY cases=5 requests_per_pulse=2\r?' "$UART_LOG" &&
+        [ "$(rg -ac 'PI5_PWM_CORPUS_READY' "$UART_LOG")" -eq 1 ] || die "wrong image: five-case PWM corpus marker required"
 fi
 ! rg -aq 'PI5_GPIO_IRQ_PROVEN' "$UART_LOG" || die "unexpected sensor edge before capture; cold boot required"
 
@@ -176,9 +189,14 @@ UART_PID=""
 sha256sum "$UART_LOG" "$LOGIC_LOG" "$ANALYZER_LOG" "$SHRIKE_LOG" "$PREFIX-config.txt" | tee "$PREFIX.sha256" || die "could not hash capture artifacts"
 rg -a 'PI5_OUT_ARM|PI5_GPIO_IRQ_PROVEN|PI5_REFLEX_REARM|PI5_ESTOP_REARM|PI5_MC|PI5_MA sample_id=|PI5_PWM_REQUEST' "$UART_LOG" || true
 if [ "$OUTPUT_MODE" != gpio ]; then
-    python3 - "$UART_LOG" "$OUTPUT_MODE" <<'PY' || die "PWM${OUTPUT_MODE#pwm} software correlation failed; retain capture for diagnosis"
-import re, sys
+    python3 - "$UART_LOG" "$OUTPUT_MODE" "$PULSE_COUNT" "$REPO/scripts/hil/pwm-containment-reduce.py" <<'PY' || die "PWM${OUTPUT_MODE#pwm} software correlation failed; retain capture for diagnosis"
+import re, runpy, sys
 text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+if sys.argv[2] == "pwm-corpus":
+    errors = runpy.run_path(sys.argv[4])["validate_uart"](text, int(sys.argv[3]), True)
+    if errors:
+        raise SystemExit("; ".join(errors))
+    raise SystemExit(0)
 if sys.argv[2] == "pwm-containment":
     expected = {
         "PI5_PWM_CONTAINMENT_READY": r" requested=4294967295 clamp_percent=90 reject_channel=3",
@@ -203,7 +221,7 @@ if len(ma) != 1 or len(mc) != 1 or ma != mc or text.count("PI5_MC ") != 1 or tex
 if "PI5_REFLEX_REARM" in text or "PI5_ESTOP_REARM" in text:
     raise SystemExit("PWM smoke must not re-arm")
 PY
-    if [ "$OUTPUT_MODE" = pwm-containment ]; then
+    if [[ "$OUTPUT_MODE" = pwm-containment || "$OUTPUT_MODE" = pwm-corpus ]]; then
         echo "CAPTURE COMPLETE: PWM containment software checks complete; physical waveform review required."
     else
         echo "CAPTURE COMPLETE: PWM smoke software correlation only; physical carrier/stop review required."

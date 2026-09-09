@@ -559,29 +559,46 @@ pub fn init() -> bool {
         return false;
     }
 
-    // Build + load + attach the reflex: on the sensor edge it drives the output
-    // to its safe value (GPIO low, or PWM duty 0) through the actuation monitor.
-    let insns = match BENCH_REFLEX_OUTPUT {
-        ReflexOutput::Gpio => kernel_bpf::bench::reflex_gpio_program(BENCH_PWM_PIN as u32, 0),
-        ReflexOutput::Pwm => {
-            let duty = if cfg!(feature = "bench-pwm-containment") {
-                u32::MAX
-            } else {
-                0
-            };
-            kernel_bpf::bench::reflex_pwm_program(BENCH_PWM_CHIP, BENCH_PWM_CHANNEL, duty)
-        }
-    };
     let Some(manager) = crate::BPF_MANAGER.get() else {
         log::error!("[bench] BPF manager not initialized; reflex not loaded");
         crate::serial_println!("PI5_BENCH_FAIL stage=bpf_manager_missing");
         return false;
     };
     let mut mgr = manager.lock();
+    #[cfg(feature = "bench-pwm-corpus")]
+    let counter_map_id = match mgr.create_map(kernel_bpf::maps::MapType::Array as u32, 4, 8, 1) {
+        // Array values start at zero. Both programs use this kernel-owned
+        // map; serialized IRQ dispatch advances one phase per edge.
+        Ok(id) => id,
+        Err(error) => {
+            crate::serial_println!("PI5_BENCH_FAIL stage=corpus_map error={:?}", error);
+            return false;
+        }
+    };
+    let insns = match BENCH_REFLEX_OUTPUT {
+        ReflexOutput::Gpio => kernel_bpf::bench::reflex_gpio_program(BENCH_PWM_PIN as u32, 0),
+        ReflexOutput::Pwm => {
+            #[cfg(feature = "bench-pwm-corpus")]
+            {
+                kernel_bpf::bench::containment_pwm_program(counter_map_id, false)
+            }
+            #[cfg(not(feature = "bench-pwm-corpus"))]
+            {
+                let duty = if cfg!(feature = "bench-pwm-containment") {
+                    u32::MAX
+                } else {
+                    0
+                };
+                kernel_bpf::bench::reflex_pwm_program(BENCH_PWM_CHIP, BENCH_PWM_CHANNEL, duty)
+            }
+        }
+    };
     #[cfg(feature = "bench-pwm-containment")]
     {
-        // Channel 3 is rejected by the real helper before narrowing/MMIO. It
-        // must leave channel 1's already-clamped physical output unchanged.
+        // Invalid channels must leave channel 1's clamped output unchanged.
+        #[cfg(feature = "bench-pwm-corpus")]
+        let invalid = kernel_bpf::bench::containment_pwm_program(counter_map_id, true);
+        #[cfg(not(feature = "bench-pwm-corpus"))]
         let invalid = kernel_bpf::bench::reflex_pwm_program(BENCH_PWM_CHIP, 3, u32::MAX);
         let route = mgr
             .load_kernel_builtin_program(invalid)
@@ -628,6 +645,8 @@ pub fn init() -> bool {
                 "PI5_PWM_CONTAINMENT_READY requested=4294967295 clamp_percent={} reject_channel=3",
                 <kernel_bpf::profile::ActiveProfile as kernel_bpf::profile::PhysicalProfile>::ACT_DUTY_MAX
             );
+            #[cfg(feature = "bench-pwm-corpus")]
+            crate::serial_println!("PI5_PWM_CORPUS_READY cases=5 requests_per_pulse=2");
             #[cfg(feature = "bench-estop-rearm")]
             crate::serial_println!("PI5_V03D_READY output={} auto_rearm=true", mode);
             #[cfg(feature = "bench-reflex-rearm")]
@@ -655,7 +674,7 @@ pub fn init() -> bool {
                 );
             }
             log::info!(
-                "[bench] reflex loaded id={} -> (gpiochip0, pin {}, rising) stops PWM{} ch{} on GPIO{}",
+                "[bench] reflex loaded id={} -> (gpiochip0, pin {}, rising) controls PWM{} ch{} on GPIO{}",
                 prog_id,
                 REFLEX_SENSOR_PIN,
                 BENCH_PWM_CHIP,

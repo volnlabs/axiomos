@@ -113,6 +113,8 @@ bench-pwm = ["bench"]
 # One sensor pulse: rising requests an over-limit duty, falling an invalid
 # channel. Uses real verified BPF helpers; final physical e-stop ends output.
 bench-pwm-containment = ["bench-pwm"]
+# Deterministic five-pair live request matrix; one counter shared by two routes.
+bench-pwm-corpus = ["bench-pwm-containment"]
 
 # Unloaded-HIL-only diagnostic: after a successful physical GPIO24 e-stop
 # release IRQ, re-arm the bench reflex output through the monitored guard path.
