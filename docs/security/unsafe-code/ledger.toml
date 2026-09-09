@@ -1,6 +1,6 @@
 version = 1
 baseline_sites = 693
-baseline_fingerprint = "sha256:47cf59fa9a22d95a2da9a2e7aed20abff6dd30a881e9a777d951c39ae2a93ecb"
+baseline_fingerprint = "sha256:dc86275d41ab8d320b34cef53eca4cb238cde6e52b44c6d77ffb2a99c50d875c"
 
 # 2026-09-09: reviewed prerequisite delta: seven motor-pair no_mangle
 # attributes (production helper and isolated test/fuzz stubs), minus one
