@@ -17,7 +17,7 @@ MPREMOTE="${MPREMOTE:-mpremote}"
 OUTPUT_MODE="${OUTPUT_MODE:-gpio}"
 LOGIC_CONN="${LOGIC_CONN:-fx2lafw}"
 SAMPLERATE="${SAMPLERATE:-24m}"
-UART_SECONDS="${UART_SECONDS:-240}"
+UART_SECONDS="${UART_SECONDS:-600}"
 READY_TIMEOUT="${READY_TIMEOUT:-120}"
 ANALYZER_READY_TIMEOUT="${ANALYZER_READY_TIMEOUT:-10}"
 PULSE_COUNT="${PULSE_COUNT:-5}"
@@ -33,7 +33,8 @@ done
 case "$SAMPLERATE" in
     1m) SAMPLES_PER_MS=1000 ;;
     24m) SAMPLES_PER_MS=24000 ;;
-    *) die "supported capture rates: 1m (functional) or 24m (timing capture)" ;;
+    6m) [ "$OUTPUT_MODE" = pwm-corpus ] || die "6m is supported only for PWM corpus"; SAMPLES_PER_MS=6000 ;;
+    *) die "supported capture rates: 1m, 24m, or 6m (PWM corpus only)" ;;
 esac
 case "$OUTPUT_MODE" in
     gpio) ;;
@@ -42,9 +43,9 @@ case "$OUTPUT_MODE" in
         if [ "$OUTPUT_MODE" = pwm-containment ]; then
             [ "$PULSE_COUNT" -eq 1 ] || die "OUTPUT_MODE=pwm-containment requires PULSE_COUNT=1"
         else
-            [ "$PULSE_COUNT" -le 100 ] && [ "$((PULSE_COUNT % 5))" -eq 0 ] || die "PWM corpus requires PULSE_COUNT to be a multiple of 5 <=100"
+            [ "$PULSE_COUNT" -le 500 ] && [ "$((PULSE_COUNT % 5))" -eq 0 ] || die "PWM corpus requires PULSE_COUNT to be a multiple of 5 <=500"
         fi
-        [ "$SAMPLERATE" = 24m ] || die "PWM containment requires SAMPLERATE=24m"
+        [[ "$SAMPLERATE" = 24m || ( "$OUTPUT_MODE" = pwm-corpus && "$SAMPLERATE" = 6m ) ]] || die "PWM containment requires 24m, or 6m for corpus"
         [ "$PULSE_HIGH_MS" -ge 100 ] && [ "$PULSE_LOW_MS" -ge 100 ] || die "PWM containment requires high and low durations >= 100ms"
         ;;
     *) die "OUTPUT_MODE must be gpio, pwm, pwm-containment or pwm-corpus" ;;

@@ -30,14 +30,16 @@ CONTAINMENT_UART = (
 )
 
 
-def corpus_uart():
+def corpus_uart(count=5):
     prefix = CONTAINMENT_UART.split(b"PI5_GPIO_IRQ_PROVEN", 1)[0]
     text = prefix.decode() + "PI5_PWM_CORPUS_READY cases=5 requests_per_pulse=2\nPI5_GPIO_IRQ_PROVEN\n"
-    for j, (duty, channel) in enumerate(zip((91, 100, 255, 65535, 4294967295), (0, 3, 257, 65537, 4294967295))):
+    for j in range(count):
+        duty = (91, 100, 255, 65535, 4294967295)[j % 5]
+        channel = (0, 3, 257, 65537, 4294967295)[j % 5]
         text += f"PI5_MA sample_id={2*j+1} monitor_ns=10\nPI5_MC sample_id={2*j+1} ns=20 kind=pwm ch=1 val=90\n"
         text += f"PI5_PWM_REQUEST sample_id={2*j+1} chip=0 channel=1 requested={duty} code=0 range=5000 duty=4500\n"
         text += f"PI5_PWM_REQUEST sample_id={2*j+2} chip=0 channel={channel} requested=4294967295 code=-1 range=5000 duty=4500\n"
-    return (text + "V04_ESTOP event_id=1 source=operator stage=assert ts_ns=300\nPI5_MB sample_id=11 ns=20\n").encode()
+    return (text + f"V04_ESTOP event_id=1 source=operator stage=assert ts_ns=300\nPI5_MB sample_id={2*count+1} ns=20\n").encode()
 
 
 MOCK_SIGROK = r'''#!/usr/bin/env python3
@@ -96,7 +98,7 @@ else:
 
 
 class ShrikeGpio23PulseTests(unittest.TestCase):
-    def run_harness(self, mode: str, uart: bytes, output_mode: str = "gpio", pulse_count: str = "2", timeout: float = 12.0, high_ms: str = "100", low_ms: str = "100", samplerate: str = "24m") -> tuple[str, str, str]:
+    def run_harness(self, mode: str, uart: bytes, output_mode: str = "gpio", pulse_count: str = "2", timeout: float = 12.0, high_ms: str = "100", low_ms: str = "100", samplerate: str = "24m", uart_seconds: str = "60") -> tuple[str, str, str]:
         with tempfile.TemporaryDirectory(prefix="shrike-gpio23-test-") as directory:
             root = Path(directory)
             bin_dir = root / "bin"
@@ -129,7 +131,7 @@ class ShrikeGpio23PulseTests(unittest.TestCase):
                     "LOGIC_CONN": "fx2lafw",
                     "READY_TIMEOUT": "1",
                     "ANALYZER_READY_TIMEOUT": "1",
-                    "UART_SECONDS": "60",
+                    "UART_SECONDS": uart_seconds,
                     "PULSE_COUNT": pulse_count,
                     "PULSE_HIGH_MS": high_ms,
                     "PULSE_LOW_MS": low_ms,
@@ -331,12 +333,27 @@ class ShrikeGpio23PulseTests(unittest.TestCase):
         self.assertIn("corpus software correlation failed", output)
 
     def test_corpus_requires_matching_image_and_bounded_count_before_stimulus(self):
-        for uart, count in ((CONTAINMENT_UART, "5"), (corpus_uart(), "1"), (corpus_uart(), "105")):
+        for uart, count in ((CONTAINMENT_UART, "5"), (corpus_uart(), "1"), (corpus_uart(), "505")):
             output, commands, _ = self.run_harness("data", uart, output_mode="pwm-corpus", pulse_count=count)
             self.assertIn("RETURN_CODE=1", output)
             self.assertNotIn("MULTIPULSE_START", commands)
         output, commands, _ = self.run_harness("data", corpus_uart(), output_mode="pwm-containment", pulse_count="1")
         self.assertIn("RETURN_CODE=1", output)
+        self.assertNotIn("MULTIPULSE_START", commands)
+
+    def test_single_boot_thousand_requests_at_six_mhz(self):
+        output, commands, _ = self.run_harness(
+            "data", corpus_uart(500), output_mode="pwm-corpus", pulse_count="500",
+            samplerate="6m", high_ms="100", low_ms="400", uart_seconds="600")
+        self.assertIn("RETURN_CODE=0", output)
+        self.assertIn("for _ in range(500)", commands)
+        self.assertIn("waveform review required", output)
+
+    def test_long_run_rejects_short_uart_window_before_stimulus(self):
+        output, commands, _ = self.run_harness(
+            "data", b"", output_mode="pwm-corpus", pulse_count="500",
+            samplerate="6m", high_ms="100", low_ms="400", uart_seconds="60")
+        self.assertIn("UART_SECONDS must cover", output)
         self.assertNotIn("MULTIPULSE_START", commands)
 
 

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Offline, unloaded PWM containment check: D0=GPIO23, D1=GPIO12, 24 MHz.
+"""Offline, unloaded PWM containment check: D0=GPIO23, D1=GPIO12, 24 MHz by default.
 
 By default, requires one sensor pulse: 50% baseline -> UINT_MAX clamped to 90% -> invalid
 channel rejected with 90% retained -> final LOW. The 1 ms settling allowance
 is functional, not a latency gate. D0 does not capture the e-stop input;
 this reducer cannot measure physical e-stop latency or establish WCET.
 The matching analyzer log must confirm acquisition completion (SR_DF_END).
---corpus --count N repeats all five deterministic request cases (N=5..100,
+--corpus --count N repeats all five deterministic request cases (N=5..500,
 a multiple of five), retaining 90% through every subsequent sensor pulse.
+--samplerate 6m reduces transport bandwidth for long functional corpus captures.
 """
 import argparse
 from bisect import bisect_left, bisect_right
@@ -20,8 +21,6 @@ import zipfile
 _CAPTURE = runpy.run_path(str(Path(__file__).with_name("v03d-reduce.py")))
 Edges = _CAPTURE["Edges"]
 RATE = _CAPTURE["SAMPLE_RATE_HZ"]
-PERIOD_MIN, PERIOD_MAX = 2280, 2520  # 95..105 us at nominal 24 MHz.
-SETTLE = RATE // 1000  # Functional allowance, never a latency/WCET claim.
 RETAIN = RATE // 100  # At least 10 ms after the rejected request.
 FINAL_LOW = RATE // 10
 TOLERANCE = 2  # Logic-analyzer sample quantization, not a calibrated clock.
@@ -29,8 +28,8 @@ DUTIES = (91, 100, 255, 65535, 4294967295)
 CHANNELS = (0, 3, 257, 65537, 4294967295)
 
 
-def read_capture(path):
-    edges = _CAPTURE["read_capture"](str(path))
+def read_capture(path, rate_hz=RATE):
+    edges = _CAPTURE["read_capture"](str(path), rate_hz)
     # Reuse the validated capture layout; Edges does not retain total length.
     with zipfile.ZipFile(path) as archive:
         metadata = _CAPTURE["_srzip_metadata"](archive.read("metadata").decode())
@@ -43,8 +42,8 @@ def read_capture(path):
 
 
 def validate_uart(text, count=1, corpus=False):
-    if (corpus and not (0 < count <= 100 and count % 5 == 0)) or (not corpus and count != 1):
-        return ["count must be 1 normally, or a positive multiple of 5 <=100 for corpus"]
+    if (corpus and not (0 < count <= 500 and count % 5 == 0)) or (not corpus and count != 1):
+        return ["count must be 1 normally, or a positive multiple of 5 <=500 for corpus"]
     errors = []
     if text.count("PI5_GPIO_IRQ_PROVEN") != 1:
         errors.append("UART needs exactly one GPIO IRQ route proof")
@@ -98,9 +97,13 @@ def validate_uart(text, count=1, corpus=False):
     return errors
 
 
-def validate_waveform(edges, samples, count=1):
+def validate_waveform(edges, samples, count=1, rate_hz=RATE):
+    if rate_hz not in (6_000_000, RATE):
+        return {}, ["unsupported sample rate"]
+    period_min, period_max = rate_hz * 95 // 1_000_000, rate_hz * 105 // 1_000_000
+    settle, retain, final_low_min = rate_hz // 1000, rate_hz // 100, rate_hz // 10
     errors = []
-    summary = {"sample_rate_hz_nominal": RATE, "samples": samples}
+    summary = {"sample_rate_hz_nominal": rate_hz, "samples": samples}
     if edges.initial not in ((0, 0), (0, 1)) or edges.final != (0, 0):
         errors.append("D0 must begin/end LOW and D1 must end LOW")
     if len(edges.d0_rises) != count or len(edges.d0_falls) != count:
@@ -133,7 +136,7 @@ def validate_waveform(edges, samples, count=1):
     cycles = [(events[i][0], events[i + 1][0], events[i + 2][0])
               for i in range(len(events) - 2) if events[i][1] == 1]
     baseline = [cycle for cycle in cycles if cycle[2] <= rise]
-    clamped = [cycle for cycle in cycles if cycle[0] >= rise + SETTLE and cycle[2] <= fall]
+    clamped = [cycle for cycle in cycles if cycle[0] >= rise + settle and cycle[2] <= fall]
     retained_counts, retention_ms = [], []
     boundaries = edges.d0_rises[1:] + [events[-1][0]]
     for j, (rejected, boundary) in enumerate(zip(edges.d0_falls, boundaries)):
@@ -141,8 +144,8 @@ def validate_waveform(edges, samples, count=1):
         last = bisect_right(cycles, boundary, key=lambda cycle: cycle[2]) - 1
         duration = cycles[last][2] - cycles[first][0] if first <= last else 0
         retained_counts.append(max(0, last - first + 1))
-        retention_ms.append(duration * 1000 / RATE)
-        if duration < RETAIN:
+        retention_ms.append(duration * 1000 / rate_hz)
+        if duration < retain:
             errors.append(f"pulse {j+1}: rejected request must retain 90% carrier for >=10 ms before next rise/stop")
     if len(baseline) < 10:
         errors.append("need >=10 complete 50% carrier cycles before D0 rises")
@@ -150,13 +153,13 @@ def validate_waveform(edges, samples, count=1):
         errors.append("need >=10 complete 90% carrier cycles after settling and before D0 falls")
     for start, high_end, end in cycles:
         period, high = end - start, high_end - start
-        if not PERIOD_MIN <= period <= PERIOD_MAX:
+        if not period_min <= period <= period_max:
             errors.append(f"carrier period outside 95..105 us at sample {start}")
             break
         if high * 10 > period * 9 + TOLERANCE * 10:
             errors.append(f"PWM exceeds 90% envelope at sample {start}")
             break
-        expected = 50 if end <= rise else 90 if start >= rise + SETTLE else None
+        expected = 50 if end <= rise else 90 if start >= rise + settle else None
         if expected is not None and abs(high * 100 - period * expected) > TOLERANCE * 100:
             errors.append(f"PWM must be {expected}% at sample {start}")
             break
@@ -167,13 +170,13 @@ def validate_waveform(edges, samples, count=1):
         if abs((high_end - start) * 100 - (end - start) * 90) > TOLERANCE * 100:
             break
         steady_start = start
-    if steady_start is None or steady_start > rise + SETTLE:
+    if steady_start is None or steady_start > rise + settle:
         errors.append("90% carrier not established within the 1 ms functional settling allowance")
     stop = events[-1][0]
     final_low = samples - stop
-    if final_low < FINAL_LOW:
+    if final_low < final_low_min:
         errors.append("final D1 LOW must last >=100 ms")
-    if stop <= edges.d0_falls[-1] + RETAIN:
+    if stop <= edges.d0_falls[-1] + retain:
         errors.append("final stop occurred before >=10 ms rejection retention")
     if baseline and events[0][0] > (baseline[0][2] - baseline[0][0]) / 2 + TOLERANCE:
         errors.append("initial carrier is absent or initial partial pulse exceeds 50%")
@@ -184,7 +187,7 @@ def validate_waveform(edges, samples, count=1):
             errors.append("final high pulse exceeds 90% envelope")
     summary.update(baseline_cycles=len(baseline), clamped_cycles=len(clamped),
                    retained_cycles=sum(retained_counts), retention_ms_per_pulse=retention_ms,
-                   pulses=count, final_low_ms=final_low * 1000 / RATE,
+                   pulses=count, final_low_ms=final_low * 1000 / rate_hz,
                    sensor_rise_sample=rise, sensor_fall_sample=fall,
                    final_output_fall_sample=stop,
                    functional_settling_allowance_ms=1)
@@ -281,7 +284,7 @@ def self_test():
                     corpus_uart.replace("PI5_PWM_CORPUS_READY", "MISSING_CORPUS_MARKER"),
                     corpus_uart + "PI5_PWM_REQUEST sample_id=10 chip=0 channel=4294967295 requested=4294967295 code=-1 range=5000 duty=4500\n"):
         assert validate_uart(corrupt, count, True), "accepted corrupted corpus IDs/cases"
-    for bad_count in (0, 1, 6, 105):
+    for bad_count in (0, 1, 6, 505):
         assert validate_uart(corpus_uart, bad_count, True), "accepted invalid corpus count"
     assert validate_uart(corpus_uart), "accepted corpus as ordinary smoke"
     corpus = fixture()
@@ -310,6 +313,15 @@ def self_test():
             del broken.d1_rises[350:390]
             del broken.d1_falls[349:389]
         assert validate_waveform(broken, corpus_samples, count)[1], f"accepted corpus {mode}"
+    # A 6 MHz capture has 600 samples/carrier cycle: the same physical checks
+    # still reject a 91% output, despite the two-sample quantization allowance.
+    six = copy.deepcopy(corpus)
+    for field in ("d0_rises", "d0_falls", "d1_rises", "d1_falls"):
+        setattr(six, field, [value // 4 for value in getattr(six, field)])
+    assert not validate_waveform(six, corpus_samples // 4, 5, rate_hz=6_000_000)[1]
+    unsafe = copy.deepcopy(six)
+    unsafe.d1_falls[350] = unsafe.d1_rises[350] + 546  # 91% of 600
+    assert validate_waveform(unsafe, corpus_samples // 4, 5, rate_hz=6_000_000)[1]
     # Exercise the reused srzip reader and total-length accounting across chunks.
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "capture.sr"
@@ -344,7 +356,23 @@ def self_test():
         complete = subprocess.run(command + ["--corpus", "--count", "5"], text=True, capture_output=True)
         assert complete.returncode == 0, complete.stdout + complete.stderr
         assert json.loads(complete.stdout)["requests"] == 10
-        for arguments in (["--count", "5"], ["--corpus", "--count", "6"], ["--corpus", "--count", "105"]):
+        _CAPTURE["_write_test_srzip"](str(path), bytes(raw[::4]), samplerate="6 MHz")
+        parsed_six, samples_six = read_capture(path, 6_000_000)
+        assert not validate_waveform(parsed_six, samples_six, 5, 6_000_000)[1]
+        try:
+            _CAPTURE["read_capture"](str(path))
+        except RuntimeError as error:
+            assert "24 MHz" in str(error)
+        else:
+            raise AssertionError("e-stop decoder silently accepted 6 MHz")
+        six_cli = subprocess.run(command + ["--corpus", "--count", "5", "--samplerate", "6m"],
+                                 text=True, capture_output=True)
+        assert six_cli.returncode == 0, six_cli.stdout + six_cli.stderr
+        assert json.loads(six_cli.stdout)["sample_rate_hz_nominal"] == 6_000_000
+        wrong_rate = subprocess.run(command + ["--corpus", "--count", "5"], capture_output=True)
+        assert wrong_rate.returncode == 1, "silently interpreted 6 MHz as 24 MHz"
+        _CAPTURE["_write_test_srzip"](str(path), bytes(raw))
+        for arguments in (["--count", "5"], ["--corpus", "--count", "6"], ["--corpus", "--count", "505"]):
             assert subprocess.run(command + arguments, capture_output=True).returncode == 2
         _CAPTURE["_write_test_srzip"](str(path), bytes(raw), probes=("D1", "D0"))
         try:
@@ -358,25 +386,29 @@ def self_test():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("capture", nargs="?", help="24 MHz sigrok .sr capture")
+    parser.add_argument("capture", nargs="?", help="sigrok .sr capture at the declared --samplerate")
     parser.add_argument("--uart", type=Path, help="matching complete UART log")
     parser.add_argument("--analyzer", type=Path, help="matching analyzer log with Received SR_DF_END")
+    parser.add_argument("--samplerate", choices=("24m", "6m"), default="24m", help="expected capture rate (6m is functional corpus only)")
     parser.add_argument("--json", action="store_true", help="emit machine-readable result")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--corpus", action="store_true", help="validate all five deterministic cases repeatedly")
-    parser.add_argument("--count", type=int, default=1, help="pulse count: 1 normally; corpus multiple of 5, <=100")
+    parser.add_argument("--count", type=int, default=1, help="pulse count: 1 normally; corpus multiple of 5, <=500")
     args = parser.parse_args()
     if args.self_test:
         self_test()
         return 0
-    if (args.corpus and not (0 < args.count <= 100 and args.count % 5 == 0)) or (not args.corpus and args.count != 1):
-        parser.error("--count must be 1 normally, or a positive multiple of 5 <=100 with --corpus")
+    if (args.corpus and not (0 < args.count <= 500 and args.count % 5 == 0)) or (not args.corpus and args.count != 1):
+        parser.error("--count must be 1 normally, or a positive multiple of 5 <=500 with --corpus")
+    if args.samplerate == "6m" and not args.corpus:
+        parser.error("6m is supported only for --corpus")
     if not args.capture or not args.uart or not args.analyzer:
         parser.error("capture.sr, --uart, and --analyzer are required")
     result = {"scope": "offline unloaded PWM functional containment; no WCET or physical e-stop latency"}
     try:
-        edges, samples = read_capture(args.capture)
-        summary, errors = validate_waveform(edges, samples, args.count)
+        rate_hz = 6_000_000 if args.samplerate == "6m" else RATE
+        edges, samples = read_capture(args.capture, rate_hz)
+        summary, errors = validate_waveform(edges, samples, args.count, rate_hz)
         errors += validate_uart(args.uart.read_text(encoding="utf-8", errors="replace"), args.count, args.corpus)
         complete = "Received SR_DF_END" in args.analyzer.read_text(encoding="utf-8", errors="replace")
         if not complete:

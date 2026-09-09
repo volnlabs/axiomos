@@ -111,7 +111,7 @@ def _srzip_metadata(text: str) -> dict[str, str]:
     return values
 
 
-def _parse_srzip(path: str) -> Edges:
+def _parse_srzip(path: str, sample_rate_hz: int = SAMPLE_RATE_HZ) -> Edges:
     try:
         archive = zipfile.ZipFile(path)
     except (OSError, zipfile.BadZipFile) as exc:
@@ -122,8 +122,13 @@ def _parse_srzip(path: str) -> Edges:
         except (KeyError, UnicodeDecodeError) as exc:
             raise RuntimeError("srzip metadata is missing or invalid") from None
         values = _srzip_metadata(metadata)
-        if not SAMPLERATE.fullmatch(values.get("samplerate", "")):
-            raise RuntimeError("capture does not declare the required 24 MHz samplerate")
+        # The e-stop CLI retains its 24 MHz default. PWM containment may
+        # explicitly request 6 MHz; never reinterpret a mismatched capture.
+        if sample_rate_hz not in (6_000_000, SAMPLE_RATE_HZ):
+            raise RuntimeError("unsupported capture sample rate")
+        pattern = SAMPLERATE if sample_rate_hz == SAMPLE_RATE_HZ else re.compile(r"^\s*(?:6\s*MHz|6000000)\s*$", re.I)
+        if not pattern.fullmatch(values.get("samplerate", "")):
+            raise RuntimeError(f"capture does not declare the required {sample_rate_hz // 1_000_000} MHz samplerate")
         if values.get("unitsize") != "1":
             raise RuntimeError("capture must use unitsize=1")
         try:
@@ -187,8 +192,8 @@ def _parse_srzip(path: str) -> Edges:
         return Edges(d0_falls, d0_rises, d1_falls, d1_rises, initial, previous)
 
 
-def read_capture(path: str) -> Edges:
-    return _parse_srzip(path)
+def read_capture(path: str, sample_rate_hz: int = SAMPLE_RATE_HZ) -> Edges:
+    return _parse_srzip(path, sample_rate_hz)
 
 
 def summarize(latencies: list[int]) -> None:
