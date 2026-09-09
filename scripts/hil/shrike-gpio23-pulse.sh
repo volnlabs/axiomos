@@ -4,7 +4,7 @@
 # Shrike GP21 -> 220 ohm -> Pi pin18/GPIO24 (active-low e-stop).
 # Analyzer D1 (input2) -> Pi pin32/GPIO12. All grounds common.
 # No motors/drivers/actuators or static GPIO24-to-3.3V jumper permitted.
-# GPIO mode requires bench-reflex-rearm; PWM mode requires one-shot bench-pwm.
+# GPIO requires bench-reflex-rearm; PWM requires bench-pwm (or bench-pwm-containment).
 # GP21 is released before boot for initial arming,
 # then asserted in the pulse program's finally block and host cleanup.
 set -uo pipefail
@@ -38,7 +38,12 @@ esac
 case "$OUTPUT_MODE" in
     gpio) ;;
     pwm) [ "$PULSE_COUNT" -eq 1 ] || die "OUTPUT_MODE=pwm requires PULSE_COUNT=1" ;;
-    *) die "OUTPUT_MODE must be gpio or pwm" ;;
+    pwm-containment)
+        [ "$PULSE_COUNT" -eq 1 ] || die "OUTPUT_MODE=pwm-containment requires PULSE_COUNT=1"
+        [ "$SAMPLERATE" = 24m ] || die "PWM containment requires SAMPLERATE=24m"
+        [ "$PULSE_HIGH_MS" -ge 100 ] && [ "$PULSE_LOW_MS" -ge 100 ] || die "PWM containment requires high and low durations >= 100ms"
+        ;;
+    *) die "OUTPUT_MODE must be gpio, pwm or pwm-containment" ;;
 esac
 CAPTURE_MS=$((PULSE_COUNT * (PULSE_HIGH_MS + PULSE_LOW_MS) + CAPTURE_MARGIN_MS))
 CAPTURE_SAMPLES=$((CAPTURE_MS * SAMPLES_PER_MS))
@@ -95,6 +100,9 @@ echo "Recording to $PREFIX; $PULSE_COUNT pulses will be automatic."
 check_uart() {
     kill -0 "$UART_PID" 2>/dev/null || die "UART capture ended early"
     ! rg -aiq 'PI5_BENCH_FAIL|PI5_BENCH_LOG_LOSS|panic|fatal|watchdog|SIGNED_BPF_(INPUT_MISSING|INPUT_INVALID|LOAD_REJECTED)' "$UART_LOG" || die "kernel failure marker"
+    if [ "$OUTPUT_MODE" = pwm ]; then
+        ! rg -aq 'PI5_PWM_CONTAINMENT_READY' "$UART_LOG" || die "wrong image: containment image requires OUTPUT_MODE=pwm-containment"
+    fi
 }
 waited=0
 until rg -aq 'PI5_BENCH_READY' "$UART_LOG" && rg -aq 'SIGNED_BPF_LOAD_OK' "$UART_LOG"; do
@@ -110,6 +118,11 @@ if [ "$OUTPUT_MODE" = gpio ]; then
 else
     rg -aq 'PI5_PWM_READY carrier_request_hz=10000 requested_duty_percent=50 auto_rearm=false' "$UART_LOG" || die "wrong image: PWM smoke build required"
     rg -aq 'PI5_OUT_ARM mode=pwm gpio=12 code=0 estop_asserted=false' "$UART_LOG" || die "initial PWM arm denied; check e-stop wiring"
+    if [ "$OUTPUT_MODE" = pwm-containment ]; then
+        rg -aqx 'PI5_PWM_CONTAINMENT_READY requested=4294967295 clamp_percent=90 reject_channel=3\r?' "$UART_LOG" &&
+            [ "$(rg -ac 'PI5_PWM_CONTAINMENT_READY' "$UART_LOG")" -eq 1 ] || die "wrong image: PWM containment marker required"
+        rg -aqx 'PI5_OUT_ARM mode=pwm gpio=12 code=0 estop_asserted=false gpio12_ctrl=0x0000c080 gpio12_pad=0x[0-9a-f]{8}\r?' "$UART_LOG" || die "PWM containment GPIO12 mux readback mismatch"
+    fi
 fi
 ! rg -aq 'PI5_GPIO_IRQ_PROVEN' "$UART_LOG" || die "unexpected sensor edge before capture; cold boot required"
 
@@ -161,11 +174,28 @@ kill "$UART_PID" 2>/dev/null || true
 wait "$UART_PID" 2>/dev/null || true
 UART_PID=""
 sha256sum "$UART_LOG" "$LOGIC_LOG" "$ANALYZER_LOG" "$SHRIKE_LOG" "$PREFIX-config.txt" | tee "$PREFIX.sha256" || die "could not hash capture artifacts"
-rg -a 'PI5_OUT_ARM|PI5_GPIO_IRQ_PROVEN|PI5_REFLEX_REARM|PI5_ESTOP_REARM|PI5_MC|PI5_MA sample_id=' "$UART_LOG" || true
-if [ "$OUTPUT_MODE" = pwm ]; then
-    python3 - "$UART_LOG" <<'PY' || die "PWM software correlation failed; retain capture for diagnosis"
+rg -a 'PI5_OUT_ARM|PI5_GPIO_IRQ_PROVEN|PI5_REFLEX_REARM|PI5_ESTOP_REARM|PI5_MC|PI5_MA sample_id=|PI5_PWM_REQUEST' "$UART_LOG" || true
+if [ "$OUTPUT_MODE" != gpio ]; then
+    python3 - "$UART_LOG" "$OUTPUT_MODE" <<'PY' || die "PWM${OUTPUT_MODE#pwm} software correlation failed; retain capture for diagnosis"
 import re, sys
 text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+if sys.argv[2] == "pwm-containment":
+    expected = {
+        "PI5_PWM_CONTAINMENT_READY": r" requested=4294967295 clamp_percent=90 reject_channel=3",
+        "PI5_PWM_REQUEST": r" sample_id=([12]) chip=0 channel=([13]) requested=4294967295 code=(0|-1) range=5000 duty=4500",
+        "PI5_MA": r" sample_id=1 monitor_ns=\d+",
+        "PI5_MC": r" sample_id=1 ns=\d+ kind=pwm ch=1 val=90",
+    }
+    for marker, fields in expected.items():
+        count = 2 if marker == "PI5_PWM_REQUEST" else 1
+        if text.count(marker) != count or len(re.findall(r"^" + marker + fields + r"$", text, re.M)) != count:
+            raise SystemExit("unexpected or missing containment marker: " + marker)
+    requests = re.findall(r"^PI5_PWM_REQUEST" + expected["PI5_PWM_REQUEST"] + r"$", text, re.M)
+    if requests != [("1", "1", "0"), ("2", "3", "-1")]:
+        raise SystemExit("need clamp sample 1 followed by rejected sample 2 with unchanged readback")
+    if text.count("PI5_GPIO_IRQ_PROVEN") != 1 or "PI5_REFLEX_REARM" in text or "PI5_ESTOP_REARM" in text:
+        raise SystemExit("containment requires one GPIO route proof and no re-arm")
+    raise SystemExit(0)
 ma = re.findall(r"PI5_MA sample_id=(\d+) monitor_ns=\d+", text)
 mc = re.findall(r"PI5_MC sample_id=(\d+) ns=\d+ kind=pwm ch=1 val=0", text)
 if len(ma) != 1 or len(mc) != 1 or ma != mc or text.count("PI5_MC ") != 1 or text.count("PI5_GPIO_IRQ_PROVEN") != 1:
@@ -173,7 +203,11 @@ if len(ma) != 1 or len(mc) != 1 or ma != mc or text.count("PI5_MC ") != 1 or tex
 if "PI5_REFLEX_REARM" in text or "PI5_ESTOP_REARM" in text:
     raise SystemExit("PWM smoke must not re-arm")
 PY
-    echo "CAPTURE COMPLETE: PWM smoke software correlation only; physical carrier/stop review required."
+    if [ "$OUTPUT_MODE" = pwm-containment ]; then
+        echo "CAPTURE COMPLETE: PWM containment software checks complete; physical waveform review required."
+    else
+        echo "CAPTURE COMPLETE: PWM smoke software correlation only; physical carrier/stop review required."
+    fi
 else
     python3 -B "$REPO/scripts/benchmark/analyze-v03.py" --sensor "$UART_LOG" --sensor-count "$PULSE_COUNT" || die "software cycle correlation failed; retain capture for diagnosis"
     echo "CAPTURE COMPLETE: software cycles checked; physical waveform review is required."

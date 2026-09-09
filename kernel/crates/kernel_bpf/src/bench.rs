@@ -58,6 +58,38 @@ mod tests {
     use crate::verifier::{Verifier, VerifyConfig};
 
     #[test]
+    fn containment_programs_verify_and_preserve_unsigned_extreme() {
+        use crate::execution::{BpfContext, BpfExecutor, Interpreter, helpers_stub};
+        for channel in [1, 3] {
+            let insns = reflex_pwm_program(0, channel, u32::MAX);
+            let program = Verifier::<ActiveProfile>::verify_with_config(
+                BpfProgType::Unspec,
+                &insns,
+                VerifyConfig {
+                    allow_actuation: true,
+                    ..VerifyConfig::default()
+                },
+            )
+            .expect("both requests are memory-safe; channel validation belongs to the helper");
+            let recorded = helpers_stub::record_pwm(|| {
+                assert_eq!(
+                    Interpreter::<ActiveProfile>::new().execute(&program, &BpfContext::empty()),
+                    Ok(0)
+                );
+            });
+            // This stub records arguments, not physical output or monitor policy.
+            assert_eq!(
+                recorded,
+                if channel == 1 {
+                    (u32::MAX as i64, -1)
+                } else {
+                    (-1, -1)
+                }
+            );
+        }
+    }
+
+    #[test]
     fn reflex_gpio_program_verifies() {
         let insns = reflex_gpio_program(12, 0);
         let result = Verifier::<ActiveProfile>::verify_with_config(

@@ -221,19 +221,20 @@ pub extern "C" fn bpf_gpio_set_output(pin: u32, initial_high: u32) -> i64 {
 /// BPF helper: Emergency motor stop
 #[no_mangle]
 pub extern "C" fn bpf_pwm_write(pwm_id: u32, channel: u32, duty_percent: u32) -> i64 {
-    if !valid_pwm_id(pwm_id) || !valid_pwm_channel(channel) {
-        return -1;
-    }
-
-    let chip = pwm_id as u8;
-    let channel = channel as u8;
-    if crate::actuation::is_motor_channel(chip, channel) {
+    #[cfg(feature = "bench-pwm-containment")]
+    let sample_id = crate::bench::pwm_request_sample_id();
+    let code = if !valid_pwm_id(pwm_id) || !valid_pwm_channel(channel) {
+        -1
+    } else if crate::actuation::is_motor_channel(pwm_id as u8, channel as u8) {
         // Motor channels use the existing signed i32-in-u32 representation;
         // non-motor PWM keeps its unsigned ABI unchanged.
-        crate::actuation::guard_motor(chip, channel, duty_percent as i32)
+        crate::actuation::guard_motor(pwm_id as u8, channel as u8, duty_percent as i32)
     } else {
-        crate::actuation::guard_pwm(chip, channel, duty_percent)
-    }
+        crate::actuation::guard_pwm(pwm_id as u8, channel as u8, duty_percent)
+    };
+    #[cfg(feature = "bench-pwm-containment")]
+    crate::bench::report_pwm_request(sample_id, pwm_id, channel, duty_percent, code);
+    code
 }
 
 /// Experimental v1 BPF helper: queue one complete signed rover command.

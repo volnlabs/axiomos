@@ -159,6 +159,35 @@ pub fn mark_gpio_irq_entry() {
     GPIO_IRQ_SAMPLE_ID.store(sample_id, Ordering::Release);
 }
 
+/// Capture identity before the normal M-C reporter consumes the IRQ stamp.
+#[cfg(feature = "bench-pwm-containment")]
+pub fn pwm_request_sample_id() -> u64 {
+    GPIO_IRQ_SAMPLE_ID.load(Ordering::Acquire)
+}
+
+/// Bench-only post-helper readback of the one physically observed PWM channel.
+/// Invalid requests are logged too, without applying anything to their target.
+#[cfg(feature = "bench-pwm-containment")]
+pub fn report_pwm_request(sample_id: u64, chip: u32, channel: u32, duty: u32, code: i64) {
+    #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+    {
+        use crate::arch::aarch64::platform::rpi5::pwm::PWM0;
+        let (_, _, range, applied_duty) = PWM0.lock().debug_regs(BENCH_PWM_CHANNEL as u8);
+        crate::serial_println!(
+            "PI5_PWM_REQUEST sample_id={} chip={} channel={} requested={} code={} range={} duty={}",
+            sample_id,
+            chip,
+            channel,
+            duty,
+            code,
+            range,
+            applied_duty
+        );
+    }
+    #[cfg(not(all(target_arch = "aarch64", feature = "rpi5")))]
+    let _ = (sample_id, chip, channel, duty, code);
+}
+
 /// Read and clear the GPIO IRQ-entry stamp (0 if none). Ensures the stamp is
 /// consumed exactly once so it can never leak into a later actuation's report.
 #[inline]
@@ -503,8 +532,13 @@ pub fn init() -> bool {
     gpio.set_pull(ESTOP_BUTTON_PIN, GpioPull::Down);
     let initial_estop_pressed = !gpio.read(ESTOP_BUTTON_PIN);
     handle_estop_button(initial_estop_pressed);
-    // Sensor: rising edge only. Button: both edges (press + release).
-    gpio.enable_interrupt(REFLEX_SENSOR_PIN, true, false);
+    // Containment uses two separate edge routes: clamp on rise, reject on fall.
+    // Other sensor benches fire only on rising edges.
+    gpio.enable_interrupt(
+        REFLEX_SENSOR_PIN,
+        true,
+        cfg!(feature = "bench-pwm-containment"),
+    );
     gpio.enable_interrupt(ESTOP_BUTTON_PIN, true, true);
     let sensor_irq = gpio.interrupt_state(REFLEX_SENSOR_PIN);
     let estop_irq = gpio.interrupt_state(ESTOP_BUTTON_PIN);
@@ -530,7 +564,12 @@ pub fn init() -> bool {
     let insns = match BENCH_REFLEX_OUTPUT {
         ReflexOutput::Gpio => kernel_bpf::bench::reflex_gpio_program(BENCH_PWM_PIN as u32, 0),
         ReflexOutput::Pwm => {
-            kernel_bpf::bench::reflex_pwm_program(BENCH_PWM_CHIP, BENCH_PWM_CHANNEL, 0)
+            let duty = if cfg!(feature = "bench-pwm-containment") {
+                u32::MAX
+            } else {
+                0
+            };
+            kernel_bpf::bench::reflex_pwm_program(BENCH_PWM_CHIP, BENCH_PWM_CHANNEL, duty)
         }
     };
     let Some(manager) = crate::BPF_MANAGER.get() else {
@@ -539,6 +578,22 @@ pub fn init() -> bool {
         return false;
     };
     let mut mgr = manager.lock();
+    #[cfg(feature = "bench-pwm-containment")]
+    {
+        // Channel 3 is rejected by the real helper before narrowing/MMIO. It
+        // must leave channel 1's already-clamped physical output unchanged.
+        let invalid = kernel_bpf::bench::reflex_pwm_program(BENCH_PWM_CHIP, 3, u32::MAX);
+        let route = mgr
+            .load_kernel_builtin_program(invalid)
+            .and_then(|id| mgr.attach_gpio_route(0, REFLEX_SENSOR_PIN, GpioEdge::Falling, id));
+        if let Err(error) = route {
+            crate::serial_println!(
+                "PI5_BENCH_FAIL stage=containment_reject_route error={:?}",
+                error
+            );
+            return false;
+        }
+    }
     match mgr.load_kernel_builtin_program(insns) {
         Ok(prog_id) => {
             if let Err(e) = mgr.attach_gpio_route(0, REFLEX_SENSOR_PIN, GpioEdge::Rising, prog_id) {
@@ -567,6 +622,11 @@ pub fn init() -> bool {
                 "PI5_PWM_READY carrier_request_hz={} requested_duty_percent={} auto_rearm=false",
                 BENCH_PWM_FREQ_HZ,
                 BENCH_PWM_DUTY_PERCENT
+            );
+            #[cfg(feature = "bench-pwm-containment")]
+            crate::serial_println!(
+                "PI5_PWM_CONTAINMENT_READY requested=4294967295 clamp_percent={} reject_channel=3",
+                <kernel_bpf::profile::ActiveProfile as kernel_bpf::profile::PhysicalProfile>::ACT_DUTY_MAX
             );
             #[cfg(feature = "bench-estop-rearm")]
             crate::serial_println!("PI5_V03D_READY output={} auto_rearm=true", mode);

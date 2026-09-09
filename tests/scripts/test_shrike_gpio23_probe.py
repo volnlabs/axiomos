@@ -18,6 +18,17 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 HARNESS = ROOT / "scripts/hil/shrike-gpio23-pulse.sh"
 
+CONTAINMENT_UART = (
+    b"PI5_BENCH_READY\nSIGNED_BPF_LOAD_OK\nPI5_BENCH_LOG_MODE deferred=true\n"
+    b"PI5_PWM_READY carrier_request_hz=10000 requested_duty_percent=50 auto_rearm=false\n"
+    b"PI5_OUT_ARM mode=pwm gpio=12 code=0 estop_asserted=false gpio12_ctrl=0x0000c080 gpio12_pad=0x00000000\n"
+    b"PI5_PWM_CONTAINMENT_READY requested=4294967295 clamp_percent=90 reject_channel=3\n"
+    b"PI5_GPIO_IRQ_PROVEN\nPI5_MA sample_id=1 monitor_ns=10\n"
+    b"PI5_MC sample_id=1 ns=20 kind=pwm ch=1 val=90\n"
+    b"PI5_PWM_REQUEST sample_id=1 chip=0 channel=1 requested=4294967295 code=0 range=5000 duty=4500\n"
+    b"PI5_PWM_REQUEST sample_id=2 chip=0 channel=3 requested=4294967295 code=-1 range=5000 duty=4500\n"
+)
+
 
 MOCK_SIGROK = r'''#!/usr/bin/env python3
 import os
@@ -75,7 +86,7 @@ else:
 
 
 class ShrikeGpio23PulseTests(unittest.TestCase):
-    def run_harness(self, mode: str, uart: bytes, output_mode: str = "gpio", pulse_count: str = "2", timeout: float = 12.0) -> tuple[str, str, str]:
+    def run_harness(self, mode: str, uart: bytes, output_mode: str = "gpio", pulse_count: str = "2", timeout: float = 12.0, high_ms: str = "100", low_ms: str = "100", samplerate: str = "24m") -> tuple[str, str, str]:
         with tempfile.TemporaryDirectory(prefix="shrike-gpio23-test-") as directory:
             root = Path(directory)
             bin_dir = root / "bin"
@@ -110,8 +121,9 @@ class ShrikeGpio23PulseTests(unittest.TestCase):
                     "ANALYZER_READY_TIMEOUT": "1",
                     "UART_SECONDS": "10",
                     "PULSE_COUNT": pulse_count,
-                    "PULSE_HIGH_MS": "20",
-                    "PULSE_LOW_MS": "20",
+                    "PULSE_HIGH_MS": high_ms,
+                    "PULSE_LOW_MS": low_ms,
+                    "SAMPLERATE": samplerate,
                     "ACTUATORS_MOTORS_DISCONNECTED": "YES",
                 }
             )
@@ -128,12 +140,16 @@ class ShrikeGpio23PulseTests(unittest.TestCase):
             def feed_uart() -> None:
                 deadline = time.monotonic() + 3
                 while time.monotonic() < deadline and not list(run_dir.glob("*uart.log")):
+                    if process.poll() is not None:
+                        return
                     time.sleep(0.01)
-                if output_mode == "pwm" and b"PI5_GPIO_IRQ_PROVEN" in uart:
+                if output_mode in ("pwm", "pwm-containment") and b"PI5_GPIO_IRQ_PROVEN" in uart:
                     prefix, tail = uart.split(b"PI5_GPIO_IRQ_PROVEN", 1)
                     os.write(master, prefix)
                     deadline = time.monotonic() + 3
                     while time.monotonic() < deadline:
+                        if process.poll() is not None:
+                            return
                         if event_log.exists() and "MPREMOTE_PULSE" in event_log.read_text(encoding="utf-8"):
                             break
                         time.sleep(0.01)
@@ -149,6 +165,7 @@ class ShrikeGpio23PulseTests(unittest.TestCase):
                 os.killpg(process.pid, signal.SIGKILL)
                 output, _ = process.communicate()
             finally:
+                feeder.join(timeout=4)
                 os.close(master)
             return (
                 f"RETURN_CODE={process.returncode}\n" + output,
@@ -233,6 +250,64 @@ class ShrikeGpio23PulseTests(unittest.TestCase):
         )
         self.assertIn("PULSE_COUNT=1", output)
         self.assertNotIn("MULTIPULSE_START", commands)
+
+    def test_containment_correlates_clamp_and_rejection_without_claiming_physical_pass(self) -> None:
+        output, commands, events = self.run_harness(
+            "data", CONTAINMENT_UART, output_mode="pwm-containment", pulse_count="1"
+        )
+        self.assertIn("RETURN_CODE=0", output)
+        self.assertIn("containment software checks complete", output)
+        self.assertIn("waveform review required", output)
+        self.assertNotIn("PASS", output)
+        self.assertLess(events.index("SIGROK_LOGIC"), events.index("MPREMOTE_PULSE"))
+        self.assertIn("for _ in range(1)", commands)
+        self.assertIn("GPIO_SAFE", commands)
+
+    def test_containment_wrong_image_never_dispatches(self) -> None:
+        marker = b"PI5_PWM_CONTAINMENT_READY requested=4294967295 clamp_percent=90 reject_channel=3\n"
+        for uart in (
+            CONTAINMENT_UART.replace(marker, b""),
+            CONTAINMENT_UART.replace(b"clamp_percent=90", b"clamp_percent=50"),
+            CONTAINMENT_UART.replace(b"reject_channel=3", b"reject_channel=30"),
+            CONTAINMENT_UART.replace(b"gpio12_ctrl=0x0000c080", b"gpio12_ctrl=0x00000000"),
+        ):
+            with self.subTest(uart=uart):
+                output, commands, _ = self.run_harness("data", uart, output_mode="pwm-containment", pulse_count="1")
+                self.assertIn("RETURN_CODE=1", output)
+                self.assertNotIn("MULTIPULSE_START", commands)
+                self.assertIn("GPIO_SAFE", commands)
+
+    def test_pwm_rejects_containment_image_before_dispatch(self) -> None:
+        output, commands, _ = self.run_harness("data", CONTAINMENT_UART, output_mode="pwm", pulse_count="1")
+        self.assertIn("RETURN_CODE=1", output)
+        self.assertNotIn("MULTIPULSE_START", commands)
+
+    def test_containment_requires_bounded_timing_capture(self) -> None:
+        for settings in ({"pulse_count": "2"}, {"samplerate": "1m"}, {"high_ms": "99"}, {"low_ms": "99"}):
+            with self.subTest(settings=settings):
+                options = {"pulse_count": "1", **settings}
+                output, commands, _ = self.run_harness("data", b"", output_mode="pwm-containment", **options)
+                self.assertIn("RETURN_CODE=1", output)
+                self.assertEqual(commands, "")
+
+    def test_containment_rejects_wrong_results_and_extra_or_mismatched_samples(self) -> None:
+        for uart in (
+            CONTAINMENT_UART.replace(b"code=-1 range", b"code=0 range"),
+            CONTAINMENT_UART.replace(b"duty=4500", b"duty=4999"),
+            CONTAINMENT_UART.replace(b"PI5_PWM_REQUEST sample_id=2", b"PI5_PWM_REQUEST sample_id=3"),
+            CONTAINMENT_UART.replace(b"kind=pwm ch=1 val=90", b"kind=pwm ch=1 val=0"),
+            CONTAINMENT_UART.replace(b"PI5_MA sample_id=1", b"PI5_MA sample_id=2"),
+            CONTAINMENT_UART + b"PI5_PWM_REQUEST sample_id=3 chip=0 channel=1 requested=4294967295 code=0 range=5000 duty=4500\n",
+            CONTAINMENT_UART + b"PI5_MA sample_id=2 monitor_ns=30\n",
+            CONTAINMENT_UART + b"PI5_MC sample_id=2 ns=30 kind=pwm ch=1 val=90\n",
+            CONTAINMENT_UART + b"PI5_GPIO_IRQ_PROVEN\n",
+            CONTAINMENT_UART + b"PI5_ESTOP_REARM sample_id=1 mode=pwm code=0\n",
+        ):
+            with self.subTest(uart=uart):
+                output, commands, _ = self.run_harness("data", uart, output_mode="pwm-containment", pulse_count="1")
+                self.assertIn("MULTIPULSE_START", commands)
+                self.assertIn("RETURN_CODE=1", output)
+                self.assertIn("containment software correlation failed", output)
 
 
 if __name__ == "__main__":
