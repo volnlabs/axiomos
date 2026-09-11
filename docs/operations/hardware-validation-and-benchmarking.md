@@ -1,10 +1,18 @@
 # Hardware validation and benchmarking runbook
 
-This is the execution checklist for `release/v0.5.0-alpha.2`. Its purpose is
+This runbook contains the full `release/v0.5.0-alpha.2` hardware checklist. Its purpose is
 to turn the source-level alpha into attributable Raspberry Pi 5, Shrike RP2040,
 and final-PWM safety-gate evidence. It does **not** authorize a safety-relevant
 robot deployment. Do not claim physical performance or safety until every
 required physical check below has retained evidence.
+
+The current [hardware-first plan](../plans/active/v04-hardware-first.md) separates
+**24-hour unloaded electronics acceptance** from powered-robot acceptance.
+Sections 4.1 through the unloaded checks in 4.4, section 4.5 and the applicable
+benchmarks can run with motor power disconnected. Passing that development gate
+unlocks v0.5 implementation; powered checks remain pending for the full robot
+gate. Historical robot-before-benchmark ordering does not block this unloaded
+campaign. Do not mark powered PR checkboxes complete using bench evidence.
 
 Use this document with the [performance methodology](../performance/methodology.md),
 the [current-results policy](../performance/current-results.md), and the
@@ -12,8 +20,10 @@ the [current-results policy](../performance/current-results.md), and the
 
 ## 0. Rules and stop conditions
 
-- [ ] Work only from `release/v0.5.0-alpha.2`; record its commit before every
-  build and do not mix artifacts from another revision.
+- [ ] Freeze the campaign's exact clean commit before every build and do not mix
+  artifacts from another revision. The original full-release target is
+  `release/v0.5.0-alpha.2`; the current prerequisite bench campaign uses the
+  separately frozen candidate identified by the hardware-first plan.
 - [ ] Keep the production Ed25519 public key offline except when exporting the
   32-byte public-key file required by the Pi build. Never commit keys, UART
   captures containing secrets, or removable-media device names.
@@ -47,7 +57,7 @@ the RISC-V GCC cross compiler. It also needs the targets declared in
 [`ci/manifests/targets.toml`](../../ci/manifests/targets.toml).
 
 ```sh
-git switch release/v0.5.0-alpha.2
+git switch --detach "${HIL_COMMIT:?Set HIL_COMMIT to the frozen campaign commit}"
 git status --short
 git rev-parse HEAD
 cargo xtask check all --profile quick
@@ -187,6 +197,62 @@ stage has a retained capture and explicit pass decision.
 - [ ] Only after the unloaded tests pass, attach a mechanically constrained
   actuator. Start at the lowest safe duty cycle and keep independent power cut
   access available.
+
+The powered step is deferred in the electronics campaign. It can later use
+secured motors without a car chassis, but must establish actual polarity,
+starting/running current, driver/supply/wiring temperature, supply behavior and
+independent power-cut effectiveness. Assembled-car tests subsequently establish
+motion and stopping under mechanical load. Correct PWM/direction signals alone
+do not prove rotation, speed, torque, braking or electrical behavior under load.
+
+### 4.5 One-hour pilot and 24-hour unloaded electronics soak
+
+This is an electronics development gate, not the existing V04-E powered-robot
+soak. Use the real Pi/RP2040/programmed-FPGA control path, sensor or documented
+stimulus, physical e-stop, UART recorder and logic analyzer. Keep motors and
+motor power disconnected. A multimeter checks unpowered continuity and powered
+DC levels; the analyzer observes digital signals, not analog transients.
+
+- [ ] Pass section 4's unloaded functional/fault checks before the soak. Exercise
+  reset and configuration-failure tests separately; an unplanned reset during
+  the soak is a failure, not an excuse to join two boots into one run.
+- [ ] Freeze a repeatable workload with known run/stop/direction/duty requests
+  and required safe-state intervals. Record expected responses independently
+  of the kernel's own output logs. Respect the actual zero-before-reverse,
+  freshness and re-arm contract. Automated stimulus is not a replacement for
+  the independently wired physical e-stop.
+- [ ] Capture both final FPGA PWM outputs and direction signals, plus the
+  stimulus/stop references needed for correlation. Monitor both channels at
+  once; sequential single-channel runs do not establish simultaneous safety.
+- [ ] Run a one-hour pilot to qualify acquisition, reduction, timestamps,
+  sample-count continuity and sufficient storage for 24 hours. Determine the
+  sample rate from the frozen timing/duty checks and instrument uncertainty;
+  lowering it solely to avoid USB failures must not hide violations.
+- [ ] Run 24 continuous hours on the identified electronics and workload.
+  Require correct commanded outputs, enables low during required safe states,
+  and no unexpected duty/direction, missed required response, panic or unplanned
+  reset. Retain the safe final state.
+- [ ] Retain bounded raw capture files and UART logs with hashes and exact
+  start/end/sample coverage. File rotation must not restart acquisition and
+  introduce gaps. Any capture gap, dropped data, log loss, early device end or
+  truncated file invalidates complete-coverage acceptance. Retain failures;
+  restart the full soak after correcting the cause.
+- [ ] Independently reduce the final-pin waveforms against the expected
+  workload over the entire interval. Heartbeats, queued-command markers,
+  occasional screenshots or sampled windows cannot establish output correctness
+  during unobserved intervals.
+
+The current short-capture scripts and V04 serial reducer do not alone implement
+or qualify this full-duration physical oracle. Qualify the acquisition and
+waveform checks before calling a run a soak. Test rejection of truncated data,
+coverage gaps, an unexpected enabled output in a stop interval, wrong duty or
+direction, missing expected responses and an unplanned reset; a full, correct
+synthetic trace must pass without being labeled physical evidence.
+
+Report a successful run as "24-hour unloaded electronics acceptance" with its
+workload and artifact identities. It permits runtime development under the
+hardware-first plan. The powered pilot, 24-hour robot soak and final whole-system
+release requirements remain separate; none is checked off by this result.
 
 ## 5. Benchmark campaigns
 
