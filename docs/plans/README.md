@@ -12,8 +12,10 @@ and [first-boot card](active/axiomos-hardware-bringup/first-boot-card.md).
 Release foundation record:
 [v0.5.0-alpha.1 release plan](active/v0.5-alpha-release.md).
 
-Proposed next runtime work:
-[v0.5 Runtime Evolution engineering draft v2](active/v0.5-runtime-evolution-engineering-draft-v2.md).
+Canonical runtime contract and M0–M7 sequence:
+[v0.5 bounded runtime evolution](active/v0.5-bounded-runtime-evolution.md).
+The [engineering draft v2](active/v0.5-runtime-evolution-engineering-draft-v2.md)
+is retained as superseded historical input.
 
 Current hardware/development sequencing:
 [24-hour unloaded electronics acceptance, then runtime evolution](active/v04-hardware-first.md).

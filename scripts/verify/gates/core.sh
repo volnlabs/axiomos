@@ -12,7 +12,9 @@ run_step xtask-manifest-drift cargo xtask boundary --check
 run_step generated-docs cargo xtask docs --check
 run_step documentation-links python3 -B scripts/verify/doc-links.py
 run_step product-naming-static python3 -B scripts/verify/product-naming.py
+run_step product-naming-tests python3 -B tests/scripts/test_product_naming.py
 run_step benchmark-provenance-static python3 -B scripts/verify/benchmark-provenance.py
+run_step v05-benchmark-reducer-self-test python3 -B scripts/benchmark/analyze-v05.py --self-test
 run_step v04-benchmark-reducer-self-test python3 -B scripts/benchmark/analyze-v04.py --self-test
 run_step v04-behavior-runner-smoke python3 -c \
     'import subprocess,sys; runner=[sys.executable,"scripts/benchmark/v04-behavior-runner.py","--behavior","smoke","--sample-id","1"]; stages=["load","verify","admit","attach","active"]; args=sum((["--"+stage,"true"] for stage in stages),[]); emitted=lambda p:[line.split(" stage=",1)[1].split()[0] for line in p.stdout.splitlines() if line.startswith("V04_BEHAVIOR")]; ok=subprocess.run(runner+args,capture_output=True,text=True); assert ok.returncode==0 and emitted(ok)==["load_request"]+stages, (ok.returncode,emitted(ok)); bad=subprocess.run(runner+["--load","false"]+sum((["--"+stage,"true"] for stage in stages[1:]),[]),capture_output=True,text=True); assert bad.returncode != 0 and emitted(bad)==["load_request"], bad.stdout; bad=subprocess.run(runner+["--load","true","--verify","false"]+sum((["--"+stage,"true"] for stage in stages[2:]),[]),capture_output=True,text=True); assert bad.returncode != 0 and emitted(bad)==["load_request","load"], bad.stdout; invalid=runner.copy(); invalid[invalid.index("smoke")]="bad name"; bad=subprocess.run(invalid+args,capture_output=True,text=True); assert bad.returncode != 0 and not emitted(bad), bad.stdout'

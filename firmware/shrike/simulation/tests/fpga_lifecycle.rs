@@ -170,6 +170,76 @@ fn post_command_status_io_failure_forces_safe() {
     lifecycle.platform().assert_safe();
 }
 
+#[test]
+fn accepted_motion_is_followed_by_one_atomic_zero_frame_and_matching_readback() {
+    let mut lifecycle = FpgaLifecycle::new(MockFpga::healthy());
+    lifecycle.configure(manifest(), 1).unwrap();
+
+    lifecycle.runtime_command(10, 400, -400, 0).unwrap();
+    lifecycle.runtime_command(11, 0, 0, 0).unwrap();
+
+    let runtime_events: Vec<_> = lifecycle
+        .platform()
+        .events
+        .iter()
+        .filter(|event| matches!(event, Event::Runtime(_) | Event::RuntimeStatus))
+        .copied()
+        .collect();
+    assert_eq!(
+        runtime_events,
+        [
+            Event::Runtime(runtime_frame(10, 400, -400, 0)),
+            Event::RuntimeStatus,
+            Event::Runtime(runtime_frame(11, 0, 0, 0)),
+            Event::RuntimeStatus,
+        ]
+    );
+}
+
+#[test]
+fn stale_status_cannot_acknowledge_zero_and_disarms_runtime() {
+    let mut fpga = MockFpga::healthy();
+    fpga.post_status = Some(Ok([STATUS_READY | STATUS_COMMAND_VALID, 10]));
+    let mut lifecycle = FpgaLifecycle::new(fpga);
+    lifecycle.configure(manifest(), 1).unwrap();
+
+    assert_eq!(
+        lifecycle.runtime_command(11, 0, 0, 0),
+        Err(LifecycleError::BadStatus)
+    );
+    lifecycle.platform().assert_safe();
+    assert!(!lifecycle.runtime_ready());
+    assert_eq!(
+        lifecycle.runtime_command(12, 1, 1, 0),
+        Err(LifecycleError::NotReady)
+    );
+}
+
+#[test]
+fn failed_zero_transfer_or_readback_requires_reconfiguration() {
+    for fail_readback in [false, true] {
+        let mut fpga = MockFpga::healthy();
+        if fail_readback {
+            fpga.post_status = Some(Err("status spi"));
+        } else {
+            fpga.runtime = Err("motor spi");
+        }
+        let mut lifecycle = FpgaLifecycle::new(fpga);
+        lifecycle.configure(manifest(), 1).unwrap();
+
+        assert!(matches!(
+            lifecycle.runtime_command(11, 0, 0, 0),
+            Err(LifecycleError::Platform(_))
+        ));
+        lifecycle.platform().assert_safe();
+        assert!(!lifecycle.runtime_ready());
+        assert_eq!(
+            lifecycle.runtime_command(12, 1, 1, 0),
+            Err(LifecycleError::NotReady)
+        );
+    }
+}
+
 fn manifest() -> BitstreamManifest {
     BitstreamManifest {
         offset: FPGA_STORAGE_START,

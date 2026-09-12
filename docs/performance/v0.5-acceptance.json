@@ -1,0 +1,50 @@
+{
+  "schema": "axiomos.v05.acceptance.v1",
+  "cpu": {"index": 0, "slots": 1, "period_ns": 10000000, "modeled_utilization_percent": 50},
+  "timing": {"handoff_timeout_ns": 80000000, "reset_quiescence_ns": 200000000},
+  "resources": {
+    "max_artifacts": 3,
+    "max_uploads": 1,
+    "max_upload_bytes": 262144,
+    "max_operations": 1,
+    "max_instances": 2,
+    "max_private_array_payload_bytes": 16384,
+    "max_retire_batches": 1,
+    "retire_batch_capacity": {"displaced_instances": 1, "evicted_artifacts": 1}
+  },
+  "recorder": {"max_records": 2048, "max_record_bytes": 96, "storage_bytes": 196608},
+  "terminal_receipts": {"bounded": true, "numeric_limit": null},
+  "campaign": {
+    "host_churn_operations_min": 100000,
+    "physical_boots_min": 3,
+    "physical_successful_transitions_min": 10000,
+    "physical_successful_transitions_per_boot_min": 1000,
+    "physical_releases_min": 1000000,
+    "fault_phase_repeats_min": 5,
+    "pilot_seconds": 3600,
+    "soak_seconds": 86400,
+    "motors_connected": false,
+    "recorder_p99_ratio_max": 1.05
+  },
+  "fault_matrix": {
+    "faults": ["stop", "link_loss", "mcu_reset", "ack_failure"],
+    "phases": ["preparation", "handoff", "committed"]
+  },
+  "embedded_budgets": {"policy": "unchanged"},
+  "required_gates": {
+    "trace_subset": {"required": true, "implemented_by_reducer": true, "scope": "host trace integrity and cycle/handoff sequencing only"},
+    "authentication_and_loading": {"required": true, "implemented_by_reducer": false, "missing_policy": "not_evaluated"},
+    "preparation_isolation": {"required": true, "implemented_by_reducer": false, "missing_policy": "not_evaluated"},
+    "private_state": {"required": true, "implemented_by_reducer": false, "missing_policy": "not_evaluated"},
+    "ownership": {"required": true, "implemented_by_reducer": false, "missing_policy": "not_evaluated"},
+    "publication_races": {"required": true, "implemented_by_reducer": false, "missing_policy": "not_evaluated"},
+    "failure_custody": {"required": true, "implemented_by_reducer": false, "missing_policy": "not_evaluated"},
+    "abi": {"required": true, "implemented_by_reducer": false, "missing_policy": "not_evaluated"},
+    "reset_quiescence": {"required": true, "implemented_by_reducer": false, "missing_policy": "not_evaluated"},
+    "physical_campaign": {"required": true, "implemented_by_reducer": false, "missing_policy": "blocked"},
+    "fault_matrix": {"required": true, "implemented_by_reducer": false, "missing_policy": "not_evaluated"},
+    "recorder_overhead": {"required": true, "implemented_by_reducer": false, "missing_policy": "not_evaluated"},
+    "resource_reclamation": {"required": true, "implemented_by_reducer": false, "missing_policy": "not_evaluated"}
+  },
+  "release_policy": {"all_required_gates_must_pass": true, "synthetic_evidence_can_pass_release": false}
+}
