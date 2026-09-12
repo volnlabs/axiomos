@@ -40,6 +40,8 @@ irq_stack_top:
     // Total = 280 bytes -> 288 for 16-byte alignment
     sub     sp, sp, #288
 
+    // Preserve the interrupted x9 before using it as timestamp scratch.
+    stp     x8, x9, [sp, #64]
     // Capture hardware timestamp as early as possible
     mrs     x9, cntvct_el0
     str     x9, [sp, #272]
@@ -48,7 +50,6 @@ irq_stack_top:
     stp     x2, x3, [sp, #16]
     stp     x4, x5, [sp, #32]
     stp     x6, x7, [sp, #48]
-    stp     x8, x9, [sp, #64]
     stp     x10, x11, [sp, #80]
     stp     x12, x13, [sp, #96]
     stp     x14, x15, [sp, #112]

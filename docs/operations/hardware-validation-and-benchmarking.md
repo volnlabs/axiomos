@@ -1,10 +1,18 @@
 # Hardware validation and benchmarking runbook
 
-This is the execution checklist for `release/v0.5.0-alpha.2`. Its purpose is
+This runbook contains the full `release/v0.5.0-alpha.2` hardware checklist. Its purpose is
 to turn the source-level alpha into attributable Raspberry Pi 5, Shrike RP2040,
 and final-PWM safety-gate evidence. It does **not** authorize a safety-relevant
 robot deployment. Do not claim physical performance or safety until every
 required physical check below has retained evidence.
+
+The current [hardware-first plan](../plans/active/v04-hardware-first.md) separates
+**24-hour unloaded electronics acceptance** from powered-robot acceptance.
+Sections 4.1 through the unloaded checks in 4.4, section 4.5 and the applicable
+benchmarks can run with motor power disconnected. Passing that development gate
+unlocks v0.5 implementation; powered checks remain pending for the full robot
+gate. Historical robot-before-benchmark ordering does not block this unloaded
+campaign. Do not mark powered PR checkboxes complete using bench evidence.
 
 Use this document with the [performance methodology](../performance/methodology.md),
 the [current-results policy](../performance/current-results.md), and the
@@ -12,8 +20,10 @@ the [current-results policy](../performance/current-results.md), and the
 
 ## 0. Rules and stop conditions
 
-- [ ] Work only from `release/v0.5.0-alpha.2`; record its commit before every
-  build and do not mix artifacts from another revision.
+- [ ] Freeze the campaign's exact clean commit before every build and do not mix
+  artifacts from another revision. The original full-release target is
+  `release/v0.5.0-alpha.2`; the current prerequisite bench campaign uses the
+  separately frozen candidate identified by the hardware-first plan.
 - [ ] Keep the production Ed25519 public key offline except when exporting the
   32-byte public-key file required by the Pi build. Never commit keys, UART
   captures containing secrets, or removable-media device names.
@@ -47,7 +57,7 @@ the RISC-V GCC cross compiler. It also needs the targets declared in
 [`ci/manifests/targets.toml`](../../ci/manifests/targets.toml).
 
 ```sh
-git switch release/v0.5.0-alpha.2
+git switch --detach "${HIL_COMMIT:?Set HIL_COMMIT to the frozen campaign commit}"
 git status --short
 git rev-parse HEAD
 cargo xtask check all --profile quick
@@ -163,6 +173,20 @@ stage has a retained capture and explicit pass decision.
 
 ### 4.3 Shrike control link and RP2040
 
+`V04_CHUNK` per-poll start/end tracing requires the opt-in Pi kernel feature
+`trace-control-link` (for example, `embedded-rpi5,trace-control-link`). The V04
+serial reducer still requires complete chunk records for its cadence checks;
+an image without this feature cannot establish those checks. Retain the trace
+image's feature list and hashes separately. Trace-enabled captures must qualify
+their logging throughput; enabling the feature does not guarantee lossless UART
+capture.
+
+Leave this feature off for local GPIO reflex measurements. Empty control-link
+poll traces exhausted the 16 KiB deferred console during a 5 Hz GPIO run; the
+64-byte drain budget does not guarantee 64 bytes fit in the UART per timer tick.
+The poller, fault/link-loss handling, and heartbeat/sensor events still run with
+tracing off, and any `PI5_BENCH_LOG_LOSS` still invalidates the capture.
+
 - [ ] Build the firmware and host simulation checks through the full gate
   before flashing hardware.
 - [ ] Flash only the reviewed binary using the board’s documented BOOTSEL/UF2
@@ -187,6 +211,62 @@ stage has a retained capture and explicit pass decision.
 - [ ] Only after the unloaded tests pass, attach a mechanically constrained
   actuator. Start at the lowest safe duty cycle and keep independent power cut
   access available.
+
+The powered step is deferred in the electronics campaign. It can later use
+secured motors without a car chassis, but must establish actual polarity,
+starting/running current, driver/supply/wiring temperature, supply behavior and
+independent power-cut effectiveness. Assembled-car tests subsequently establish
+motion and stopping under mechanical load. Correct PWM/direction signals alone
+do not prove rotation, speed, torque, braking or electrical behavior under load.
+
+### 4.5 One-hour pilot and 24-hour unloaded electronics soak
+
+This is an electronics development gate, not the existing V04-E powered-robot
+soak. Use the real Pi/RP2040/programmed-FPGA control path, sensor or documented
+stimulus, physical e-stop, UART recorder and logic analyzer. Keep motors and
+motor power disconnected. A multimeter checks unpowered continuity and powered
+DC levels; the analyzer observes digital signals, not analog transients.
+
+- [ ] Pass section 4's unloaded functional/fault checks before the soak. Exercise
+  reset and configuration-failure tests separately; an unplanned reset during
+  the soak is a failure, not an excuse to join two boots into one run.
+- [ ] Freeze a repeatable workload with known run/stop/direction/duty requests
+  and required safe-state intervals. Record expected responses independently
+  of the kernel's own output logs. Respect the actual zero-before-reverse,
+  freshness and re-arm contract. Automated stimulus is not a replacement for
+  the independently wired physical e-stop.
+- [ ] Capture both final FPGA PWM outputs and direction signals, plus the
+  stimulus/stop references needed for correlation. Monitor both channels at
+  once; sequential single-channel runs do not establish simultaneous safety.
+- [ ] Run a one-hour pilot to qualify acquisition, reduction, timestamps,
+  sample-count continuity and sufficient storage for 24 hours. Determine the
+  sample rate from the frozen timing/duty checks and instrument uncertainty;
+  lowering it solely to avoid USB failures must not hide violations.
+- [ ] Run 24 continuous hours on the identified electronics and workload.
+  Require correct commanded outputs, enables low during required safe states,
+  and no unexpected duty/direction, missed required response, panic or unplanned
+  reset. Retain the safe final state.
+- [ ] Retain bounded raw capture files and UART logs with hashes and exact
+  start/end/sample coverage. File rotation must not restart acquisition and
+  introduce gaps. Any capture gap, dropped data, log loss, early device end or
+  truncated file invalidates complete-coverage acceptance. Retain failures;
+  restart the full soak after correcting the cause.
+- [ ] Independently reduce the final-pin waveforms against the expected
+  workload over the entire interval. Heartbeats, queued-command markers,
+  occasional screenshots or sampled windows cannot establish output correctness
+  during unobserved intervals.
+
+The current short-capture scripts and V04 serial reducer do not alone implement
+or qualify this full-duration physical oracle. Qualify the acquisition and
+waveform checks before calling a run a soak. Test rejection of truncated data,
+coverage gaps, an unexpected enabled output in a stop interval, wrong duty or
+direction, missing expected responses and an unplanned reset; a full, correct
+synthetic trace must pass without being labeled physical evidence.
+
+Report a successful run as "24-hour unloaded electronics acceptance" with its
+workload and artifact identities. It permits runtime development under the
+hardware-first plan. The powered pilot, 24-hour robot soak and final whole-system
+release requirements remain separate; none is checked off by this result.
 
 ## 5. Benchmark campaigns
 
@@ -240,6 +320,56 @@ cargo xtask bench verifier -- "$CAMPAIGN/verifier-cost.log" \
   trigger configuration, analyzer sample rate, and all excluded samples.
 - [ ] Repeat after cold boot, warm boot, and representative non-critical load.
   Do not call a single best run a latency bound.
+
+Bench images switch to a bounded deferred console after bench initialization:
+16 KiB of queued bytes plus one pending byte, a 1024-byte formatted-record limit,
+and at most 64 nonblocking UART send attempts per 100 Hz timer tick. The existing
+byte ring is reused; a full UART never causes this drain to wait. Formatting and
+queue work still execute with IRQs masked, so this is not a zero-overhead or WCET
+claim. Oversized, full-buffer or contended records produce
+`PI5_BENCH_LOG_LOSS dropped_records=N`; any loss invalidates serial-derived evidence.
+Boot-fatal, panic and fatal-halt diagnostics bypass the buffer because another
+timer tick is not guaranteed. The normal non-bench console is unchanged; timing
+results apply to the identified diagnostic image, not automatically to production.
+
+`PI5_BENCH_TIMING` records the counter frequency and the software endpoints:
+M-C starts at the GPIO handler stamp and ends after issuing the local output
+write; M-B ends after issuing all local safe writes, before link notification
+or logging. Neither is a physical-edge-to-motor measurement. Capture the input
+and output electrically for that claim. The sensor reducer checks cycle
+correlation; it does not establish latency thresholds merely by succeeding.
+
+#### Unloaded repeated GPIO reflex bring-up
+
+Build `embedded-rpi5,bench-reflex-rearm` separately. With both boards unpowered,
+remove the manual Pi 3.3 V stimulus and any static GPIO24-high jumper. Connect
+Shrike GP22 through 220 ohm to Pi GPIO23 (physical16), and GP21 through a second
+220 ohm to GPIO24 (physical18). Share ground; analyzer D0 observes GPIO23 and
+D1 observes GPIO12 (physical32). Keep all motors, drivers and actuators
+physically disconnected. Shrike runs its retained MicroPython stimulus firmware;
+this does not test the axiomos MCU firmware or FPGA runtime.
+
+Connect Shrike USB first, leaving Pi power off. Run the existing harness with
+explicit serial ports and `RUN_DIR` as required by the campaign:
+
+```sh
+ACTUATORS_MOTORS_DISCONNECTED=YES SAMPLERATE=1m PULSE_COUNT=5 \
+  scripts/hil/shrike-gpio23-pulse.sh
+```
+
+Power Pi only at `UART RECORDING`. The harness holds the sensor LOW and releases
+the e-stop input before boot, checks initial output arming, waits for signed-load
+and diagnostic readiness, and starts pulses only after live analyzer data.
+It ends with both Shrike signals LOW and requests the same state on host cleanup.
+A failed cleanup requires powering off Pi. This host/MCU procedure is not an
+independent physical safety gate and must remain unloaded.
+
+The first 1 MHz run is a functional capture, not a timing acceptance result.
+Review every GPIO23 rising edge against a GPIO12 falling response and subsequent
+re-arm, plus the final LOW output. The script checks correlated software samples
+but does not declare physical acceptance. Retain all logs, raw capture, image and
+harness identities; use 24 MHz with recorded clock accuracy for subsequent timing
+work and the required campaign counts, not the five-pulse bring-up default.
 
 #### V03-D unloaded e-stop diagnostic
 

@@ -21,17 +21,17 @@ use alloc::boxed::Box;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use conquer_once::spin::OnceCell;
-use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
-use shrike_link::motor::{signed_duty_to_permille, MotorSide};
+use shrike_link::motor::MotorSide;
 use shrike_link::ring::RingBuf;
 use shrike_link::session::{LinkAction, LinkSession};
-use shrike_link::{encode, Decoder, Msg, MAX_FRAME};
+use shrike_link::tx::TxState;
+use shrike_link::{Decoder, Msg};
 use spin::Mutex;
 
 use super::memory_map::RP1_UART0_BASE;
 use super::pl011::{Pl011, DEFAULT_UART_CLK_HZ};
 
-/// TX/RX ring capacity (frames are <= MAX_FRAME ~ 22 bytes; 256 is ample).
+/// RX ring capacity.
 const RING_BYTES: usize = 256;
 /// Link baud — MUST match the RP2040 firmware (`shrike_rp2040` UART_BAUD).
 const LINK_BAUD: u32 = 115_200;
@@ -58,6 +58,7 @@ const ULTRASONIC_CHANNEL: u32 = 0; // proximity / range
 static CONTROL_LINK: OnceCell<Mutex<ControlLink>> = OnceCell::uninit();
 static NEXT_SENSOR_SAMPLE_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_LINK_LOSS_EVENT_ID: AtomicU64 = AtomicU64::new(1);
+#[cfg(feature = "trace-control-link")]
 static NEXT_CHUNK_ID: AtomicU64 = AtomicU64::new(1);
 static LINK_UNINITIALIZED_REPORTED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
@@ -66,6 +67,12 @@ static LINK_UNINITIALIZED_REPORTED: core::sync::atomic::AtomicBool =
 /// link-owned motor. Unmapped channels keep local RP1 PWM.
 #[must_use]
 pub fn motor_side(chip: u8, channel: u8) -> Option<MotorSide> {
+    // The unloaded PWM diagnostic reserves exactly this channel for local RP1
+    // output. Ordinary builds retain signed-pair-only motor ownership.
+    #[cfg(feature = "bench-pwm")]
+    if crate::bench::is_bench_pwm_output(chip, channel) {
+        return None;
+    }
     if chip != MOTOR_CHIP {
         return None;
     }
@@ -130,14 +137,10 @@ enum PendingEstop {
 pub struct ControlLink {
     uart: Pl011,
     rx: RingBuf<RING_BYTES>,
-    tx: RingBuf<RING_BYTES>,
+    tx: TxState,
     dec: Decoder,
     rx_overflows: u32,
     session: LinkSession,
-    /// Cached per-wheel setpoint (per-mille) — MotorSetpoint carries both, so a
-    /// single-channel actuation keeps the other wheel's last value.
-    motor_left: i16,
-    motor_right: i16,
     motor_seq: u8,
     pending_estop: Option<PendingEstop>,
     link_loss_reported: bool,
@@ -194,60 +197,67 @@ impl ControlLink {
             }
         }
 
-        // Ordered e-stop commands dominate heartbeats; if an assert frame cannot
-        // fit yet, do not refresh the peer watchdog with a smaller heartbeat.
-        let estop_queue_empty = self.flush_pending_estop();
-        let pending_assert = self.has_pending_estop_assert();
-        if estop_queue_empty || !pending_assert {
-            match self.session.tick(now) {
-                LinkAction::Heartbeat(seq) => {
-                    let _ = self.enqueue(&Msg::HeartbeatToShrike { seq });
+        // Decide timeout before publishing pending motion. An assert cancels an
+        // unsent frame; a partially transmitted frame finishes before stop.
+        let action = self.session.tick(now);
+        let heartbeat = match action {
+            LinkAction::Heartbeat(seq) => Some(seq),
+            LinkAction::SafeStop => {
+                if !self.link_loss_reported {
+                    out.link_loss = true;
+                    self.link_loss_reported = true;
                 }
-                LinkAction::SafeStop => {
-                    if !self.link_loss_reported {
-                        out.link_loss = true;
-                        self.link_loss_reported = true;
-                    }
-                    if self.request_estop(true) {
-                        self.session.estop_sent();
-                    }
-                }
-                LinkAction::Idle => {}
+                self.queue_estop(true);
+                None
+            }
+            LinkAction::Idle => None,
+        };
+        // This sender-side age bound is independent of the MCU receive
+        // watchdog. A partial frame (and bytes already in the UART FIFO) cannot
+        // be retracted, but obsolete work that has sent no byte is discarded.
+        self.tx.discard_expired_motor(now, LINK_TIMEOUT_NS);
+        self.cancel_unsent_for_stop();
+        let estop_queue_empty = self.flush_pending_estop(now);
+        if matches!(action, LinkAction::SafeStop) && !self.has_pending_estop_assert() {
+            self.session.estop_sent();
+        }
+        if estop_queue_empty && self.tx.is_idle() {
+            self.flush_pending_motor(now);
+        }
+        if estop_queue_empty && self.tx.is_idle() {
+            if let Some(seq) = heartbeat {
+                let _ = self.enqueue(&Msg::HeartbeatToShrike { seq }, now);
             }
         }
 
         // TX: bounded drain. Stop when the FIFO is full (write_byte won't spin).
         let mut sent = 0;
         while sent < TX_PER_POLL && !self.uart.tx_full() {
-            match self.tx.pop() {
-                Some(b) => {
-                    self.uart.write_byte(b);
-                    sent += 1;
-                }
-                None => break,
-            }
+            let Some(byte) = self.tx.next_byte() else {
+                break;
+            };
+            self.uart.write_byte(byte);
+            sent += 1;
         }
         out
     }
 
     /// Enqueue a whole frame, or nothing (never a partial/torn frame). Returns
     /// false if it doesn't fit.
-    fn enqueue(&mut self, msg: &Msg) -> bool {
-        let mut buf = [0u8; MAX_FRAME];
-        let n = match encode(msg, &mut buf) {
-            Ok(n) => n,
-            Err(_) => return false,
-        };
-        if RING_BYTES - self.tx.len() < n {
-            return false;
-        }
-        for &b in &buf[..n] {
-            self.tx.push(b);
-        }
-        true
+    fn enqueue(&mut self, msg: &Msg, now: u64) -> bool {
+        self.tx.start(msg, now)
     }
 
-    fn request_estop(&mut self, assert: bool) -> bool {
+    fn request_estop(&mut self, assert: bool, now: u64) -> bool {
+        self.queue_estop(assert);
+        self.cancel_unsent_for_stop();
+        self.flush_pending_estop(now)
+    }
+
+    fn queue_estop(&mut self, assert: bool) {
+        if assert {
+            self.tx.clear_motor();
+        }
         self.pending_estop = match (self.pending_estop, assert) {
             (None, true) | (Some(PendingEstop::Release), true) => Some(PendingEstop::Assert),
             (None, false) | (Some(PendingEstop::Release), false) => Some(PendingEstop::Release),
@@ -259,16 +269,21 @@ impl ControlLink {
                 Some(PendingEstop::AssertThenRelease)
             }
         };
-        self.flush_pending_estop()
     }
 
-    fn flush_pending_estop(&mut self) -> bool {
-        while let Some(pending) = self.pending_estop {
+    fn cancel_unsent_for_stop(&mut self) {
+        if self.has_pending_estop_assert() {
+            self.tx.cancel_unsent();
+        }
+    }
+
+    fn flush_pending_estop(&mut self, now: u64) -> bool {
+        if let Some(pending) = self.pending_estop {
             let assert = match pending {
                 PendingEstop::Assert | PendingEstop::AssertThenRelease => true,
                 PendingEstop::Release => false,
             };
-            if !self.enqueue(&Msg::Estop { assert }) {
+            if !self.enqueue(&Msg::Estop { assert }, now) {
                 return false;
             }
             self.pending_estop = match pending {
@@ -286,25 +301,28 @@ impl ControlLink {
         )
     }
 
-    /// Update one wheel and enqueue the combined `MotorSetpoint`.
-    fn set_motor(&mut self, side: MotorSide, permille: i16) -> bool {
-        if !self.flush_pending_estop() {
+    fn set_motor_pair(&mut self, left: i16, right: i16, now: u64) -> bool {
+        if self.has_pending_estop_assert() && (left != 0 || right != 0) {
             return false;
         }
+        self.tx.replace_motor(left, right, now);
+        true
+    }
 
-        let mut left = self.motor_left;
-        let mut right = self.motor_right;
-        match side {
-            MotorSide::Left => left = permille,
-            MotorSide::Right => right = permille,
-        }
+    fn set_safe_motor_pair(&mut self, now: u64) -> bool {
+        self.tx.prioritize_motor(0, 0, now);
+        true
+    }
+
+    fn flush_pending_motor(&mut self, _now: u64) -> bool {
+        let Some((left, right, queued_at)) = self.tx.take_motor() else {
+            return true;
+        };
         let seq = self.motor_seq.wrapping_add(1);
-        if !self.enqueue(&Msg::MotorSetpoint { seq, left, right }) {
+        if !self.enqueue(&Msg::MotorSetpoint { seq, left, right }, queued_at) {
+            self.tx.replace_motor(left, right, queued_at);
             return false;
         }
-
-        self.motor_left = left;
-        self.motor_right = right;
         self.motor_seq = seq;
         true
     }
@@ -335,12 +353,15 @@ pub fn service() {
     let now = now_ns();
     let Some(out) = with_link(|l| l.poll_decode(now)) else {
         if !LINK_UNINITIALIZED_REPORTED.swap(true, Ordering::AcqRel) {
+            #[cfg(feature = "trace-control-link")]
             let chunk_id = NEXT_CHUNK_ID.fetch_add(1, Ordering::Relaxed);
+            #[cfg(feature = "trace-control-link")]
             crate::serial_println!("V04_CHUNK chunk_id={} stage=start ts_ns={}", chunk_id, now);
             crate::serial_println!(
                 "V04_FAILURE reason=link_uninitialized count=1 ts_ns={}",
                 now
             );
+            #[cfg(feature = "trace-control-link")]
             crate::serial_println!(
                 "V04_CHUNK chunk_id={} stage=end ts_ns={}",
                 chunk_id,
@@ -350,7 +371,11 @@ pub fn service() {
         return;
     };
 
+    // Empty polls are work, not events. Trace them only when measuring link
+    // cadence; their sustained text output can exceed the deferred UART drain.
+    #[cfg(feature = "trace-control-link")]
     let chunk_id = NEXT_CHUNK_ID.fetch_add(1, Ordering::Relaxed);
+    #[cfg(feature = "trace-control-link")]
     crate::serial_println!("V04_CHUNK chunk_id={} stage=start ts_ns={}", chunk_id, now);
     // Side-effects OUTSIDE the CONTROL_LINK lock (thread context).
     if out.overflow_count != 0 {
@@ -389,6 +414,7 @@ pub fn service() {
         );
         dispatch_ultrasonic(timestamp, *echo, *sample_id);
     }
+    #[cfg(feature = "trace-control-link")]
     crate::serial_println!(
         "V04_CHUNK chunk_id={} stage=end ts_ns={}",
         chunk_id,
@@ -427,12 +453,10 @@ fn init() {
         Mutex::new(ControlLink {
             uart,
             rx: RingBuf::new(),
-            tx: RingBuf::new(),
+            tx: TxState::new(),
             dec: Decoder::new(),
             rx_overflows: 0,
             session: LinkSession::new(LINK_TIMEOUT_NS, HEARTBEAT_PERIOD_NS),
-            motor_left: 0,
-            motor_right: 0,
             motor_seq: 0,
             pending_estop: None,
             link_loss_reported: false,
@@ -475,38 +499,42 @@ pub fn link_alive() -> bool {
     with_link(|l| l.session.alive(now)).unwrap_or(false)
 }
 
-/// Route a monitor-clamped motor duty to the link as a `MotorSetpoint`. Returns
-/// true if the setpoint was enqueued. `value` is a monitor-approved signed
-/// magnitude/direction command.
-pub fn send_motor(side: MotorSide, value: i32) -> bool {
-    let permille = signed_duty_to_permille(value, ActiveProfile::ACT_DUTY_MAX);
-    with_link(|l| {
-        if !l.set_motor(side, permille) {
-            return false;
-        }
-        if let Some(sample_id) = crate::driver::iio::take_v04_motor_sample_id() {
-            crate::serial_println!(
-                "V04_MOTOR_CMD sample_id={} seq={} left={} right={} ts_ns={}",
-                sample_id,
-                l.motor_seq,
-                l.motor_left,
-                l.motor_right,
-                now_ns()
-            );
-        }
-        true
-    })
-    .unwrap_or(false)
+/// Retain the latest monitor-approved complete pair for `MotorSetpoint` TX.
+/// `true` means queued locally; the Shrike/FPGA has not acknowledged application.
+pub fn send_motor_pair(left: i16, right: i16) -> bool {
+    let now = now_ns();
+    with_link(|l| l.session.alive(now) && l.set_motor_pair(left, right, now)).unwrap_or(false)
+}
+
+/// Put a fresh zero pair ahead of obsolete unsent motion without changing the
+/// peer e-stop latch. A partially transmitted frame still finishes first.
+pub fn send_safe_motor_pair() -> bool {
+    let now = now_ns();
+    with_link(|l| l.session.alive(now) && l.set_safe_motor_pair(now)).unwrap_or(false)
+}
+
+pub fn report_motor_queued(left: i16, right: i16) {
+    if let Some(sample_id) = crate::driver::iio::take_v04_motor_sample_id() {
+        crate::serial_println!(
+            "V04_MOTOR_QUEUED sample_id={} left={} right={} ts_ns={}",
+            sample_id,
+            left,
+            right,
+            now_ns()
+        );
+    }
 }
 
 /// Command the RP2040 e-stop latch. Returns true if all pending e-stop commands
 /// are queued; otherwise the poller will retry before heartbeats/motor setpoints.
 pub fn command_estop(assert: bool) -> bool {
-    with_link(|l| l.request_estop(assert)).unwrap_or(false)
+    let now = now_ns();
+    with_link(|l| l.request_estop(assert, now)).unwrap_or(false)
 }
 
 /// Enqueue a message for transmission after any pending e-stop command.
 /// False if link down, full, or an earlier e-stop command still cannot fit.
 pub fn send(msg: &Msg) -> bool {
-    with_link(|l| l.flush_pending_estop() && l.enqueue(msg)).unwrap_or(false)
+    let now = now_ns();
+    with_link(|l| l.flush_pending_estop(now) && l.enqueue(msg, now)).unwrap_or(false)
 }

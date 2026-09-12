@@ -269,8 +269,13 @@ impl Rp1Gpio {
     /// peripheral signal (e.g. PWM) actually reaches the pin.
     pub fn configure_peripheral_output(&self, pin: u8, func: GpioFunction) {
         self.set_function(pin, func);
-        self.reg_ctrl(pin)
-            .modify(|v| (v & !ctrl::OEOVER_MASK) | (ctrl::OEOVER_ENABLE << ctrl::OEOVER_SHIFT));
+        // GPIO set_low/set_high use OUTOVER. Release that forced level when
+        // handing the pad to a peripheral; FUNCSEL alone cannot override it.
+        // The caller must prepare a safe peripheral output before this handoff.
+        self.reg_ctrl(pin).modify(|v| {
+            (v & !(ctrl::OEOVER_MASK | ctrl::OUTOVER_MASK))
+                | (ctrl::OEOVER_ENABLE << ctrl::OEOVER_SHIFT)
+        });
         // Clear output-disable so the pad drives; keep the input buffer on so
         // the driven level can be read back for the boot self-test.
         self.reg_pad(pin)

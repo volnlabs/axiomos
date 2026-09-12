@@ -87,6 +87,7 @@ This catalog contains only interfaces dispatched by shipped kernels. Reserved sy
 | 1003 | `BPF_HELPER_GPIO_SET` | Raspberry Pi 5 |
 | 1004 | `BPF_HELPER_GPIO_GET` | Raspberry Pi 5 |
 | 1005 | `BPF_HELPER_PWM_WRITE` | Raspberry Pi 5 |
+| 1008 | `BPF_HELPER_MOTOR_PAIR_V1` | Raspberry Pi 5 (experimental v1) |
 
 ## BPF attach types
 
@@ -94,7 +95,6 @@ This catalog contains only interfaces dispatched by shipped kernels. Reserved sy
 |---:|---|---|
 | 1 | `BPF_ATTACH_TYPE_TIMER` | cloud and embedded profiles |
 | 2 | `BPF_ATTACH_TYPE_GPIO` | Raspberry Pi 5 |
-| 3 | `BPF_ATTACH_TYPE_PWM` | Raspberry Pi 5 |
 | 4 | `BPF_ATTACH_TYPE_IIO` | Raspberry Pi 5 |
 | 5 | `BPF_ATTACH_TYPE_SYS_ENTER` | cloud and embedded profiles |
 | 6 | `BPF_ATTACH_TYPE_SYS_EXIT` | cloud and embedded profiles |

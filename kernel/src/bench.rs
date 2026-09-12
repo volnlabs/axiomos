@@ -17,14 +17,24 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+#[cfg(all(
+    feature = "bench-pwm",
+    any(
+        feature = "bench-reflex-rearm",
+        feature = "bench-estop-rearm",
+        feature = "bench-paired-overhead"
+    )
+))]
+compile_error!("bench-pwm is a one-shot unloaded diagnostic; do not combine it with rearm or paired-overhead benches");
+
 /// Sensor pin: the reflex fires on this pin's rising edge.
 pub const REFLEX_SENSOR_PIN: u8 = 23;
 /// E-stop button pin (NC-held-high; open/press/broken wire pulls low).
 pub const ESTOP_BUTTON_PIN: u8 = 24;
-/// PWM controller the reflex and demo drive (PWM0).
-/// Reflex-output PWM carrier. At 100% duty this holds GPIO12 high until the
-/// reflex writes duty 0, giving V03-B a single GPIO12 falling edge to measure.
+/// Requested PWM carrier frequency. Measure the physical period separately.
 pub const BENCH_PWM_FREQ_HZ: u32 = 10_000;
+/// A visible carrier through the ordinary monitor envelope, not DC high.
+pub const BENCH_PWM_DUTY_PERCENT: u32 = 50;
 pub const BENCH_PWM_CHIP: u32 = 0;
 /// PWM channel the reflex and demo drive, in the monitor's 1-based numbering.
 /// Channel 1 maps to RP1 PWM0 hardware channel 0 = GPIO12 (Alt0).
@@ -45,7 +55,10 @@ pub enum ReflexOutput {
 
 /// Selects the reflex output path for this build. Two experiments on one rig;
 /// build one image per mode and report both latency numbers.
+#[cfg(not(feature = "bench-pwm"))]
 pub const BENCH_REFLEX_OUTPUT: ReflexOutput = ReflexOutput::Gpio;
+#[cfg(feature = "bench-pwm")]
+pub const BENCH_REFLEX_OUTPUT: ReflexOutput = ReflexOutput::Pwm;
 
 /// True when an actuation targets the local PWM output reserved for Task 11.
 #[inline]
@@ -61,6 +74,7 @@ pub fn is_bench_pwm_output(chip: u8, channel: u8) -> bool {
 #[inline]
 #[cfg(any(
     feature = "bench-estop-rearm",
+    feature = "bench-reflex-rearm",
     all(target_arch = "aarch64", feature = "rpi5")
 ))]
 fn arm_reflex_output() -> (&'static str, i64) {
@@ -68,7 +82,11 @@ fn arm_reflex_output() -> (&'static str, i64) {
         ReflexOutput::Gpio => ("gpio", crate::actuation::guard_gpio(BENCH_PWM_PIN, 1)),
         ReflexOutput::Pwm => (
             "pwm",
-            crate::actuation::guard_pwm(BENCH_PWM_CHIP as u8, BENCH_PWM_CHANNEL as u8, 100),
+            crate::actuation::guard_pwm(
+                BENCH_PWM_CHIP as u8,
+                BENCH_PWM_CHANNEL as u8,
+                BENCH_PWM_DUTY_PERCENT,
+            ),
         ),
     }
 }
@@ -141,6 +159,35 @@ pub fn mark_gpio_irq_entry() {
     GPIO_IRQ_SAMPLE_ID.store(sample_id, Ordering::Release);
 }
 
+/// Capture identity before the normal M-C reporter consumes the IRQ stamp.
+#[cfg(feature = "bench-pwm-containment")]
+pub fn pwm_request_sample_id() -> u64 {
+    GPIO_IRQ_SAMPLE_ID.load(Ordering::Acquire)
+}
+
+/// Bench-only post-helper readback of the one physically observed PWM channel.
+/// Invalid requests are logged too, without applying anything to their target.
+#[cfg(feature = "bench-pwm-containment")]
+pub fn report_pwm_request(sample_id: u64, chip: u32, channel: u32, duty: u32, code: i64) {
+    #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+    {
+        use crate::arch::aarch64::platform::rpi5::pwm::PWM0;
+        let (_, _, range, applied_duty) = PWM0.lock().debug_regs(BENCH_PWM_CHANNEL as u8);
+        crate::serial_println!(
+            "PI5_PWM_REQUEST sample_id={} chip={} channel={} requested={} code={} range={} duty={}",
+            sample_id,
+            chip,
+            channel,
+            duty,
+            code,
+            range,
+            applied_duty
+        );
+    }
+    #[cfg(not(all(target_arch = "aarch64", feature = "rpi5")))]
+    let _ = (sample_id, chip, channel, duty, code);
+}
+
 /// Read and clear the GPIO IRQ-entry stamp (0 if none). Ensures the stamp is
 /// consumed exactly once so it can never leak into a later actuation's report.
 #[inline]
@@ -150,32 +197,26 @@ pub fn take_gpio_irq_entry() -> Option<(u64, u64)> {
     (sample_id != 0 && entry != 0).then_some((sample_id, entry))
 }
 
-/// Report monitor decision overhead (M-A). Logged on every guarded actuation.
-/// Emits a compact serial marker so a host reducer can build the distribution
-/// (`log::info` does not reach the Pi UART).
-#[inline]
-pub fn report_monitor_overhead(decide_cycles: u64) {
-    let sample_id = GPIO_IRQ_SAMPLE_ID.load(Ordering::Acquire);
-    if sample_id != 0 {
-        crate::serial_println!(
-            "PI5_MA sample_id={} monitor_ns={}",
-            sample_id,
-            cycles_to_ns(decide_cycles)
-        );
-    }
-}
-
-/// Report edge->actuate latency for the GPIO IRQ currently in flight (M-C).
-/// No-op outside a GPIO IRQ (when no entry stamp is set); consumes the stamp so
-/// a later non-IRQ actuation cannot reuse it.
-pub fn report_edge_to_actuate(kind: &str, channel: u8, value: u32) {
+/// Report M-A and M-C only after the local output write has been issued and
+/// timestamped. M-C begins at this GPIO handler's software stamp, not at the
+/// external sensor edge; physical edge latency requires the analyzer.
+pub fn report_edge_to_actuate(
+    kind: &str,
+    channel: u8,
+    value: u32,
+    monitor_cycles: u64,
+    applied_at: u64,
+) {
     let Some((sample_id, start)) = take_gpio_irq_entry() else {
         return;
     };
-    let ns = cycles_to_ns(now_cycles().wrapping_sub(start));
+    let ns = cycles_to_ns(applied_at.wrapping_sub(start));
     REFLEX_SAMPLE_ID.store(sample_id, Ordering::Release);
-    // Compact serial marker for the V03-B latency distribution (edge -> actuate,
-    // M-C). One line per sensor edge; the host reducer parses `ns=`.
+    crate::serial_println!(
+        "PI5_MA sample_id={} monitor_ns={}",
+        sample_id,
+        cycles_to_ns(monitor_cycles)
+    );
     crate::serial_println!(
         "PI5_MC sample_id={} ns={} kind={} ch={} val={}",
         sample_id,
@@ -206,21 +247,23 @@ pub fn rearm_reflex_after_sample() {
 /// Handle the physical e-stop button (M-B), called from the GPIO IRQ handler
 /// with `pressed` already resolved from the edge/level. Pressed => operator
 /// trigger; released => operator release. Routes through the kernel-owned e-stop,
-/// the same path as `sys_estop`. M-B is timed from IRQ entry to "all channels
-/// safe", and the IRQ-entry stamp is consumed here either way so it cannot leak
-/// into a later actuation's M-C line.
+/// the same path as `sys_estop`. M-B ends after the local safe writes are
+/// issued, before link notification or logging. It does not measure physical
+/// pad propagation or downstream motor shutdown. The entry stamp is consumed
+/// either way so it cannot leak into another actuation's M-C line.
 pub fn handle_estop_button(pressed: bool) {
     use kernel_bpf::actuation::EstopAction;
     let entry = take_gpio_irq_entry();
     if pressed {
-        crate::actuation::operator_estop(EstopAction::Trigger);
+        let (code, applied_at) = crate::actuation::operator_estop_timed(EstopAction::Trigger);
         if let Some((sample_id, entry)) = entry {
             ESTOP_SAMPLE_ID.store(sample_id, Ordering::Release);
-            let ns = cycles_to_ns(now_cycles().wrapping_sub(entry));
-            log::info!("[bench] M-B estop irq-entry->safe latency_ns={}", ns);
-            // Emit only after operator_estop(Trigger) has applied every safe
-            // drive and returned, so this is the physical press -> safe latency.
-            crate::serial_println!("PI5_MB sample_id={} ns={}", sample_id, ns);
+            if let (0, Some(applied_at)) = (code, applied_at) {
+                let ns = cycles_to_ns(applied_at.wrapping_sub(entry));
+                crate::serial_println!("PI5_MB sample_id={} ns={}", sample_id, ns);
+            } else {
+                crate::serial_println!("PI5_BENCH_FAIL stage=estop_apply sample_id={}", sample_id);
+            }
         }
     } else {
         let release_code = crate::actuation::operator_estop(EstopAction::Release);
@@ -309,7 +352,10 @@ pub fn run_containment_corpus() {
     let mut safed = 0u32;
     let mut clamps = 0u32;
 
-    let mut mon = crate::actuation::ACTUATION_MONITOR.lock();
+    // This is a decision-model benchmark, not the live actuation path. A local
+    // monitor also prevents serial output from holding the IRQ-shared monitor.
+    let mut mon = kernel_bpf::actuation::Monitor::<kernel_bpf::profile::ActiveProfile>::new();
+    crate::serial_println!("PI5_V03C_SCOPE model_only=true physical_acceptance=false");
     for sample_id in 1..=N {
         let r = next();
         let kind = if r & 1 == 0 {
@@ -390,7 +436,6 @@ pub fn run_containment_corpus() {
             clamps += 1;
         }
     }
-    drop(mon);
 
     crate::serial_println!(
         "PI5_V03C_SUMMARY n={} escapes={} safed={} clamps={} seed=0x{:016x}",
@@ -451,58 +496,32 @@ pub fn init() -> bool {
         }
     };
 
+    crate::serial_println!(
+        "PI5_BENCH_TIMING mc=handler_to_local_write mb=handler_to_local_safe_writes counter_hz={}",
+        counter_freq()
+    );
+
     // V03-C: prove on-device that no invalid/out-of-envelope request escapes the
     // monitor. Runs before the reflex is armed; monitor-decision only, no MMIO.
     run_containment_corpus();
 
-    // Configure the reflex output pin (GPIO12). GPIO mode drives it as a plain
-    // GPIO output; PWM mode routes it to the PWM0 peripheral (Alt0).
-    match BENCH_REFLEX_OUTPUT {
-        ReflexOutput::Gpio => gpio.configure_output(BENCH_PWM_PIN, false),
-        ReflexOutput::Pwm => gpio.configure_peripheral_output(BENCH_PWM_PIN, GpioFunction::Alt0),
-    }
+    // Keep the pad GPIO-low while preparing PWM, including on a warm reboot.
+    // No direct high-output self-test: nonzero actuation goes through ARM-A.
+    gpio.configure_output(BENCH_PWM_PIN, false);
 
     #[cfg(feature = "bench-paired-overhead")]
     run_paired_overhead();
 
-    // Pad-driver self-test: force the pad high then low via the CTRL override,
-    // bypassing PWM. If this toggles the read-back level but the PWM duty test
-    // below does not, the pad + readback are fine and the PWM counter/clock is
-    // the dead layer. Restores normal (peripheral-driven) output after.
-    gpio.force_output_override(BENCH_PWM_PIN, Some(true));
-    let pad_drive_high = gpio.interrupt_state(BENCH_PWM_PIN).status;
-    gpio.force_output_override(BENCH_PWM_PIN, Some(false));
-    let pad_drive_low = gpio.interrupt_state(BENCH_PWM_PIN).status;
-    gpio.force_output_override(BENCH_PWM_PIN, None);
-    crate::serial_println!(
-        "PI5_PAD_SELFTEST drive_high=0x{:08x} drive_low=0x{:08x} toggled={}",
-        pad_drive_high,
-        pad_drive_low,
-        pad_drive_high != pad_drive_low
-    );
-
-    // PWM mode only: enable the PWM0 functional clock and the channel (output
-    // held LOW), then self-test the output by driving DC high/low. The HIGH arm
-    // later goes through the e-stop-guarded actuation path, never a raw write.
     if BENCH_REFLEX_OUTPUT == ReflexOutput::Pwm {
-        use crate::arch::aarch64::platform::rpi5::pwm::{enable_pwm0_clock, pwm0_clock_ctrl, PWM0};
+        use crate::arch::aarch64::platform::rpi5::pwm::{enable_pwm0_clock, PWM0};
         enable_pwm0_clock();
         let pwm = PWM0.lock();
+        pwm.disable(BENCH_PWM_CHANNEL as u8);
         pwm.set_frequency(BENCH_PWM_CHANNEL as u8, BENCH_PWM_FREQ_HZ);
         pwm.set_duty_cycle(BENCH_PWM_CHANNEL as u8, 0);
         pwm.enable(BENCH_PWM_CHANNEL as u8);
-
-        pwm.set_duty_cycle(BENCH_PWM_CHANNEL as u8, 100);
-        let status_high = gpio.interrupt_state(BENCH_PWM_PIN).status;
-        pwm.set_duty_cycle(BENCH_PWM_CHANNEL as u8, 0);
-        let status_low = gpio.interrupt_state(BENCH_PWM_PIN).status;
-        crate::serial_println!(
-            "PI5_PWM_SELFTEST clk_ctrl=0x{:08x} status_high=0x{:08x} status_low=0x{:08x} toggled={}",
-            pwm0_clock_ctrl(),
-            status_high,
-            status_low,
-            status_high != status_low
-        );
+        drop(pwm);
+        gpio.configure_peripheral_output(BENCH_PWM_PIN, GpioFunction::Alt0);
     }
     gpio.configure_input(REFLEX_SENSOR_PIN);
     gpio.configure_input(ESTOP_BUTTON_PIN);
@@ -513,8 +532,13 @@ pub fn init() -> bool {
     gpio.set_pull(ESTOP_BUTTON_PIN, GpioPull::Down);
     let initial_estop_pressed = !gpio.read(ESTOP_BUTTON_PIN);
     handle_estop_button(initial_estop_pressed);
-    // Sensor: rising edge only. Button: both edges (press + release).
-    gpio.enable_interrupt(REFLEX_SENSOR_PIN, true, false);
+    // Containment uses two separate edge routes: clamp on rise, reject on fall.
+    // Other sensor benches fire only on rising edges.
+    gpio.enable_interrupt(
+        REFLEX_SENSOR_PIN,
+        true,
+        cfg!(feature = "bench-pwm-containment"),
+    );
     gpio.enable_interrupt(ESTOP_BUTTON_PIN, true, true);
     let sensor_irq = gpio.interrupt_state(REFLEX_SENSOR_PIN);
     let estop_irq = gpio.interrupt_state(ESTOP_BUTTON_PIN);
@@ -535,20 +559,58 @@ pub fn init() -> bool {
         return false;
     }
 
-    // Build + load + attach the reflex: on the sensor edge it drives the output
-    // to its safe value (GPIO low, or PWM duty 0) through the actuation monitor.
-    let insns = match BENCH_REFLEX_OUTPUT {
-        ReflexOutput::Gpio => kernel_bpf::bench::reflex_gpio_program(BENCH_PWM_PIN as u32, 0),
-        ReflexOutput::Pwm => {
-            kernel_bpf::bench::reflex_pwm_program(BENCH_PWM_CHIP, BENCH_PWM_CHANNEL, 0)
-        }
-    };
     let Some(manager) = crate::BPF_MANAGER.get() else {
         log::error!("[bench] BPF manager not initialized; reflex not loaded");
         crate::serial_println!("PI5_BENCH_FAIL stage=bpf_manager_missing");
         return false;
     };
     let mut mgr = manager.lock();
+    #[cfg(feature = "bench-pwm-corpus")]
+    let counter_map_id = match mgr.create_map(kernel_bpf::maps::MapType::Array as u32, 4, 8, 1) {
+        // Array values start at zero. Both programs use this kernel-owned
+        // map; serialized IRQ dispatch advances one phase per edge.
+        Ok(id) => id,
+        Err(error) => {
+            crate::serial_println!("PI5_BENCH_FAIL stage=corpus_map error={:?}", error);
+            return false;
+        }
+    };
+    let insns = match BENCH_REFLEX_OUTPUT {
+        ReflexOutput::Gpio => kernel_bpf::bench::reflex_gpio_program(BENCH_PWM_PIN as u32, 0),
+        ReflexOutput::Pwm => {
+            #[cfg(feature = "bench-pwm-corpus")]
+            {
+                kernel_bpf::bench::containment_pwm_program(counter_map_id, false)
+            }
+            #[cfg(not(feature = "bench-pwm-corpus"))]
+            {
+                let duty = if cfg!(feature = "bench-pwm-containment") {
+                    u32::MAX
+                } else {
+                    0
+                };
+                kernel_bpf::bench::reflex_pwm_program(BENCH_PWM_CHIP, BENCH_PWM_CHANNEL, duty)
+            }
+        }
+    };
+    #[cfg(feature = "bench-pwm-containment")]
+    {
+        // Invalid channels must leave channel 1's clamped output unchanged.
+        #[cfg(feature = "bench-pwm-corpus")]
+        let invalid = kernel_bpf::bench::containment_pwm_program(counter_map_id, true);
+        #[cfg(not(feature = "bench-pwm-corpus"))]
+        let invalid = kernel_bpf::bench::reflex_pwm_program(BENCH_PWM_CHIP, 3, u32::MAX);
+        let route = mgr
+            .load_kernel_builtin_program(invalid)
+            .and_then(|id| mgr.attach_gpio_route(0, REFLEX_SENSOR_PIN, GpioEdge::Falling, id));
+        if let Err(error) = route {
+            crate::serial_println!(
+                "PI5_BENCH_FAIL stage=containment_reject_route error={:?}",
+                error
+            );
+            return false;
+        }
+    }
     match mgr.load_kernel_builtin_program(insns) {
         Ok(prog_id) => {
             if let Err(e) = mgr.attach_gpio_route(0, REFLEX_SENSOR_PIN, GpioEdge::Rising, prog_id) {
@@ -572,6 +634,19 @@ pub fn init() -> bool {
                 gpio.ctrl_readback(BENCH_PWM_PIN),
                 gpio.pad_readback(BENCH_PWM_PIN)
             );
+            #[cfg(feature = "bench-pwm")]
+            crate::serial_println!(
+                "PI5_PWM_READY carrier_request_hz={} requested_duty_percent={} auto_rearm=false",
+                BENCH_PWM_FREQ_HZ,
+                BENCH_PWM_DUTY_PERCENT
+            );
+            #[cfg(feature = "bench-pwm-containment")]
+            crate::serial_println!(
+                "PI5_PWM_CONTAINMENT_READY requested=4294967295 clamp_percent={} reject_channel=3",
+                <kernel_bpf::profile::ActiveProfile as kernel_bpf::profile::PhysicalProfile>::ACT_DUTY_MAX
+            );
+            #[cfg(feature = "bench-pwm-corpus")]
+            crate::serial_println!("PI5_PWM_CORPUS_READY cases=5 requests_per_pulse=2");
             #[cfg(feature = "bench-estop-rearm")]
             crate::serial_println!("PI5_V03D_READY output={} auto_rearm=true", mode);
             #[cfg(feature = "bench-reflex-rearm")]
@@ -599,7 +674,7 @@ pub fn init() -> bool {
                 );
             }
             log::info!(
-                "[bench] reflex loaded id={} -> (gpiochip0, pin {}, rising) stops PWM{} ch{} on GPIO{}",
+                "[bench] reflex loaded id={} -> (gpiochip0, pin {}, rising) controls PWM{} ch{} on GPIO{}",
                 prog_id,
                 REFLEX_SENSOR_PIN,
                 BENCH_PWM_CHIP,

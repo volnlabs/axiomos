@@ -1,291 +1,252 @@
 #!/usr/bin/env bash
-# Shrike-driven GPIO23 multi-pulse probe.
-#
-# Wiring (see docs/hil-gpio23-schematic for the full diagram):
-#   Shrike GPIO22 --[ 220 ohm ]--> Pi GPIO23 / physical pin 16
-#   Shrike GND -------------------> Pi GND (pin 20 or 14)
-#   Logic D0 ---> Pi side of the resistor (pin 16 node = what RP1 sees)
-#   Logic D1 ---> Pi GPIO12 / physical pin 32 (reflex PWM output)
-#   Logic GND --> common GND
-#
-# The series resistor MUST be small (~220 ohm, not 2.2 kOhm). A 2.2 kOhm source
-# into the analyzer's input capacitance slows the GPIO23 rising edge enough that
-# the RP1 edge detector misses it: the node still reads a valid 3.3 V high and
-# the analyzer still triggers, but no interrupt is latched. 220 ohm keeps the
-# edge fast while still limiting fault current to ~15 mA on a 3.3 V clash.
-#
-# The script arms UART + logic capture, tells the operator when to power the Pi,
-# waits for the kernel's built-in reflex attachment, then emits repeated clean
-# GPIO22 pulses. PI5_BENCH_READY is printed only after that attachment succeeds.
+# Unloaded GPIO reflex capture; physical waveform review is still required.
+# Shrike GP22 -> 220 ohm -> Pi pin16/GPIO23, analyzer D0 (input1).
+# Shrike GP21 -> 220 ohm -> Pi pin18/GPIO24 (active-low e-stop).
+# Analyzer D1 (input2) -> Pi pin32/GPIO12. All grounds common.
+# No motors/drivers/actuators or static GPIO24-to-3.3V jumper permitted.
+# GPIO requires bench-reflex-rearm; PWM requires bench-pwm (or bench-pwm-containment).
+# GP21 is released before boot for initial arming,
+# then asserted in the pulse program's finally block and host cleanup.
 set -uo pipefail
 
-REPO="$(git rev-parse --show-toplevel)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUN_DIR="${RUN_DIR:-$REPO/artifacts/runs/axiomos-hil-20260720T134903Z/03-gpio}"
 PI_UART="${PI_UART:-/dev/serial/by-id/usb-Raspberry_Pi_Debug_Probe__CMSIS-DAP__E6633861A355B838-if01}"
 SHRIKE_UART="${SHRIKE_UART:-/dev/serial/by-id/usb-SHRIKE_Board_in_Micropython_Mode_de65143857942625-if00}"
-LOGIC_CONN="${LOGIC_CONN:-}"
+MPREMOTE="${MPREMOTE:-mpremote}"
+OUTPUT_MODE="${OUTPUT_MODE:-gpio}"
+LOGIC_CONN="${LOGIC_CONN:-fx2lafw}"
 SAMPLERATE="${SAMPLERATE:-24m}"
-SAMPLES="${SAMPLES:-25m}"
-UART_SECONDS="${UART_SECONDS:-45}"
-READY_TIMEOUT="${READY_TIMEOUT:-30}"
-TRIGGER="${TRIGGER:-1}"
+UART_SECONDS="${UART_SECONDS:-600}"
+READY_TIMEOUT="${READY_TIMEOUT:-120}"
+ANALYZER_READY_TIMEOUT="${ANALYZER_READY_TIMEOUT:-10}"
 PULSE_COUNT="${PULSE_COUNT:-5}"
 PULSE_HIGH_MS="${PULSE_HIGH_MS:-800}"
 PULSE_LOW_MS="${PULSE_LOW_MS:-800}"
+CAPTURE_MARGIN_MS=5000
 
-EXPECTED=(PI5_BENCH_READY PI5_V03B_READY PI5_GPIO_IRQ_PROVEN)
-FORBIDDEN=(PI5_BENCH_FAIL panic fatal watchdog)
-
-mkdir -p "$RUN_DIR"
-
-if [ "${ACTUATORS_MOTORS_DISCONNECTED:-}" != "YES" ]; then
-    echo "ABORT: disconnect all actuators and motors, then set ACTUATORS_MOTORS_DISCONNECTED=YES." >&2
-    exit 1
-fi
-
-idx=0
-for f in "$RUN_DIR"/shrike-gpio23-pulse-*; do
-    n=${f##*/shrike-gpio23-pulse-}
-    n=${n%%[-.]*}
-    case $n in
-        ''|*[!0-9]*) continue ;;
-    esac
-    [ "$((10#$n))" -gt "$idx" ] && idx=$((10#$n))
+die() { echo "ABORT: $*" >&2; exit 1; }
+[ "${ACTUATORS_MOTORS_DISCONNECTED:-}" = YES ] || die "disconnect motors, drivers and actuators; set ACTUATORS_MOTORS_DISCONNECTED=YES"
+for value in "$PULSE_COUNT" "$PULSE_HIGH_MS" "$PULSE_LOW_MS" "$UART_SECONDS" "$READY_TIMEOUT" "$ANALYZER_READY_TIMEOUT"; do
+    [[ "$value" =~ ^[1-9][0-9]{0,4}$ ]] || die "counts and durations must be positive decimal integers <= 99999"
 done
-PROBE="$(printf '%02d' "$((idx + 1))")"
-UART_LOG="$RUN_DIR/shrike-gpio23-pulse-$PROBE-uart.log"
-LOGIC_LOG="$RUN_DIR/shrike-gpio23-pulse-$PROBE.sr"
-
-require_rw() {
-    local path="$1"
-    local label="$2"
-    local target
-
-    if ! test -e "$path"; then
-        echo "ABORT: $label missing: $path" >&2
-        exit 1
-    fi
-
-    target="$(readlink -f "$path")"
-    if test -r "$path" && test -w "$path"; then
-        return 0
-    fi
-
-    echo "$label needs ACL on $target"
-    sudo setfacl -m "u:$(id -un):rw" "$target"
-}
-
-if ! command -v sigrok-cli >/dev/null; then
-    echo "ABORT: sigrok-cli not found" >&2
-    exit 1
+case "$SAMPLERATE" in
+    1m) SAMPLES_PER_MS=1000 ;;
+    24m) SAMPLES_PER_MS=24000 ;;
+    6m) [ "$OUTPUT_MODE" = pwm-corpus ] || die "6m is supported only for PWM corpus"; SAMPLES_PER_MS=6000 ;;
+    *) die "supported capture rates: 1m, 24m, or 6m (PWM corpus only)" ;;
+esac
+case "$OUTPUT_MODE" in
+    gpio) ;;
+    pwm) [ "$PULSE_COUNT" -eq 1 ] || die "OUTPUT_MODE=pwm requires PULSE_COUNT=1" ;;
+    pwm-containment|pwm-corpus)
+        if [ "$OUTPUT_MODE" = pwm-containment ]; then
+            [ "$PULSE_COUNT" -eq 1 ] || die "OUTPUT_MODE=pwm-containment requires PULSE_COUNT=1"
+        else
+            [ "$PULSE_COUNT" -le 500 ] && [ "$((PULSE_COUNT % 5))" -eq 0 ] || die "PWM corpus requires PULSE_COUNT to be a multiple of 5 <=500"
+        fi
+        [[ "$SAMPLERATE" = 24m || ( "$OUTPUT_MODE" = pwm-corpus && "$SAMPLERATE" = 6m ) ]] || die "PWM containment requires 24m, or 6m for corpus"
+        [ "$PULSE_HIGH_MS" -ge 100 ] && [ "$PULSE_LOW_MS" -ge 100 ] || die "PWM containment requires high and low durations >= 100ms"
+        ;;
+    *) die "OUTPUT_MODE must be gpio, pwm, pwm-containment or pwm-corpus" ;;
+esac
+CAPTURE_MS=$((PULSE_COUNT * (PULSE_HIGH_MS + PULSE_LOW_MS) + CAPTURE_MARGIN_MS))
+CAPTURE_SAMPLES=$((CAPTURE_MS * SAMPLES_PER_MS))
+CAPTURE_SECONDS=$(((CAPTURE_MS + 999) / 1000 + 10))
+if [ "$OUTPUT_MODE" = pwm-corpus ]; then
+    [ "$UART_SECONDS" -ge "$((READY_TIMEOUT + (CAPTURE_MS + 999) / 1000 + 30))" ] || die "UART_SECONDS must cover readiness, capture and 30s margin"
 fi
-if ! command -v mpremote >/dev/null; then
-    echo "ABORT: mpremote not found" >&2
-    exit 1
-fi
-
-require_rw "$PI_UART" "Pi UART"
-require_rw "$SHRIKE_UART" "Shrike UART"
-
-PI_DEV="$(readlink -f "$PI_UART")"
-UART_PID=""
-
-# A reader left over from a previous aborted run keeps the serial port open.
-# Two readers on one device split the byte stream, so markers like
-# PI5_BENCH_READY arrive corrupted and are never matched. Free the port first,
-# and guarantee our own reader dies on any exit path (killing the tee alone
-# leaves the cat blocked on read, which is exactly how the leak happens).
-free_pi_uart() {
-    if fuser "$PI_DEV" >/dev/null 2>&1; then
-        echo "Freeing stale reader(s) on $PI_DEV..."
-        fuser -k "$PI_DEV" 2>/dev/null || true
-        sleep 1
-    fi
+for command in "$MPREMOTE" sigrok-cli fuser rg timeout python3; do
+    command -v "$command" >/dev/null || die "missing command: $command"
+done
+for port in "$PI_UART" "$SHRIKE_UART"; do
+    [ -r "$port" ] && [ -w "$port" ] || die "no read/write access to $port; run with sudo"
+    ! fuser "$port" >/dev/null 2>&1 || die "port already open: $port; stop the other reader first"
+done
+mkdir -p "$RUN_DIR" || exit 1
+idx=0
+for file in "$RUN_DIR"/shrike-gpio23-pulse-*; do
+    number=${file##*/shrike-gpio23-pulse-}; number=${number%%[-.]*}
+    [[ "$number" =~ ^[0-9]+$ ]] || continue
+    [ "$((10#$number))" -le "$idx" ] || idx=$((10#$number))
+done
+PREFIX="$RUN_DIR/shrike-gpio23-pulse-$(printf '%02d' "$((idx + 1))")"
+UART_LOG="$PREFIX-uart.log"
+LOGIC_LOG="$PREFIX.sr"
+RAW_LOG="$PREFIX.bin"
+CONVERT_LOG="$PREFIX-convert.log"
+ANALYZER_LOG="$PREFIX-analyzer.log"
+SHRIKE_LOG="$PREFIX-shrike.log"
+printf 'rate=%s samples=%s count=%s high_ms=%s low_ms=%s output_mode=%s\n' \
+    "$SAMPLERATE" "$CAPTURE_SAMPLES" "$PULSE_COUNT" "$PULSE_HIGH_MS" "$PULSE_LOW_MS" "$OUTPUT_MODE" > "$PREFIX-config.txt" || die "could not retain capture configuration"
+UART_PID=""; LOGIC_PID=""; PULSE_PID=""; SHRIKE_TOUCHED=0
+set_safe() {
+    timeout --signal=TERM --kill-after=2s 12s "$MPREMOTE" connect "$SHRIKE_UART" resume exec \
+        "from machine import Pin; p=Pin(22, Pin.OUT, value=0); e=Pin(21, Pin.OUT, value=0); print('GPIO_SAFE', p.value(), e.value())" >> "$SHRIKE_LOG" 2>&1
 }
 cleanup() {
-    [ -n "$UART_PID" ] && kill "$UART_PID" 2>/dev/null || true
-    fuser -k "$PI_DEV" 2>/dev/null || true
+    local status=$?
+    for pid in "$PULSE_PID" "$LOGIC_PID" "$UART_PID"; do
+        if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
+    done
+    if [ "$SHRIKE_TOUCHED" -eq 1 ] && ! set_safe; then
+        echo "ABORT: could not set Shrike outputs LOW; power off the Pi." >&2
+        status=1
+    fi
+    return "$status"
 }
-trap cleanup EXIT INT TERM
-free_pi_uart
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-if [ -z "$LOGIC_CONN" ]; then
-    LOGIC_CONN="$(sigrok-cli --scan |
-        sed -n 's/^\(fx2lafw[^ ]*\) - Saleae Logic.*/\1/p' |
-        head -n 1)"
-fi
-if [ -z "$LOGIC_CONN" ]; then
-    echo "ABORT: logic analyzer not found" >&2
-    sigrok-cli --scan || true
-    exit 1
-fi
-
-echo "probe $PROBE"
-echo "  UART  -> $UART_LOG"
-echo "  logic -> $LOGIC_LOG"
-echo "  logic device: $LOGIC_CONN"
-echo
-
-echo "Setting Shrike GPIO22 idle low..."
-mpremote connect "$SHRIKE_UART" exec \
-  "from machine import Pin; p=Pin(22, Pin.OUT); p.value(0); print('GPIO22_LOW')"
-
-stty -F "$PI_UART" 115200 cs8 -cstopb -parenb -ixon -ixoff -crtscts raw -echo
-
-timeout --signal=INT --kill-after=2s "${UART_SECONDS}s" \
-  stdbuf -o0 cat "$PI_UART" |
-  stdbuf -o0 tr -d '\r' |
-  stdbuf -o0 tee "$UART_LOG" &
+SHRIKE_TOUCHED=1
+timeout --signal=TERM --kill-after=2s 12s "$MPREMOTE" connect "$SHRIKE_UART" resume exec \
+    "from machine import Pin; p=Pin(22, Pin.OUT, value=0); e=Pin(21, Pin.OUT, value=1); print('GPIO_READY', p.value(), e.value())" > "$SHRIKE_LOG" 2>&1 || die "Shrike initialization failed"
+stty -F "$PI_UART" 115200 cs8 -cstopb -parenb -ixon -ixoff -crtscts raw -echo || die "UART setup failed"
+timeout --signal=TERM --kill-after=2s "${UART_SECONDS}s" cat "$PI_UART" > "$UART_LOG" &
 UART_PID=$!
-
-sleep 1
-
-echo
-echo "CAPTURE ARMED."
-echo "Plug in / power on the Pi when countdown starts."
-for n in 5 4 3 2 1; do
-    echo "  $n"
-    sleep 1
-done
-echo "Pi should be powering now. Waiting for PI5_BENCH_READY..."
-
+echo "UART RECORDING — POWER ON THE PI NOW. Do not touch the stimulus."
+echo "Recording to $PREFIX; $PULSE_COUNT pulses will be automatic."
+check_uart() {
+    kill -0 "$UART_PID" 2>/dev/null || die "UART capture ended early"
+    ! rg -aiq 'PI5_BENCH_FAIL|PI5_BENCH_LOG_LOSS|panic|fatal|watchdog|SIGNED_BPF_(INPUT_MISSING|INPUT_INVALID|LOAD_REJECTED)' "$UART_LOG" || die "kernel failure marker"
+    if [ "$OUTPUT_MODE" = pwm ]; then
+        ! rg -aq 'PI5_PWM_CONTAINMENT_READY' "$UART_LOG" || die "wrong image: containment image requires OUTPUT_MODE=pwm-containment"
+    elif [ "$OUTPUT_MODE" = pwm-containment ]; then
+        ! rg -aq 'PI5_PWM_CORPUS_READY' "$UART_LOG" || die "wrong image: corpus image requires OUTPUT_MODE=pwm-corpus"
+    fi
+}
 waited=0
-until rg -aq 'PI5_BENCH_READY' "$UART_LOG" 2>/dev/null; do
-    if [ "$waited" -ge "$READY_TIMEOUT" ]; then
-        echo "FAIL: no PI5_BENCH_READY after ${READY_TIMEOUT}s"
-        kill "$UART_PID" 2>/dev/null || true
-        wait "$UART_PID" 2>/dev/null || true
-        exit 1
-    fi
-    sleep 1
-    waited=$((waited + 1))
+until rg -aq 'PI5_BENCH_READY' "$UART_LOG" && rg -aq 'SIGNED_BPF_LOAD_OK' "$UART_LOG"; do
+    check_uart
+    [ "$waited" -lt "$((READY_TIMEOUT * 10))" ] || die "boot readiness timeout"
+    sleep 0.1; waited=$((waited + 1))
 done
-
-echo "PI5_BENCH_READY seen; the built-in reflex is attached."
-if ! rg -aq 'PI5_V03B_READY output=gpio sample_ids=true auto_rearm=true' "$UART_LOG"; then
-    echo "FAIL: image lacks the bench-reflex-rearm diagnostic feature" >&2
-    exit 1
-fi
-echo "Sending $PULSE_COUNT Shrike GPIO22 pulses..."
-PULSE_TIMEOUT_SECONDS=$(((PULSE_COUNT * (PULSE_HIGH_MS + PULSE_LOW_MS)) / 1000 + 15))
-timeout --signal=INT --kill-after=2s "${PULSE_TIMEOUT_SECONDS}s" \
-  sigrok-cli \
-    -d "$LOGIC_CONN" \
-    -c "samplerate=$SAMPLERATE" \
-    -C D0,D1 \
-    ${TRIGGER:+-t D0=r} \
-    -w \
-    --samples "$SAMPLES" \
-    -O srzip \
-    -o "$LOGIC_LOG" &
-LOGIC_PID=$!
-
-sleep 1
-timeout --signal=INT --kill-after=2s "${PULSE_TIMEOUT_SECONDS}s" \
-  mpremote connect "$SHRIKE_UART" exec \
-  "from machine import Pin; import time; p=Pin(22, Pin.OUT); p.value(0); time.sleep_ms(500); print('MULTIPULSE_START')
-for _ in range($PULSE_COUNT): p.value(1); time.sleep_ms($PULSE_HIGH_MS); p.value(0); time.sleep_ms($PULSE_LOW_MS)
-print('MULTIPULSE_DONE')"
-
-wait "$LOGIC_PID"
-LOGIC_STATUS=$?
-wait "$UART_PID" || true
-
-echo
-echo "logic-analyzer exit: $LOGIC_STATUS"
-ls -lh "$UART_LOG" "$LOGIC_LOG" 2>/dev/null
-sha256sum "$UART_LOG" "$LOGIC_LOG" 2>/dev/null
-
-echo
-if [ ! -s "$LOGIC_LOG" ]; then
-    echo "NO LOGIC CAPTURE - $LOGIC_LOG missing or empty"
-    LOGIC_ANALYSIS_OK=0
+check_uart
+rg -aq 'PI5_BENCH_LOG_MODE deferred=true' "$UART_LOG" || die "wrong image: deferred bench logging required"
+if [ "$OUTPUT_MODE" = gpio ]; then
+    rg -aq 'PI5_V03B_READY output=gpio sample_ids=true auto_rearm=true' "$UART_LOG" || die "wrong image: bench-reflex-rearm required"
+    rg -aq 'PI5_OUT_ARM mode=gpio gpio=12 code=0 estop_asserted=false' "$UART_LOG" || die "initial output arm denied; check e-stop wiring"
 else
-    LOGIC_ANALYSIS_OK=1
-    sigrok-cli -i "$LOGIC_LOG" -O csv 2>/dev/null | python3 -c '
+    rg -aq 'PI5_PWM_READY carrier_request_hz=10000 requested_duty_percent=50 auto_rearm=false' "$UART_LOG" || die "wrong image: PWM smoke build required"
+    rg -aq 'PI5_OUT_ARM mode=pwm gpio=12 code=0 estop_asserted=false' "$UART_LOG" || die "initial PWM arm denied; check e-stop wiring"
+    if [[ "$OUTPUT_MODE" = pwm-containment || "$OUTPUT_MODE" = pwm-corpus ]]; then
+        rg -aqx 'PI5_PWM_CONTAINMENT_READY requested=4294967295 clamp_percent=90 reject_channel=3\r?' "$UART_LOG" &&
+            [ "$(rg -ac 'PI5_PWM_CONTAINMENT_READY' "$UART_LOG")" -eq 1 ] || die "wrong image: PWM containment marker required"
+        rg -aqx 'PI5_OUT_ARM mode=pwm gpio=12 code=0 estop_asserted=false gpio12_ctrl=0x0000c080 gpio12_pad=0x[0-9a-f]{8}\r?' "$UART_LOG" || die "PWM containment GPIO12 mux readback mismatch"
+    fi
+fi
+if [ "$OUTPUT_MODE" = pwm-corpus ]; then
+    rg -aqx 'PI5_PWM_CORPUS_READY cases=5 requests_per_pulse=2\r?' "$UART_LOG" &&
+        [ "$(rg -ac 'PI5_PWM_CORPUS_READY' "$UART_LOG")" -eq 1 ] || die "wrong image: five-case PWM corpus marker required"
+fi
+! rg -aq 'PI5_GPIO_IRQ_PROVEN' "$UART_LOG" || die "unexpected sensor edge before capture; cold boot required"
+
+# Continuous capture includes idle baseline, every pulse and the final stop.
+# libsigrok 0.5.2 rewrites srzip for every USB packet. Its growing archive work
+# can starve acquisition. Stream raw bytes here; package after capture stops.
+# Do not trigger on an edge that we have not yet authorized Shrike to generate.
+timeout --signal=TERM --kill-after=2s "${CAPTURE_SECONDS}s" \
+    sigrok-cli -l 4 -d "$LOGIC_CONN" -c "samplerate=$SAMPLERATE" -C D0,D1 \
+    --samples "$CAPTURE_SAMPLES" -O binary -o "$RAW_LOG" > "$ANALYZER_LOG" 2>&1 &
+LOGIC_PID=$!
+waited=0
+until rg -q 'Received SR_DF_LOGIC' "$ANALYZER_LOG"; do
+    check_uart
+    kill -0 "$LOGIC_PID" 2>/dev/null || die "analyzer exited before delivering data"
+    [ "$waited" -lt "$((ANALYZER_READY_TIMEOUT * 10))" ] || die "analyzer data timeout"
+    sleep 0.1; waited=$((waited + 1))
+done
+check_uart
+kill -0 "$LOGIC_PID" 2>/dev/null || die "analyzer ended before pulses"
+! rg -aq 'PI5_GPIO_IRQ_PROVEN' "$UART_LOG" || die "unexpected edge before pulses"
+echo "CAPTURE ACTIVE — sending $PULSE_COUNT pulses automatically. Keep hands off."
+timeout --signal=TERM --kill-after=2s "${CAPTURE_SECONDS}s" \
+    "$MPREMOTE" connect "$SHRIKE_UART" resume exec \
+    "from machine import Pin; import time
+p=Pin(22, Pin.OUT, value=0); e=Pin(21, Pin.OUT)
+try:
+    print('MULTIPULSE_START')
+    for _ in range($PULSE_COUNT):
+        p.value(1); time.sleep_ms($PULSE_HIGH_MS)
+        p.value(0); time.sleep_ms($PULSE_LOW_MS)
+finally:
+    p.value(0); e.value(0)
+print('MULTIPULSE_DONE', p.value(), e.value())" >> "$SHRIKE_LOG" 2>&1 &
+PULSE_PID=$!
+while kill -0 "$PULSE_PID" 2>/dev/null; do
+    check_uart
+    kill -0 "$LOGIC_PID" 2>/dev/null || die "capture ended before pulses completed"
+    sleep 0.1
+done
+wait "$PULSE_PID" || die "Shrike pulse command failed"
+PULSE_PID=""
+rg -q 'MULTIPULSE_DONE 0 0' "$SHRIKE_LOG" || die "Shrike did not confirm pulse completion and final LOW state"
+while kill -0 "$LOGIC_PID" 2>/dev/null; do check_uart; sleep 0.1; done
+wait "$LOGIC_PID" || die "analyzer failed"
+LOGIC_PID=""
+check_uart
+set_safe || die "could not assert final e-stop; power off Pi"
+SHRIKE_TOUCHED=0
+kill "$UART_PID" 2>/dev/null || true
+wait "$UART_PID" 2>/dev/null || true
+UART_PID=""
+# FX2 D0/D1 use one raw byte per sample. A short stream must never pass merely
+# because sigrok exited zero. Keep the original binary even if packaging fails.
+python3 - "$RAW_LOG" "$CAPTURE_SAMPLES" <<'PY' || die "raw sample count mismatch; retain capture for diagnosis"
+from pathlib import Path
 import sys
-triggered = sys.argv[1] != ""
-prev = None
-rising = falling = n = 0
-first = None
-for line in sys.stdin:
-    line = line.strip()
-    if not line or line[0] in ";t":
-        continue
-    parts = line.split(",")
-    try:
-        d0 = int(parts[-2])
-        d1 = int(parts[-1])
-    except (ValueError, IndexError):
-        continue
-    if prev is not None and d0 != prev:
-        if d0:
-            rising += 1
-            if first is None:
-                first = n
-        else:
-            falling += 1
-    prev = d0
-    n += 1
-print(f"D0(GPIO23): {n} samples, {rising} rising, {falling} falling")
-if first is not None:
-    print(f"    first rising edge at sample {first}")
-if triggered and rising == 0 and falling > 0:
-    print("    capture began after the D0 rising trigger; falling edge confirms the pulse")
-elif rising == 0:
-    print("    NO RISING EDGE - Shrike pulse was not captured on D0")
-' "$TRIGGER" || {
-        echo "(could not analyse $LOGIC_LOG)"
-        LOGIC_ANALYSIS_OK=0
+actual = Path(sys.argv[1]).stat().st_size
+expected = int(sys.argv[2])
+if actual != expected:
+    raise SystemExit(f"raw sample count {actual} != {expected}")
+PY
+echo "ACQUISITION COMPLETE — packaging saved samples; Pi may be powered off."
+sigrok-cli -i "$RAW_LOG" -I "binary:numchannels=8:samplerate=$((SAMPLES_PER_MS * 1000))" \
+    -C 0=D0,1=D1 -O srzip -o "$LOGIC_LOG" > "$CONVERT_LOG" 2>&1 || die "capture packaging failed; raw samples retained"
+[ -s "$LOGIC_LOG" ] || die "capture packaging failed; raw samples retained"
+sha256sum "$UART_LOG" "$LOGIC_LOG" "$RAW_LOG" "$ANALYZER_LOG" "$CONVERT_LOG" "$SHRIKE_LOG" "$PREFIX-config.txt" | tee "$PREFIX.sha256" || die "could not hash capture artifacts"
+rg -a 'PI5_OUT_ARM|PI5_GPIO_IRQ_PROVEN|PI5_REFLEX_REARM|PI5_ESTOP_REARM|PI5_MC|PI5_MA sample_id=|PI5_PWM_REQUEST' "$UART_LOG" || true
+if [ "$OUTPUT_MODE" != gpio ]; then
+    python3 - "$UART_LOG" "$OUTPUT_MODE" "$PULSE_COUNT" "$REPO/scripts/hil/pwm-containment-reduce.py" <<'PY' || die "PWM${OUTPUT_MODE#pwm} software correlation failed; retain capture for diagnosis"
+import re, runpy, sys
+text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+if sys.argv[2] == "pwm-corpus":
+    errors = runpy.run_path(sys.argv[4])["validate_uart"](text, int(sys.argv[3]), True)
+    if errors:
+        raise SystemExit("; ".join(errors))
+    raise SystemExit(0)
+if sys.argv[2] == "pwm-containment":
+    expected = {
+        "PI5_PWM_CONTAINMENT_READY": r" requested=4294967295 clamp_percent=90 reject_channel=3",
+        "PI5_PWM_REQUEST": r" sample_id=([12]) chip=0 channel=([13]) requested=4294967295 code=(0|-1) range=5000 duty=4500",
+        "PI5_MA": r" sample_id=1 monitor_ns=\d+",
+        "PI5_MC": r" sample_id=1 ns=\d+ kind=pwm ch=1 val=90",
     }
-fi
-
-echo
-rg -a -n 'PI5_BENCH_READY|PI5_V03B_READY|PI5_MA|PI5_MC|PI5_REFLEX_REARM|PI5_GPIO_IRQ_DIAG|PI5_GPIO_IRQ_PROVEN|SIGNED_BPF_(LOAD_OK|INPUT_MISSING)|PI5_BENCH_FAIL|panic|fatal|watchdog' \
-  "$UART_LOG" || true
-
-# Handler-entry vs pulse-count census. PI5_GPIO_IRQ_PROVEN latches once per boot,
-# so it cannot show a storm; the per-entry PI5_GPIO_IRQ_DIAG lines can. Roughly
-# one handler entry per delivered rising edge is expected. Many more than
-# PULSE_COUNT means the source is not being cleanly acknowledged (level-like
-# re-trigger); zero means no edge reached the handler at all.
-handler_entries=$(rg -ac 'PI5_GPIO_IRQ_DIAG' "$UART_LOG" 2>/dev/null || echo 0)
-echo "handler entries (PI5_GPIO_IRQ_DIAG): $handler_entries  (pulses sent: $PULSE_COUNT)"
-if [ "$handler_entries" -gt "$((PULSE_COUNT * 2))" ]; then
-    echo "WARNING: entries >> pulses - possible interrupt storm / bad acknowledge"
-fi
-
-echo
-ok=1
-for m in "${EXPECTED[@]}"; do
-    if rg -aq "$m" "$UART_LOG"; then
-        echo "ok      $m"
+    for marker, fields in expected.items():
+        count = 2 if marker == "PI5_PWM_REQUEST" else 1
+        if text.count(marker) != count or len(re.findall(r"^" + marker + fields + r"$", text, re.M)) != count:
+            raise SystemExit("unexpected or missing containment marker: " + marker)
+    requests = re.findall(r"^PI5_PWM_REQUEST" + expected["PI5_PWM_REQUEST"] + r"$", text, re.M)
+    if requests != [("1", "1", "0"), ("2", "3", "-1")]:
+        raise SystemExit("need clamp sample 1 followed by rejected sample 2 with unchanged readback")
+    if text.count("PI5_GPIO_IRQ_PROVEN") != 1 or "PI5_REFLEX_REARM" in text or "PI5_ESTOP_REARM" in text:
+        raise SystemExit("containment requires one GPIO route proof and no re-arm")
+    raise SystemExit(0)
+ma = re.findall(r"PI5_MA sample_id=(\d+) monitor_ns=\d+", text)
+mc = re.findall(r"PI5_MC sample_id=(\d+) ns=\d+ kind=pwm ch=1 val=0", text)
+if len(ma) != 1 or len(mc) != 1 or ma != mc or text.count("PI5_MC ") != 1 or text.count("PI5_GPIO_IRQ_PROVEN") != 1:
+    raise SystemExit("need exactly one correlated PWM M-A/M-C pair and GPIO route proof")
+if "PI5_REFLEX_REARM" in text or "PI5_ESTOP_REARM" in text:
+    raise SystemExit("PWM smoke must not re-arm")
+PY
+    if [[ "$OUTPUT_MODE" = pwm-containment || "$OUTPUT_MODE" = pwm-corpus ]]; then
+        echo "CAPTURE COMPLETE: PWM containment software checks complete; physical waveform review required."
     else
-        echo "MISSING $m"
-        ok=0
+        echo "CAPTURE COMPLETE: PWM smoke software correlation only; physical carrier/stop review required."
     fi
-done
-for m in "${FORBIDDEN[@]}"; do
-    if rg -aiq "$m" "$UART_LOG"; then
-        echo "FORBIDDEN MARKER PRESENT: $m"
-        ok=0
-    fi
-done
-
-if [ "$LOGIC_STATUS" != 0 ] || [ "${LOGIC_ANALYSIS_OK:-0}" != 1 ]; then
-    echo "LOGIC_CAPTURE_INCOMPLETE"
-    ok=0
+else
+    python3 -B "$REPO/scripts/benchmark/analyze-v03.py" --sensor "$UART_LOG" --sensor-count "$PULSE_COUNT" || die "software cycle correlation failed; retain capture for diagnosis"
+    echo "CAPTURE COMPLETE: software cycles checked; physical waveform review is required."
 fi
-
-if ! python3 -B "$REPO/scripts/benchmark/analyze-v03.py" \
-    --sensor "$UART_LOG" --sensor-count "$PULSE_COUNT"; then
-    ok=0
-fi
-
-if [ "$ok" = 1 ]; then
-    echo "PASS: Shrike GPIO22 -> Pi GPIO23 interrupt probe"
-    exit 0
-fi
-
-echo "FAIL: Shrike GPIO23 pulse probe"
-exit 1
+echo "Shrike reports GPIO22=LOW and GPIO21=LOW (e-stop asserted). Power off the Pi."

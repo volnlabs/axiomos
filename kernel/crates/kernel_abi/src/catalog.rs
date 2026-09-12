@@ -95,7 +95,6 @@ pub const SUPPORTED_BPF_MAP_TYPES: &[AbiEntry] = &[
 pub const SUPPORTED_BPF_ATTACH_TYPES: &[AbiEntry] = &[
     entry!(BPF_ATTACH_TYPE_TIMER, "cloud and embedded profiles"),
     entry!(BPF_ATTACH_TYPE_GPIO, "Raspberry Pi 5"),
-    entry!(BPF_ATTACH_TYPE_PWM, "Raspberry Pi 5"),
     entry!(BPF_ATTACH_TYPE_IIO, "Raspberry Pi 5"),
     entry!(BPF_ATTACH_TYPE_SYS_ENTER, "cloud and embedded profiles"),
     entry!(BPF_ATTACH_TYPE_SYS_EXIT, "cloud and embedded profiles"),
@@ -124,6 +123,7 @@ pub const SUPPORTED_BPF_HELPERS: &[AbiEntry] = &[
     entry!(BPF_HELPER_GPIO_SET, "Raspberry Pi 5"),
     entry!(BPF_HELPER_GPIO_GET, "Raspberry Pi 5"),
     entry!(BPF_HELPER_PWM_WRITE, "Raspberry Pi 5"),
+    entry!(BPF_HELPER_MOTOR_PAIR_V1, "Raspberry Pi 5 (experimental v1)"),
 ];
 
 #[cfg(test)]

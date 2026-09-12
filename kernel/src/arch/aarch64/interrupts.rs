@@ -186,6 +186,8 @@ fn handle_timer_interrupt(ctx: &ExceptionContext) {
             "timer",
         );
     }
+    #[cfg(all(feature = "rpi5", feature = "bench"))]
+    crate::serial::drain_bench_buffer();
 }
 
 /// Clear timer interrupt

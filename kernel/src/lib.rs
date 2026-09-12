@@ -1,5 +1,5 @@
 #![no_std]
-#![no_main]
+#![cfg_attr(not(test), no_main)]
 #![cfg_attr(target_arch = "x86_64", feature(abi_x86_interrupt))]
 #![feature(negative_impls)]
 extern crate alloc;
@@ -144,6 +144,8 @@ pub fn init() -> Result<(), KernelInitError> {
     {
         info!("Initializing v0.3 HW bench (Task 11)...");
         if bench::init() {
+            #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+            serial::enable_bench_buffer();
             info!("HW bench initialized");
         } else {
             ::log::error!("HW bench initialization failed; PI5_BENCH_READY suppressed");

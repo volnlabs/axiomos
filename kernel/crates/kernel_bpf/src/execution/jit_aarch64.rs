@@ -1036,6 +1036,7 @@ impl<P: PhysicalProfile> Arm64JitCompiler<P> {
             fn bpf_gpio_read(pin: u32) -> i64;
             fn bpf_gpio_write(pin: u32, value: u32) -> i64;
             fn bpf_pwm_write(pwm_id: u32, channel: u32, duty: u32) -> i64;
+            fn bpf_motor_pair_v1(left_permille: i32, right_permille: i32) -> i64;
         }
 
         let runtime = HelperId::from_raw(helper_id)
@@ -1053,6 +1054,7 @@ impl<P: PhysicalProfile> Arm64JitCompiler<P> {
             RuntimeHelper::GpioSet => Ok(bpf_gpio_write as *const () as u64),
             RuntimeHelper::GpioGet => Ok(bpf_gpio_read as *const () as u64),
             RuntimeHelper::PwmWrite => Ok(bpf_pwm_write as *const () as u64),
+            RuntimeHelper::MotorPairV1 => Ok(bpf_motor_pair_v1 as *const () as u64),
             _ => Err(Arm64JitError::UnsupportedInstruction),
         }
     }

@@ -128,6 +128,8 @@ pub const BPF_HELPER_GPIO_GET: i32 = 1004;
 pub const BPF_HELPER_PWM_WRITE: i32 = 1005;
 pub const BPF_HELPER_IIO_READ: i32 = 1006;
 pub const BPF_HELPER_CAN_SEND: i32 = 1007;
+/// Experimental signed rover pair helper; versioned until its ABI is proven.
+pub const BPF_HELPER_MOTOR_PAIR_V1: i32 = 1008;
 
 /// Requested/offered access rights in [`BpfAttr::file_flags`] for object pin/open.
 /// Zero is accepted as a backwards-compatible read-only request.

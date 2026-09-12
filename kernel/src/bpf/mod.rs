@@ -441,7 +441,6 @@ const fn is_supported_attach_type(attach_type: u32) -> bool {
         attach_type,
         ATTACH_TYPE_TIMER
             | ATTACH_TYPE_GPIO
-            | ATTACH_TYPE_PWM
             | ATTACH_TYPE_IIO
             | ATTACH_TYPE_SYS_ENTER
             | ATTACH_TYPE_SYS_EXIT
@@ -2771,6 +2770,22 @@ mod tests {
             .expect("quiesce unrelated program");
         assert_eq!(manager.resource_usage().live_maps, 0);
         assert_eq!(manager.resource_usage().map_bytes, 0);
+    }
+
+    #[test]
+    fn pwm_observation_attach_is_rejected_without_publication() {
+        let mut manager = BpfManager::new_with_limits(tiny_limits());
+        let id = manager
+            .load_raw_program(vec![BpfInsn::mov64_imm(0, 0), BpfInsn::exit()])
+            .expect("load program");
+        assert_eq!(
+            manager.attach(ATTACH_TYPE_PWM, id),
+            Err(BpfError::InvalidInstruction)
+        );
+        assert!(manager.attachments.values().all(|ids| !ids.contains(&id)));
+        manager
+            .unload_program(id)
+            .expect("rejected attach retains no reference");
     }
 
     #[test]

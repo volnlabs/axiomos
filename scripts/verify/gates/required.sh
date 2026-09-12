@@ -1,5 +1,12 @@
 # Sourced by engineering-audit.sh; shares its gate functions and result state.
 if [[ "$MODE" != "quick" ]]; then
+    if [[ "$RUN_QEMU" -eq 1 ]]; then
+        run_step aarch64-exception-context python3 -B scripts/verify/aarch64-exception-context.py
+    else
+        skip_step aarch64-exception-context "disabled by option"
+    fi
+    run_step pwm-attach-rejected env EMBEDDED_DISK_PATH=/dev/null cargo test --locked -p kernel --lib --features embedded-profile pwm_observation_attach_is_rejected_without_publication
+    run_step rootfs-selection python3 -B scripts/verify/rootfs-selection.py
     run_cargo_step clippy-kernel-abi clippy -p kernel_abi --lib -- -D clippy::all
     run_cargo_step clippy-elfloader clippy -p kernel_elfloader --all-targets -- -D clippy::all
     run_cargo_step clippy-syscall clippy -p kernel_syscall --all-targets -- -D clippy::all

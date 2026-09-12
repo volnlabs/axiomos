@@ -101,6 +101,11 @@ pub extern "C" fn bpf_pwm_write(_pwm_id: u32, _channel: u32, _duty: u32) -> i64 
     0
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn bpf_motor_pair_v1(_left: i32, _right: i32) -> i64 {
+    0
+}
+
 // SAFETY: Test stub for BPF helper.
 #[unsafe(no_mangle)]
 pub extern "C" fn bpf_timeseries_push(_map_id: u32, _key: *const u8, _value: *const u8) -> i64 {

@@ -1,70 +1,53 @@
 `timescale 1ns/1ps
-
 module tb_shrike_safety_gate;
-    reg estop_n;
-    reg signed [11:0] left_duty_permille;
-    reg signed [11:0] right_duty_permille;
-    reg left_pwm_in;
-    reg right_pwm_in;
-    wire left_pwm_out;
-    wire right_pwm_out;
-
-    shrike_safety_gate #(.MAX_DUTY_PERMILLE(800)) dut (
-        .estop_n(estop_n),
-        .left_duty_permille(left_duty_permille),
-        .right_duty_permille(right_duty_permille),
-        .left_pwm_in(left_pwm_in),
-        .right_pwm_in(right_pwm_in),
-        .left_pwm_out(left_pwm_out),
-        .right_pwm_out(right_pwm_out)
-    );
-
-    task check_outputs;
-        input expected_left;
-        input expected_right;
+    reg clk = 0, rst_n = 1, command_valid = 0, command_accept = 0, estop_n = 1;
+    reg signed [11:0] left_duty_permille = 0, right_duty_permille = 0;
+    reg left_pwm_in = 0, right_pwm_in = 1;
+    wire left_pwm_out, right_pwm_out;
+    wire left_direction_out, right_direction_out;
+    wire invalid_left_pwm_out, invalid_right_pwm_out;
+    integer i, lh, rh;
+    always #5 clk = ~clk;
+    shrike_safety_gate #(.CLOCK_HZ(1000), .PWM_CARRIER_HZ(50)) dut (
+        .clk(clk), .rst_n(rst_n), .command_valid(command_valid),
+        .command_accept(command_accept), .estop_n(estop_n),
+        .left_duty_permille(left_duty_permille), .right_duty_permille(right_duty_permille),
+        .left_pwm_in(left_pwm_in), .right_pwm_in(right_pwm_in),
+        .left_pwm_out(left_pwm_out), .right_pwm_out(right_pwm_out),
+        .left_direction_out(left_direction_out), .right_direction_out(right_direction_out));
+    shrike_safety_gate #(.CLOCK_HZ(49), .PWM_CARRIER_HZ(50)) invalid_config (
+        .clk(clk), .rst_n(rst_n), .command_valid(command_valid),
+        .command_accept(command_accept), .estop_n(estop_n),
+        .left_duty_permille(left_duty_permille), .right_duty_permille(right_duty_permille),
+        .left_pwm_in(left_pwm_in), .right_pwm_in(right_pwm_in),
+        .left_pwm_out(invalid_left_pwm_out), .right_pwm_out(invalid_right_pwm_out));
+    task period;
+        input integer expected_left, expected_right;
         begin
-            #1;
-            if (left_pwm_out !== expected_left || right_pwm_out !== expected_right) begin
-                $display("FAIL: estop_n=%b left_duty=%0d right_duty=%0d in=%b%b out=%b%b expected=%b%b",
-                    estop_n, left_duty_permille, right_duty_permille,
-                    left_pwm_in, right_pwm_in, left_pwm_out, right_pwm_out,
-                    expected_left, expected_right);
-                $fatal(1);
-            end
+            lh=0; rh=0;
+            for (i=0; i<20; i=i+1) begin @(posedge clk); #1; lh=lh+left_pwm_out; rh=rh+right_pwm_out; end
+            if (lh != expected_left || rh != expected_right) $fatal(1, "PWM counts %0d/%0d", lh, rh);
         end
     endtask
-
     initial begin
-        // Valid signed commands pass each PWM independently.
-        estop_n = 1'b1;
-        left_duty_permille = 12'sd800;
-        right_duty_permille = -12'sd800;
-        left_pwm_in = 1'b1;
-        right_pwm_in = 1'b0;
-        check_outputs(1'b1, 1'b0);
-
-        // The envelope is inclusive at both boundaries.
-        right_pwm_in = 1'b1;
-        check_outputs(1'b1, 1'b1);
-
-        // Either out-of-range command disables BOTH motors, including a PWM
-        // edge already high at the instant the command becomes invalid.
-        left_duty_permille = 12'sd801;
-        check_outputs(1'b0, 1'b0);
-        left_duty_permille = -12'sd801;
-        check_outputs(1'b0, 1'b0);
-        left_duty_permille = 12'sd0;
-        right_duty_permille = 12'sd801;
-        check_outputs(1'b0, 1'b0);
-
-        // E-stop dominance is asynchronous and independent of valid commands.
-        right_duty_permille = 12'sd0;
-        estop_n = 1'b0;
-        check_outputs(1'b0, 1'b0);
-        estop_n = 1'b1;
-        check_outputs(1'b1, 1'b1);
-
-        $display("PASS: shrike_safety_gate");
-        $finish;
+        rst_n=0; #2 rst_n=1; repeat (2) @(posedge clk);
+        left_duty_permille=100; right_duty_permille=-800;
+        command_valid=1; command_accept=1; @(posedge clk); #1 command_accept=0;
+        if (invalid_left_pwm_out || invalid_right_pwm_out)
+            $fatal(1,"unsupported zero-cycle PWM configuration must stay off");
+        period(2,16);
+        if (left_direction_out !== 0 || right_direction_out !== 1)
+            $fatal(1,"+N/-N direction polarity");
+        left_pwm_in=1; right_pwm_in=0; period(2,16);
+        left_duty_permille=0; right_duty_permille=0; period(0,0);
+        left_duty_permille=100; right_duty_permille=100;
+        estop_n=0; #1; if (left_pwm_out || right_pwm_out) $fatal(1,"e-stop assertion");
+        if (left_direction_out || right_direction_out) $fatal(1,"e-stop direction safe low");
+        estop_n=1; command_accept=1; @(posedge clk); #1 command_accept=0;
+        period(0,0);
+        repeat (2) @(posedge clk);
+        command_accept=1; @(posedge clk); #1 command_accept=0; period(2,2);
+        left_duty_permille=801; #1; if (left_pwm_out || right_pwm_out) $fatal(1,"range");
+        $display("PASS: shrike_safety_gate"); $finish;
     end
 endmodule

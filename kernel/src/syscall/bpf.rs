@@ -486,57 +486,6 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
                     Ok(_) => {
                         log::info!("sys_bpf: attached prog {} to type {}", prog_id, attach_type);
 
-                        // For PWM attach type, also configure hardware if needed
-                        #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
-                        if attach_type == crate::bpf::ATTACH_TYPE_PWM {
-                            // key = chip_id (0 or 1), value = channel (0-3)
-                            // In this simple implementation, we assume key/value are passed directly in attr.key/value
-                            // which are u64 pointers. But wait, in the syscall handler above for GPIO
-                            // we cast attr.key as u8 directly?
-                            // Let's check the struct BpfAttr definition in kernel_abi.
-                            //
-                            // pub struct BpfAttr {
-                            //    pub test: u32,
-                            //    ...
-                            //    pub key: u64,    // For map ops this is a pointer. For attach, it can be value?
-                            //    pub value: u64,
-                            // }
-                            //
-                            // Yes, in rk_cli/demos we are setting key/value to integer values for attach.
-
-                            let chip_id = attr.key as u8;
-                            let channel = attr.value as u8;
-
-                            if chip_id <= 1 && channel <= 3 {
-                                // SAFETY: Rp1Pwm::pwm0/1 accesses valid MMIO.
-                                // The kernel has exclusive access.
-                                let _pwm = unsafe {
-                                    if chip_id == 0 {
-                                        crate::arch::aarch64::platform::rpi5::pwm::Rp1Pwm::pwm0()
-                                    } else {
-                                        crate::arch::aarch64::platform::rpi5::pwm::Rp1Pwm::pwm1()
-                                    }
-                                };
-
-                                // Enable the channel so BPF hooks can trigger
-                                // We don't change frequency/duty here, just ensure it's active
-                                // The user should configure it via PWM syscalls separately if they want output.
-                                // But for *observation*, we might just need to ensure the driver knows we are watching.
-                                // The driver triggers hooks in set_duty_cycle/etc.
-
-                                log::info!(
-                                    "sys_bpf: attached BPF to PWM chip={} channel={}",
-                                    chip_id,
-                                    channel
-                                );
-                            } else {
-                                log::warn!(
-                                    "sys_bpf: invalid PWM chip={} or channel={}",
-                                    chip_id,
-                                    channel
-                                );
-                            }
-                        }
                         if attach_type == crate::bpf::ATTACH_TYPE_IIO {
                             log::info!(
                                 "sys_bpf: attached BPF program {} to IIO sensor event",

@@ -10,6 +10,8 @@ pub(crate) fn halt(code: &'static str) -> ! {
 
     #[cfg(not(debug_assertions))]
     {
+        #[cfg(all(target_arch = "aarch64", feature = "rpi5", feature = "bench"))]
+        crate::serial::emergency_console();
         crate::serial_println!("V04_PANIC kind=fatal");
         crate::serial_println!("KERNEL_FATAL code={}", code);
         loop {

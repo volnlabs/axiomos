@@ -11,6 +11,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
 TARGET="aarch64-unknown-none"
+TARGET_DIR="${CARGO_TARGET_DIR:-$PROJECT_DIR/target}"
+[[ "$TARGET_DIR" = /* ]] || TARGET_DIR="$PROJECT_DIR/$TARGET_DIR"
 PROFILE="${2:-release}"
 
 # Check arguments
@@ -32,9 +34,9 @@ fi
 
 # Determine build directory
 if [ "$PROFILE" = "release" ]; then
-    BUILD_DIR="$PROJECT_DIR/target/$TARGET/release"
+    BUILD_DIR="$TARGET_DIR/$TARGET/release"
 else
-    BUILD_DIR="$PROJECT_DIR/target/$TARGET/debug"
+    BUILD_DIR="$TARGET_DIR/$TARGET/debug"
 fi
 
 # Check if kernel exists

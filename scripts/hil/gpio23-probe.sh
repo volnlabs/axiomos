@@ -9,13 +9,13 @@ set -uo pipefail
 
 RUN_DIR="${RUN_DIR:-$(git rev-parse --show-toplevel)/artifacts/runs/axiomos-hil-20260720T134903Z/03-gpio}"
 PI_UART="${PI_UART:-/dev/serial/by-id/usb-Raspberry_Pi_Debug_Probe__CMSIS-DAP__E6633861A355B838-if01}"
-LOGIC_CONN="${LOGIC_CONN:-fx2lafw:conn=3.9}"
+LOGIC_CONN="${LOGIC_CONN:-fx2lafw}"
 SAMPLERATE="${SAMPLERATE:-1m}"
-# A cold boot reaches PI5_BENCH_READY at ~6.5 s, and the edge must come after
-# that, so the window has to cover boot plus a human reaction. 12 s did not.
+# Begin the analyzer window only after the verbose instrumented boot finishes.
 SAMPLES="${SAMPLES:-30m}"
-UART_SECONDS="${UART_SECONDS:-40}"
-READY_TIMEOUT="${READY_TIMEOUT:-25}"
+UART_SECONDS="${UART_SECONDS:-240}"
+READY_TIMEOUT="${READY_TIMEOUT:-120}"
+ANALYZER_READY_TIMEOUT="${ANALYZER_READY_TIMEOUT:-10}"
 
 mkdir -p "$RUN_DIR"
 
@@ -34,6 +34,7 @@ done
 PROBE="$(printf '%02d' "$((idx + 1))")"
 UART_LOG="$RUN_DIR/gpio23-probe-$PROBE-uart.log"
 LOGIC_LOG="$RUN_DIR/gpio23-probe-$PROBE.sr"
+ANALYZER_LOG="$RUN_DIR/gpio23-probe-$PROBE-analyzer.log"
 
 if ! test -r "$PI_UART" || ! test -w "$PI_UART"; then
     echo "ABORT: no read/write access to $PI_UART" >&2
@@ -48,58 +49,114 @@ fi
 echo "probe $PROBE -> $UART_LOG"
 echo "            $LOGIC_LOG"
 
-stty -F "$PI_UART" 115200 cs8 -cstopb -parenb -ixon -ixoff -crtscts raw -echo
+# Never split UART bytes with an existing reader or kill another terminal's job.
+if ! command -v fuser >/dev/null; then
+    echo "ABORT: fuser not found" >&2
+    exit 1
+fi
+if fuser "$PI_UART" >/dev/null 2>&1; then
+    echo "ABORT: UART already open; stop the previous capture first." >&2
+    exit 1
+fi
 
-timeout --signal=INT --kill-after=2s "${UART_SECONDS}s" \
-  stdbuf -o0 cat "$PI_UART" |
-  stdbuf -o0 tr -d '\r' |
-  stdbuf -o0 tee "$UART_LOG" &
+UART_PID=""
+LOGIC_PID=""
+cleanup() {
+    for pid in "$LOGIC_PID" "$UART_PID"; do
+        if [ -n "$pid" ]; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        fi
+    done
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+stty -F "$PI_UART" 115200 cs8 -cstopb -parenb -ixon -ixoff -crtscts raw -echo || exit 1
+# Keep raw UART bytes; one owned timeout process, no orphaned tee/cat pipeline.
+timeout --signal=TERM --kill-after=2s "${UART_SECONDS}s" \
+  cat "$PI_UART" > "$UART_LOG" &
 UART_PID=$!
 
-sleep 1
+echo "UART RECORDING - power on the Pi with the stimulus DISCONNECTED."
+echo "Wait for the action prompt; do not apply an edge during boot."
 
-sigrok-cli -d "$LOGIC_CONN" -c "samplerate=$SAMPLERATE" -C D0 \
-  --samples "$SAMPLES" -O srzip -o "$LOGIC_LOG" &
-LOGIC_PID=$!
-
-echo
-echo "CAPTURE ACTIVE. Keep the lead OFF pin 16 and power-cycle the Pi now."
-echo "GPIO23 is armed rising-edge-only, so it must sit low until the route is up."
-echo
-
-# The interrupt is only armed once the kernel prints PI5_BENCH_READY. Touching
-# before that puts the edge in the bootloader window, where nothing is
-# listening, and a lead already resting on pin 16 gives a falling edge that is
-# correctly ignored.
-waited=0
-until rg -aq 'PI5_BENCH_READY' "$UART_LOG" 2>/dev/null; do
-    if [ "$waited" -ge "$READY_TIMEOUT" ]; then
-        echo "WARNING: no PI5_BENCH_READY after ${READY_TIMEOUT}s."
-        echo "         Did the Pi power-cycle? Probing anyway."
-        break
+check_uart() {
+    if ! kill -0 "$UART_PID" 2>/dev/null; then
+        echo "ABORT: UART capture ended before the test completed." >&2
+        exit 1
     fi
-    sleep 1
+    if rg -aiq 'PI5_BENCH_FAIL|PI5_BENCH_LOG_LOSS|panic|fatal|watchdog|SIGNED_BPF_(INPUT_MISSING|INPUT_INVALID|LOAD_REJECTED)' "$UART_LOG"; then
+        echo "ABORT: kernel failure marker; leave the stimulus disconnected." >&2
+        exit 1
+    fi
+}
+
+waited=0
+until rg -aq 'PI5_BENCH_READY' "$UART_LOG" && rg -aq 'SIGNED_BPF_LOAD_OK' "$UART_LOG"; do
+    check_uart
+    if [ "$waited" -ge "$((READY_TIMEOUT * 10))" ]; then
+        echo "ABORT: boot readiness timed out; DO NOT apply the stimulus." >&2
+        exit 1
+    fi
+    sleep 0.1
     waited=$((waited + 1))
 done
+check_uart
+if rg -aq 'PI5_GPIO_IRQ_PROVEN' "$UART_LOG"; then
+    echo "ABORT: GPIO edge occurred before the prompt; cold boot required." >&2
+    exit 1
+fi
+
+sigrok-cli -l 4 -d "$LOGIC_CONN" -c "samplerate=$SAMPLERATE" -C D0,D1 \
+  --samples "$SAMPLES" -O srzip -o "$LOGIC_LOG" > "$ANALYZER_LOG" 2>&1 &
+LOGIC_PID=$!
+
+waited=0
+until rg -q 'Received SR_DF_LOGIC' "$ANALYZER_LOG"; do
+    check_uart
+    if ! kill -0 "$LOGIC_PID" 2>/dev/null || [ "$waited" -ge "$((ANALYZER_READY_TIMEOUT * 10))" ]; then
+        echo "ABORT: analyzer did not deliver data; DO NOT apply the stimulus." >&2
+        exit 1
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+done
+check_uart
+if ! kill -0 "$LOGIC_PID" 2>/dev/null || rg -aq 'PI5_GPIO_IRQ_PROVEN' "$UART_LOG"; then
+    echo "ABORT: capture ended or an edge occurred before the prompt." >&2
+    exit 1
+fi
 
 echo
-echo "  >>> ROUTE UP - touch the resistor lead to physical pin 16 now,"
-echo "      hold ~0.5 s, remove it ONCE, then wait for the capture to end."
+echo "  >>> TOUCH NOW: connect the free end AFTER the 220-ohm resistor"
+echo "      to the GPIO23 node (Pi physical pin 16 / analyzer D0)."
+echo "      Hold ~0.5 s, remove ONCE, then leave it disconnected."
 echo
 
+while kill -0 "$LOGIC_PID" 2>/dev/null; do
+    check_uart
+    sleep 0.1
+done
 wait "$LOGIC_PID"
 LOGIC_STATUS=$?
-wait "$UART_PID"
+LOGIC_PID=""
+check_uart
+cleanup
+UART_PID=""
 
-echo
-echo "logic-analyzer exit: $LOGIC_STATUS"
-ls -lh "$UART_LOG" "$LOGIC_LOG" 2>/dev/null
-sha256sum "$UART_LOG" "$LOGIC_LOG" 2>/dev/null
+if [ "$LOGIC_STATUS" -ne 0 ]; then
+    echo "FAIL: analyzer exited with status $LOGIC_STATUS; capture is invalid." >&2
+    exit 1
+fi
+ls -lh "$UART_LOG" "$LOGIC_LOG"
+sha256sum "$UART_LOG" "$LOGIC_LOG" "$ANALYZER_LOG"
 
 # Edge census. A missing marker is ambiguous on its own: no stimulus and a
 # broken route look identical in the UART log. The capture tells them apart.
 echo
-sigrok-cli -i "$LOGIC_LOG" -O csv 2>/dev/null | python3 -c '
+sigrok-cli -i "$LOGIC_LOG" -C D0 -O csv 2>/dev/null | python3 -c '
 import sys
 prev = None
 rising = falling = n = 0
@@ -126,10 +183,12 @@ if first is not None:
     print(f"    first rising edge at sample {first}")
 if rising == 0:
     print("    NO RISING EDGE - the stimulus never reached pin 16 while armed")
-' || echo "(could not analyse $LOGIC_LOG)"
+    sys.exit(1)
+' || { echo "FAIL: no usable GPIO23 edge evidence" >&2; exit 1; }
 
 echo
-proven=$(rg -ac 'PI5_GPIO_IRQ_PROVEN' "$UART_LOG" 2>/dev/null || echo 0)
+proven=$(rg -ac 'PI5_GPIO_IRQ_PROVEN' "$UART_LOG" 2>/dev/null || true)
+proven=${proven:-0}
 rg -a -n 'PI5_BENCH_READY|PI5_GPIO_IRQ_PROVEN|PI5_BENCH_FAIL|panic|fatal|watchdog' \
   "$UART_LOG" || true
 

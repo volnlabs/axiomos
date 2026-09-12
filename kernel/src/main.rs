@@ -80,6 +80,8 @@ impl BootError {
 }
 
 fn boot_fatal(error: BootError) -> ! {
+    #[cfg(all(target_arch = "aarch64", feature = "rpi5", feature = "bench"))]
+    kernel::serial::emergency_console();
     kernel::serial_println!("BOOT_FATAL code={}", error.code());
     loop {
         hlt();
@@ -332,6 +334,8 @@ fn rust_panic(info: &PanicInfo) -> ! {
 
 #[cfg(not(test))]
 fn handle_panic(info: &PanicInfo) {
+    #[cfg(all(target_arch = "aarch64", feature = "rpi5", feature = "bench"))]
+    kernel::serial::emergency_console();
     #[cfg(all(
         target_arch = "aarch64",
         feature = "rpi5",

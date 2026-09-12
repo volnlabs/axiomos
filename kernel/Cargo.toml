@@ -94,6 +94,11 @@ audit-diagnostics = []
 # Raw AArch64 register/UART probes used only during hardware bring-up.
 bringup-diagnostics = []
 
+# Per-poll V04_CHUNK start/end records for control-link cadence diagnostics.
+# Keep off for local GPIO timing: empty polls can exhaust deferred UART capacity.
+# Fault, link-loss, heartbeat and sensor records do not depend on this feature.
+trace-control-link = []
+
 # Forward the kernel_physical_memory fault-injection controller into a
 # controlled boot probe (kernel/src/audit_fault_probe.rs). Off by default;
 # opt in for fault-path QEMU scenarios only. The QEMU scenario lives
@@ -105,6 +110,16 @@ audit-fault-injection = ["kernel_physical_memory/fault-injection"]
 # Off by default — measurement/demo instrumentation, not for production images.
 # Enable alongside a profile, e.g. `--features embedded-rpi5,bench`.
 bench = []
+
+# Unloaded one-shot PWM carrier/stop diagnostic on GPIO12.
+# Reserves PWM0/channel1 for local output; incompatible with auto-rearm benches.
+bench-pwm = ["bench"]
+
+# One sensor pulse: rising requests an over-limit duty, falling an invalid
+# channel. Uses real verified BPF helpers; final physical e-stop ends output.
+bench-pwm-containment = ["bench-pwm"]
+# Deterministic five-pair live request matrix; one counter shared by two routes.
+bench-pwm-corpus = ["bench-pwm-containment"]
 
 # Unloaded-HIL-only diagnostic: after a successful physical GPIO24 e-stop
 # release IRQ, re-arm the bench reflex output through the monitored guard path.

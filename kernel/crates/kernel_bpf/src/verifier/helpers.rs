@@ -97,6 +97,8 @@ pub enum HelperId {
     IioRead = abi::BPF_HELPER_IIO_READ,
     /// Send CAN message
     CanSend = abi::BPF_HELPER_CAN_SEND,
+    /// Experimental complete signed rover command, left/right per-mille.
+    MotorPairV1 = abi::BPF_HELPER_MOTOR_PAIR_V1,
 }
 
 impl HelperId {
@@ -129,6 +131,7 @@ impl HelperId {
             abi::BPF_HELPER_PWM_WRITE => Some(Self::PwmWrite),
             abi::BPF_HELPER_IIO_READ => Some(Self::IioRead),
             abi::BPF_HELPER_CAN_SEND => Some(Self::CanSend),
+            abi::BPF_HELPER_MOTOR_PAIR_V1 => Some(Self::MotorPairV1),
             _ => None,
         }
     }
@@ -162,6 +165,7 @@ impl HelperId {
             Self::PwmWrite => "bpf_pwm_write",
             Self::IioRead => "bpf_iio_read",
             Self::CanSend => "bpf_can_send",
+            Self::MotorPairV1 => "bpf_motor_pair_v1",
         }
     }
 
@@ -210,6 +214,7 @@ impl HelperId {
             Self::PwmWrite => true,
             Self::IioRead => true,
             Self::CanSend => true,
+            Self::MotorPairV1 => true,
         }
     }
 
@@ -432,6 +437,7 @@ pub(crate) enum RuntimeHelper {
     GpioSet,
     GpioGet,
     PwmWrite,
+    MotorPairV1,
 }
 
 /// Shared verifier/runtime contract for one helper.
@@ -480,6 +486,7 @@ const fn runtime_helper(id: HelperId) -> Option<RuntimeHelper> {
         HelperId::GpioSet => Some(RuntimeHelper::GpioSet),
         HelperId::GpioGet => Some(RuntimeHelper::GpioGet),
         HelperId::PwmWrite => Some(RuntimeHelper::PwmWrite),
+        HelperId::MotorPairV1 => Some(RuntimeHelper::MotorPairV1),
         _ => None,
     }
 }
@@ -614,6 +621,11 @@ const fn helper_signature(id: HelperId) -> HelperSignature {
         )
         .requiring_actuation(),
 
+        HelperId::MotorPairV1 => {
+            HelperSignature::new(id, &[ArgType::Scalar, ArgType::Scalar], ReturnType::Integer)
+                .requiring_actuation()
+        }
+
         HelperId::IioRead => HelperSignature::new(
             id,
             &[ArgType::Scalar, ArgType::PtrToStack, ArgType::MemSize],
@@ -729,6 +741,7 @@ mod tests {
         assert_eq!(HelperId::from_raw(1003), Some(HelperId::GpioSet));
         assert_eq!(HelperId::from_raw(1004), Some(HelperId::GpioGet));
         assert_eq!(HelperId::from_raw(1005), Some(HelperId::PwmWrite));
+        assert_eq!(HelperId::from_raw(1008), Some(HelperId::MotorPairV1));
     }
 
     #[test]
@@ -769,6 +782,7 @@ mod tests {
             HelperId::PwmWrite,
             HelperId::IioRead,
             HelperId::CanSend,
+            HelperId::MotorPairV1,
         ];
         let runtime_count = all
             .iter()
