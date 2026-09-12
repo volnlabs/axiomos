@@ -1,7 +1,7 @@
 //! Host-only mock implementations of the local shrike_control traits.
 //!
 //! The mocks implement `shrike_control::{ByteIo, MicrosClock, Ultrasonic,
-//! EstopLine, MotorChannel}` so they can drive the production `control::run`
+//! EstopLine, MotorPairSink}` so they can drive the production `control::run`
 //! function under deterministic clock and state sequences. The tests assert
 //! the fail-safe behavior of the control loop (e-stop dominance, fresh-
 //! setpoint requirement after release, sampled-state sequences). They do
@@ -13,7 +13,7 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicI64, Ordering as AtomicOrdering};
 
-use shrike_control::{ByteIo, EstopLine, MicrosClock, MotorChannel, Ultrasonic};
+use shrike_control::{ByteIo, EstopLine, MicrosClock, MotorPairSink, Ultrasonic};
 
 /// `ByteIo` mock with a FIFO input queue and a captured output buffer.
 pub struct MockByteIo {
@@ -31,11 +31,20 @@ impl MockByteIo {
 }
 
 impl ByteIo for MockByteIo {
+    type Error = ();
+
     fn read(&mut self) -> Option<u8> {
         self.input.pop_front()
     }
-    fn write(&mut self, bytes: &[u8]) {
+    fn try_write(&mut self, bytes: &[u8]) -> Result<usize, ()> {
         self.output.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn reset(&mut self) -> Result<(), ()> {
+        self.input.clear();
+        // Captured transmission history is not a pending UART FIFO.
+        // Reset discards queued RX; already-observed output cannot be undone.
+        Ok(())
     }
 }
 
@@ -114,37 +123,45 @@ impl EstopLine for MockEstop {
     }
 }
 
-/// `MotorChannel` mock: records every `drive`/`coast` call in sequence.
-pub struct MockMotor {
-    pub calls: Vec<(i16, u32)>,
-    iteration: u32,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MotorPairCall {
+    Apply { seq: u8, left: i16, right: i16 },
+    Inhibit,
 }
 
-impl MockMotor {
+/// Paired-motor mock: records atomic command applications and inhibition.
+pub struct MockMotorPair {
+    pub calls: Vec<MotorPairCall>,
+    pub fail_apply_at: Option<usize>,
+}
+
+impl MockMotorPair {
     pub fn new() -> Self {
         Self {
             calls: Vec::new(),
-            iteration: 0,
+            fail_apply_at: None,
         }
     }
 }
 
-impl MotorChannel for MockMotor {
-    fn drive(&mut self, duty: i16) {
-        self.calls.push((duty, self.iteration));
-    }
-    fn coast(&mut self) {
-        self.calls.push((0, self.iteration));
+impl Default for MockMotorPair {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-// A shared mutable iteration counter for both motors is not required:
-// each `MockMotor` instance is its own channel, and `run` calls them
-// in the same iteration. The iteration number is approximate (we
-// only update it in drive/coast), so the tests use it for ordering,
-// not for exact iteration counting.
-impl MockMotor {
-    pub fn advance_iteration(&mut self) {
-        self.iteration = self.iteration.wrapping_add(1);
+impl MotorPairSink for MockMotorPair {
+    type Error = ();
+
+    fn apply(&mut self, seq: u8, left: i16, right: i16) -> Result<(), Self::Error> {
+        if self.fail_apply_at == Some(self.calls.len()) {
+            return Err(());
+        }
+        self.calls.push(MotorPairCall::Apply { seq, left, right });
+        Ok(())
+    }
+
+    fn inhibit(&mut self) {
+        self.calls.push(MotorPairCall::Inhibit);
     }
 }

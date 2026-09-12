@@ -35,11 +35,8 @@ if [[ "$MODE" != "quick" ]]; then
         --target thumbv6m-none-eabi -- -D clippy::all
     run_cargo_step clippy-rp2040-release clippy --manifest-path firmware/shrike/rp2040/Cargo.toml \
         --target thumbv6m-none-eabi --release -- -D clippy::all
-    # shrike_control is the firmware-domain shared crate extracted from
-    # shrike_rp2040/src/{control,motor}.rs. no_std, host-buildable; this
-    # step verifies the extraction is byte-for-byte equivalent for host
-    # consumers. The thumbv6m target build of the firmware exercises
-    # shrike_control via the shrike_rp2040 path.
+    # The shared no_std control crate must remain host-buildable. The
+    # thumbv6m firmware build checks the target dependency as well.
     run_cargo_step shrike-control-build build -p shrike_control
     # shrike_rp2040_host_sim is a host-only simulation crate that depends
     # on shrike_control and exercises the production control loop under
@@ -50,7 +47,7 @@ if [[ "$MODE" != "quick" ]]; then
     run_cargo_step shrike_rp2040-host-sim-tests test -p shrike_rp2040_host_sim
     run_step fpga-safety-gate scripts/verify/fpga-safety-gate.sh
     run_step shrike_rp2040-host-sim-static python3 -c \
-        'from pathlib import Path; lib=Path("firmware/shrike/control/src/lib.rs").read_text(); run=Path("firmware/shrike/control/src/control.rs").read_text(); sim=Path("firmware/shrike/simulation/src/mocks.rs").read_text(); sim_tests_state=Path("firmware/shrike/simulation/tests/state_machine.rs").read_text(); sim_tests_sampled=Path("firmware/shrike/simulation/tests/sampled_state.rs").read_text(); assert "fn run" in run and "max_iterations" in run, "control::run must accept max_iterations: Option<u32>"; assert "RunSummary" in run, "control::run must return RunSummary"; assert all(name in sim for name in ("MockByteIo", "MockClock", "MockUltrasonic", "MockEstop", "MockMotor")), "all 5 mock types must be present"; assert "embedded_hal" not in sim, "mocks must implement local shrike_control traits, not embedded-hal"; assert all(trait_name in sim for trait_name in ("ByteIo", "MicrosClock", "Ultrasonic", "EstopLine", "MotorChannel")), "mocks must implement the 5 local traits"; assert "no_lost_irq_edge" not in (sim_tests_state + sim_tests_sampled) and "no lost IRQ" not in (sim_tests_state + sim_tests_sampled).lower() and "no_lost_edge" not in (sim_tests_state + sim_tests_sampled), "tests must not claim hardware-level IRQ edge-loss"'
+        'from pathlib import Path; lib=Path("firmware/shrike/control/src/lib.rs").read_text(); run=Path("firmware/shrike/control/src/control.rs").read_text(); sim=Path("firmware/shrike/simulation/src/mocks.rs").read_text(); sim_tests_state=Path("firmware/shrike/simulation/tests/state_machine.rs").read_text(); sim_tests_sampled=Path("firmware/shrike/simulation/tests/sampled_state.rs").read_text(); assert "fn run" in run and "max_iterations" in run, "control::run must accept max_iterations: Option<u32>"; assert "RunSummary" in run, "control::run must return RunSummary"; assert all(name in sim for name in ("MockByteIo", "MockClock", "MockUltrasonic", "MockEstop", "MockMotorPair")), "all 5 mock types must be present"; assert "embedded_hal" not in sim, "mocks must implement local shrike_control traits, not embedded-hal"; assert all(trait_name in sim for trait_name in ("ByteIo", "MicrosClock", "Ultrasonic", "EstopLine", "MotorPairSink")), "mocks must implement the 5 local traits"; assert "no_lost_irq_edge" not in (sim_tests_state + sim_tests_sampled) and "no lost IRQ" not in (sim_tests_state + sim_tests_sampled).lower() and "no_lost_edge" not in (sim_tests_state + sim_tests_sampled), "tests must not claim hardware-level IRQ edge-loss"'
     if [[ "$MODE" == "full" ]]; then
         RISCV_TARGET_DIR="$(mktemp -d)"
         run_step clippy-riscv-clean env CARGO_TARGET_DIR="$RISCV_TARGET_DIR" cargo clippy --locked \

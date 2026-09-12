@@ -49,6 +49,13 @@ impl TxState {
         true
     }
 
+    /// Inspect the next byte without relinquishing it to a backpressured UART.
+    /// Call `next_byte` only after the transport accepts this byte.
+    pub fn peek_byte(&self) -> Option<u8> {
+        let frame = self.active.as_ref()?;
+        Some(frame.bytes[frame.sent as usize])
+    }
+
     pub fn next_byte(&mut self) -> Option<u8> {
         let frame = self.active.as_mut()?;
         let byte = frame.bytes[frame.sent as usize];
@@ -132,6 +139,23 @@ impl Default for TxState {
 mod tests {
     use super::*;
     use crate::Decoder;
+
+    #[test]
+    fn a_backpressured_writer_keeps_the_same_byte_until_accepted() {
+        let mut tx = TxState::new();
+        assert!(tx.start(&Msg::HeartbeatToPi { seq: 7 }, 0));
+        let mut decoder = Decoder::new();
+        let mut result = None;
+        while let Some(byte) = tx.peek_byte() {
+            for _ in 0..4 {
+                assert_eq!(tx.peek_byte(), Some(byte));
+            }
+            assert_eq!(tx.next_byte(), Some(byte));
+            result = decoder.push(byte).or(result);
+        }
+        assert_eq!(result, Some(Ok(Msg::HeartbeatToPi { seq: 7 })));
+        assert!(tx.is_idle());
+    }
 
     #[test]
     fn safe_zero_cannot_cancel_an_unsent_estop() {
