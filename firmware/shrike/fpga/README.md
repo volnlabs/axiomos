@@ -67,3 +67,18 @@ verilator --binary --timing --top-module tb_shrike_safety_gate \
   firmware/shrike/fpga/tb_shrike_safety_gate.sv
 ./obj_dir/Vtb_shrike_safety_gate
 ```
+
+## Vendor RTL preflight
+
+From the repository root, run the Renesas-bundled Yosys against the checked-in
+structural check (replace `yosys` with the installed compiler path):
+
+```sh
+yosys -s scripts/verify/fpga-safety-preflight.ys
+```
+
+This checks hierarchy, process lowering, conflicting drivers, undriven wires,
+logic loops and inferred latches. It complements simulation; it does not
+produce a Forge bitstream or qualify device mapping, pins, fit or timing.
+The local installed runner and remaining board gates are recorded in the
+[bench plan](../../../docs/plans/active/shrike-fpga-bench.md).

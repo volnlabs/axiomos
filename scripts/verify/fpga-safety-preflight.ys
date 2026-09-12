@@ -1,0 +1,8 @@
+# Run from the repository root with the Renesas-bundled Yosys.
+# RTL structural checks only; this does not establish Forge device fit/timing.
+read_verilog -noautowire firmware/shrike/fpga/forgefpga/ffpga/src/top.v firmware/shrike/fpga/forgefpga/ffpga/src/spi_target.v firmware/shrike/fpga/forgefpga/ffpga/src/shrike_safety_gate.v
+hierarchy -check -top top
+proc
+check -assert
+select -assert-none t:$dlatch t:$adlatch t:$dlatchsr
+stat

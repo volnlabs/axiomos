@@ -77,6 +77,7 @@
     reg [7:0] status_snapshot;
     reg [7:0] sequence_snapshot;
     reg [1:0] estop_release_sync;
+    wire safety_rst_n = rst_n & estop_n;
 
     assign clk_en = 1'b1;
     assign spi_miso_en = 1'b1;
@@ -133,11 +134,32 @@
             ss_n_sync <= {ss_n_sync[1:0], spi_ss_n};
     end
 
-    always @(posedge clk or negedge rst_n or negedge estop_n) begin
-        if (!rst_n || !estop_n)
+    always @(posedge clk or negedge safety_rst_n) begin
+        if (!safety_rst_n)
             estop_release_sync <= 2'b00;
         else
             estop_release_sync <= {estop_release_sync[0], 1'b1};
+    end
+
+    // E-stop retains replay history and the selected transaction's snapshot.
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            sequence_valid <= 1'b0;
+            last_sequence <= 8'h00;
+            status_snapshot <= 8'h00;
+            sequence_snapshot <= 8'h00;
+        end else if (estop_n) begin
+            if (transaction_end_pending && !status_read_selected
+                && transaction_selected && transaction_accepted
+                && transaction_bit_count == 7'd96) begin
+                last_sequence <= frame_sequence;
+                sequence_valid <= 1'b1;
+            end
+            if (cs_fall && estop_release_sync[1]) begin
+                status_snapshot <= status;
+                sequence_snapshot <= sequence_valid ? last_sequence : 8'h00;
+            end
+        end
     end
 
     always @(posedge clk or negedge rst_n or negedge estop_n) begin
@@ -154,8 +176,6 @@
             frame_left <= 16'sd0;
             frame_right <= 16'sd0;
             frame_flags <= 8'h00;
-            sequence_valid <= 1'b0;
-            last_sequence <= 8'h00;
             command_valid <= 1'b0;
             watchdog_expired <= 1'b0;
             watchdog_count <= 32'd0;
@@ -163,8 +183,6 @@
             right_duty_permille <= 12'sd0;
             command_accept <= 1'b0;
             status_read_selected <= 1'b0;
-            status_snapshot <= 8'h00;
-            sequence_snapshot <= 8'h00;
         end else if (!estop_n) begin
             byte_index <= 4'd0;
             transaction_selected <= 1'b0;
@@ -212,8 +230,6 @@
                     && transaction_bit_count == 7'd96) begin
                     left_duty_permille <= frame_left[11:0];
                     right_duty_permille <= frame_right[11:0];
-                    last_sequence <= frame_sequence;
-                    sequence_valid <= 1'b1;
                     command_valid <= 1'b1;
                     watchdog_expired <= 1'b0;
                     watchdog_count <= 32'd0;
@@ -232,8 +248,6 @@
             end
 
             if (cs_fall && estop_release_sync[1]) begin
-                status_snapshot <= status;
-                sequence_snapshot <= sequence_valid ? last_sequence : 8'h00;
                 transaction_selected <= 1'b1;
                 transaction_accepted <= 1'b0;
                 transaction_bit_count <= 7'd0;

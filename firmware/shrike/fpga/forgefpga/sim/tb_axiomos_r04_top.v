@@ -25,7 +25,7 @@ module tb_axiomos_r04_top;
     wire right_direction_out, right_direction_out_en;
     reg [7:0] last_status;
     reg [7:0] accepted_sequence;
-    integer failures;
+    integer failures, release_order;
 
     top #(.COMMAND_TIMEOUT_CYCLES(WATCHDOG_CYCLES),
           .CLOCK_HZ(1000), .PWM_CARRIER_HZ(50)) dut (
@@ -225,6 +225,8 @@ module tb_axiomos_r04_top;
             check(left_pwm_out === 1'b0 && right_pwm_out === 1'b0,
                   "reset must force both PWM outputs low");
             check(spi_miso === 1'b0, "READY must be low during reset");
+            check(dut.sequence_valid === 1'b0 && dut.last_sequence === 8'h00,
+                  "power reset must clear the replay baseline");
             rst_n = 1'b1;
             #100;
             check(spi_miso === 1'b1 && spi_miso_en === 1'b1,
@@ -380,6 +382,11 @@ module tb_axiomos_r04_top;
         check(left_pwm_out === 1'b0 && right_pwm_out === 1'b0,
               "e-stop release without a fresh command must remain disabled");
 
+        send_command(8'h01, 8'h01, 8'h06, 8'h03, 16'd100, 16'd100,
+                     8'h00, 8'h36, 8'h0c);
+        check(dut.command_valid === 1'b0 && dut.last_sequence === 8'h03,
+              "e-stop must retain the replay baseline and reject the old command");
+
         send_command(8'h01, 8'h01, 8'h06, 8'h04, 16'd100, 16'd100,
                      8'h00, 8'h77, 8'hc4);
         check(dut.command_valid === 1'b1,
@@ -479,6 +486,24 @@ module tb_axiomos_r04_top;
                      8'h00, 8'h44, 8'h1e);
         check(dut.command_valid === 1'b1, "zero command must be accepted");
         check_pwm_period(0, 0, "zero command must produce no PWM pulses");
+
+        for (release_order = 0; release_order < 2; release_order = release_order + 1) begin
+            @(negedge clk); estop_n = 1'b0;
+            #1 rst_n = 1'b0;
+            #1;
+            if (release_order == 0) rst_n = 1'b1;
+            else estop_n = 1'b1;
+            check_pwm_period(0, 0, "partial reset release must keep PWM disabled");
+            check(dut.estop_release_sync === 2'b00,
+                  "either asserted reset must hold top release qualification clear");
+            @(negedge clk); rst_n = 1'b1; estop_n = 1'b1;
+            check_pwm_period(0, 0, "overlapping reset release alone must not rearm");
+            send_command(8'h01, 8'h01, 8'h06, 8'h03, 16'd100, 16'd100,
+                         8'h00, 8'h36, 8'h0c);
+            check(dut.command_valid === 1'b1,
+                  "fresh complete command after overlapping reset must recover");
+            check_pwm_period(2, 2, "fresh command must restore PWM after overlap");
+        end
 
         rst_n = 1'b0;
         #1;

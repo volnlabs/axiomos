@@ -19,6 +19,7 @@ module shrike_safety_gate #(
     reg [31:0] pwm_count;
     reg estop_armed;
     reg [1:0] estop_release_sync;
+    wire safety_rst_n = rst_n & estop_n;
     wire [11:0] left_magnitude = left_duty_permille[11] ? -left_duty_permille : left_duty_permille;
     wire [11:0] right_magnitude = right_duty_permille[11] ? -right_duty_permille : right_duty_permille;
     wire envelope_ok = left_magnitude <= MAX_DUTY_PERMILLE && right_magnitude <= MAX_DUTY_PERMILLE;
@@ -31,8 +32,8 @@ module shrike_safety_gate #(
     wire [31:0] left_high_cycles = left_scaled / 1000;
     wire [31:0] right_high_cycles = right_scaled / 1000;
 
-    always @(posedge clk or negedge rst_n or negedge estop_n) begin
-        if (!rst_n || !estop_n) begin
+    always @(posedge clk or negedge safety_rst_n) begin
+        if (!safety_rst_n) begin
             pwm_count <= 0; estop_armed <= 0; estop_release_sync <= 0;
         end
         else begin

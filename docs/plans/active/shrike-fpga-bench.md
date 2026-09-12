@@ -29,7 +29,7 @@ they are not operational FPGA acceptance. No unchanged capture is repeated.
   restoration procedure. Prove restoration before custom runtime flashing.
   Keep the existing flash guard. Use missing/corrupt fixtures for negative
   recovery tests once the actual recovery record becomes ready.
-- [ ] Install and identify the vendor ForgeFPGA toolchain in Ubuntu 24.04;
+- [x] Install and identify the vendor ForgeFPGA toolchain in Ubuntu 24.04 userspace;
   record installer/compiler/device identities and retained artifact locations.
 - [ ] Review clock/reset, e-stop, both PWM/direction outputs and all MCU
   interconnect through the vendor I/O planner and powered-off continuity.
@@ -141,17 +141,11 @@ to operator-only evidence.
 Vendor readiness remains blocked on concrete inputs:
 
 - [Renesas Go Configure Software Hub](https://www.renesas.com/en/software-tool/go-configure-software-hub)
-  lists Ubuntu 24.04 support and v6.55.001 for Ubuntu (64-bit), 247.58 MB,
-  published August 14, 2026. Its
-  [official installer link](https://www.renesas.com/en/document/sws/go-configure-software-hub-v655001-ubuntu-64-bit)
-  requires MyRenesas login; the unauthenticated request redirects to login and
-  then receives a Cloudflare challenge. No browser session is available to this
-  agent. The installer has not been downloaded or installed. Supply the official
-  downloaded installer locally to resume; never supply account credentials in
-  the repository. The Arch host is not the planned supported Ubuntu environment;
-  Docker access is denied and passwordless sudo is unavailable. User-accessible
-  QEMU/KVM is present, so a supported Ubuntu guest remains a possible setup once
-  the installer is available.
+  v6.55.001 is now installed from the operator's downloaded Ubuntu amd64 DEB.
+  The earlier unauthenticated download was blocked by login/Cloudflare; that
+  installer dependency is resolved. Package and environment identities are
+  recorded below. The Arch host runs the Ubuntu userspace through unprivileged
+  Bubblewrap; this is not a full Ubuntu guest or a vendor-certified host setup.
 - [Vicharak release v1.0.0](https://github.com/vicharak-in/shrike/releases/tag/v1.0.0)
   remains the only published release on recheck. Its Shrike-Lite MicroPython
   UF2 is 676,864 bytes, but the release does not bind it to V1.0/R0.4 recovery.
@@ -229,10 +223,11 @@ forecast. Physical capture still requires the board and pilot qualifications.
 
 ### Audit checkpoint
 
-At the handoff checkpoint, the initial full audit has 139 completed PASS stages,
-four FAIL stages and two explicit SKIPs; `miri-bpf-cloud` is still running and
-tracked-lockfile finalization follows it. The audit continues writing its own
-results in `artifacts/runs/1789194472-check-all/`. It is not a passing full gate.
+The initial full audit completed at 06:59:07 UTC with exit 1: 147 stages,
+141 PASS, four FAIL and two explicit SKIPs, in 31 minutes 15 seconds. All 17
+Miri stages (setup plus 16 tests) and tracked-lockfile finalization passed.
+The two skips are the opt-in fault injection and deferred SMP4 scheduler check.
+This is not a passing full gate.
 The four recorded failures are product naming, flash contract, and RP2040
 debug/release Clippy. The last three pass on the focused reruns after `0ff336a`;
 those reruns do not rewrite the failed original audit. Historical-name lint
@@ -241,7 +236,89 @@ UART-sheet generator. Do not rename evidence identities or relax the gate to
 claim readiness. A clean final-candidate full pass remains required before
 physical deployment.
 
-Next dependent action: obtain the official Ubuntu installer locally, establish
+Next dependent action: resolve the synthesis preflight findings, establish
 board-compatible recovery, then review the actual FPGA pins and configuration
 handoff before completing the concrete adapter. v0.5 implementation is outside
 this branch; motors, drivers and motor power remain disconnected.
+
+
+### Installed vendor environment
+
+The downloaded `go-configure-sw-hub-v6.55.001-ubuntu-22.04-amd64.deb` is
+293,600,164 bytes. SHA-256:
+`610eb83b5c40c7da3bb83f39ad5cd136f67486a3b436f2df66273889d9a08c47`.
+Its Debian metadata identifies package `go-configure-sw-hub` version `6.55-1`,
+architecture amd64; the complete compressed payload integrity check passed.
+This locally calculated hash identifies the received file, not a separately
+verified vendor signature. `GPLauncher --version` reports
+`Go Configure Software Hub v.6.55 6.55.001`.
+
+The official [Ubuntu Base 24.04 image directory](https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/)
+provided `ubuntu-base-24.04.5-base-amd64.tar.gz`; its published SHA256SUMS entry
+matched `e77b6f10c2590cef872b33ee9f635a0e3fd1f57fb074c0e52b5c7f56147a0c86`.
+The local environment is
+`/home/utkarsh/.local/share/axiomos-tools/forgefpga-6.55.001/`.
+Installation logs preserve the initial single-UID fontconfig and missing icon
+index failures. Reconfiguration and installing `hicolor-icon-theme` resolved
+both; `dpkg --audit` now returns no findings. Vendor files stay outside Git.
+
+The local `run` script uses the Ubuntu rootfs, binds this feature worktree at
+`/workspace`, and exposes no USB hardware or network. Headless version check:
+
+```sh
+/home/utkarsh/.local/share/axiomos-tools/forgefpga-6.55.001/run /usr/bin/GPLauncher --version
+```
+
+For the vendor GUI on the operator's existing X11 display:
+
+```sh
+FORGE_QT_PLATFORM=xcb /home/utkarsh/.local/share/axiomos-tools/forgefpga-6.55.001/run /usr/bin/GPLauncher
+```
+
+The GUI process launched; this is not evidence of a reviewed I/O planner or
+successful build. The installed launcher/designer help exposes file opening,
+not a documented command-line Forge build. Bundled Yosys is `0.59+0`, git
+`946048486`; generic RTL preflight cannot establish device fit, routing, timing
+or a configuration bitstream.
+
+
+### RTL synthesis blockers repaired
+
+The installed compiler exposed two rejected dual-edge/OR reset processes that
+Icarus simulation accepted. Combining the same-value POR/e-stop resets into one
+active-low reset signal fixes the release synchronizer and both gate source
+mirrors. The next compiler stage exposed eight logic loops in the asynchronous
+set/clear feedback for replay and status registers retained during e-stop.
+Those four registers now have POR-only reset with a clocked e-stop hold; their
+commit conditions and old-value snapshot semantics remain unchanged.
+
+Both existing simulations pass, including new reset-overlap release orders,
+immediate output suppression during active PWM, release-only disarm, fresh
+command recovery, replay rejection after e-stop and POR clearing replay history.
+Independent review and parent reruns pass. The checked-in structural regression
+can be repeated in this local environment with:
+
+```sh
+/home/utkarsh/.local/share/axiomos-tools/forgefpga-6.55.001/run \
+  /usr/local/go-configure-sw-hub/bin/external/yosys/v59/yosys \
+  -s scripts/verify/fpga-safety-preflight.ys
+```
+
+Hierarchy, process lowering, `check -assert` and absence of inferred latches pass;
+zero check problems remain. One `Complex async reset` warning for `frame_bad`
+remains (`$dffsr`, POR=0/e-stop=1); actual Forge mapping must resolve support.
+Generic arithmetic cells are not device resource estimates. No fit, routed
+clock timing, bitstream or physical acceptance is claimed.
+
+Original failures, intermediate eight-loop failure and final passing commands,
+source hashes and logs are retained under ignored
+`.superpowers/sdd/shrike-fpga-bench/vendor-synthesis/`. The parent run uses the
+tracked preflight script; documentation links pass at 116 files / 336 links.
+A working project copy is prepared at
+`.superpowers/sdd/shrike-fpga-bench/vendor-project/axiomos_r04.ffpga` (visible as
+`/workspace/.superpowers/sdd/shrike-fpga-bench/vendor-project/axiomos_r04.ffpga`
+inside the vendor environment). The hub remains launched for the operator;
+file-argument attempts exited without a persistent designer process, so opening
+the project is not verified. Native desktop UI control is unavailable in this
+session. The next GUI action is to open that copy and run the Forge build/I/O
+planner; any resulting project changes and reports require review before use.
