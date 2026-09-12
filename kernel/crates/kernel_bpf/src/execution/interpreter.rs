@@ -286,7 +286,7 @@ impl<P: PhysicalProfile> Interpreter<P> {
         let input_ptr = |addr: u64| {
             let start = stack.as_ptr().addr() as u64;
             match addr.checked_sub(start) {
-                Some(offset) if offset <= stack.len() as u64 => {
+                Some(offset) if offset < stack.len() as u64 => {
                     stack.as_ptr().wrapping_add(offset as usize)
                 }
                 _ => addr as *const u8,
@@ -387,7 +387,9 @@ impl<P: PhysicalProfile> Interpreter<P> {
 
         // Frame-pointer copies are stack accesses too. Access through the live
         // slice instead of an integer-derived pointer invalidated by reborrows.
-        if let Some(stack_idx) = stack_access_offset(stack, base, addr, size.size_bytes())? {
+        if let Some(stack_idx) =
+            stack_access_offset(stack, base, addr, size.size_bytes(), src == Register::R10)?
+        {
             let value = match size {
                 MemSize::Byte => stack[stack_idx] as u64,
                 MemSize::Half => {
@@ -507,7 +509,9 @@ impl<P: PhysicalProfile> Interpreter<P> {
             .checked_add_signed(i64::from(insn.offset))
             .ok_or(BpfError::OutOfBounds)?;
 
-        if let Some(stack_idx) = stack_access_offset(stack, base, addr, size.size_bytes())? {
+        if let Some(stack_idx) =
+            stack_access_offset(stack, base, addr, size.size_bytes(), dst == Register::R10)?
+        {
             match size {
                 MemSize::Byte => {
                     stack[stack_idx] = value as u8;
@@ -550,18 +554,19 @@ impl<P: PhysicalProfile> Interpreter<P> {
     }
 }
 
-/// Identify stack addresses, including R10's one-past-end value. If either
-/// the base or effective address belongs to the stack, an invalid range must
-/// fail here rather than falling through to a generic raw-pointer access.
+/// Identify stack addresses and explicit R10 accesses. The one-past-end
+/// address may also belong to adjacent non-stack storage, so only R10's
+/// register identity makes that address unambiguously stack-backed.
 fn stack_access_offset(
     stack: &[u8],
     base: u64,
     addr: u64,
     size: usize,
+    frame_pointer: bool,
 ) -> Result<Option<usize>, BpfError> {
     let start = stack.as_ptr().addr() as u64;
     let end = start + stack.len() as u64;
-    if !(start..=end).contains(&base) && !(start..=end).contains(&addr) {
+    if !frame_pointer && !(start..end).contains(&base) && !(start..end).contains(&addr) {
         return Ok(None);
     }
     let offset = addr.checked_sub(start).ok_or(BpfError::OutOfBounds)?;
@@ -789,6 +794,27 @@ mod tests {
     }
 
     #[test]
+    fn adjacent_data_is_not_stack_memory() {
+        let interpreter = Interpreter::<ActiveProfile>::new();
+        let mut storage = [0u8; 32];
+        let (stack, data) = storage.split_at_mut(16);
+        data[..8].copy_from_slice(&42u64.to_ne_bytes());
+        let addr = data.as_ptr() as u64;
+        let ctx = BpfContext::empty();
+        let mut regs = RegisterFile::new();
+        regs.set(Register::R6, addr);
+        interpreter
+            .execute_load(&BpfInsn::new(0x79, 0, 6, 0, 0), &mut regs, stack, &ctx)
+            .unwrap();
+        assert_eq!(regs.get(Register::R0), 42);
+        assert_eq!(
+            interpreter.call_helper(6, [0, stack.as_ptr() as u64, addr, 0, 0], &ctx, stack),
+            Ok(0)
+        );
+        assert_eq!(helpers_stub::get_test_map_value(), 42);
+    }
+
+    #[test]
     fn copied_stack_pointer_rejects_out_of_bounds_access() {
         let interpreter = Interpreter::<ActiveProfile>::new();
         let mut stack = [0u8; 16];
@@ -797,7 +823,13 @@ mod tests {
         let ctx = BpfContext::empty();
         let mut regs = RegisterFile::new();
         regs.set(Register::R7, 42);
-        for (base, offset) in [(start, -1), (end, 0), (end, -7), (end, 1)] {
+        for addr in [end, end + 1] {
+            assert_eq!(
+                stack_access_offset(&stack, end, addr, 8, true),
+                Err(BpfError::OutOfBounds)
+            );
+        }
+        for (base, offset) in [(start, -1), (end - 7, 0), (end, -7), (end - 1, 1)] {
             regs.set(Register::R6, base);
             assert_eq!(
                 interpreter.execute_load(
