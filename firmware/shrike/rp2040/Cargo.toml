@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "Shrike-lite RP2040 sidecar firmware: UART control link, L298N motors, ultrasonic, e-stop"
 
+# Standalone target firmware, including when this checkout is a nested worktree.
+[workspace]
+
 [features]
 default = []
 # Deliberately cannot build until lifecycle commands are atomically integrated
