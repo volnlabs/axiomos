@@ -85,7 +85,7 @@ impl<P: PhysicalProfile> Interpreter<P> {
             }
 
             OpcodeClass::Jmp | OpcodeClass::Jmp32 => {
-                return self.execute_jmp(insn, regs, class == OpcodeClass::Jmp, ctx);
+                return self.execute_jmp(insn, regs, class == OpcodeClass::Jmp, ctx, stack);
             }
 
             OpcodeClass::Ldx => {
@@ -178,12 +178,13 @@ impl<P: PhysicalProfile> Interpreter<P> {
         regs: &mut RegisterFile,
         is_64bit: bool,
         ctx: &BpfContext<'_>,
+        stack: &[u8],
     ) -> Result<InsnResult, BpfError> {
         let jmp_op = JmpOp::from_opcode(insn.opcode).ok_or(BpfError::InvalidInstruction)?;
 
         // Handle call and exit
         if matches!(jmp_op, JmpOp::Call) {
-            return self.execute_call(insn, regs, ctx);
+            return self.execute_call(insn, regs, ctx, stack);
         }
 
         if matches!(jmp_op, JmpOp::Exit) {
@@ -241,6 +242,7 @@ impl<P: PhysicalProfile> Interpreter<P> {
         insn: &BpfInsn,
         regs: &mut RegisterFile,
         ctx: &BpfContext<'_>,
+        stack: &[u8],
     ) -> Result<InsnResult, BpfError> {
         let helper_id = insn.imm;
 
@@ -254,7 +256,7 @@ impl<P: PhysicalProfile> Interpreter<P> {
         ];
 
         // Execute helper
-        let result = self.call_helper(helper_id, args, ctx)?;
+        let result = self.call_helper(helper_id, args, ctx, stack)?;
 
         // Store result in R0
         regs.set(Register::R0, result);
@@ -268,6 +270,7 @@ impl<P: PhysicalProfile> Interpreter<P> {
         helper_id: i32,
         args: [u64; 5],
         ctx: &BpfContext<'_>,
+        stack: &[u8],
     ) -> Result<u64, BpfError> {
         let Some(id) = HelperId::from_raw(helper_id) else {
             return Err(BpfError::InvalidHelper(helper_id));
@@ -276,10 +279,25 @@ impl<P: PhysicalProfile> Interpreter<P> {
             return Err(BpfError::InvalidHelper(helper_id));
         };
 
-        // SAFETY: Calling BPF helpers is inherently unsafe as they are extern "C" functions.
-        // We rely on the BPF verifier (in a full implementation) to ensure arguments are valid.
-        // In this interpreter, we assume arguments are reasonably well-formed or the helper handles invalid inputs.
-        // Dispatch uses the runtime operation paired with the verifier signature.
+        // Integer registers retain addresses, not the live stack borrow's
+        // provenance. Reconstruct stack-backed input pointers from this borrow
+        // for the duration of the helper call. Other pointers retain the
+        // existing verifier/map/context lifetime contract.
+        let input_ptr = |addr: u64| {
+            let start = stack.as_ptr().addr() as u64;
+            match addr.checked_sub(start) {
+                Some(offset) if offset <= stack.len() as u64 => {
+                    stack.as_ptr().wrapping_add(offset as usize)
+                }
+                _ => addr as *const u8,
+            }
+        };
+
+        // SAFETY: The helper contract requires live, in-bounds input buffers.
+        // The reconstruction above restores stack provenance, not bounds or
+        // initialization proofs for implicit map-key/value lengths; those remain
+        // a separate verifier/helper obligation. Helpers consume input pointers
+        // synchronously and must not retain them after returning.
         unsafe {
             match runtime {
                 RuntimeHelper::KtimeGetNs => Ok(bpf_ktime_get_ns()),
@@ -301,35 +319,35 @@ impl<P: PhysicalProfile> Interpreter<P> {
                 }
 
                 RuntimeHelper::TracePrintk => {
-                    Ok(bpf_trace_printk(args[0] as *const u8, args[1] as u32) as u64)
+                    Ok(bpf_trace_printk(input_ptr(args[0]), args[1] as u32) as u64)
                 }
 
                 RuntimeHelper::MapLookupElem => {
-                    Ok(bpf_map_lookup_elem(args[0] as u32, args[1] as *const u8) as u64)
+                    Ok(bpf_map_lookup_elem(args[0] as u32, input_ptr(args[1])) as u64)
                 }
 
                 RuntimeHelper::MapUpdateElem => Ok(bpf_map_update_elem(
                     args[0] as u32,
-                    args[1] as *const u8,
-                    args[2] as *const u8,
+                    input_ptr(args[1]),
+                    input_ptr(args[2]),
                     args[3],
                 ) as u64),
 
                 RuntimeHelper::MapDeleteElem => {
-                    Ok(bpf_map_delete_elem(args[0] as u32, args[1] as *const u8) as u64)
+                    Ok(bpf_map_delete_elem(args[0] as u32, input_ptr(args[1])) as u64)
                 }
 
                 RuntimeHelper::RingbufOutput => {
                     Ok(
-                        bpf_ringbuf_output(args[0] as u32, args[1] as *const u8, args[2], args[3])
+                        bpf_ringbuf_output(args[0] as u32, input_ptr(args[1]), args[2], args[3])
                             as u64,
                     )
                 }
 
                 RuntimeHelper::TimeseriesPush => Ok(bpf_timeseries_push(
                     args[0] as u32,
-                    args[1] as *const u8,
-                    args[2] as *const u8,
+                    input_ptr(args[1]),
+                    input_ptr(args[2]),
                 ) as u64),
 
                 // Robotics Helpers
@@ -363,21 +381,13 @@ impl<P: PhysicalProfile> Interpreter<P> {
         let size = MemSize::from_opcode(insn.opcode).ok_or(BpfError::InvalidInstruction)?;
 
         let base = regs.get(src);
-        // wrapping_add is correct for address calculation
-        let addr = base.wrapping_add(insn.offset as i64 as u64);
+        let addr = base
+            .checked_add_signed(i64::from(insn.offset))
+            .ok_or(BpfError::OutOfBounds)?;
 
-        // 1. Stack access (src = R10)
-        if src == Register::R10 {
-            let offset = insn.offset as i64;
-            // R10 (FP) = stack.as_ptr() + stack.len(), so r10 + offset maps to
-            // stack[stack.len() + offset]. Offset is negative for valid accesses.
-            let stack_idx_signed = stack.len() as i64 + offset;
-
-            if stack_idx_signed < 0 || stack_idx_signed as usize + size.size_bytes() > stack.len() {
-                return Err(BpfError::OutOfBounds);
-            }
-
-            let stack_idx = stack_idx_signed as usize;
+        // Frame-pointer copies are stack accesses too. Access through the live
+        // slice instead of an integer-derived pointer invalidated by reborrows.
+        if let Some(stack_idx) = stack_access_offset(stack, base, addr, size.size_bytes())? {
             let value = match size {
                 MemSize::Byte => stack[stack_idx] as u64,
                 MemSize::Half => {
@@ -453,9 +463,9 @@ impl<P: PhysicalProfile> Interpreter<P> {
         // After verification, these pointers are trusted. We allow reads through any
         // non-null pointer that didn't match the above categories.
         if addr != 0 {
-            // SAFETY: The BPF verifier (or program construction) ensures the pointer
-            // is valid. Map value pointers are stable for the duration of BPF execution
-            // because the BPF manager lock is re-acquired by helpers as needed.
+            // SAFETY: Verification bounds map-value accesses; the execution's
+            // captured map bindings and leases keep their storage live and
+            // exclusively available until execution returns.
             let value = unsafe {
                 match size {
                     MemSize::Byte => core::ptr::read_unaligned(addr as *const u8) as u64,
@@ -492,18 +502,12 @@ impl<P: PhysicalProfile> Interpreter<P> {
 
         let size = MemSize::from_opcode(insn.opcode).ok_or(BpfError::InvalidInstruction)?;
 
-        // For stack access (dst = R10)
-        if dst == Register::R10 {
-            let offset = insn.offset as i64;
-            // R10 (FP) = stack.as_ptr() + stack.len(), so r10 + offset maps to
-            // stack[stack.len() + offset]. Offset is negative for valid accesses.
-            let stack_idx_signed = stack.len() as i64 + offset;
+        let base = regs.get(dst);
+        let addr = base
+            .checked_add_signed(i64::from(insn.offset))
+            .ok_or(BpfError::OutOfBounds)?;
 
-            if stack_idx_signed < 0 || stack_idx_signed as usize + size.size_bytes() > stack.len() {
-                return Err(BpfError::OutOfBounds);
-            }
-
-            let stack_idx = stack_idx_signed as usize;
+        if let Some(stack_idx) = stack_access_offset(stack, base, addr, size.size_bytes())? {
             match size {
                 MemSize::Byte => {
                     stack[stack_idx] = value as u8;
@@ -528,9 +532,6 @@ impl<P: PhysicalProfile> Interpreter<P> {
         //
         // BPF helpers return raw pointers to map values that programs can write through.
         // After verification, these pointers are trusted.
-        let base = regs.get(dst);
-        let addr = base.wrapping_add(insn.offset as i64 as u64);
-
         if addr != 0 {
             // SAFETY: The BPF verifier (or program construction) ensures the pointer
             // is valid. Map value pointers are stable for the duration of BPF execution.
@@ -547,6 +548,27 @@ impl<P: PhysicalProfile> Interpreter<P> {
 
         Err(BpfError::OutOfBounds)
     }
+}
+
+/// Identify stack addresses, including R10's one-past-end value. If either
+/// the base or effective address belongs to the stack, an invalid range must
+/// fail here rather than falling through to a generic raw-pointer access.
+fn stack_access_offset(
+    stack: &[u8],
+    base: u64,
+    addr: u64,
+    size: usize,
+) -> Result<Option<usize>, BpfError> {
+    let start = stack.as_ptr().addr() as u64;
+    let end = start + stack.len() as u64;
+    if !(start..=end).contains(&base) && !(start..=end).contains(&addr) {
+        return Ok(None);
+    }
+    let offset = addr.checked_sub(start).ok_or(BpfError::OutOfBounds)?;
+    if offset > stack.len() as u64 || size as u64 > stack.len() as u64 - offset {
+        return Err(BpfError::OutOfBounds);
+    }
+    Ok(Some(offset as usize))
 }
 
 impl<P: PhysicalProfile> Default for Interpreter<P> {
@@ -767,6 +789,99 @@ mod tests {
     }
 
     #[test]
+    fn copied_stack_pointer_rejects_out_of_bounds_access() {
+        let interpreter = Interpreter::<ActiveProfile>::new();
+        let mut stack = [0u8; 16];
+        let start = stack.as_ptr().addr() as u64;
+        let end = start + stack.len() as u64;
+        let ctx = BpfContext::empty();
+        let mut regs = RegisterFile::new();
+        regs.set(Register::R7, 42);
+        for (base, offset) in [(start, -1), (end, 0), (end, -7), (end, 1)] {
+            regs.set(Register::R6, base);
+            assert_eq!(
+                interpreter.execute_load(
+                    &BpfInsn::new(0x79, 0, 6, offset, 0),
+                    &mut regs,
+                    &stack,
+                    &ctx
+                ),
+                Err(BpfError::OutOfBounds)
+            );
+            assert_eq!(
+                interpreter.execute_store(&BpfInsn::new(0x7b, 6, 7, offset, 0), &regs, &mut stack),
+                Err(BpfError::OutOfBounds)
+            );
+            assert_eq!(stack, [0; 16]);
+        }
+        for base in [0, u64::MAX] {
+            regs.set(Register::R6, base);
+            let offset = if base == 0 { -1 } else { 1 };
+            assert_eq!(
+                interpreter.execute_load(
+                    &BpfInsn::new(0x79, 0, 6, offset, 0),
+                    &mut regs,
+                    &stack,
+                    &ctx
+                ),
+                Err(BpfError::OutOfBounds)
+            );
+            assert_eq!(
+                interpreter.execute_store(&BpfInsn::new(0x7b, 6, 7, offset, 0), &regs, &mut stack),
+                Err(BpfError::OutOfBounds)
+            );
+        }
+        for (base, offset) in [(start, 0), (end, -8)] {
+            regs.set(Register::R6, base);
+            interpreter
+                .execute_store(&BpfInsn::new(0x7b, 6, 7, offset, 0), &regs, &mut stack)
+                .unwrap();
+            interpreter
+                .execute_load(
+                    &BpfInsn::new(0x79, 0, 6, offset, 0),
+                    &mut regs,
+                    &stack,
+                    &ctx,
+                )
+                .unwrap();
+            assert_eq!(regs.get(Register::R0), 42);
+        }
+    }
+
+    #[test]
+    fn copied_stack_pointer_roundtrip_all_widths() {
+        for (store, load, store_reg, expected) in [
+            (0x72, 0x71, 0x73, 43),
+            (0x6a, 0x69, 0x6b, 43),
+            (0x62, 0x61, 0x63, 43),
+            (0x7a, 0x79, 0x7b, 43),
+        ] {
+            let program = ProgramBuilder::<ActiveProfile>::new(BpfProgType::SocketFilter)
+                .insn(BpfInsn::new(store, 10, 0, -15, 42))
+                .insn(BpfInsn::mov64_reg(6, 10))
+                .insn(BpfInsn::add64_imm(6, -15))
+                .insn(BpfInsn::new(load, 7, 6, 0, 0))
+                .insn(BpfInsn::add64_imm(7, 1))
+                .insn(BpfInsn::new(store_reg, 6, 7, 0, 0))
+                .insn(BpfInsn::new(load, 0, 10, -15, 0))
+                .exit()
+                .build()
+                .expect("verified unaligned stack access through a copied frame pointer");
+            let mut stack = vec![0; ActiveProfile::MAX_STACK_SIZE];
+            for _ in 0..2 {
+                assert_eq!(
+                    Interpreter::<ActiveProfile>::new().execute_with_stack(
+                        &program,
+                        &BpfContext::empty(),
+                        &mut stack
+                    ),
+                    Ok(expected)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn execute_arithmetic() {
         let program = ProgramBuilder::<ActiveProfile>::new(BpfProgType::SocketFilter)
             .insn(BpfInsn::mov64_imm(0, 10)) // r0 = 10
@@ -873,18 +988,9 @@ mod tests {
 
     /// # Miri safety contract
     ///
-    /// This test is the regression test for the Stacked Borrows bug that
-    /// arose when `bpf_map_update_elem` formed a `&u64` reference through an
-    /// integer-derived raw pointer passed across the BPF helper ABI. Under
-    /// `cargo miri test -p kernel_bpf --no-default-features --features
-    /// cloud-profile` the test must pass — a regression that re-introduces
-    /// `*(value as *const u64)` (or any other ref-forming deref) inside the
-    /// helper fails Miri on the read.
-    ///
-    /// Miri proves the read is aliasing-clean under sequential single-
-    /// threaded execution. It does NOT prove concurrent safety; that
-    /// requires Loom or true kernel concurrency, tracked under
-    /// "Loom/Miri epoch reclamation tests" in the engineering audit package.
+    /// The helper must read the actual stack payload, with a pointer valid
+    /// through its call. A stub that stores the pointer's numeric address
+    /// instead of reading it would hide interpreter aliasing failures.
     #[test]
     fn execute_map_update_helper() {
         // Test that calling bpf_map_update_elem helper works
@@ -893,7 +999,6 @@ mod tests {
         assert_eq!(helpers_stub::get_test_map_value(), 0);
 
         // We need to put a value on the stack and pass its pointer
-        // For this test, we'll just verify the helper is called and returns 0
         let program = ProgramBuilder::<ActiveProfile>::new(BpfProgType::SocketFilter)
             .insn(BpfInsn::new(0x7a, 10, 0, -8, 0)) // key
             .insn(BpfInsn::new(0x7a, 10, 0, -16, 42)) // value
@@ -914,6 +1019,7 @@ mod tests {
         let result = interpreter.execute(&program, &ctx);
         // Helper should return 0 on success
         assert_eq!(result, Ok(0));
+        assert_eq!(helpers_stub::get_test_map_value(), 42);
     }
 
     #[test]
