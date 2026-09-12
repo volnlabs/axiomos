@@ -87,3 +87,14 @@ output = "firmware/shrike/rp2040/target/thumbv6m-none-eabi/release/shrike_rp2040
 selection = "fixed standalone manifest, target, profile, and binary path"
 immutable_inputs = "firmware/shrike/rp2040/Cargo.lock; rust-toolchain.toml"
 hash_evidence = "SHA-256 required in the physical-HIL retained artifact manifest"
+
+[[artifact]]
+name = "Shrike RP2040 UF2"
+platform = "Shrike RP2040 firmware"
+status = "supported after HIL"
+format = "UF2 firmware image"
+producer = "firmware/shrike/rp2040/build-uf2.sh"
+output = "firmware/shrike/rp2040/target/thumbv6m-none-eabi/release/shrike_rp2040.uf2"
+selection = "elf2uf2-rs@2.2.0 of the fixed crate-local release ELF, rejected if it reaches the upper 2 MiB"
+immutable_inputs = "firmware/shrike/rp2040/Cargo.lock; rust-toolchain.toml; firmware/shrike/rp2040/memory.x; elf2uf2-rs@2.2.0"
+hash_evidence = "SHA-256 sidecar emitted by build-uf2.sh and retained before physical flashing"

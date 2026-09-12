@@ -258,6 +258,30 @@ pub fn set_priority(irq: u32, priority: u8) {
 #[cfg(not(any(feature = "rpi5", feature = "virt")))]
 pub fn set_priority(_irq: u32, _priority: u8) {}
 
+/// Configure an interrupt as edge-triggered in GICD_ICFGR.
+///
+/// GICv2 uses `0b10` for an edge-triggered interrupt's two-bit field. RP1
+/// MSI-X vectors are edge-triggered even though the RP1 peripheral source
+/// feeding a vector may itself be level-sensitive.
+#[cfg(any(feature = "rpi5", feature = "virt"))]
+pub fn set_edge_triggered(irq: u32) {
+    let reg_index = (irq / 16) as usize;
+    let shift = (irq % 16) * 2;
+
+    // SAFETY: ICFGR contains one two-bit field per interrupt. The calculated
+    // offset and shift select exactly the requested IRQ.
+    unsafe {
+        let offset = gicd::ICFGR + reg_index * 4;
+        let mut value = read_gicd(offset);
+        value &= !(0b11 << shift);
+        value |= 0b10 << shift;
+        write_gicd(offset, value);
+    }
+}
+
+#[cfg(not(any(feature = "rpi5", feature = "virt")))]
+pub fn set_edge_triggered(_irq: u32) {}
+
 // Low-level register access
 //
 // SAFETY for all GIC register access functions:

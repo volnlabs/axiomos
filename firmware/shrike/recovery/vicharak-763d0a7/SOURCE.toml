@@ -1,0 +1,28 @@
+name = "Vicharak Shrike recovery payloads"
+repository = "https://github.com/vicharak-in/shrike"
+commit = "763d0a7dd9ebdfc3f61de148457d5c34f112f61e"
+board = "Shrike-lite V1.0/R0.4"
+
+# The pinned source contains these vendor hardware-test payloads. The Vicharak
+# v1.0.0 release labels `shrike-lite-micropython.uf2` only as Shrike-Lite
+# (RP2040), not V1.0/R0.4. It is therefore not an authoritative R0.4 recovery
+# image and must not be substituted here.
+[files]
+"main.py" = "ce408fb16ee49d321131d28a4fc21ec9e28d4ea207c22e18ae0496d29f189fea"
+"blink_all.bin" = "cd40b215efa40f272fe788202417d7f312a4e8f772fb06c2f96beafaf4fb65fd"
+
+[upstream_files]
+"main.py" = "0e3b259a4f2387260823435a3a53e98dbc9f4164860cff95d84421a2f73f5b59"
+"blink_all.bin" = "cd40b215efa40f272fe788202417d7f312a4e8f772fb06c2f96beafaf4fb65fd"
+
+[source_paths]
+"main.py" = "test/hardware_test/main.py"
+"blink_all.bin" = "test/bitstreams/v1_4/blink_all.bin"
+
+[factory_uf2]
+ready = false
+file = ""
+sha256 = ""
+board = ""
+source = ""
+search = "Vicharak release v1.0.0 and pinned commit 763d0a7 were checked; neither asserts a factory UF2 for V1.0/R0.4."

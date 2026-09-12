@@ -110,6 +110,18 @@ def main() -> None:
         "release fatal policy must emit a bounded stable record",
     )
 
+    # Terminal failures cannot depend on another timer tick to drain logs.
+    for name, body in (
+        ("boot_fatal", boot.split("fn boot_fatal(", 1)[1].split("\n}", 1)[0]),
+        ("handle_panic", boot.split("fn handle_panic(", 1)[1]),
+        ("fatal::halt", fatal.split("#[cfg(not(debug_assertions))]", 1)[1]),
+    ):
+        require(
+            "emergency_console();" in body
+            and body.index("emergency_console();") < body.index("serial_println!"),
+            f"{name}: bypass deferred bench logging before terminal diagnostics",
+        )
+
     block = read("kernel/src/driver/block.rs")
     register = block.split("pub fn register_block_device", 1)[1].split("pub fn by_id", 1)[0]
     require("RegisterBlockDeviceError" in block, "block registration needs a typed error")

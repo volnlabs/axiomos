@@ -1,0 +1,18 @@
+schema_version = 1
+purpose = "V03-B N>=10k: emit per-edge M-C latency (PI5_MC ns=) + monitor overhead (PI5_MA ns=) as serial markers for the reducer; GPIO reflex output"
+source_commit = "cf38b5d17242ea90841dfc4df0d1caf3f95f02bf"
+worktree_dirty = true
+profile = "release"
+features = ["embedded-rpi5", "bench"]
+bench_reflex_output = "Gpio"
+trusted_key_sha256 = "16daa2cd24e9dc1dad1a85ce2900dbc117055e9e46c4282a53d3d6ef10346ff3"
+startup_rbpf_sha256 = "2aeb7979945f72f87ed9fcfd07bc1a9e685464dff7b41c4133a385f2dbe8eed5"
+kernel_sha256 = "3f892aa22ed29e9a47c73c206167652a006b7c0299cde5aef917ec4b19e4e5e2"
+kernel8_sha256 = "4d61c2eee265b9e5bda538694cdc46020817cc4ef75bd64213c689d9b9d0e4f6"
+disk_sha256 = "0a6cf02acc7e79887f40e690ae4b0f0ef5f8d3d75ab38887662ab45b14e59fc4"
+expected_markers = ["PI5_OUT_ARM", "PI5_BENCH_READY", "PI5_GPIO_IRQ_PROVEN", "PI5_MC"]
+
+[markers]
+PI5_MC = "per sensor edge: ns=<edge->actuate cycles in ns> (M-C, IRQ-entry to actuation apply). One per pulse."
+PI5_MA = "per guarded actuation: ns=<monitor decide overhead> (M-A / V03-A)."
+note = "M-C is the software path (IRQ entry -> apply); the physical pad-to-pad edge (9.25us single sample) is separate and larger. Reflex fires per edge regardless of output state, so no re-arm needed for the M-C distribution."

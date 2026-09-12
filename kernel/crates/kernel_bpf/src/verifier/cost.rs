@@ -91,6 +91,7 @@ pub fn helper_cost(helper_id: i32) -> u32 {
         | HelperId::GpioSet
         | HelperId::GpioGet
         | HelperId::PwmWrite
+        | HelperId::MotorPairV1
         | HelperId::IioRead
         | HelperId::CanSend => COST_HELPER_COPY,
 

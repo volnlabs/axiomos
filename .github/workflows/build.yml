@@ -47,6 +47,16 @@ env:
 
 jobs:
 
+  aarch64-exception-context:
+    name: "AArch64 exception register canaries"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install emulator and cross assembler
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu qemu-system-arm
+      - name: Execute production exception vectors
+        run: python3 -B scripts/verify/aarch64-exception-context.py
+
   lint:
     name: "Lint (root workspace)"
     runs-on: ubuntu-latest
@@ -146,7 +156,7 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y iverilog
-      - name: Simulate final PWM safety envelope
+      - name: Simulate FPGA safety gate and R0.4 runtime link
         run: scripts/verify/fpga-safety-gate.sh
 
   test:
@@ -184,7 +194,10 @@ jobs:
             cargo test -p kernel_bpf --no-default-features --features cloud-profile $PROFILE_FLAG
             cargo test -p kernel_bpf --no-default-features --features cloud-profile --test profile_contracts $PROFILE_FLAG
             cargo test -p kernel_bpf --no-default-features --features embedded-profile $PROFILE_FLAG
+            EMBEDDED_DISK_PATH=/dev/null cargo test --locked -p kernel --lib --features embedded-profile pwm_observation_attach_is_rejected_without_publication $PROFILE_FLAG
             cargo test -p shrike_link $PROFILE_FLAG
+            cargo test -p shrike_control $PROFILE_FLAG
+            cargo test -p shrike_rp2040_host_sim $PROFILE_FLAG
   test-standalone-workspaces:
     name: "Test (standalone workspaces)"
     runs-on: ubuntu-latest
@@ -201,10 +214,20 @@ jobs:
         run: cargo test --manifest-path userspace/tools/rk_bridge/Cargo.toml
       - name: Test rk_cli
         run: cargo test --manifest-path userspace/tools/rk_cli/Cargo.toml
+      - name: Test Shrike-lite R0.4 board profile
+        run: |
+          rustc --edition=2021 --test firmware/shrike/rp2040/host-tests/r04_board_profile.rs -o /tmp/r04-board-profile-test
+          /tmp/r04-board-profile-test
+      - name: Test Shrike-lite R0.4 flash contract
+        run: python3 firmware/shrike/rp2040/host-tests/test_flash_contract.py
       - name: Test RP2040 firmware (debug)
         run: cargo test --manifest-path firmware/shrike/rp2040/Cargo.toml --target thumbv6m-none-eabi --no-run
       - name: Test RP2040 firmware (release)
         run: cargo test --manifest-path firmware/shrike/rp2040/Cargo.toml --target thumbv6m-none-eabi --release --no-run
+      - name: Build and verify Shrike-lite R0.4 UF2
+        run: |
+          firmware/shrike/rp2040/build-uf2.sh
+          sha256sum --check firmware/shrike/rp2040/target/thumbv6m-none-eabi/release/shrike_rp2040.uf2.sha256
 
   firmware-rp2040:
     name: "Firmware (RP2040)"
@@ -322,9 +345,19 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y xorriso e2fsprogs gcc-aarch64-linux-gnu
+      - name: Install CI BPF trust fixture
+        run: |
+          # This RFC 8032 public key is a reproducible CI fixture, not a secret
+          # or a production trust root. Keeping it in the job makes fork PR
+          # builds work without weakening signed-only production builds.
+          TRUSTED_KEY_FIXTURE="$RUNNER_TEMP/axiomos-bpf-ci-trusted-key.bin"
+          printf '\xd7\x5a\x98\x01\x82\xb1\x0a\xb7\xd5\x4b\xfe\xd3\xc9\x64\x07\x3a\x0e\xe1\x72\xf3\xda\xa6\x23\x25\xaf\x02\x1a\x68\xf7\x07\x51\x1a' > "$TRUSTED_KEY_FIXTURE"
+          echo "AXIOM_BPF_TRUSTED_KEY_PATH=$TRUSTED_KEY_FIXTURE" >> "$GITHUB_ENV"
       - name: Build (x86_64)
         run: |
           cargo build --release
+      - name: Verify rootfs selection and clean fallback
+        run: python3 -B scripts/verify/rootfs-selection.py
       - name: Build (AArch64)
         run: |
           cargo build --release --target aarch64-unknown-none --no-default-features --features aarch64_deps

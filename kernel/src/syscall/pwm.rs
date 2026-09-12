@@ -26,6 +26,15 @@ fn valid_pwm_channel(channel: usize) -> bool {
     (1..=2).contains(&channel)
 }
 
+fn motor_setpoint_from_abi(value: usize) -> Option<i32> {
+    if value <= i32::MAX as usize {
+        Some(value as i32)
+    } else {
+        let signed = value as i64;
+        signed.is_negative().then_some(signed as i32)
+    }
+}
+
 /// Configure PWM period/frequency
 ///
 /// Arguments:
@@ -62,10 +71,23 @@ pub fn sys_pwm_config(pwm_id: usize, freq_hz: usize) -> isize {
 /// Arguments:
 /// - `pwm_id`: 0 or 1
 /// - `channel`: 1 or 2
-/// - `duty_percent`: 0-100 (percentage)
+/// - `duty_percent`: unsigned for ordinary PWM; signed i32 representation for
+///   link-owned motor channels (same ABI word, sign selects direction)
 pub fn sys_pwm_write(pwm_id: usize, channel: usize, duty_percent: usize) -> isize {
     if !valid_pwm_id(pwm_id) || !valid_pwm_channel(channel) {
         return -1;
+    }
+    if crate::actuation::is_motor_channel(pwm_id as u8, channel as u8) {
+        let Some(setpoint) = motor_setpoint_from_abi(duty_percent) else {
+            return -1;
+        };
+        return crate::actuation::guard_motor_with(
+            pwm_id as u8,
+            channel as u8,
+            setpoint,
+            Authority::Operator,
+            AuditSource::SyscallPwm,
+        ) as isize;
     }
     let Ok(duty_percent) = u32::try_from(duty_percent) else {
         return -1;
@@ -78,6 +100,18 @@ pub fn sys_pwm_write(pwm_id: usize, channel: usize, duty_percent: usize) -> isiz
         Authority::Operator,
         AuditSource::SyscallPwm,
     ) as isize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::motor_setpoint_from_abi;
+
+    #[test]
+    fn syscall_motor_abi_preserves_signed_direction() {
+        assert_eq!(motor_setpoint_from_abi(25), Some(25));
+        assert_eq!(motor_setpoint_from_abi((-25i64) as usize), Some(-25));
+        assert_eq!(motor_setpoint_from_abi(i32::MAX as usize + 1), None);
+    }
 }
 
 /// Enable/Disable PWM channel

@@ -725,6 +725,21 @@ mod fault_injection_tests {
             .count()
     }
 
+    #[test]
+    fn armed_scope_does_not_fault_other_test_threads() {
+        fault::armed(0, || {
+            let allocated = std::thread::spawn(|| {
+                let mut pmm = empty_pmm(1);
+                let frame: Option<PhysFrame<Size4KiB>> =
+                    PhysicalFrameAllocator::allocate_frame(&mut pmm);
+                frame.is_some()
+            })
+            .join()
+            .unwrap();
+            assert!(allocated, "fault injection leaked into another test thread");
+        });
+    }
+
     /// Documents the counter semantics: armed(N) allows N total false
     /// returns; the (N+1)-th call returns true.
     #[test]

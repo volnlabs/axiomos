@@ -1,0 +1,18 @@
+schema_version = 1
+purpose = "V03-C containment corpus (1000 invalid/out-of-envelope requests through the real ARM-A monitor, escapes=0) + M-C/M-A latency markers + GPIO reflex"
+source_commit = "f5fee96abc1460e7d0161af33444008a8edb4121"
+worktree_dirty = true
+profile = "release"
+features = ["embedded-rpi5", "bench"]
+bench_reflex_output = "Gpio"
+trusted_key_sha256 = "16daa2cd24e9dc1dad1a85ce2900dbc117055e9e46c4282a53d3d6ef10346ff3"
+startup_rbpf_sha256 = "2aeb7979945f72f87ed9fcfd07bc1a9e685464dff7b41c4133a385f2dbe8eed5"
+kernel_sha256 = "386d52a3b6b41e8160b957281c79d2d3b0c6ebf43c6deb73481a83a7f22c400b"
+kernel8_sha256 = "01cf79899c129bc1b9a1b39cbdd5f5a85d284f58caa316e71a00f3d626f1c57e"
+disk_sha256 = "b196c25767df17902d94bd5b312ffa0488cecb05f734786b891059294a585c3c"
+expected_markers = ["PI5_V03C", "PI5_OUT_ARM", "PI5_BENCH_READY", "PI5_GPIO_IRQ_PROVEN"]
+
+[v03c]
+marker = "PI5_V03C n=1000 escapes=<count> safed=<count> seed=0x.."
+pass = "escapes=0 — every invalid/out-of-envelope request applied within the channel envelope or drove the universal safe value 0"
+note = "boot-time; monitor decide().apply() only (no MMIO); avoids the bench's own channel/pin so it does not disturb the reflex arm. No wiring or pulses needed for this check."

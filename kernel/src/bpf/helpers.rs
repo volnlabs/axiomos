@@ -209,7 +209,8 @@ pub extern "C" fn bpf_gpio_set_output(pin: u32, initial_high: u32) -> i64 {
 /// Arguments:
 /// - pwm_id: 0 or 1
 /// - channel: 1 or 2
-/// - duty_percent: 0-100
+/// - duty_percent: unsigned for ordinary PWM; signed i32 representation for
+///   link-owned motor channels
 ///
 /// Returns 0 on success, -1 on error.
 ///
@@ -220,11 +221,28 @@ pub extern "C" fn bpf_gpio_set_output(pin: u32, initial_high: u32) -> i64 {
 /// BPF helper: Emergency motor stop
 #[no_mangle]
 pub extern "C" fn bpf_pwm_write(pwm_id: u32, channel: u32, duty_percent: u32) -> i64 {
-    if !valid_pwm_id(pwm_id) || !valid_pwm_channel(channel) {
-        return -1;
-    }
+    #[cfg(feature = "bench-pwm-containment")]
+    let sample_id = crate::bench::pwm_request_sample_id();
+    let code = if !valid_pwm_id(pwm_id) || !valid_pwm_channel(channel) {
+        -1
+    } else if crate::actuation::is_motor_channel(pwm_id as u8, channel as u8) {
+        // Motor channels use the existing signed i32-in-u32 representation;
+        // non-motor PWM keeps its unsigned ABI unchanged.
+        crate::actuation::guard_motor(pwm_id as u8, channel as u8, duty_percent as i32)
+    } else {
+        crate::actuation::guard_pwm(pwm_id as u8, channel as u8, duty_percent)
+    };
+    #[cfg(feature = "bench-pwm-containment")]
+    crate::bench::report_pwm_request(sample_id, pwm_id, channel, duty_percent, code);
+    code
+}
 
-    crate::actuation::guard_pwm(pwm_id as u8, channel as u8, duty_percent)
+/// Experimental v1 BPF helper: queue one complete signed rover command.
+/// Values are per-mille and the monitor clamps them to its shared electrical
+/// and slew envelope. Success means queued for Shrike transport, not applied.
+#[unsafe(no_mangle)]
+pub extern "C" fn bpf_motor_pair_v1(left_permille: i32, right_permille: i32) -> i64 {
+    crate::actuation::guard_motor_pair(left_permille, right_permille)
 }
 
 /// # Safety

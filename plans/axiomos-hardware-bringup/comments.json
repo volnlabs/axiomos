@@ -1,0 +1,25 @@
+[
+  {
+    "id": "cmt_7750b799062b6816",
+    "planId": "local-axiomos-hardware-bringup",
+    "parentCommentId": null,
+    "sectionId": null,
+    "kind": "comment",
+    "status": "open",
+    "anchor": null,
+    "message": "Use these question answers to revise the plan:\nQuestion block: block-eaf08023\n- Which trust root should the first hardware campaign use?: Dedicated lab key\n- Transcribe the exact Shrike sticker.: Different revision, Other: v1.0 and R0.4\n- Which official Raspberry Pi 5 accessory do you have?: Official 27 W supply\n- How should a compatible Shrike FPGA project enter the campaign?: Vendor minimum board files\n- Provide the FPGA-link and e-stop hardware facts.: see this https://github.com/vicharak-in/shrike\n- Provide the motors and safe power-chain details.: No answer yet\n- List the remaining bench and measurement equipment.: No answer yet\n- What HC-SR04 interface circuit will you use?: No answer yet",
+    "createdBy": "human",
+    "authorEmail": "local@agent-native.local",
+    "authorName": null,
+    "resolutionTarget": "agent",
+    "mentions": [],
+    "mentionsJson": null,
+    "resolvedBy": null,
+    "resolvedAt": null,
+    "consumedAt": null,
+    "deletedAt": null,
+    "deletedBy": null,
+    "createdAt": "2026-07-20T12:26:22.863Z",
+    "updatedAt": "2026-07-20T12:26:22.863Z"
+  }
+]

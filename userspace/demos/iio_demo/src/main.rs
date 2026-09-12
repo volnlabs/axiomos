@@ -176,6 +176,7 @@ pub extern "C" fn _start() -> ! {
         ..Default::default()
     };
 
+    // Fixture-only demo: it intentionally carries no v0.4 campaign identity.
     let prog_id = bpf(
         5, // BPF_PROG_LOAD
         &load_attr as *const BpfAttr as *const u8,

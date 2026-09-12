@@ -1,0 +1,932 @@
+{
+  "baseline": "4f5aa9037832b9ee27145c5ffc87f4c3ca707e18",
+  "scope": "Tracked Rust files under kernel, firmware, userspace. Lexical declarations, including tests and architecture alternatives; excludes dependency globals, macro-generated declarations, hardware registers and struct-owned state. Types flag potential mutability; not a proof of target reachability.",
+  "rust_files": 332,
+  "rust_lines": 86775,
+  "declarations": [
+    {
+      "file": "firmware/shrike/rp2040/src/main.rs",
+      "line": 27,
+      "name": "BOOT2_FIRMWARE",
+      "type": "[u8",
+      "classification": "immutable or externally initialized; inspect type"
+    },
+    {
+      "file": "kernel/crates/kernel_bpf/src/execution/mod.rs",
+      "line": 29,
+      "name": "TEST_MAP_VALUE",
+      "type": "AtomicU64",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/crates/kernel_bpf/src/execution/mod.rs",
+      "line": 34,
+      "name": "REC_LOCK",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/crates/kernel_bpf/src/execution/mod.rs",
+      "line": 35,
+      "name": "RECORDING",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/crates/kernel_bpf/src/execution/mod.rs",
+      "line": 36,
+      "name": "PWM_CH1",
+      "type": "AtomicI64",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/crates/kernel_bpf/src/execution/mod.rs",
+      "line": 37,
+      "name": "PWM_CH2",
+      "type": "AtomicI64",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/crates/kernel_devfs/src/fs.rs",
+      "line": 135,
+      "name": "FS_COUNTER",
+      "type": "AtomicU64",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/crates/kernel_devfs/src/fs.rs",
+      "line": 281,
+      "name": "ID_COUNTER",
+      "type": "AtomicUsize",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/crates/kernel_physical_memory/src/fault.rs",
+      "line": 41,
+      "name": "BUDGET",
+      "type": "AtomicU32",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/crates/kernel_physical_memory/src/fault.rs",
+      "line": 42,
+      "name": "DISARMED",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/crates/kernel_physical_memory/src/fault.rs",
+      "line": 43,
+      "name": "SERIAL",
+      "type": "Mutex<()>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/crates/kernel_physical_memory/src/fault.rs",
+      "line": 47,
+      "name": "ARMED_ON_THIS_THREAD",
+      "type": "Cell<bool>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/acpi.rs",
+      "line": 17,
+      "name": "ACPI_TABLES",
+      "type": "OnceCell<Mutex<AcpiTables<AcpiHandlerImpl>>>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/actuation.rs",
+      "line": 17,
+      "name": "ACTUATION_MONITOR",
+      "type": "Mutex<Monitor<ActiveProfile>>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/actuation.rs",
+      "line": 18,
+      "name": "APPLY_LOCK",
+      "type": "Mutex<()>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/actuation.rs",
+      "line": 19,
+      "name": "NEXT_V04_ESTOP_EVENT",
+      "type": "AtomicU64",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/apic.rs",
+      "line": 14,
+      "name": "IO_APIC",
+      "type": "OnceCell<Mutex<IoApic>>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/boot.rs",
+      "line": 6,
+      "name": "BOOT_INFO",
+      "type": "BootInfo",
+      "classification": "explicit static mut"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/boot.rs",
+      "line": 65,
+      "name": "__bss_start",
+      "type": "u8",
+      "classification": "immutable or externally initialized; inspect type"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/boot.rs",
+      "line": 66,
+      "name": "__bss_end",
+      "type": "u8",
+      "classification": "immutable or externally initialized; inspect type"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/dtb.rs",
+      "line": 55,
+      "name": "DTB_INFO",
+      "type": "DeviceTreeInfo",
+      "classification": "explicit static mut"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/exceptions.rs",
+      "line": 10,
+      "name": "PREEMPT_MARKER_SENT",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/exceptions.rs",
+      "line": 12,
+      "name": "SYNC_ENTRY_MARKER_SENT",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/exceptions.rs",
+      "line": 14,
+      "name": "SYNC_DECODE_MARKER_SENT",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/exceptions.rs",
+      "line": 16,
+      "name": "SVC_MARKER_SENT",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/exceptions.rs",
+      "line": 18,
+      "name": "SVC_ENTER_MARKER_SENT",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/exceptions.rs",
+      "line": 20,
+      "name": "SVC_RETURN_MARKER_SENT",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/exceptions.rs",
+      "line": 22,
+      "name": "DATA_ABORT_MARKER_SENT",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/exceptions.rs",
+      "line": 24,
+      "name": "INSTR_ABORT_MARKER_SENT",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/gic.rs",
+      "line": 85,
+      "name": "GICD",
+      "type": "usize",
+      "classification": "immutable or externally initialized; inspect type"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/gic.rs",
+      "line": 89,
+      "name": "GICC",
+      "type": "usize",
+      "classification": "immutable or externally initialized; inspect type"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/interrupts.rs",
+      "line": 27,
+      "name": "TIMER_IRQ_MARKER_SENT",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/interrupts.rs",
+      "line": 29,
+      "name": "FIRST_IRQ_MARKER_SENT",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/mm.rs",
+      "line": 21,
+      "name": "BOOT_TABLES",
+      "type": "BootPageTables",
+      "classification": "explicit static mut"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/phys.rs",
+      "line": 12,
+      "name": "BOOT_REGIONS",
+      "type": "[crate::mem::phys::MemoryRegion",
+      "classification": "explicit static mut"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/phys.rs",
+      "line": 39,
+      "name": "__text_start",
+      "type": "u8",
+      "classification": "immutable or externally initialized; inspect type"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/phys.rs",
+      "line": 40,
+      "name": "__bss_end",
+      "type": "u8",
+      "classification": "immutable or externally initialized; inspect type"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/platform/rpi5/control_link.rs",
+      "line": 58,
+      "name": "CONTROL_LINK",
+      "type": "OnceCell<Mutex<ControlLink>>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/platform/rpi5/control_link.rs",
+      "line": 59,
+      "name": "NEXT_SENSOR_SAMPLE_ID",
+      "type": "AtomicU64",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/platform/rpi5/control_link.rs",
+      "line": 60,
+      "name": "NEXT_LINK_LOSS_EVENT_ID",
+      "type": "AtomicU64",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/platform/rpi5/control_link.rs",
+      "line": 61,
+      "name": "NEXT_CHUNK_ID",
+      "type": "AtomicU64",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/platform/rpi5/control_link.rs",
+      "line": 62,
+      "name": "LINK_UNINITIALIZED_REPORTED",
+      "type": "core::sync::atomic::AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/platform/rpi5/mod.rs",
+      "line": 28,
+      "name": "UART",
+      "type": "Lazy<Mutex<Rp1Uart>>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/platform/rpi5/mod.rs",
+      "line": 37,
+      "name": "PWM0",
+      "type": "Lazy<Mutex<Rp1Pwm>>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/platform/rpi5/mod.rs",
+      "line": 46,
+      "name": "PWM1",
+      "type": "Lazy<Mutex<Rp1Pwm>>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/platform/rpi5/pwm.rs",
+      "line": 101,
+      "name": "PWM0",
+      "type": "Mutex<Rp1Pwm>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/platform/rpi5/pwm.rs",
+      "line": 105,
+      "name": "PWM1",
+      "type": "Mutex<Rp1Pwm>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/arch/aarch64/platform/virt/mod.rs",
+      "line": 11,
+      "name": "SERIAL_CONSOLE",
+      "type": "Lazy<Mutex<PL011Uart>>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/arch/x86_64.rs",
+      "line": 13,
+      "name": "TLB_SHOOTDOWN_EPOCH",
+      "type": "AtomicU64",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/arch/x86_64.rs",
+      "line": 15,
+      "name": "TLB_SHOOTDOWN_REPORTED",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/arch/x86_64.rs",
+      "line": 16,
+      "name": "TLB_SHOOTDOWN_ACKS",
+      "type": "[AtomicU64",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/backtrace.rs",
+      "line": 16,
+      "name": "BACKTRACE_CONTEXT",
+      "type": "OnceCell<BacktraceContext>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/bench.rs",
+      "line": 78,
+      "name": "GPIO_IRQ_ENTRY",
+      "type": "AtomicU64",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/bench.rs",
+      "line": 80,
+      "name": "NEXT_SAMPLE_ID",
+      "type": "AtomicU64",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/bench.rs",
+      "line": 82,
+      "name": "GPIO_IRQ_SAMPLE_ID",
+      "type": "AtomicU64",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/bench.rs",
+      "line": 84,
+      "name": "ESTOP_SAMPLE_ID",
+      "type": "AtomicU64",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/bench.rs",
+      "line": 86,
+      "name": "REFLEX_SAMPLE_ID",
+      "type": "AtomicU64",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/bench.rs",
+      "line": 88,
+      "name": "GPIO_IRQ_PROVEN",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/bench.rs",
+      "line": 90,
+      "name": "GPIO_IRQ_DIAG_COUNT",
+      "type": "AtomicU64",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/bpf/mod.rs",
+      "line": 209,
+      "name": "HOOK_SNAPSHOTS",
+      "type": "EpochSnapshot<HookSnapshot>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/bpf/trust.rs",
+      "line": 12,
+      "name": "PRODUCTION_BPF_TRUSTED_KEY",
+      "type": "&[u8",
+      "classification": "immutable or externally initialized; inspect type"
+    },
+    {
+      "file": "kernel/src/driver/block.rs",
+      "line": 17,
+      "name": "BLOCK_DEVICES",
+      "type": "RwLock< BTreeMap<u64, Arc<RwLock<dyn BlockDevice<KernelDeviceId, 512> + Send + Sync>>>, >",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/driver/block.rs",
+      "line": 20,
+      "name": "BLOCK_DEVICE_COUNTER",
+      "type": "AtomicU64",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/driver/iio.rs",
+      "line": 60,
+      "name": "IIO_MANAGER",
+      "type": "OnceCell<Mutex<IioManager>>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/driver/iio.rs",
+      "line": 65,
+      "name": "V04_ACTIVE_SAMPLE_IDS",
+      "type": "[AtomicU64",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/driver/mod.rs",
+      "line": 33,
+      "name": "COUNTER",
+      "type": "AtomicU64",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/driver/pci.rs",
+      "line": 13,
+      "name": "PCI_DRIVERS",
+      "type": "[PciDriverDescriptor]",
+      "classification": "immutable or externally initialized; inspect type"
+    },
+    {
+      "file": "kernel/src/driver/ram.rs",
+      "line": 17,
+      "name": "EMBEDDED_DISK",
+      "type": "&[u8]",
+      "classification": "immutable or externally initialized; inspect type"
+    },
+    {
+      "file": "kernel/src/driver/raw.rs",
+      "line": 9,
+      "name": "RAW_DEVICES",
+      "type": "RwLock<RawDeviceRegistry<KernelDeviceId>>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/driver/virtio/block.rs",
+      "line": 34,
+      "name": "VIRTIO_READ_SECTOR_PROBE_SEQ",
+      "type": "AtomicU64",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/driver/virtio/block.rs",
+      "line": 43,
+      "name": "VIRTIO_BLK",
+      "type": "PciDriverDescriptor",
+      "classification": "immutable or externally initialized; inspect type"
+    },
+    {
+      "file": "kernel/src/driver/virtio/gpu.rs",
+      "line": 25,
+      "name": "VIRTIO_GPU",
+      "type": "PciDriverDescriptor",
+      "classification": "immutable or externally initialized; inspect type"
+    },
+    {
+      "file": "kernel/src/driver/virtio/hal.rs",
+      "line": 76,
+      "name": "MMIO_ALLOC_OFFSET",
+      "type": "AtomicUsize",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/file/devfs.rs",
+      "line": 10,
+      "name": "DEVFS",
+      "type": "OnceCell<ArcLockedDevFs>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/file/ext2.rs",
+      "line": 51,
+      "name": "FS_COUNTER",
+      "type": "AtomicU64",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/file/mod.rs",
+      "line": 18,
+      "name": "VFS",
+      "type": "RwLock<Vfs>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/hpet.rs",
+      "line": 17,
+      "name": "HPET",
+      "type": "OnceCell<RwLock<Hpet>>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/lib.rs",
+      "line": 49,
+      "name": "BOOT_TIME_SECONDS",
+      "type": "OnceCell<u64>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/lib.rs",
+      "line": 59,
+      "name": "BOOT_METRICS",
+      "type": "OnceCell<KernelBootMetrics>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/lib.rs",
+      "line": 60,
+      "name": "BPF_MANAGER",
+      "type": "OnceCell<Mutex<bpf::BpfManager>>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/lib.rs",
+      "line": 217,
+      "name": "__text_start",
+      "type": "u8",
+      "classification": "immutable or externally initialized; inspect type"
+    },
+    {
+      "file": "kernel/src/lib.rs",
+      "line": 218,
+      "name": "__kernel_end",
+      "type": "u8",
+      "classification": "immutable or externally initialized; inspect type"
+    },
+    {
+      "file": "kernel/src/limine.rs",
+      "line": 11,
+      "name": "_START_MARKER",
+      "type": "RequestsStartMarker",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/limine.rs",
+      "line": 16,
+      "name": "_END_MARKER",
+      "type": "RequestsEndMarker",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/limine.rs",
+      "line": 21,
+      "name": "BASE_REVISION",
+      "type": "BaseRevision",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/limine.rs",
+      "line": 26,
+      "name": "BOOT_TIME",
+      "type": "DateAtBootRequest",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/limine.rs",
+      "line": 31,
+      "name": "KERNEL_FILE_REQUEST",
+      "type": "ExecutableFileRequest",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/limine.rs",
+      "line": 36,
+      "name": "KERNEL_ADDRESS_REQUEST",
+      "type": "ExecutableAddressRequest",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/limine.rs",
+      "line": 41,
+      "name": "MEMORY_MAP_REQUEST",
+      "type": "MemoryMapRequest",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/limine.rs",
+      "line": 46,
+      "name": "HHDM_REQUEST",
+      "type": "HhdmRequest",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/limine.rs",
+      "line": 51,
+      "name": "RSDP_REQUEST",
+      "type": "RsdpRequest",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/limine.rs",
+      "line": 56,
+      "name": "STACK_SIZE_REQUEST",
+      "type": "StackSizeRequest",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/limine.rs",
+      "line": 61,
+      "name": "MODULE_REQUEST",
+      "type": "ModuleRequest",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/limine.rs",
+      "line": 66,
+      "name": "MP_REQUEST",
+      "type": "MpRequest",
+      "classification": "explicit static mut"
+    },
+    {
+      "file": "kernel/src/mcore/context.rs",
+      "line": 29,
+      "name": "ONLINE_CPU_MASK",
+      "type": "AtomicU64",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/mcore/context.rs",
+      "line": 31,
+      "name": "ONLINE_LAPIC_IDS",
+      "type": "[AtomicU32",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/mcore/mtask/process/construction.rs",
+      "line": 27,
+      "name": "ROOT_PROCESS",
+      "type": "OnceCell<Arc<Process>>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/mcore/mtask/process/id.rs",
+      "line": 27,
+      "name": "COUNTER",
+      "type": "AtomicU64",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/mcore/mtask/process/trampoline.rs",
+      "line": 41,
+      "name": "TRAMPOLINE_MARKER_SENT",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/mcore/mtask/process/trampoline.rs",
+      "line": 47,
+      "name": "TRAMPOLINE_OPEN_STAGE_SENT",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/mcore/mtask/process/trampoline.rs",
+      "line": 53,
+      "name": "TRAMPOLINE_READ_STAGE_SENT",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/mcore/mtask/process/trampoline.rs",
+      "line": 59,
+      "name": "TRAMPOLINE_ELF_STAGE_SENT",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/mcore/mtask/process/trampoline.rs",
+      "line": 65,
+      "name": "TRAMPOLINE_ENTER_USER_STAGE_SENT",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/mcore/mtask/process/trampoline.rs",
+      "line": 71,
+      "name": "TRAMPOLINE_TTBR0_STAGE_SENT",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/mcore/mtask/process/tree.rs",
+      "line": 9,
+      "name": "PROCESS_TREE",
+      "type": "OnceCell<RwLock<ProcessTree>>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/mcore/mtask/scheduler/cleanup.rs",
+      "line": 19,
+      "name": "CLEANUP_QUEUE",
+      "type": "OnceCell<TaskQueue>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/mcore/mtask/scheduler/cleanup.rs",
+      "line": 20,
+      "name": "CLEANUP_WORKER_SCHEDULED",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/mcore/mtask/scheduler/cleanup.rs",
+      "line": 27,
+      "name": "CLEANUP_RUN_MARKER_SENT",
+      "type": "Rpi5AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/mcore/mtask/scheduler/mod.rs",
+      "line": 50,
+      "name": "SCHED_SWITCH_MARKER_SENT",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/mcore/mtask/scheduler/mod.rs",
+      "line": 56,
+      "name": "SCHED_SWITCH_TARGET_MARKER_SENT",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/mcore/mtask/scheduler/run_queue.rs",
+      "line": 12,
+      "name": "RUN_QUEUES",
+      "type": "OnceCell<RunQueueSet<Task>>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/mcore/mtask/scheduler/sleep.rs",
+      "line": 13,
+      "name": "SLEEP_QUEUE",
+      "type": "OnceCell<Mutex<DeadlineQueue<Pin<Box<Task>>, MAX_SLEEPING_TASKS>>>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/mcore/mtask/task/id.rs",
+      "line": 27,
+      "name": "COUNTER",
+      "type": "AtomicU64",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/mem/address_space/mod.rs",
+      "line": 58,
+      "name": "KERNEL_ADDRESS_SPACE",
+      "type": "OnceCell<AddressSpace>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/mem/address_space/mod.rs",
+      "line": 60,
+      "name": "RECURSIVE_INDEX",
+      "type": "OnceCell<usize>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/mem/heap.rs",
+      "line": 31,
+      "name": "HEAP_INITIALIZED",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/mem/heap.rs",
+      "line": 34,
+      "name": "HEAP_START",
+      "type": "VirtAddr",
+      "classification": "immutable or externally initialized; inspect type"
+    },
+    {
+      "file": "kernel/src/mem/heap.rs",
+      "line": 37,
+      "name": "HEAP_START",
+      "type": "VirtAddr",
+      "classification": "immutable or externally initialized; inspect type"
+    },
+    {
+      "file": "kernel/src/mem/heap.rs",
+      "line": 40,
+      "name": "HEAP_SIZES",
+      "type": "OnceCell<HeapSizes>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/mem/heap.rs",
+      "line": 43,
+      "name": "ALLOCATOR",
+      "type": "linked_list_allocator::LockedHeap",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/mem/phys.rs",
+      "line": 16,
+      "name": "PHYS_ALLOC",
+      "type": "Option<Mutex<MultiStageAllocator>>",
+      "classification": "explicit static mut"
+    },
+    {
+      "file": "kernel/src/mem/phys.rs",
+      "line": 17,
+      "name": "FRAME_REFS",
+      "type": "Option<Mutex<FrameRefCounts>>",
+      "classification": "explicit static mut"
+    },
+    {
+      "file": "kernel/src/mem/phys.rs",
+      "line": 53,
+      "name": "RESERVED_REGIONS",
+      "type": "ReservedRegions",
+      "classification": "explicit static mut"
+    },
+    {
+      "file": "kernel/src/mem/phys.rs",
+      "line": 322,
+      "name": "BOOT_REGIONS",
+      "type": "[MemoryRegion",
+      "classification": "explicit static mut"
+    },
+    {
+      "file": "kernel/src/mem/virt.rs",
+      "line": 21,
+      "name": "VMM",
+      "type": "OnceCell<RwLock<VirtualMemoryManager>>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/serial.rs",
+      "line": 8,
+      "name": "SERIAL1",
+      "type": "Lazy<Mutex<SerialPort>>",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/syscall/mod.rs",
+      "line": 61,
+      "name": "WRITE_MARKER_SENT",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/syscall/mod.rs",
+      "line": 63,
+      "name": "BPF_MARKER_SENT",
+      "type": "AtomicBool",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "kernel/src/syscall/mod.rs",
+      "line": 64,
+      "name": "EXPORTED_RINGBUF_MAP_ID",
+      "type": "AtomicU32",
+      "classification": "interior/initialization mutability"
+    },
+    {
+      "file": "userspace/core/init/src/main.rs",
+      "line": 1214,
+      "name": "EXEC_PATH",
+      "type": "&[u8]",
+      "classification": "immutable or externally initialized; inspect type"
+    },
+    {
+      "file": "userspace/core/init/src/main.rs",
+      "line": 1230,
+      "name": "MISSING_PATH",
+      "type": "&[u8]",
+      "classification": "immutable or externally initialized; inspect type"
+    },
+    {
+      "file": "userspace/core/init/src/main.rs",
+      "line": 1542,
+      "name": "PATH",
+      "type": "&[u8]",
+      "classification": "immutable or externally initialized; inspect type"
+    }
+  ]
+}

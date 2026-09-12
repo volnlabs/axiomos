@@ -12,6 +12,7 @@ fn main() {
 
     // Handle embedded disk image for rpi5
     if std::env::var("CARGO_FEATURE_RPI5").is_ok() {
+        println!("cargo:rerun-if-env-changed=AXIOM_DISK_IMAGE");
         let out_dir = std::env::var("OUT_DIR").unwrap();
 
         if let Ok(disk_path) = std::env::var("AXIOM_DISK_IMAGE") {
@@ -22,11 +23,28 @@ fn main() {
             println!("cargo:rustc-env=EMBEDDED_DISK_PATH={}", dest);
             println!("cargo:rerun-if-changed={}", disk_path);
         } else {
-            // Generate a minimal empty ext2 disk image as fallback
+            // Generate a minimal empty ext2 disk image as fallback.
+            //
+            // This must be byte-reproducible: the image is embedded in the
+            // kernel, so any variation changes kernel8.img and breaks artifact
+            // provenance for HIL benchmark campaigns. mke2fs otherwise stamps a
+            // random filesystem UUID, a random directory hash seed, and the
+            // current time into the superblock. Pin all three. The hash seed
+            // UUID must be non-zero — mke2fs treats the all-zero UUID as unset
+            // and falls back to a random seed.
+            const DISK_UUID: &str = "a5106f0e-9d4f-4b7a-8c21-3f6d0e5b1c94";
             let dest = format!("{}/disk.img", out_dir);
+            // mke2fs on an existing file can behave differently; start clean.
+            let _ = std::fs::remove_file(&dest);
             let status = std::process::Command::new("mke2fs")
+                .env("SOURCE_DATE_EPOCH", "0")
+                .arg("-q")
                 .arg("-t")
                 .arg("ext2")
+                .arg("-U")
+                .arg(DISK_UUID)
+                .arg("-E")
+                .arg(format!("hash_seed={DISK_UUID}"))
                 .arg(&dest)
                 .arg("10M")
                 .status()

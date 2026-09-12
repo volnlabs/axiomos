@@ -46,7 +46,7 @@ name = "benchmark-analyzer-self-test"
 display = "scripts/benchmark/analyze-v03.py --self-test"
 argv = ["scripts/benchmark/analyze-v03.py", "--self-test"]
 docs = ["docs/security/gates/local-audit-gate.md"]
-expect = "Ran 2 tests"
+expect = "OK"
 
 [[command]]
 name = "verifier-cost-help"

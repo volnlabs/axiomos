@@ -1,0 +1,56 @@
+from reportlab.pdfgen import canvas
+from reportlab.lib.colors import HexColor, white
+from pathlib import Path
+out=Path('/home/utkarsh/Work/axiomOS/output/pdf/axiomos-estop-wiring.pdf')
+c=canvas.Canvas(str(out),pagesize=(1000,760)); c.setTitle('axiomos - unloaded Pi 5 e-stop test wiring')
+ink='#183047'; gray='#52616F'; red='#B93142'; blue='#2367A4'; green='#21744C'
+def text(x,y,s,size=11,color=ink,bold=False):
+ c.setFillColor(HexColor(color)); c.setFont('Helvetica-Bold' if bold else 'Helvetica',size); c.drawString(x,y,s)
+def box(x,y,w,h,fill='#F1F5F8',stroke='#CCD6DE'):
+ c.setFillColor(HexColor(fill)); c.setStrokeColor(HexColor(stroke)); c.setLineWidth(1); c.roundRect(x,y,w,h,9,fill=1,stroke=1)
+def line(points,color=ink,width=2):
+ c.setStrokeColor(HexColor(color)); c.setLineWidth(width); p=c.beginPath();p.moveTo(*points[0])
+ for pt in points[1:]:p.lineTo(*pt)
+ c.drawPath(p)
+def dot(x,y,color):
+ c.setFillColor(HexColor(color));c.circle(x,y,3.5,stroke=0,fill=1)
+def resistor(x,y,color):
+ line([(x,y),(x+12,y)],color);c.setStrokeColor(HexColor(color));c.setFillColor(white);c.rect(x+12,y-6,48,12,fill=1,stroke=1);line([(x+60,y),(x+72,y)],color);text(x+15,y+14,'220 ohm',10,color)
+text(34,723,'axiomos / physical e-stop test',25,bold=True)
+text(34,700,'Pi 5 + Shrike stimulus + logic analyzer + Debug Probe  |  No motors, motor drivers or actuators',12)
+box(34,647,932,36,'#FFF1D8','#E3BC72');text(47,660,'WIRE WITH BOTH BOARDS UNPOWERED.  All GPIO signals are 3.3 V.  Do not connect a power rail to GPIO24.',11,bold=True)
+text(34,628,'Signal diagram - functional layout, not board orientation. Pi labels are PHYSICAL header pin numbers.',10,gray)
+box(34,340,212,251);text(50,567,'SHRIKE',17,bold=True);text(50,547,'Use printed GP21 / GP22 labels',10,gray)
+box(500,340,226,251);text(516,567,'RASPBERRY PI 5',17,bold=True);text(516,547,'40-pin GPIO header',11,gray)
+box(811,340,155,251);text(826,567,'ANALYZER',16,bold=True);text(826,546,'Case labels 1-8',10,gray)
+text(53,501,'GP21: e-stop stimulus',11,red,bold=True);dot(246,505,red)
+line([(246,505),(298,505)],red);resistor(298,505,red);line([(370,505),(500,505)],red)
+dot(480,505,red);line([(480,505),(480,606),(790,606),(790,505),(811,505)],red)
+text(518,500,'Pin 18 / GPIO24',13,red,bold=True);text(518,483,'LOW = asserted',10,red)
+text(595,611,'D0 taps the PI SIDE of the resistor',10,red,bold=True)
+text(825,500,'Input 1 = D0',12,red,bold=True)
+text(52,433,'GP22: held LOW',11,blue,bold=True);dot(246,437,blue)
+line([(246,437),(298,437)],blue);resistor(298,437,blue);line([(370,437),(500,437)],blue)
+text(518,432,'Pin 16 / GPIO23',13,blue,bold=True);text(518,416,'Sensor wire stays connected',10,gray)
+# GPIO12 output sits on the right side, separate from the sensor connection.
+line([(726,465),(811,465)],green);dot(726,465,green)
+text(592,467,'Pin 32 / GPIO12',11,green,bold=True);text(825,460,'Input 2 = D1',12,green,bold=True)
+text(52,372,'GND',12,bold=True);line([(246,377),(500,377)],ink);text(518,372,'Pin 20 / GND',12,bold=True)
+text(614,354,'Pin 14 / GND',11,bold=True);line([(726,359),(811,359)],ink);text(825,354,'GND',12,bold=True)
+text(34,318,'Only change from sensor testing: move analyzer input 1 (D0) from pin 16 to pin 18. Input 2 (D1) stays on pin 32.',11,red,bold=True)
+text(34,299,'Pi pins 14 and 20 share ground internally. Use the same resistor values and existing ground connections.',10,gray)
+box(34,175,932,108)
+text(50,259,'USB, UART, SD and power',13,bold=True)
+text(50,239,'Host USB  ->  Shrike USB                         Host USB  ->  Logic analyzer USB',11)
+text(50,219,'Host USB  ->  Debug Probe USB  ->  probe UART port (U)  ->  Pi dedicated 3-pin UART connector',11)
+text(50,199,'Keep the existing keyed UART cable unchanged; do not move it to GPIO14/15 on the 40-pin header.',10,gray)
+text(50,183,'SD card  ->  Pi microSD slot                     Pi USB-C power supply  ->  Pi power port (OFF until script prompt)',10)
+text(34,150,'Power-on order',13,bold=True)
+text(34,130,'1. Pi power OFF + Shrike USB unplugged: insert the prepared SD and make the wiring above.',11)
+text(34,111,'2. Connect Shrike USB, analyzer USB and Debug Probe USB. Leave Pi power OFF.',11)
+text(34,92,'3. Run the e-stop capture script. Power the Pi ONLY at "UART RECORDING - POWER ON THE PI NOW".',11)
+text(34,73,'4. Keep hands off during automatic presses. Power off Pi at completion. Do not attach actuators.',11)
+text(34,47,'Test image: bench-estop-rearm. Automatic output rearm on release is diagnostic-only; this is not the FPGA/motor cutoff test.',9,gray)
+text(34,30,'Source: campaign wiring + scripts/hil/v03d-estop-cycle.sh; Pi pin numbering / debug header: official Raspberry Pi documentation.',8,gray)
+c.linkURL('https://www.raspberrypi.com/documentation/computers/raspberry-pi.html',(34,24,965,40),relative=0)
+c.save();print(out)

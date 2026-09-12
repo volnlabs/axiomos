@@ -22,11 +22,17 @@ mod interpreter;
 #[cfg(test)]
 #[allow(clippy::missing_safety_doc, improper_ctypes_definitions)]
 pub mod helpers_stub {
-    use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+    extern crate std;
+
+    use core::cell::Cell;
+    use core::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
     use super::BpfContext;
 
-    static TEST_MAP_VALUE: AtomicU64 = AtomicU64::new(0);
+    std::thread_local! {
+        // Each test's synchronous execution owns its map, including raw value pointers.
+        static TEST_MAP_VALUE: Cell<u64> = const { Cell::new(0) };
+    }
 
     // PWM-call recorder for behavior semantic tests. Sessions are serialized by
     // REC_LOCK and gated by RECORDING, so concurrent cargo-test threads can't
@@ -99,7 +105,7 @@ pub mod helpers_stub {
 
     #[unsafe(no_mangle)]
     pub extern "C" fn bpf_map_lookup_elem(_map_id: u32, _key: *const u8) -> *mut u8 {
-        TEST_MAP_VALUE.as_ptr() as *mut u8
+        TEST_MAP_VALUE.with(|value| value.as_ptr().cast::<u8>())
     }
 
     #[unsafe(no_mangle)]
@@ -110,32 +116,18 @@ pub mod helpers_stub {
         _flags: u64,
     ) -> i32 {
         if !value.is_null() {
-            // SAFETY: `value` arrives over the BPF helper ABI as
-            // `args[2] as *const u8`, where `args[2]` is the integer-encoded
-            // address the BPF program computed in register R3. The
-            // interpreter forwards it through this `as *const u8` cast at
-            // `interpreter.rs:313`, which produces a provenance-less wild
-            // pointer in Miri's model. The test stub therefore reuses the
-            // integer as the stored payload (after `value as usize`) rather
-            // than dereferencing it; `read_unaligned` would still be UB
-            // because it cannot confer provenance on an integer-derived
-            // pointer. The single consumer of this stub is
-            // `execute_map_update_helper`, which only asserts Ok(0) and
-            // does not check the stored value, so this approximation is
-            // faithful to the test's contract.
-            //
-            // Production-side helper kernels dereference this buffer in the
-            // kernel address space where integer-to-pointer provenance is
-            // supplied by the loader; that path is not exercised under Miri.
-            let val = value as usize as u64;
-            TEST_MAP_VALUE.store(val, Ordering::SeqCst);
+            // SAFETY: The test supplies an initialized eight-byte value through
+            // the interpreter's helper ABI. Read the payload so Miri checks that
+            // the interpreter actually preserves its pointer's provenance.
+            let val = unsafe { core::ptr::read_unaligned(value.cast::<u64>()) };
+            TEST_MAP_VALUE.with(|value| value.set(val));
         }
         0
     }
 
     #[unsafe(no_mangle)]
     pub extern "C" fn bpf_map_delete_elem(_map_id: u32, _key: *const u8) -> i32 {
-        TEST_MAP_VALUE.store(0, Ordering::SeqCst);
+        TEST_MAP_VALUE.with(|value| value.set(0));
         0
     }
 
@@ -172,16 +164,25 @@ pub mod helpers_stub {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "C" fn bpf_motor_pair_v1(left: i32, right: i32) -> i64 {
+        if RECORDING.load(Ordering::Relaxed) {
+            PWM_CH1.store(left as i64, Ordering::Relaxed);
+            PWM_CH2.store(right as i64, Ordering::Relaxed);
+        }
+        0
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "C" fn bpf_timeseries_push(_map_id: u32, _key: *const u8, _value: *const u8) -> i64 {
         0
     }
 
     pub fn get_test_map_value() -> u64 {
-        TEST_MAP_VALUE.load(Ordering::SeqCst)
+        TEST_MAP_VALUE.with(Cell::get)
     }
 
     pub fn reset_test_map() {
-        TEST_MAP_VALUE.store(0, Ordering::SeqCst);
+        TEST_MAP_VALUE.with(|value| value.set(0));
     }
 }
 

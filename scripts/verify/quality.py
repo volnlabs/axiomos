@@ -8,6 +8,7 @@ from collections import Counter
 import hashlib
 import json
 from pathlib import Path
+from pathlib import PurePosixPath
 import subprocess
 import sys
 import tomllib
@@ -48,6 +49,24 @@ def git_blob(commit: str, relative: str) -> bytes:
         stderr=subprocess.PIPE,
     )
     return result.stdout
+
+
+def historical_source_inputs(commit: str, patterns: list[str]) -> set[str]:
+    result = subprocess.run(
+        ["git", "ls-tree", "-r", "-z", "--name-only", commit],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    paths = [path.decode() for path in result.stdout.split(b"\0") if path]
+    return {
+        path
+        for path in paths
+        if any(
+            PurePosixPath("/" + path).match("/" + pattern) for pattern in patterns
+        )
+    }
 
 
 def validate_mutation_evidence(row: dict, quality: dict) -> None:
@@ -114,11 +133,7 @@ def validate_mutation_evidence(row: dict, quality: dict) -> None:
         raise ValueError(f"{row['name']}: mutation evidence score mismatch")
 
     inputs = report.get("inputs", {})
-    source_inputs = {
-        path.relative_to(ROOT).as_posix()
-        for pattern in row["files"]
-        for path in ROOT.glob(pattern)
-    }
+    source_inputs = historical_source_inputs(commit, row["files"])
     required_inputs = source_inputs | {"Cargo.lock", "rust-toolchain.toml"}
     if set(inputs) != required_inputs:
         raise ValueError(f"{row['name']}: mutation evidence input set mismatch")

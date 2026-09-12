@@ -12,6 +12,7 @@
 #![no_std]
 
 mod control;
+pub mod fpga;
 mod motor;
 
 pub use control::{run, ByteIo, Config, EstopLine, MicrosClock, Ultrasonic};

@@ -80,6 +80,8 @@ impl BootError {
 }
 
 fn boot_fatal(error: BootError) -> ! {
+    #[cfg(all(target_arch = "aarch64", feature = "rpi5", feature = "bench"))]
+    kernel::serial::emergency_console();
     kernel::serial_println!("BOOT_FATAL code={}", error.code());
     loop {
         hlt();
@@ -248,10 +250,16 @@ unsafe extern "C" fn main() -> ! {
             dbg_mark(0x68); // 'h'
             boot_fatal(BootError::InitExecutableMissing);
         }
-        if Process::create_userspace_init(Process::root(), init_path).is_err() {
-            dbg_mark(0x69); // 'i'
-            boot_fatal(BootError::InitProcessCreationFailed);
-        }
+        let proc = match Process::create_userspace_init(Process::root(), init_path) {
+            Ok(process) => process,
+            Err(_) => {
+                dbg_mark(0x69); // 'i'
+                boot_fatal(BootError::InitProcessCreationFailed);
+            }
+        };
+        kernel::serial_println!("INIT_PROCESS_STARTED pid={}", proc.pid());
+        #[cfg(feature = "bench")]
+        kernel::serial_println!("PI5_BOOT_OK");
         dbg_mark(0x45); // 'E'
     } else {
         // Expected on Pi5 bring-up before a block driver is wired in.
@@ -326,6 +334,8 @@ fn rust_panic(info: &PanicInfo) -> ! {
 
 #[cfg(not(test))]
 fn handle_panic(info: &PanicInfo) {
+    #[cfg(all(target_arch = "aarch64", feature = "rpi5", feature = "bench"))]
+    kernel::serial::emergency_console();
     #[cfg(all(
         target_arch = "aarch64",
         feature = "rpi5",
@@ -336,6 +346,7 @@ fn handle_panic(info: &PanicInfo) {
         (0xFFFF_8010_7D00_1000 as *mut u32).write_volatile(0x21); // '!'
     }
 
+    kernel::serial_println!("V04_PANIC kind=panic");
     if let Some(location) = info.location() {
         kernel::serial_println!(
             "kernel panicked at {}:{}:{}:",

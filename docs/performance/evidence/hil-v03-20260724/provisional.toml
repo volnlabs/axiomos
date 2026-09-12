@@ -1,0 +1,82 @@
+schema_version = 1
+status = "provisional"
+campaign = "rpi5-v03-hil-20260724"
+date = "2026-07-24"
+reason = "The deployed-image manifests record dirty worktrees, and clean rebuilds of the subsequent commits did not reproduce the deployed kernel8 hashes. The captures are durable lab evidence but cannot be promoted to an attributable release campaign."
+toolchain = "nightly-2026-07-02"
+rustc = "rustc 1.98.0-nightly (4c9d2bfe4 2026-07-01)"
+hardware = "Raspberry Pi 5 (8 GB, RP1); Shrike-Lite GPIO22 stimulus; fx2lafw logic analyzer at 24 MHz; Pi Debug Probe UART"
+reducer_command = "python3 scripts/hil/v03b-reduce.py --warmup 16 docs/performance/evidence/hil-v03-20260724/latency-smoke-uart.log docs/performance/evidence/hil-v03-20260724/latency-main-uart.log"
+
+[[image]]
+name = "gpio-reflex"
+recorded_source_commit = "03a4137f9fe450ad57fea57223051e800a0d4068"
+subsequent_commit = "cf38b5d17242ea90841dfc4df0d1caf3f95f02bf"
+recorded_worktree_dirty = true
+deployed_kernel8_sha256 = "8aa77fd7bba04f748ccdae8973cece668742e0244466c81b6528887b6ce3272d"
+clean_rebuild_kernel8_sha256 = "27621c7105939a9a476a2bd04d024f5fa091c01cecccd03629c17d05db365c09"
+clean_rebuild_matches = false
+build_record = "docs/performance/evidence/hil-v03-20260724/gpio-reflex-build.toml"
+build_record_sha256 = "28de03453f0a838ff75f7cf4988fed40f7fefcc785cb897f70d3085613f0e9ba"
+
+[[image]]
+name = "latency"
+recorded_source_commit = "cf38b5d17242ea90841dfc4df0d1caf3f95f02bf"
+subsequent_commit = "f5fee96abc1460e7d0161af33444008a8edb4121"
+recorded_worktree_dirty = true
+deployed_kernel8_sha256 = "4d61c2eee265b9e5bda538694cdc46020817cc4ef75bd64213c689d9b9d0e4f6"
+clean_rebuild_kernel8_sha256 = "2d78172cceed03e844967660f4166a141a882958e62659263bc9a1c57cf87832"
+clean_rebuild_matches = false
+build_record = "docs/performance/evidence/hil-v03-20260724/latency-build.toml"
+build_record_sha256 = "0417a54dace260dd6365d5607c0108a7ea5039c2ce8c7c7994ce40274b6e0f45"
+
+[[image]]
+name = "containment"
+recorded_source_commit = "f5fee96abc1460e7d0161af33444008a8edb4121"
+subsequent_commit = "2942eea0d79c7bef1a935142d9f8328cabe1b7dc"
+recorded_worktree_dirty = true
+deployed_kernel8_sha256 = "01cf79899c129bc1b9a1b39cbdd5f5a85d284f58caa316e71a00f3d626f1c57e"
+clean_rebuild_kernel8_sha256 = "4a41b2b504bac7fdc94190d6cf960185640c269c54b589c17506b0af223a7d6e"
+clean_rebuild_matches = false
+build_record = "docs/performance/evidence/hil-v03-20260724/containment-build.toml"
+build_record_sha256 = "5ac731d7e4a7670ef80b2472a244e5d006b9656373782aec94cdaa094b135e26"
+
+[[capture]]
+name = "physical-reflex-uart"
+path = "docs/performance/evidence/hil-v03-20260724/gpio-reflex-uart.log"
+sha256 = "516530564175806d47f42e8b863194f03c8d099c77c16a110023a7b41f9e1d9e"
+
+[[capture]]
+name = "physical-reflex-analyzer"
+path = "docs/performance/evidence/hil-v03-20260724/gpio-reflex.sr"
+sha256 = "a0cc98bf2552cf481f8f62be7912c537cb4dd4dc1d684f375ba6239f12cd5395"
+
+[[capture]]
+name = "latency-smoke-uart"
+path = "docs/performance/evidence/hil-v03-20260724/latency-smoke-uart.log"
+sha256 = "683a9d86f78f919bfa507262df693a1b6e1fba64dcc4819ee1ee126a81f1dcde"
+
+[[capture]]
+name = "latency-smoke-analyzer"
+path = "docs/performance/evidence/hil-v03-20260724/latency-smoke.sr"
+sha256 = "421daf223b62b8dc094b105bf59c5968c9f7f9e5d107f5c02508ec9fad1e9754"
+
+[[capture]]
+name = "latency-main-uart"
+path = "docs/performance/evidence/hil-v03-20260724/latency-main-uart.log"
+sha256 = "ef7159685a7d0932fab2dd86a6194a2fabed33cb4b572a5ad36fed9ad2f1a240"
+
+[[capture]]
+name = "latency-main-analyzer"
+path = "docs/performance/evidence/hil-v03-20260724/latency-main.sr"
+sha256 = "0f0f26421eed1fbc87f3486019978a80cae209a89ef449be2a66f6b6c963f0d4"
+
+[[capture]]
+name = "containment-uart"
+path = "docs/performance/evidence/hil-v03-20260724/containment-uart.log"
+sha256 = "da29deb1564bd30c8cb5b7872a44c3a804a1809133238d7546766077d287b1fd"
+
+[[capture]]
+name = "containment-analyzer"
+path = "docs/performance/evidence/hil-v03-20260724/containment.sr"
+sha256 = "fc01bd077453d251f698ae1a9e7ba3ea0c617c3e0578e5ab9bad806de8178d89"

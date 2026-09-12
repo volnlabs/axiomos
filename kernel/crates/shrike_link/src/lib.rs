@@ -16,6 +16,7 @@
 pub mod motor;
 pub mod ring;
 pub mod session;
+pub mod tx;
 pub mod watchdog;
 
 pub const SYNC: u8 = 0x7E;

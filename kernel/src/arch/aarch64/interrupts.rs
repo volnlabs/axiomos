@@ -6,19 +6,10 @@
 //!
 //! # RP1 GPIO Interrupt Routing
 //!
-//! On Raspberry Pi 5, the RP1 southbridge connects via PCIe2. The RP1 has
-//! its own internal interrupt controller that aggregates all peripheral
-//! interrupts (GPIO, UART, SPI, etc.) and routes them to the main GIC
-//! via PCIe MSI or legacy interrupts.
-//!
-//! According to the BCM2712 device tree:
-//! - PCIe2 INTA -> GIC SPI 229 (IRQ 261)
-//! - PCIe2 INTB -> GIC SPI 230 (IRQ 262)
-//! - PCIe2 INTC -> GIC SPI 231 (IRQ 263)
-//! - PCIe2 INTD -> GIC SPI 232 (IRQ 264)
-//!
-//! The RP1's GPIO Bank 0 generates internal IRQ 0, which routes through
-//! the RP1's interrupt controller to one of these PCIe lines.
+//! On Raspberry Pi 5, RP1 IO_BANK0 is RP1 interrupt/vector 0. PCIe2 uses
+//! BCM2712 MIP0 for MSI-X; MIP0 maps vectors 0..63 to GIC SPIs 128..191.
+//! Therefore IO_BANK0 arrives at GIC SPI 128, interrupt ID 160. The PCIe2
+//! legacy INTA mapping (SPI 229 / ID 261) is not the RP1 MSI-X GPIO path.
 
 #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -28,18 +19,9 @@ use super::gic;
 /// Non-secure physical timer IRQ number (PPI 14 = IRQ 30)
 const TIMER_IRQ: u32 = gic::irq::TIMER_PHYS;
 
-/// RP1 GPIO IRQ number
-///
-/// The RP1 connects via PCIe2, which uses GIC SPI 229-232 for INTA-D.
-/// GIC SPI numbers map to IRQ IDs as: SPI N = IRQ (32 + N).
-/// So PCIe2 INTA (SPI 229) = IRQ 261.
-///
-/// Note: The RP1 has its own internal interrupt controller. GPIO Bank 0
-/// is RP1 internal IRQ 0. A full implementation would need to also read
-/// the RP1's interrupt status registers to determine which peripheral
-/// (GPIO, UART, etc.) raised the interrupt.
+/// RP1 IO_BANK0 MSI-X vector 0: MIP0 SPI 128 + the GIC SPI base of 32.
 #[cfg(feature = "rpi5")]
-const RP1_GPIO_IRQ: u32 = 261; // GIC SPI 229 = 32 + 229
+const RP1_GPIO_IRQ: u32 = 160;
 
 #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
 static TIMER_IRQ_MARKER_SENT: AtomicBool = AtomicBool::new(false);
@@ -76,6 +58,7 @@ pub fn init() {
     // Enable RP1 GPIO interrupt (routed via PCIe2)
     #[cfg(feature = "rpi5")]
     {
+        gic::set_edge_triggered(RP1_GPIO_IRQ);
         gic::enable_irq(RP1_GPIO_IRQ);
         gic::set_priority(RP1_GPIO_IRQ, 0x80);
     }
@@ -203,6 +186,8 @@ fn handle_timer_interrupt(ctx: &ExceptionContext) {
             "timer",
         );
     }
+    #[cfg(all(feature = "rpi5", feature = "bench"))]
+    crate::serial::drain_bench_buffer();
 }
 
 /// Clear timer interrupt

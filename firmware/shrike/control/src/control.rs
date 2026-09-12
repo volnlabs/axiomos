@@ -8,6 +8,10 @@ use shrike_link::{encode, Decoder, Msg, MAX_FRAME};
 
 use crate::motor::MotorChannel;
 
+/// Keep serial input from monopolizing one control-loop iteration when the
+/// UART is continuously ready; watchdog, motors, and telemetry get service.
+const RX_BYTES_PER_ITERATION: usize = 64;
+
 /// Non-blocking byte transport (the UART to the Pi5).
 pub trait ByteIo {
     /// Next received byte, or `None` if none ready.
@@ -68,8 +72,8 @@ pub struct RunSummary {
 
 /// Run the control loop.
 ///
-/// - When `max_iterations` is `None`, the loop runs forever (production
-///   behavior used by `firmware/shrike/rp2040/src/main.rs`).
+/// - When `max_iterations` is `None`, this legacy direct-motor loop runs forever.
+///   The FPGA-owner entry point remains disabled pending its hardware adapter.
 /// - When `max_iterations` is `Some(n)`, the loop returns after `n`
 ///   iterations with a `RunSummary`. The host simulation crate uses this
 ///   bounded form to exercise the production control loop under mocks.
@@ -96,7 +100,6 @@ where
     let mut last_ping: u64 = 0;
     let mut last_peer_heartbeat: u64 = 0;
     let mut peer_heartbeat_seq: u16 = 0;
-    let mut prev_estop = false;
     let mut summary = RunSummary::default();
 
     loop {
@@ -104,23 +107,17 @@ where
 
         let now = clock.now_us();
 
-        // 1. Mirror the hardware e-stop line's EDGES into the watchdog, so a
-        //    hard e-stop disarms it exactly like a soft Estop: setpoints that
-        //    arrive while the line is asserted cannot arm motion, and after
-        //    release a FRESH setpoint is required before driving resumes (no
-        //    stale-command restart). Edge-triggered, not every loop, so a held
-        //    e-stop never refreshes link liveness and mask a dead link.
+        // 1. Hardware stop is a separate cause: releasing it cannot clear an
+        // operator/timeout latch. Sampling never refreshes command lifetime.
         let hw_estop = estop.asserted();
         if hw_estop {
             summary.estop_asserts = summary.estop_asserts.wrapping_add(1);
         }
-        if hw_estop != prev_estop {
-            wd.on_msg(&Msg::Estop { assert: hw_estop }, now);
-            prev_estop = hw_estop;
-        }
+        wd.set_hardware_estop(hw_estop);
 
         // 2. Drain the UART, feeding decoded Pi5 messages to the watchdog.
-        while let Some(b) = io.read() {
+        for _ in 0..RX_BYTES_PER_ITERATION {
+            let Some(b) = io.read() else { break };
             if let Some(Ok(msg)) = dec.push(b) {
                 wd.on_msg(&msg, now);
             }
@@ -129,7 +126,7 @@ where
         }
 
         // 3. Decide. The hardware line also dominates directly (defense in
-        //    depth — independent of the edge-mirror above); the watchdog
+        //    depth — independent of the sampled latch above); the watchdog
         //    independently stays disarmed until a fresh post-release setpoint.
         let out = if hw_estop {
             Output::SafeStop
@@ -247,6 +244,24 @@ mod tests {
             let byte = self.input.get(self.next).copied();
             self.next = self.next.saturating_add(1);
             byte
+        }
+
+        fn write(&mut self, bytes: &[u8]) {
+            self.output.borrow_mut().extend_from_slice(bytes);
+        }
+    }
+
+    struct ContinuousIo<'a> {
+        input: &'a [u8],
+        next: usize,
+        output: &'a RefCell<ByteCapture>,
+    }
+
+    impl<'a> ByteIo for ContinuousIo<'a> {
+        fn read(&mut self) -> Option<u8> {
+            let byte = self.input.get(self.next).copied().unwrap_or(0);
+            self.next = self.next.saturating_add(1);
+            Some(byte)
         }
 
         fn write(&mut self, bytes: &[u8]) {
@@ -468,6 +483,45 @@ mod tests {
     }
 
     #[test]
+    fn continuous_rx_still_services_motor_and_heartbeat() {
+        let mut frame = [0; MAX_FRAME];
+        let frame_len = encode(
+            &Msg::MotorSetpoint {
+                seq: 1,
+                left: -400,
+                right: 250,
+            },
+            &mut frame,
+        )
+        .unwrap();
+        let output = RefCell::new(ByteCapture::new());
+        let triggers = Cell::new(0);
+        let left = RefCell::new(MotorLog::new());
+        let right = RefCell::new(MotorLog::new());
+
+        let summary = run(
+            ContinuousIo {
+                input: &frame[..frame_len],
+                next: 0,
+                output: &output,
+            },
+            SequenceClock::new(&[1, 2]),
+            TestUltrasonic::new(&[None, None], &triggers),
+            TestEstop::new(&[false, false]),
+            TestMotor { log: &left },
+            TestMotor { log: &right },
+            config(100, u64::MAX, 1),
+            Some(2),
+        )
+        .unwrap();
+
+        assert_eq!(summary.motor_drive_calls, 4);
+        assert!(summary.bytes_written > 0);
+        assert_eq!(left.borrow().as_slice()[0], -400);
+        assert_eq!(right.borrow().as_slice()[0], 250);
+    }
+
+    #[test]
     #[should_panic(expected = "stop unbounded control-loop test")]
     fn absent_iteration_limit_continues_into_the_next_iteration() {
         let output = RefCell::new(ByteCapture::new());
@@ -570,6 +624,40 @@ mod tests {
         assert_eq!(summary.estop_asserts, 2);
         assert_eq!(summary.motor_drive_calls, 0);
         assert_eq!(summary.motor_coast_calls, 6);
+        assert_eq!(left.borrow().as_slice(), [0, 0, 0]);
+        assert_eq!(right.borrow().as_slice(), [0, 0, 0]);
+    }
+
+    #[test]
+    fn hardware_release_cannot_clear_an_operator_stop() {
+        // One RX batch per iteration. Soft stop at t=1, physical stop at t=2,
+        // then a new motor command alongside physical release at t=3.
+        let mut input = [0u8; RX_BYTES_PER_ITERATION * 3];
+        encode(&Msg::Estop { assert: true }, &mut input).unwrap();
+        encode(
+            &Msg::MotorSetpoint {
+                seq: 1,
+                left: 400,
+                right: 400,
+            },
+            &mut input[RX_BYTES_PER_ITERATION * 2..],
+        )
+        .unwrap();
+        let output = RefCell::new(ByteCapture::new());
+        let triggers = Cell::new(0);
+        let left = RefCell::new(MotorLog::new());
+        let right = RefCell::new(MotorLog::new());
+        run(
+            TestIo::new(&input, &output),
+            SequenceClock::new(&[1, 2, 3]),
+            TestUltrasonic::new(&[None, None, None], &triggers),
+            TestEstop::new(&[false, true, false]),
+            TestMotor { log: &left },
+            TestMotor { log: &right },
+            config(100, u64::MAX, 0),
+            Some(3),
+        )
+        .unwrap();
         assert_eq!(left.borrow().as_slice(), [0, 0, 0]);
         assert_eq!(right.borrow().as_slice(), [0, 0, 0]);
     }

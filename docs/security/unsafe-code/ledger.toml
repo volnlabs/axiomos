@@ -1,6 +1,17 @@
 version = 1
-baseline_sites = 675
-baseline_fingerprint = "sha256:9b42266d7d3e44820d56e1b28e646172435687d24b42277ea59a2e418781c5d0"
+baseline_sites = 694
+baseline_fingerprint = "sha256:7da4b56b8bc1a521373022057b4a657bde8410440dc0dff55bcb990852f1fb17"
+
+# 2026-09-09: reviewed prerequisite delta: seven motor-pair no_mangle
+# attributes (production helper and isolated test/fuzz stubs), minus one
+# removed direct PWM MMIO block. Existing obligation rules cover each site.
+
+# 2026-09-09 timing fix: unchanged unsafe constructs/counts/obligations;
+# reviewed line relocations after bench logging and terminal-path edits.
+
+# 2026-09-12: reviewed stack/helper provenance repair and prior HIL line
+# relocations. The helper test now reads its eight-byte payload under Miri.
+# The additional unsafe block is confined to the test-only helper stub.
 
 # Rules are evaluated in order. Keep narrow, high-risk obligations before broad
 # subsystem rules. The first matching rule supplies every site-level field.
@@ -177,7 +188,7 @@ scope = "production"
 owner = "BPF runtime/JIT maintainers"
 invariant = "Only VerifiedProgram reaches execution; context lifetime covers execution; generated code obeys ABI, branch, bounds, cache, and W^X requirements."
 callers = "BpfExecutor, kernel hook dispatch, AArch64 JIT"
-tests = "cloud/embedded execution and verifier suites plus fuzzing; JIT differential tests and enforced RW-to-RX lifecycle remain incomplete."
+tests = "cloud/embedded execution and verifier suites plus fuzzing; Miri copied-stack-pointer load/store and actual helper-payload regressions. JIT differential tests and enforced RW-to-RX lifecycle remain incomplete."
 priority = "P0"
 reviewed = "2026-07-12"
 

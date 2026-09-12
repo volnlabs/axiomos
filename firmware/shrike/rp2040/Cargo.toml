@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 description = "Shrike-lite RP2040 sidecar firmware: UART control link, L298N motors, ultrasonic, e-stop"
 
+[features]
+default = []
+# Deliberately cannot build until lifecycle commands are atomically integrated
+# with the existing UART/watchdog/e-stop control loop.
+fpga-runtime = []
+
 [dependencies]
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
