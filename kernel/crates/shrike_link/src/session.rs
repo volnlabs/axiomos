@@ -179,7 +179,7 @@ mod tests {
         s.tick(0);
         // dead from 100 on; must never emit Heartbeat
         for t in [100u64, 120, 140, 200, 400] {
-            assert_ne!(matches!(s.tick(t), LinkAction::Heartbeat(_)), true);
+            assert!(!matches!(s.tick(t), LinkAction::Heartbeat(_)));
             s.estop_sent(); // simulate it gets sent
         }
     }

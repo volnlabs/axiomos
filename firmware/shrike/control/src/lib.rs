@@ -14,6 +14,10 @@
 mod control;
 pub mod fpga;
 mod motor;
+pub mod transport;
 
-pub use control::{run, ByteIo, Config, EstopLine, MicrosClock, Ultrasonic};
+pub use control::{
+    run, ByteIo, Config, EstopLine, FaultReason, MicrosClock, MotorPairSink, RunSummary,
+    RunTermination, StopReason, Ultrasonic,
+};
 pub use motor::{L298n, MotorChannel};

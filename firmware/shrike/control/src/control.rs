@@ -4,9 +4,12 @@
 //! traits so the RP2040 peripherals (or a host mock) plug in at the edges.
 
 use shrike_link::watchdog::{Output, Watchdog};
-use shrike_link::{encode, Decoder, Msg, MAX_FRAME};
+#[cfg(test)]
+use shrike_link::{encode, MAX_FRAME};
+use shrike_link::{Decoder, Msg};
 
-use crate::motor::MotorChannel;
+use crate::fpga::{FpgaLifecycle, FpgaPlatform, LifecycleError};
+use crate::transport::TelemetryTx;
 
 /// Keep serial input from monopolizing one control-loop iteration when the
 /// UART is continuously ready; watchdog, motors, and telemetry get service.
@@ -14,10 +17,37 @@ const RX_BYTES_PER_ITERATION: usize = 64;
 
 /// Non-blocking byte transport (the UART to the Pi5).
 pub trait ByteIo {
+    type Error;
+
     /// Next received byte, or `None` if none ready.
     fn read(&mut self) -> Option<u8>;
-    /// Best-effort transmit.
-    fn write(&mut self, bytes: &[u8]);
+    /// Try to transmit a prefix. `Ok(0)` is backpressure.
+    fn try_write(&mut self, bytes: &[u8]) -> Result<usize, Self::Error>;
+    /// Clear software and hardware receive/transmit state.
+    fn reset(&mut self) -> Result<(), Self::Error>;
+}
+
+/// Atomic paired-motor boundary owned by the FPGA lifecycle. Before calling
+/// [`run`], the outer driver must configure the sink and establish zero output;
+/// the loop never configures, rearms, or creates a new control session.
+pub trait MotorPairSink {
+    type Error;
+
+    fn apply(&mut self, seq: u8, left: i16, right: i16) -> Result<(), Self::Error>;
+    /// Trusted fail-safe path; implementations must make both outputs safe.
+    fn inhibit(&mut self);
+}
+
+impl<P: FpgaPlatform> MotorPairSink for FpgaLifecycle<P> {
+    type Error = LifecycleError<P::Error>;
+
+    fn apply(&mut self, seq: u8, left: i16, right: i16) -> Result<(), Self::Error> {
+        self.runtime_command(seq, left, right, 0)
+    }
+
+    fn inhibit(&mut self) {
+        self.fail_safe("control loop terminal stop/fault");
+    }
 }
 
 /// Monotonic microsecond clock.
@@ -49,41 +79,77 @@ pub struct Config {
     pub peer_heartbeat_period_us: u64,
 }
 
-/// Counters recorded during a bounded run, returned when `run` stops after
-/// the requested number of iterations. The production firmware never
-/// inspects this struct; the host simulation crate uses it to assert
-/// that the control loop reached the expected state.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct RunSummary {
-    /// Number of loop iterations actually executed.
-    pub iterations: u32,
-    /// Number of `MotorChannel::drive` calls (one per actuated side per
-    /// iteration that produced `Output::Drive`).
-    pub motor_drive_calls: u32,
-    /// Number of `MotorChannel::coast` calls (one per actuated side per
-    /// iteration that produced `Output::SafeStop`).
-    pub motor_coast_calls: u32,
-    /// Total bytes written via `ByteIo::write`.
-    pub bytes_written: u32,
-    /// Number of `EstopLine::asserted` samples that returned `true`, including
-    /// both the assertion edge and subsequent held samples.
-    pub estop_asserts: u32,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    HardwareEstop,
+    SoftwareEstop,
+    WatchdogExpired,
 }
 
-/// Run the control loop.
-///
-/// - When `max_iterations` is `None`, this legacy direct-motor loop runs forever.
-///   The FPGA-owner entry point remains disabled pending its hardware adapter.
-/// - When `max_iterations` is `Some(n)`, the loop returns after `n`
-///   iterations with a `RunSummary`. The host simulation crate uses this
-///   bounded form to exercise the production control loop under mocks.
-pub fn run<IO, CK, US, ES, ML, MR>(
-    mut io: IO,
-    clock: CK,
-    mut ultra: US,
-    mut estop: ES,
-    mut left: ML,
-    mut right: MR,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultReason {
+    Decode,
+    UnexpectedMessage,
+    MotorSink,
+    Io,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum RunTermination {
+    #[default]
+    IterationLimit,
+    Stop(StopReason),
+    Fault(FaultReason),
+}
+
+/// Result of a bounded run or terminal stop/fault. Borrowed peripherals remain
+/// available to the outer driver for explicit reset and FPGA requalification.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RunSummary {
+    pub iterations: u32,
+    /// Pairs whose sink call completed with an accepted-sequence acknowledgement.
+    pub motor_pairs_accepted: u32,
+    pub motor_inhibit_calls: u32,
+    /// Bytes accepted by local UART writes, not observed delivery.
+    pub bytes_written: u64,
+    /// Software-owned frames rejected by capacity or discarded on termination/reset.
+    /// Loss from resetting the hardware UART FIFO is unknown and not included.
+    pub telemetry_frames_dropped: u64,
+    pub estop_asserts: u32,
+    pub termination: RunTermination,
+    /// A reset failure is reported without hiding the stop/fault that triggered it.
+    pub io_reset_failed: bool,
+}
+
+fn terminate<IO: ByteIo, S: MotorPairSink>(
+    io: &mut IO,
+    motors: &mut S,
+    mut summary: RunSummary,
+    termination: RunTermination,
+    tx: &TelemetryTx,
+) -> Option<RunSummary> {
+    motors.inhibit();
+    summary.motor_inhibit_calls = summary.motor_inhibit_calls.wrapping_add(1);
+    summary.termination = termination;
+    summary.bytes_written = tx.accepted_bytes();
+    summary.telemetry_frames_dropped = summary
+        .telemetry_frames_dropped
+        .saturating_add(tx.pending_frames());
+    summary.io_reset_failed = io.reset().is_err();
+    Some(summary)
+}
+
+/// Run until the iteration bound or a terminal stop/fault. Motor commands are
+/// submitted once, in decode order; cached watchdog output is never replayed.
+/// The caller supplies a freshly qualified sink already holding zero output.
+/// After any return, drain/requalify explicitly before starting a new run; this
+/// function never establishes a link session or rearms a stopped FPGA.
+pub fn run<IO, CK, US, ES, S>(
+    io: &mut IO,
+    clock: &CK,
+    ultra: &mut US,
+    estop: &mut ES,
+    motors: &mut S,
     cfg: Config,
     max_iterations: Option<u32>,
 ) -> Option<RunSummary>
@@ -92,63 +158,221 @@ where
     CK: MicrosClock,
     US: Ultrasonic,
     ES: EstopLine,
-    ML: MotorChannel,
-    MR: MotorChannel,
+    S: MotorPairSink,
 {
+    let mut tx = TelemetryTx::new();
     let mut dec = Decoder::new();
     let mut wd = Watchdog::new(cfg.link_timeout_us);
     let mut last_ping: u64 = 0;
     let mut last_peer_heartbeat: u64 = 0;
     let mut peer_heartbeat_seq: u16 = 0;
     let mut summary = RunSummary::default();
+    let mut command_applied = false;
+
+    if max_iterations == Some(0) {
+        return terminate(io, motors, summary, RunTermination::IterationLimit, &tx);
+    }
 
     loop {
         summary.iterations = summary.iterations.wrapping_add(1);
 
-        let now = clock.now_us();
-
-        // 1. Hardware stop is a separate cause: releasing it cannot clear an
-        // operator/timeout latch. Sampling never refreshes command lifetime.
-        let hw_estop = estop.asserted();
+        let mut now = clock.now_us();
+        let mut hw_estop = estop.asserted();
         if hw_estop {
             summary.estop_asserts = summary.estop_asserts.wrapping_add(1);
         }
         wd.set_hardware_estop(hw_estop);
+        if hw_estop {
+            return terminate(
+                io,
+                motors,
+                summary,
+                RunTermination::Stop(StopReason::HardwareEstop),
+                &tx,
+            );
+        }
+        if command_applied && wd.output(now) == Output::SafeStop {
+            return terminate(
+                io,
+                motors,
+                summary,
+                RunTermination::Stop(StopReason::WatchdogExpired),
+                &tx,
+            );
+        }
 
-        // 2. Drain the UART, feeding decoded Pi5 messages to the watchdog.
         for _ in 0..RX_BYTES_PER_ITERATION {
             let Some(b) = io.read() else { break };
-            if let Some(Ok(msg)) = dec.push(b) {
-                wd.on_msg(&msg, now);
+            let Some(decoded) = dec.push(b) else {
+                continue;
+            };
+            let msg = match decoded {
+                Ok(msg) => msg,
+                Err(_) => {
+                    return terminate(
+                        io,
+                        motors,
+                        summary,
+                        RunTermination::Fault(FaultReason::Decode),
+                        &tx,
+                    );
+                }
+            };
+
+            now = clock.now_us();
+            hw_estop = estop.asserted();
+            if hw_estop {
+                summary.estop_asserts = summary.estop_asserts.wrapping_add(1);
+                wd.set_hardware_estop(true);
+                return terminate(
+                    io,
+                    motors,
+                    summary,
+                    RunTermination::Stop(StopReason::HardwareEstop),
+                    &tx,
+                );
             }
-            // Decode errors (CRC/len/unknown) are intentionally dropped: a
-            // corrupt frame must never reach actuation.
+
+            match msg {
+                Msg::MotorSetpoint { seq, left, right } => {
+                    let accepted = wd.on_msg(&msg, now);
+                    let output = wd.output(now);
+                    if !accepted {
+                        if command_applied && output == Output::SafeStop {
+                            return terminate(
+                                io,
+                                motors,
+                                summary,
+                                RunTermination::Stop(StopReason::WatchdogExpired),
+                                &tx,
+                            );
+                        }
+                        continue;
+                    }
+                    if output != (Output::Drive { left, right }) {
+                        return terminate(
+                            io,
+                            motors,
+                            summary,
+                            RunTermination::Stop(StopReason::WatchdogExpired),
+                            &tx,
+                        );
+                    }
+
+                    hw_estop = estop.asserted();
+                    if hw_estop {
+                        summary.estop_asserts = summary.estop_asserts.wrapping_add(1);
+                        wd.set_hardware_estop(true);
+                        return terminate(
+                            io,
+                            motors,
+                            summary,
+                            RunTermination::Stop(StopReason::HardwareEstop),
+                            &tx,
+                        );
+                    }
+                    let before_apply = clock.now_us();
+                    if wd.output(before_apply) == Output::SafeStop {
+                        return terminate(
+                            io,
+                            motors,
+                            summary,
+                            RunTermination::Stop(StopReason::WatchdogExpired),
+                            &tx,
+                        );
+                    }
+                    if motors.apply(seq, left, right).is_err() {
+                        return terminate(
+                            io,
+                            motors,
+                            summary,
+                            RunTermination::Fault(FaultReason::MotorSink),
+                            &tx,
+                        );
+                    }
+                    command_applied = true;
+                    summary.motor_pairs_accepted = summary.motor_pairs_accepted.wrapping_add(1);
+
+                    let after_apply = clock.now_us();
+                    hw_estop = estop.asserted();
+                    if hw_estop {
+                        summary.estop_asserts = summary.estop_asserts.wrapping_add(1);
+                        wd.set_hardware_estop(true);
+                        return terminate(
+                            io,
+                            motors,
+                            summary,
+                            RunTermination::Stop(StopReason::HardwareEstop),
+                            &tx,
+                        );
+                    }
+                    if wd.output(after_apply) == Output::SafeStop {
+                        return terminate(
+                            io,
+                            motors,
+                            summary,
+                            RunTermination::Stop(StopReason::WatchdogExpired),
+                            &tx,
+                        );
+                    }
+                }
+                Msg::Estop { .. } => {
+                    let _ = wd.on_msg(&msg, now);
+                    return terminate(
+                        io,
+                        motors,
+                        summary,
+                        RunTermination::Stop(StopReason::SoftwareEstop),
+                        &tx,
+                    );
+                }
+                Msg::HeartbeatToShrike { .. } => {
+                    let _ = wd.on_msg(&msg, now);
+                    if command_applied && wd.output(now) == Output::SafeStop {
+                        return terminate(
+                            io,
+                            motors,
+                            summary,
+                            RunTermination::Stop(StopReason::WatchdogExpired),
+                            &tx,
+                        );
+                    }
+                }
+                Msg::Sensor { .. } | Msg::HeartbeatToPi { .. } => {
+                    return terminate(
+                        io,
+                        motors,
+                        summary,
+                        RunTermination::Fault(FaultReason::UnexpectedMessage),
+                        &tx,
+                    );
+                }
+            }
         }
 
-        // 3. Decide. The hardware line also dominates directly (defense in
-        //    depth — independent of the sampled latch above); the watchdog
-        //    independently stays disarmed until a fresh post-release setpoint.
-        let out = if hw_estop {
-            Output::SafeStop
-        } else {
-            wd.output(now)
-        };
-
-        // 4. Actuate.
-        match out {
-            Output::Drive { left: l, right: r } => {
-                left.drive(l);
-                right.drive(r);
-                summary.motor_drive_calls = summary.motor_drive_calls.wrapping_add(2);
-            }
-            Output::SafeStop => {
-                left.coast();
-                right.coast();
-                summary.motor_coast_calls = summary.motor_coast_calls.wrapping_add(2);
-            }
+        now = clock.now_us();
+        hw_estop = estop.asserted();
+        if hw_estop {
+            summary.estop_asserts = summary.estop_asserts.wrapping_add(1);
+            wd.set_hardware_estop(true);
+            return terminate(
+                io,
+                motors,
+                summary,
+                RunTermination::Stop(StopReason::HardwareEstop),
+                &tx,
+            );
+        }
+        if command_applied && wd.output(now) == Output::SafeStop {
+            return terminate(
+                io,
+                motors,
+                summary,
+                RunTermination::Stop(StopReason::WatchdogExpired),
+                &tx,
+            );
         }
 
-        // 5. Periodic ultrasonic ping + Sensor report back to the Pi5.
         if now.wrapping_sub(last_ping) >= cfg.ping_period_us {
             ultra.trigger();
             last_ping = now;
@@ -159,10 +383,9 @@ where
                 estop_line: hw_estop,
                 flags: 0,
             };
-            let mut buf = [0u8; MAX_FRAME];
-            if let Ok(n) = encode(&msg, &mut buf) {
-                io.write(&buf[..n]);
-                summary.bytes_written = summary.bytes_written.wrapping_add(n as u32);
+            if !tx.queue(msg) {
+                summary.telemetry_frames_dropped =
+                    summary.telemetry_frames_dropped.saturating_add(1);
             }
         }
 
@@ -174,16 +397,24 @@ where
             };
             peer_heartbeat_seq = peer_heartbeat_seq.wrapping_add(1);
             last_peer_heartbeat = now;
-            let mut buf = [0u8; MAX_FRAME];
-            if let Ok(n) = encode(&msg, &mut buf) {
-                io.write(&buf[..n]);
-                summary.bytes_written = summary.bytes_written.wrapping_add(n as u32);
+            if !tx.queue(msg) {
+                summary.telemetry_frames_dropped =
+                    summary.telemetry_frames_dropped.saturating_add(1);
             }
+        }
+        if tx.service(io).is_err() {
+            return terminate(
+                io,
+                motors,
+                summary,
+                RunTermination::Fault(FaultReason::Io),
+                &tx,
+            );
         }
 
         if let Some(limit) = max_iterations {
             if summary.iterations >= limit {
-                return Some(summary);
+                return terminate(io, motors, summary, RunTermination::IterationLimit, &tx);
             }
         }
     }
@@ -240,14 +471,22 @@ mod tests {
     }
 
     impl ByteIo for TestIo<'_> {
+        type Error = ();
+
         fn read(&mut self) -> Option<u8> {
             let byte = self.input.get(self.next).copied();
             self.next = self.next.saturating_add(1);
             byte
         }
 
-        fn write(&mut self, bytes: &[u8]) {
+        fn try_write(&mut self, bytes: &[u8]) -> Result<usize, ()> {
             self.output.borrow_mut().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn reset(&mut self) -> Result<(), ()> {
+            self.next = self.input.len();
+            Ok(())
         }
     }
 
@@ -258,14 +497,22 @@ mod tests {
     }
 
     impl<'a> ByteIo for ContinuousIo<'a> {
+        type Error = ();
+
         fn read(&mut self) -> Option<u8> {
             let byte = self.input.get(self.next).copied().unwrap_or(0);
             self.next = self.next.saturating_add(1);
             Some(byte)
         }
 
-        fn write(&mut self, bytes: &[u8]) {
+        fn try_write(&mut self, bytes: &[u8]) -> Result<usize, ()> {
             self.output.borrow_mut().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn reset(&mut self) -> Result<(), ()> {
+            self.next = self.input.len();
+            Ok(())
         }
     }
 
@@ -387,13 +634,23 @@ mod tests {
         }
     }
 
-    struct TestMotor<'a> {
-        log: &'a RefCell<MotorLog>,
+    struct TestMotors<'a> {
+        left: &'a RefCell<MotorLog>,
+        right: &'a RefCell<MotorLog>,
     }
 
-    impl MotorChannel for TestMotor<'_> {
-        fn drive(&mut self, duty: i16) {
-            self.log.borrow_mut().push(duty);
+    impl MotorPairSink for TestMotors<'_> {
+        type Error = ();
+
+        fn apply(&mut self, _: u8, left: i16, right: i16) -> Result<(), Self::Error> {
+            self.left.borrow_mut().push(left);
+            self.right.borrow_mut().push(right);
+            Ok(())
+        }
+
+        fn inhibit(&mut self) {
+            self.left.borrow_mut().push(0);
+            self.right.borrow_mut().push(0);
         }
     }
 
@@ -420,27 +677,29 @@ mod tests {
     }
 
     #[test]
-    fn zero_iteration_limit_still_executes_one_safe_iteration() {
+    fn zero_iteration_limit_exits_safe_without_running_the_loop() {
         let output = RefCell::new(ByteCapture::new());
         let triggers = Cell::new(0);
         let left = RefCell::new(MotorLog::new());
         let right = RefCell::new(MotorLog::new());
 
         let summary = run(
-            TestIo::new(&[], &output),
-            SequenceClock::new(&[0]),
-            TestUltrasonic::new(&[None], &triggers),
-            TestEstop::new(&[false]),
-            TestMotor { log: &left },
-            TestMotor { log: &right },
+            &mut TestIo::new(&[], &output),
+            &SequenceClock::new(&[0]),
+            &mut TestUltrasonic::new(&[None], &triggers),
+            &mut TestEstop::new(&[false]),
+            &mut TestMotors {
+                left: &left,
+                right: &right,
+            },
             config(100, u64::MAX, 0),
             Some(0),
         )
         .expect("bounded run must return a summary");
 
-        assert_eq!(summary.iterations, 1);
-        assert_eq!(summary.motor_drive_calls, 0);
-        assert_eq!(summary.motor_coast_calls, 2);
+        assert_eq!(summary.iterations, 0);
+        assert_eq!(summary.motor_pairs_accepted, 0);
+        assert_eq!(summary.motor_inhibit_calls, 1);
         assert_eq!(left.borrow().as_slice(), [0]);
         assert_eq!(right.borrow().as_slice(), [0]);
         assert_eq!(triggers.get(), 0);
@@ -465,19 +724,21 @@ mod tests {
         let right = RefCell::new(MotorLog::new());
 
         let summary = run(
-            TestIo::new(&frame[..frame_len], &output),
-            SequenceClock::new(&[1, 12]),
-            TestUltrasonic::new(&[None, None], &triggers),
-            TestEstop::new(&[false, false]),
-            TestMotor { log: &left },
-            TestMotor { log: &right },
+            &mut TestIo::new(&frame[..frame_len], &output),
+            &SequenceClock::new(&[1, 1, 1, 1, 1, 12]),
+            &mut TestUltrasonic::new(&[None, None], &triggers),
+            &mut TestEstop::new(&[false]),
+            &mut TestMotors {
+                left: &left,
+                right: &right,
+            },
             config(10, u64::MAX, 100),
             Some(2),
         )
         .unwrap();
 
-        assert_eq!(summary.motor_drive_calls, 2);
-        assert_eq!(summary.motor_coast_calls, 2);
+        assert_eq!(summary.motor_pairs_accepted, 1);
+        assert_eq!(summary.motor_inhibit_calls, 1);
         assert_eq!(left.borrow().as_slice(), [400, 0]);
         assert_eq!(right.borrow().as_slice(), [-250, 0]);
     }
@@ -500,22 +761,24 @@ mod tests {
         let right = RefCell::new(MotorLog::new());
 
         let summary = run(
-            ContinuousIo {
+            &mut ContinuousIo {
                 input: &frame[..frame_len],
                 next: 0,
                 output: &output,
             },
-            SequenceClock::new(&[1, 2]),
-            TestUltrasonic::new(&[None, None], &triggers),
-            TestEstop::new(&[false, false]),
-            TestMotor { log: &left },
-            TestMotor { log: &right },
+            &SequenceClock::new(&[1]),
+            &mut TestUltrasonic::new(&[None, None], &triggers),
+            &mut TestEstop::new(&[false]),
+            &mut TestMotors {
+                left: &left,
+                right: &right,
+            },
             config(100, u64::MAX, 1),
             Some(2),
         )
         .unwrap();
 
-        assert_eq!(summary.motor_drive_calls, 4);
+        assert_eq!(summary.motor_pairs_accepted, 1);
         assert!(summary.bytes_written > 0);
         assert_eq!(left.borrow().as_slice()[0], -400);
         assert_eq!(right.borrow().as_slice()[0], 250);
@@ -530,14 +793,16 @@ mod tests {
         let right = RefCell::new(MotorLog::new());
 
         let _ = run(
-            TestIo::new(&[], &output),
-            PanickingClock {
+            &mut TestIo::new(&[], &output),
+            &PanickingClock {
                 calls: Cell::new(0),
             },
-            TestUltrasonic::new(&[None], &triggers),
-            TestEstop::new(&[false]),
-            TestMotor { log: &left },
-            TestMotor { log: &right },
+            &mut TestUltrasonic::new(&[None], &triggers),
+            &mut TestEstop::new(&[false]),
+            &mut TestMotors {
+                left: &left,
+                right: &right,
+            },
             config(100, u64::MAX, 0),
             None,
         );
@@ -576,20 +841,26 @@ mod tests {
         let left = RefCell::new(MotorLog::new());
         let right = RefCell::new(MotorLog::new());
         let summary = run(
-            TestIo::new(&input[..corrupt_len + valid_len], &output),
-            SequenceClock::new(&[1]),
-            TestUltrasonic::new(&[None], &triggers),
-            TestEstop::new(&[false]),
-            TestMotor { log: &left },
-            TestMotor { log: &right },
+            &mut TestIo::new(&input[..corrupt_len + valid_len], &output),
+            &SequenceClock::new(&[1]),
+            &mut TestUltrasonic::new(&[None], &triggers),
+            &mut TestEstop::new(&[false]),
+            &mut TestMotors {
+                left: &left,
+                right: &right,
+            },
             config(100, u64::MAX, 0),
             Some(1),
         )
         .unwrap();
 
-        assert_eq!(summary.motor_drive_calls, 2);
-        assert_eq!(left.borrow().as_slice(), [20]);
-        assert_eq!(right.borrow().as_slice(), [-30]);
+        assert_eq!(
+            summary.termination,
+            RunTermination::Fault(FaultReason::Decode)
+        );
+        assert_eq!(summary.motor_pairs_accepted, 0);
+        assert_eq!(left.borrow().as_slice(), [0]);
+        assert_eq!(right.borrow().as_slice(), [0]);
     }
 
     #[test]
@@ -610,22 +881,24 @@ mod tests {
         let right = RefCell::new(MotorLog::new());
 
         let summary = run(
-            TestIo::new(&frame[..frame_len], &output),
-            SequenceClock::new(&[1, 2, 3]),
-            TestUltrasonic::new(&[None, None, None], &triggers),
-            TestEstop::new(&[true, true, false]),
-            TestMotor { log: &left },
-            TestMotor { log: &right },
+            &mut TestIo::new(&frame[..frame_len], &output),
+            &SequenceClock::new(&[1, 2, 3]),
+            &mut TestUltrasonic::new(&[None, None, None], &triggers),
+            &mut TestEstop::new(&[true, true, false]),
+            &mut TestMotors {
+                left: &left,
+                right: &right,
+            },
             config(100, u64::MAX, 0),
             Some(3),
         )
         .unwrap();
 
-        assert_eq!(summary.estop_asserts, 2);
-        assert_eq!(summary.motor_drive_calls, 0);
-        assert_eq!(summary.motor_coast_calls, 6);
-        assert_eq!(left.borrow().as_slice(), [0, 0, 0]);
-        assert_eq!(right.borrow().as_slice(), [0, 0, 0]);
+        assert_eq!(summary.estop_asserts, 1);
+        assert_eq!(summary.motor_pairs_accepted, 0);
+        assert_eq!(summary.motor_inhibit_calls, 1);
+        assert_eq!(left.borrow().as_slice(), [0]);
+        assert_eq!(right.borrow().as_slice(), [0]);
     }
 
     #[test]
@@ -648,18 +921,20 @@ mod tests {
         let left = RefCell::new(MotorLog::new());
         let right = RefCell::new(MotorLog::new());
         run(
-            TestIo::new(&input, &output),
-            SequenceClock::new(&[1, 2, 3]),
-            TestUltrasonic::new(&[None, None, None], &triggers),
-            TestEstop::new(&[false, true, false]),
-            TestMotor { log: &left },
-            TestMotor { log: &right },
+            &mut TestIo::new(&input, &output),
+            &SequenceClock::new(&[1, 2, 3]),
+            &mut TestUltrasonic::new(&[None, None, None], &triggers),
+            &mut TestEstop::new(&[false, true, false]),
+            &mut TestMotors {
+                left: &left,
+                right: &right,
+            },
             config(100, u64::MAX, 0),
             Some(3),
         )
         .unwrap();
-        assert_eq!(left.borrow().as_slice(), [0, 0, 0]);
-        assert_eq!(right.borrow().as_slice(), [0, 0, 0]);
+        assert_eq!(left.borrow().as_slice(), [0]);
+        assert_eq!(right.borrow().as_slice(), [0]);
     }
 
     #[test]
@@ -669,12 +944,14 @@ mod tests {
         let left = RefCell::new(MotorLog::new());
         let right = RefCell::new(MotorLog::new());
         let summary = run(
-            TestIo::new(&[], &output),
-            SequenceClock::new(&[u64::MAX - 4, 6]),
-            TestUltrasonic::new(&[Some(123), Some(456)], &triggers),
-            TestEstop::new(&[false, false]),
-            TestMotor { log: &left },
-            TestMotor { log: &right },
+            &mut TestIo::new(&[], &output),
+            &SequenceClock::new(&[u64::MAX - 4, u64::MAX - 4, 6, 6]),
+            &mut TestUltrasonic::new(&[Some(123), Some(456)], &triggers),
+            &mut TestEstop::new(&[false, false]),
+            &mut TestMotors {
+                left: &left,
+                right: &right,
+            },
             config(100, 10, 10),
             Some(2),
         )
