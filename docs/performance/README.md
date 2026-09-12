@@ -8,6 +8,7 @@ Performance claims are separated into method, current evidence, and history.
 - [Historical unsupported results](../archive/benchmarks/2026-06-legacy-benchmarks.md)
 - [v0.5 acceptance configuration](v0.5-acceptance.json) and
   [canonical runtime contract](../plans/active/v0.5-bounded-runtime-evolution.md)
+- [v0.5 M0 host checks and retained synthetic trace](../reviews/releases/2026-09-12-v0.5-m0/README.md)
 
 The initial v0.5 host reducer is `scripts/benchmark/analyze-v05.py`.
 Use `--describe` for its versioned trace/expectations formats, `--show-acceptance`

@@ -1,0 +1,71 @@
+{
+  "acceptance_config_sha256": "8b1fb03e7c41b17ac581c1f92353cc53cdf1e1556fb63fe6549dd2f631edd650",
+  "audit": {
+    "counts": {
+      "pass": 83,
+      "skip": 1
+    },
+    "exit_code": 0,
+    "finished_at": "2026-09-12T06:42:52Z",
+    "profile": "quick",
+    "raw_archive": "audit-quick.tar.gz",
+    "skips": [
+      {
+        "command": "RUN_AUDIT_FAULT not set",
+        "duration_ms": 0,
+        "log": "-",
+        "name": "audit-fault-injection-qemu-smoke",
+        "status": "skip"
+      }
+    ],
+    "started_at": "2026-09-12T06:40:49Z"
+  },
+  "not_run": [
+    "full engineering audit",
+    "Miri",
+    "v0.5 operational artifact reproducibility",
+    "v0.5 physical functional/fault campaign",
+    "one-hour pilot",
+    "24-hour soak"
+  ],
+  "physical_tests_performed": false,
+  "release_verdict": "blocked",
+  "review": {
+    "findings_fixed": [
+      "source event ordering",
+      "installation continuity",
+      "operation prefix/readiness sequencing",
+      "malformed input structured failures"
+    ],
+    "focused_reviewer_remaining_findings": 0
+  },
+  "schema": "axiomos.v05.m0-checks.v1",
+  "source": "01766ce99bfb09f948832e550f0ede1c6f663271",
+  "supporting_checks": [
+    {
+      "command": "CARGO_TARGET_DIR=/home/utkarsh/Work/axiomOS/target cargo test --locked -p shrike_link -p shrike_control -p shrike_rp2040_host_sim",
+      "exit_code": 0,
+      "log": "firmware-host.log.gz",
+      "scope": "host simulation",
+      "tests_passed": 94
+    },
+    {
+      "command": "bash scripts/verify/fpga-safety-gate.sh",
+      "exit_code": 0,
+      "log": "rtl.log",
+      "scope": "RTL simulation, not synthesis or physical hardware"
+    },
+    {
+      "command": "python3 -B scripts/verify/rootfs-selection.py",
+      "exit_code": 0,
+      "log": "preparation-rootfs-selection.log",
+      "scope": "pre-commit preparation check; source inputs unchanged at recorded candidate"
+    },
+    {
+      "command": "python3 -B scripts/verify/aarch64-exception-context.py",
+      "exit_code": 0,
+      "log": "preparation-aarch64-context.log",
+      "scope": "pre-commit emulated canary; source inputs unchanged at recorded candidate"
+    }
+  ]
+}

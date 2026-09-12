@@ -1,0 +1,18 @@
+{"acceptance_config_sha256": "8b1fb03e7c41b17ac581c1f92353cc53cdf1e1556fb63fe6549dd2f631edd650", "artifact_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "boot_id": "session-boot-a", "clock_hz": 1000000000, "evidence_kind": "synthetic", "schema": "axiomos.v05.trace.v1", "source_id": "01766ce99bfb09f948832e550f0ede1c6f663271", "type": "header"}
+{"artifact_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "generation": 2, "operation": "activate", "operation_id": 1, "seq": 1, "ticks": 1, "type": "operation_request"}
+{"artifact_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "generation": 2, "operation_id": 1, "seq": 2, "ticks": 100000002, "type": "operation_accepted"}
+{"artifact_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "generation": 2, "operation_id": 1, "seq": 3, "ticks": 100000003, "type": "handoff_enter"}
+{"artifact_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "generation": 2, "operation_id": 1, "seq": 4, "ticks": 100000004, "type": "sink_safe_ready"}
+{"cycle": 1, "generation": 2, "mode": "controller", "scheduled_ticks": 110000000, "seq": 5, "ticks": 110000000, "type": "cycle_release"}
+{"artifact_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "cycle": 1, "generation": 2, "operation_id": 1, "seq": 6, "ticks": 110000001, "type": "operation_committed"}
+{"artifact_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "cycle": 1, "generation": 2, "seq": 7, "ticks": 110000002, "type": "behavior_enter"}
+{"artifact_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "cycle": 1, "generation": 2, "seq": 8, "ticks": 110000003, "type": "behavior_exit"}
+{"cycle": 1, "generation": 2, "mode": "controller", "seq": 9, "ticks": 110000004, "type": "cycle_complete"}
+{"operation_id": 1, "outcome": "successful", "seq": 10, "ticks": 110000005, "type": "operation_response"}
+{"cycle": 2, "generation": 2, "mode": "controller", "scheduled_ticks": 120000000, "seq": 11, "ticks": 120000000, "type": "cycle_release"}
+{"artifact_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "cycle": 2, "generation": 2, "seq": 12, "ticks": 120000001, "type": "behavior_enter"}
+{"artifact_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "cycle": 2, "generation": 2, "seq": 13, "ticks": 120000002, "type": "behavior_exit"}
+{"cycle": 2, "generation": 2, "mode": "controller", "seq": 14, "ticks": 120000003, "type": "cycle_complete"}
+{"cycle": 3, "generation": 2, "mode": "safe", "scheduled_ticks": 130000000, "seq": 15, "ticks": 130000000, "type": "cycle_release"}
+{"cycle": 3, "generation": 2, "mode": "safe", "seq": 16, "ticks": 130000001, "type": "cycle_complete"}
+{"event_count": 16, "last_event_seq": 16, "seq": 17, "ticks": 130000002, "type": "terminal"}

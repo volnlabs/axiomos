@@ -1,0 +1,65 @@
+[
+  {
+    "name": "production-source-unchanged",
+    "command": [
+      "git",
+      "diff",
+      "--exit-code",
+      "05e2b25",
+      "--",
+      "kernel/src",
+      "kernel/crates",
+      "firmware/shrike/control",
+      "firmware/shrike/rp2040",
+      "firmware/shrike/fpga"
+    ],
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "name": "main-checkout-clean",
+    "command": [
+      "git",
+      "-C",
+      "/home/utkarsh/Work/axiomOS",
+      "status",
+      "--porcelain"
+    ],
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "name": "runtime-worktree-clean",
+    "command": [
+      "git",
+      "status",
+      "--porcelain"
+    ],
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "name": "source",
+    "command": [
+      "git",
+      "rev-parse",
+      "HEAD"
+    ],
+    "exit_code": 0,
+    "stdout": "01766ce99bfb09f948832e550f0ede1c6f663271\n",
+    "stderr": ""
+  },
+  {
+    "name": "toolchain",
+    "command": [
+      "rustc",
+      "-Vv"
+    ],
+    "exit_code": 0,
+    "stdout": "rustc 1.98.0-nightly (4c9d2bfe4 2026-07-01)\nbinary: rustc\ncommit-hash: 4c9d2bfe4ad7a65669098754964aaebe0ec1ced2\ncommit-date: 2026-07-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.0-nightly\nLLVM version: 22.1.8\n",
+    "stderr": ""
+  }
+]

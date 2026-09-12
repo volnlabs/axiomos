@@ -1,0 +1,5 @@
+PASS: shrike_safety_gate
+firmware/shrike/fpga/tb_shrike_safety_gate.sv:51: $finish called at 1067000 (1ps)
+PASS: axiomos_r04_forgefpga_runtime_link
+firmware/shrike/fpga/forgefpga/sim/tb_axiomos_r04_top.v:497: $finish called at 587872000 (1ps)
+NOTE: software simulation passed; ForgeFPGA synthesis/bitstream evidence is not produced by this gate.

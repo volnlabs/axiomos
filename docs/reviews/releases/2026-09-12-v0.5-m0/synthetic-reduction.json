@@ -1,0 +1,69 @@
+{
+  "boots": [
+    {
+      "acceptance_config_sha256": "8b1fb03e7c41b17ac581c1f92353cc53cdf1e1556fb63fe6549dd2f631edd650",
+      "artifact_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "boot_id": "session-boot-a",
+      "event_counts": {
+        "behavior_enter": 2,
+        "behavior_exit": 2,
+        "cycle_complete": 3,
+        "cycle_release": 3,
+        "handoff_enter": 1,
+        "operation_accepted": 1,
+        "operation_committed": 1,
+        "operation_request": 1,
+        "operation_response": 1,
+        "sink_safe_ready": 1
+      },
+      "evidence_kind": "synthetic",
+      "failures": 0,
+      "handoff_samples": 1,
+      "operation_outcomes": {
+        "canceled": 0,
+        "failed": 0,
+        "rejected": 0,
+        "successful": 1
+      },
+      "release_count": 3,
+      "source_id": "01766ce99bfb09f948832e550f0ede1c6f663271",
+      "unfinished_operations": 0
+    }
+  ],
+  "gate_results": {
+    "abi": "not_evaluated",
+    "authentication_and_loading": "not_evaluated",
+    "failure_custody": "not_evaluated",
+    "fault_matrix": "not_evaluated",
+    "ownership": "not_evaluated",
+    "physical_campaign": "blocked",
+    "preparation_isolation": "not_evaluated",
+    "private_state": "not_evaluated",
+    "publication_races": "not_evaluated",
+    "recorder_overhead": "not_evaluated",
+    "reset_quiescence": "not_evaluated",
+    "resource_reclamation": "not_evaluated",
+    "trace_subset": "pass"
+  },
+  "input_sha256": {
+    "expectations": "06ac1459c0c0e6dcdacbc21b7426317aa306a6ecaba4e3fc3eb3b01e49bba72e",
+    "trace": "0a9c98d9b0d3cadc7d1a64c78917d120f8f93f94b94a373b13e8f415daae841a"
+  },
+  "release_blockers": [
+    "authentication_and_loading",
+    "preparation_isolation",
+    "private_state",
+    "ownership",
+    "publication_races",
+    "failure_custody",
+    "abi",
+    "reset_quiescence",
+    "physical_campaign",
+    "fault_matrix",
+    "recorder_overhead",
+    "resource_reclamation"
+  ],
+  "release_verdict": "blocked",
+  "schema": "axiomos.v05.results.v1",
+  "trace_verdict": "pass"
+}

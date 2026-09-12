@@ -1,0 +1,32 @@
+{
+  "acceptance_config_sha256": "8b1fb03e7c41b17ac581c1f92353cc53cdf1e1556fb63fe6549dd2f631edd650",
+  "boots": {
+    "session-boot-a": {
+      "artifact_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event_counts": {
+        "behavior_enter": 2,
+        "behavior_exit": 2,
+        "cycle_complete": 3,
+        "cycle_release": 3,
+        "handoff_enter": 1,
+        "operation_accepted": 1,
+        "operation_committed": 1,
+        "operation_request": 1,
+        "operation_response": 1,
+        "sink_safe_ready": 1
+      },
+      "operation_outcomes": {
+        "canceled": 0,
+        "failed": 0,
+        "rejected": 0,
+        "successful": 1
+      },
+      "release_cycles": {
+        "count": 3,
+        "first": 1
+      },
+      "source_id": "01766ce99bfb09f948832e550f0ede1c6f663271"
+    }
+  },
+  "schema": "axiomos.v05.expectations.v1"
+}
