@@ -8,7 +8,6 @@ from pathlib import Path
 import tempfile
 import os
 import pty
-import resource
 import threading
 import time
 import tracemalloc
@@ -104,6 +103,75 @@ class ObserverTests(unittest.TestCase):
             bad = bytearray(data); mutate(bad)
             with self.assertRaises(ValueError):
                 observer = self.m.Waveform(cfg); observer.feed(bytes(bad)); observer.finish()
+
+    def test_last_settled_pulse_before_step_boundary_is_checked(self):
+        cfg, data = fixture()
+        for start, end in ((5200, 5500), (4900, 5500)):
+            broken = bytearray(data)
+            broken[start:end] = bytes(value & ~1 for value in broken[start:end])
+            for size in (1, 101, 4096, len(data)):
+                with self.subTest(start=start, size=size), self.assertRaises(ValueError):
+                    observer = self.m.Waveform(cfg)
+                    for offset in range(0, len(broken), size): observer.feed(broken[offset:offset + size])
+                    observer.finish()
+
+    def test_settled_high_cannot_hide_behind_stop_but_shortening_is_valid(self):
+        for period in (1198, 1200, 1202):
+            for phase in (0, 1, 60, 120, 300, 600, 950, 1197):
+                cfg, _ = fixture()
+                stop_at = 100 + 5 * period + phase
+                cfg['steps'] = [dict(left=100, right=-250, estop=1, settle_samples=1202,
+                                     min_samples=stop_at - 101, max_samples=stop_at - 99), cfg['steps'][-1]]
+                cfg['samples'] = stop_at + 6000
+                data = bytearray()
+                for at in range(cfg['samples']):
+                    value = 16 if at < stop_at else 0
+                    if 100 <= at < stop_at:
+                        value |= 8
+                        if (at - 100) % period < round(period * .1): value |= 1
+                        if (at - 100) % period < round(period * .25): value |= 2
+                    if 100 <= at < 110 or stop_at <= at < stop_at + 10: value |= 32
+                    data.append(value)
+                for size in (101, len(data)):
+                    observer = self.m.Waveform(cfg)
+                    for at in range(0, len(data), size): observer.feed(data[at:at + size])
+                    observer.finish()
+                if phase >= 300:
+                    start = 100 + 5 * period
+                    data[start:stop_at] = bytes(v | 1 for v in data[start:stop_at])
+                    with self.assertRaises(ValueError):
+                        observer = self.m.Waveform(cfg); observer.feed(data); observer.finish()
+
+    def test_analyzer_loss_marker_before_retained_tail_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.m.analyzer_chunk(b'', b'USB transfer error\n' + b'x' * 32000 + b'SR_DF_END\n')
+
+    def test_manifest_rejects_boolean_integer_aliases_and_string_completion(self):
+        cfg, data = fixture()
+        for record_index, field, value in ((-1, 'complete', 'false'), (-1, 'samples', True),
+                                            (0, 'format', True), (1, 'id', False),
+                                            (1, 'offset', False), (1, 'compressor_exit', False)):
+            with tempfile.TemporaryDirectory() as name:
+                root = Path(name); run = root / 'run'
+                self.m.archive_stream(io.BytesIO(data), run, root, cfg)
+                records = list(self.m.read_json_lines(run / 'manifest.jsonl'))
+                records[record_index][field] = value
+                (run / 'manifest.jsonl').write_text(''.join(json.dumps(record) + '\n' for record in records))
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    self.m.replay(run, require_uart=False)
+
+    def test_uart_chunk_pairs_are_ordered_and_complete(self):
+        before = 'V04_HEARTBEAT seq=1 ts_ns=1\n'
+        after = 'V04_HEARTBEAT seq=2 ts_ns=4\n'
+        for middle in ('V04_CHUNK chunk_id=1 stage=start ts_ns=2\nV04_CHUNK chunk_id=3 stage=end ts_ns=3\n',
+                       'V04_CHUNK chunk_id=1 stage=start ts_ns=2\n',
+                       'V04_CHUNK chunk_id=1 stage=end ts_ns=2\n',
+                       'V04_CHUNK chunk_id=2 stage=start ts_ns=2\nV04_CHUNK chunk_id=2 stage=end ts_ns=3\n'):
+            with self.assertRaises(ValueError):
+                uart = self.m.Uart(1000); uart.feed((before + middle + after).encode()); uart.finish()
+        uart = self.m.Uart(1000)
+        uart.feed((before + 'V04_CHUNK chunk_id=1 stage=start ts_ns=2\nV04_CHUNK chunk_id=1 stage=end ts_ns=3\n' + after).encode())
+        uart.finish()
 
     def test_archive_rejects_integrity_and_order_failures(self):
         cfg, data = fixture()
@@ -223,7 +291,10 @@ class ObserverTests(unittest.TestCase):
             archived = time.monotonic()
             self.m.replay(root / 'run', require_uart=False)
             done = time.monotonic()
-            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            # Linux ru_maxrss can retain the pre-exec parent's high-water mark.
+            # VmHWM measures this observer test process after exec.
+            rss = int(next(line.split()[1] for line in Path('/proc/self/status').read_text().splitlines()
+                           if line.startswith('VmHWM:')))
             self.assertLess(rss, 128 * 1024)
             print(f'SYNTHETIC ONLY: 24M samples archive={archived-start:.3f}s replay={done-archived:.3f}s '
                   f'combined={24_000_000 / (done-start) / 2**20:.1f} MiB/s peak_RSS={rss} KiB; not physical qualification')

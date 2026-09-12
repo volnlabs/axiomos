@@ -127,8 +127,11 @@ class Waveform:
         duration = at - self.start
         if not self.step['min_samples'] <= duration <= self.step['max_samples']:
             raise ValueError(f'count/deadline: step {self.stimuli} dwell {duration}')
-        for side, cycles in zip(('left', 'right'), self.step_cycles):
-            if self.step[side] and cycles == 0: raise ValueError(f'missing {side} settled response')
+        for i, side in enumerate(('left', 'right')):
+            if self.step[side]:
+                if self.step_cycles[i] == 0: raise ValueError(f'missing {side} settled response')
+                if self.rise[i] is None or at - self.rise[i] > self.c['period_max'] + self.c['tolerance_samples']:
+                    raise ValueError(f'missing {side} final carrier pulse')
 
     def segment(self, value, begin, end):
         prev = self.previous
@@ -193,13 +196,26 @@ class Waveform:
                         self.cycles[i] += 1
                         self.step_cycles[i] += 1
                 self.rise[i], self.fall[i] = begin, None
-            if old and not high: self.fall[i] = begin
+            if old and not high:
+                self.fall[i] = begin
+                # Validate the high pulse now, including the last pulse before
+                # a command boundary where another rising edge may never occur.
+                # A strobe clears rise: only transition-truncated pulses skip this.
+                if self.rise[i] is not None and self.rise[i] >= self.start + self.step['settle_samples']:
+                    width = (begin - self.rise[i]) * 1000
+                    low = self.c['period_min'] * abs(expected) - self.c['tolerance_samples'] * 1000
+                    high_bound = self.c['period_max'] * abs(expected) + self.c['tolerance_samples'] * 1000
+                    if not low <= width <= high_bound: raise ValueError(f'{side} pulse duty mismatch')
             if high and self.high_start[i] is not None:
                 if end - self.high_start[i] > self.c['period_max'] * .8 + self.c['tolerance_samples']:
                     raise ValueError(f'{side} high pulse exceeds 80% envelope')
+                if self.step and self.high_start[i] >= self.start + self.step['settle_samples']:
+                    limit = self.c['period_max'] * abs(expected) + self.c['tolerance_samples'] * 1000
+                    if (end - self.high_start[i]) * 1000 > limit:
+                        raise ValueError(f'{side} settled high pulse exceeds expected duty')
             if settled and expected:
                 last = self.rise[i] if self.rise[i] is not None else self.start + self.step['settle_samples']
-                if end - last > 2 * self.c['period_max']:
+                if end - last > self.c['period_max'] + self.c['tolerance_samples']:
                     raise ValueError(f'missing {side} carrier')
         self.previous = value
 
@@ -234,6 +250,8 @@ class Uart:
         self.first_receipt = None
         self.last_receipt = None
         self.max_receipt_gap = 0.0
+        self.active_chunk = None
+        self.last_chunk = 0
 
     def feed(self, data, received_at=None):
         self.buffer += data
@@ -264,6 +282,16 @@ class Uart:
                     if self.last_receipt is not None:
                         self.max_receipt_gap = max(self.max_receipt_gap, received_at - self.last_receipt)
                     self.last_receipt = received_at
+            if record['_event'] == 'V04_CHUNK':
+                chunk = int(record['chunk_id'])
+                if record['stage'] == 'start':
+                    if self.active_chunk is not None or chunk != self.last_chunk + 1:
+                        raise ValueError('UART chunk start missing/duplicate/out of order')
+                    self.active_chunk = chunk
+                else:
+                    if chunk != self.active_chunk: raise ValueError('UART chunk end mismatch')
+                    self.last_chunk = chunk
+                    self.active_chunk = None
             for key in ('sample_id', 'event_id'):
                 if key not in record: continue
                 stream = (record['_event'], record.get('behavior'), record.get('stage'))
@@ -280,6 +308,7 @@ class Uart:
 
     def finish(self):
         if self.buffer: raise ValueError('truncated UART record')
+        if self.active_chunk is not None: raise ValueError('UART chunk missing end')
         if self.beats < 2: raise ValueError('missing UART heartbeat coverage')
         if self.timestamp - self.beat_time > self.max_gap: raise ValueError('UART trailing heartbeat gap')
         return dict(records=self.records, heartbeats=self.beats)
@@ -376,7 +405,8 @@ def read_json_lines(path):
 def replay(run, require_uart=True):
     records = iter(read_json_lines(run / 'manifest.jsonl'))
     header = next(records, {})
-    if header.get('type') != 'header' or header.get('format') != 1: raise ValueError('missing/invalid manifest header')
+    if header.get('type') != 'header' or type(header.get('format')) is not int or header.get('format') != 1: raise ValueError('missing/invalid manifest header')
+    if header.get('source') not in ('sigrok', 'synthetic-or-import'): raise ValueError('unknown evidence source')
     observer = Waveform(header['config'])
     chunk_limit = integer(header['chunk_bytes'], 1, CHUNK_BYTES, 'chunk size')
     count = 0
@@ -386,6 +416,12 @@ def replay(run, require_uart=True):
         if record.get('type') == 'end':
             footer = record
             continue
+        for field in ('id', 'offset', 'samples', 'bytes', 'started_ns', 'ended_ns', 'compressor_exit'):
+            integer(record.get(field), 0, 2**63 - 1, 'chunk ' + field)
+        for field in ('sha256', 'raw_sha256'):
+            if not isinstance(record.get(field), str) or not re.fullmatch('[0-9a-f]{64}', record[field]):
+                raise ValueError('invalid chunk SHA-256')
+        if record['started_ns'] > record['ended_ns']: raise ValueError('invalid chunk timestamps')
         if record.get('type') != 'chunk' or record.get('id') != count or record.get('offset') != observer.offset:
             raise ValueError('missing/duplicate/reordered chunk')
         if record.get('file') != f'{count:08d}.zst': raise ValueError('chunk filename mismatch')
@@ -405,7 +441,11 @@ def replay(run, require_uart=True):
         if hashlib.sha256(data).hexdigest() != record['raw_sha256']: raise ValueError('raw chunk integrity failure')
         observer.feed(data)
         count += 1
-    if not footer or not footer.get('complete') or footer.get('acquisition_exit') != 0:
+    if not footer or footer.get('complete') is not True:
+        raise ValueError('acquisition incomplete or failed')
+    for field in ('acquisition_exit', 'chunks', 'samples'):
+        integer(footer.get(field), 0, 2**63 - 1, 'completion ' + field)
+    if footer.get('acquisition_exit') != 0:
         raise ValueError('acquisition incomplete or failed')
     if footer.get('chunks') != count or footer.get('samples') != observer.offset:
         raise ValueError('completion counts differ')
@@ -420,7 +460,7 @@ def replay(run, require_uart=True):
     if header.get('source') == 'sigrok':
         if not require_uart: raise ValueError('sigrok replay requires UART')
         check_receipts(footer.get('uart_receipts', {}), footer['elapsed_seconds'], header['config']['uart_max_gap_ns'], report['uart']['heartbeats'])
-        if not footer.get('sr_df_end') or not footer.get('loaded_library_verified'):
+        if footer.get('sr_df_end') is not True or footer.get('loaded_library_verified') is not True:
             raise ValueError('missing sigrok completion/runtime proof')
         if sha(run / 'analyzer.log') != footer.get('analyzer_sha256'): raise ValueError('analyzer log integrity failure')
     report.update(physical_acceptance=False, evidence_source=header.get('source'),
@@ -447,6 +487,13 @@ def pinned_runtime(config):
         path = Path(item['path'])
         if not path.is_absolute() or sha(path) != item['sha256']: raise ValueError(f'runtime hash mismatch: {name}')
     return runtime
+
+
+def analyzer_chunk(tail, data):
+    text = tail + data
+    if re.search(rb'overflow|dropped|USB transfer error', text, re.I):
+        raise ValueError('analyzer reported acquisition loss')
+    return text[-MAX_LINE:], b'SR_DF_END' in text
 
 
 def library_loaded(pid, path):
@@ -517,10 +564,8 @@ def capture(config, campaign, run_name, uart_path, driver):
                                 budget.write(uart_log, data); uart.feed(data, time.monotonic() - start)
                             elif key.data == 'analyzer':
                                 budget.write(analyzer_log, data)
-                                analyzer_tail = (analyzer_tail + data)[-MAX_LINE:]
-                                ended = ended or b'SR_DF_END' in analyzer_tail
-                                if re.search(rb'overflow|dropped|USB transfer error', analyzer_tail, re.I):
-                                    raise ValueError('analyzer reported acquisition loss')
+                                analyzer_tail, chunk_ended = analyzer_chunk(analyzer_tail, data)
+                                ended = ended or chunk_ended
                             else:
                                 pending.extend(data)
                                 if len(pending) >= CHUNK_BYTES:
