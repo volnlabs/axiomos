@@ -12,6 +12,10 @@ run_step xtask-manifest-drift cargo xtask boundary --check
 run_step generated-docs cargo xtask docs --check
 run_step documentation-links python3 -B scripts/verify/doc-links.py
 run_step product-naming-static python3 -B scripts/verify/product-naming.py
+run_step product-naming-tests python3 -B tests/scripts/test_product_naming.py
+run_step fpga-build-evidence-tests python3 -B tests/scripts/test_fpga_build_evidence.py
+run_cargo_step shrike-control-tests test -p shrike_control
+run_step shrike-bench-tests python3 -B scripts/hil/shrike-bench.py self-test
 run_step benchmark-provenance-static python3 -B scripts/verify/benchmark-provenance.py
 run_step v04-benchmark-reducer-self-test python3 -B scripts/benchmark/analyze-v04.py --self-test
 run_step v04-behavior-runner-smoke python3 -c \

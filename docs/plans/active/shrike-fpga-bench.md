@@ -4,6 +4,45 @@ Status: in progress. Baseline: `05e2b25763546bcf4b6031b4767ac7be125dd31b`
 (`baseline/v0.5-fpga-start`), repository `volnlabs/axiomos`, branch
 `feat/fpga-bringup`, worktree `worktree/fpga-bringup`.
 
+## Current gate status
+
+The software continuation starts from `e0da976` (including CI fix `135e53b`).
+The dated execution records below preserve earlier failures; use this table
+and the final timing-closure record for the current status.
+
+| Requirement | Status |
+|---|---|
+| Vendor toolchain, generated MCU bitstream, device fit/routing | Complete for the recorded candidate |
+| Nominal 20 ns and all five 18 ns setup corners | Complete; worst setup margin +0.300 ns |
+| Project/I/O-planner/post-route pin assignments | All 17 match; electrical continuity remains open |
+| Post-route hold/pulse, asynchronous interfaces, actual oscillator | Open; setup success does not close these requirements |
+| Factory recovery UF2 and observed restoration | Open; `factory_uf2.ready=false` and flash guard retained |
+| Paired sink, reverse TX ownership and local drain model | Host implementation and focused regressions pass; no hardware acceptance |
+| Concrete configuration/runtime adapter and physical reset/drain | Open; `fpga-runtime` remains disabled |
+| Functional/fault campaign, one-hour pilot, 24-hour soak | Open; no new physical acceptance |
+
+Current software work repairs the naming gate, preserves zero/readback host
+regressions, makes retained build verification portable, and replaces batched
+independent wheel writes with ordered pairs and bounded telemetry transmission.
+Stops return to the outer owner for requalification: `FpgaLifecycle::fail_safe`
+removes runtime readiness, and the control loop must not invent a command
+sequence or automatically resume a stopped installation. Local reset-drain
+tests are prerequisites, not proof of UART/peer quiescence on the board.
+
+The read-only evidence command is:
+
+```sh
+python3 -B scripts/verify/fpga-build-evidence.py --evidence-dir \
+  .superpowers/sdd/shrike-fpga-bench/vendor-synthesis/timing-closure-20260912
+```
+
+It checks the retained manifest and six builds against current canonical RTL,
+settings, SDC and pins, then compares its result with retained `results.json`.
+It never rewrites the retained evidence. It does not qualify hold/pulse timing,
+runtime enabling, programming or physical hardware. The documented Tcl flow
+already produces bitstreams; opening a GUI to obtain the first bitstream is
+no longer the next prerequisite.
+
 ## Contract
 
 Validate the real Pi -> RP2040 -> programmed FPGA path with motors, drivers
@@ -31,12 +70,15 @@ they are not operational FPGA acceptance. No unchanged capture is repeated.
   recovery tests once the actual recovery record becomes ready.
 - [x] Install and identify the vendor ForgeFPGA toolchain in Ubuntu 24.04 userspace;
   record installer/compiler/device identities and retained artifact locations.
-- [ ] Review clock/reset, e-stop, both PWM/direction outputs and all MCU
-  interconnect through the vendor I/O planner and powered-off continuity.
-  Review voltage domains, common ground and sensor conditioning with the operator.
+- [x] Bind clock/reset, e-stop, both PWM/direction outputs and MCU interconnect
+  through the vendor I/O planner and confirm all 17 post-route assignments.
+- [x] Generate bitstreams with synthesis, fit/routing and all-corner setup
+  reports; retain exact source/configuration and artifact hashes/lengths.
+- [ ] Verify powered-off continuity, voltage domains, common ground and sensor
+  conditioning with the operator.
 - [ ] Establish PWR/EN/configuration/READY semantics, SPI/CS bounds and runtime
-  handoff. Generate the bitstream with synthesis, fit, timing and pin reports.
-  Record actual clock calibration, bitstream hash/length and flash placement.
+  handoff. Close hold/pulse/interface timing and record actual clock calibration
+  and the qualified flash placement/programming procedure.
 - No guessed pin coordinates/timings, OTP programming or hardware claim from
   simulation. The nominal clock/carrier/watchdog defaults remain tunable.
 
@@ -44,11 +86,17 @@ they are not operational FPGA acceptance. No unchanged capture is repeated.
 
 - [ ] Complete existing `R04Platform`/`FpgaLifecycle` with bounded hash-checked
   bitstream reads and the qualified configuration/runtime sequence.
-- [ ] Replace independent motor writes with one paired interface carrying the
+- [x] Replace independent motor writes with one paired interface carrying the
   accepted Pi sequence and signed duties. Preserve command age; heartbeats,
   status reads and cached commands never manufacture freshness.
-- [ ] Preserve zero-before-reverse even when both frames arrive in one RX batch.
+- [x] Preserve zero-before-reverse even when both frames arrive in one RX batch.
   Require the existing separate `A5 00` acknowledgement with matching sequence.
+- [x] Use bounded whole-frame reverse TX with accepted-byte backpressure and
+  explicit software-owned telemetry loss counts. UART acceptance is not delivery;
+  hardware FIFO loss on reset is unknown.
+- [x] Prepare a bounded local reset-drain model requiring at least 200 ms of
+  continuous motion-inhibited quiescence; readiness is not rearm.
+- [ ] Qualify reset draining against both peers and the actual queues/FIFOs.
 - [ ] Make startup/fault/recovery fail closed. Reconfiguration never replays
   stored motion; release alone never drives. Enable `fpga-runtime` only after
   the board/artifact prerequisites and concrete adapter checks are satisfied.
