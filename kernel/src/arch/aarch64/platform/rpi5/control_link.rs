@@ -58,6 +58,7 @@ const ULTRASONIC_CHANNEL: u32 = 0; // proximity / range
 static CONTROL_LINK: OnceCell<Mutex<ControlLink>> = OnceCell::uninit();
 static NEXT_SENSOR_SAMPLE_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_LINK_LOSS_EVENT_ID: AtomicU64 = AtomicU64::new(1);
+#[cfg(feature = "trace-control-link")]
 static NEXT_CHUNK_ID: AtomicU64 = AtomicU64::new(1);
 static LINK_UNINITIALIZED_REPORTED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
@@ -352,12 +353,15 @@ pub fn service() {
     let now = now_ns();
     let Some(out) = with_link(|l| l.poll_decode(now)) else {
         if !LINK_UNINITIALIZED_REPORTED.swap(true, Ordering::AcqRel) {
+            #[cfg(feature = "trace-control-link")]
             let chunk_id = NEXT_CHUNK_ID.fetch_add(1, Ordering::Relaxed);
+            #[cfg(feature = "trace-control-link")]
             crate::serial_println!("V04_CHUNK chunk_id={} stage=start ts_ns={}", chunk_id, now);
             crate::serial_println!(
                 "V04_FAILURE reason=link_uninitialized count=1 ts_ns={}",
                 now
             );
+            #[cfg(feature = "trace-control-link")]
             crate::serial_println!(
                 "V04_CHUNK chunk_id={} stage=end ts_ns={}",
                 chunk_id,
@@ -367,7 +371,11 @@ pub fn service() {
         return;
     };
 
+    // Empty polls are work, not events. Trace them only when measuring link
+    // cadence; their sustained text output can exceed the deferred UART drain.
+    #[cfg(feature = "trace-control-link")]
     let chunk_id = NEXT_CHUNK_ID.fetch_add(1, Ordering::Relaxed);
+    #[cfg(feature = "trace-control-link")]
     crate::serial_println!("V04_CHUNK chunk_id={} stage=start ts_ns={}", chunk_id, now);
     // Side-effects OUTSIDE the CONTROL_LINK lock (thread context).
     if out.overflow_count != 0 {
@@ -406,6 +414,7 @@ pub fn service() {
         );
         dispatch_ultrasonic(timestamp, *echo, *sample_id);
     }
+    #[cfg(feature = "trace-control-link")]
     crate::serial_println!(
         "V04_CHUNK chunk_id={} stage=end ts_ns={}",
         chunk_id,

@@ -94,6 +94,11 @@ audit-diagnostics = []
 # Raw AArch64 register/UART probes used only during hardware bring-up.
 bringup-diagnostics = []
 
+# Per-poll V04_CHUNK start/end records for control-link cadence diagnostics.
+# Keep off for local GPIO timing: empty polls can exhaust deferred UART capacity.
+# Fault, link-loss, heartbeat and sensor records do not depend on this feature.
+trace-control-link = []
+
 # Forward the kernel_physical_memory fault-injection controller into a
 # controlled boot probe (kernel/src/audit_fault_probe.rs). Off by default;
 # opt in for fault-path QEMU scenarios only. The QEMU scenario lives

@@ -173,6 +173,20 @@ stage has a retained capture and explicit pass decision.
 
 ### 4.3 Shrike control link and RP2040
 
+`V04_CHUNK` per-poll start/end tracing requires the opt-in Pi kernel feature
+`trace-control-link` (for example, `embedded-rpi5,trace-control-link`). The V04
+serial reducer still requires complete chunk records for its cadence checks;
+an image without this feature cannot establish those checks. Retain the trace
+image's feature list and hashes separately. Trace-enabled captures must qualify
+their logging throughput; enabling the feature does not guarantee lossless UART
+capture.
+
+Leave this feature off for local GPIO reflex measurements. Empty control-link
+poll traces exhausted the 16 KiB deferred console during a 5 Hz GPIO run; the
+64-byte drain budget does not guarantee 64 bytes fit in the UART per timer tick.
+The poller, fault/link-loss handling, and heartbeat/sensor events still run with
+tracing off, and any `PI5_BENCH_LOG_LOSS` still invalidates the capture.
+
 - [ ] Build the firmware and host simulation checks through the full gate
   before flashing hardware.
 - [ ] Flash only the reviewed binary using the board’s documented BOOTSEL/UF2
