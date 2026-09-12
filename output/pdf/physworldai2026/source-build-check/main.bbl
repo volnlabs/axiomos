@@ -1,0 +1,133 @@
+\begin{thebibliography}{14}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Alshiekh et~al.(2018)Alshiekh, Bloem, Ehlers, K{\"o}nighofer, Niekum,
+  and Topcu]{alshiekh2018shielding}
+Mohammed Alshiekh, Roderick Bloem, R{\"u}diger Ehlers, Bettina K{\"o}nighofer,
+  Scott Niekum, and Ufuk Topcu.
+\newblock Safe reinforcement learning via shielding.
+\newblock In \emph{Proceedings of the AAAI Conference on Artificial
+  Intelligence}, volume~32, pages 2669--2678, 2018.
+\newblock \doi{10.1609/aaai.v32i1.11797}.
+
+\bibitem[Biggs and Foote(2021)]{ros2lifecycle}
+Geoffrey Biggs and Tully Foote.
+\newblock Managed nodes.
+\newblock {ROS 2} Design, 2021.
+\newblock URL \url{https://design.ros2.org/articles/node_lifecycle.html}.
+\newblock Written June 2015; last modified February 2021; accessed September
+  2026.
+
+\bibitem[Hayden et~al.(2014)Hayden, Saur, Smith, Hicks, and
+  Foster]{hayden2014kitsune}
+Christopher~M. Hayden, Karla Saur, Edward~K. Smith, Michael Hicks, and
+  Jeffrey~S. Foster.
+\newblock {Kitsune}: Efficient, general-purpose dynamic software updating for
+  {C}.
+\newblock \emph{ACM Transactions on Programming Languages and Systems},
+  36\penalty0 (4), 2014.
+\newblock \doi{10.1145/2629460}.
+
+\bibitem[Herlihy and Wing(1990)]{herlihy1990linearizability}
+Maurice~P. Herlihy and Jeannette~M. Wing.
+\newblock Linearizability: A correctness condition for concurrent objects.
+\newblock \emph{ACM Transactions on Programming Languages and Systems},
+  12\penalty0 (3):\penalty0 463--492, 1990.
+\newblock \doi{10.1145/78969.78972}.
+
+\bibitem[Lim and Clites(2026)]{lim2026lithe}
+He~Kai Lim and Tyler~R. Clites.
+\newblock {LITHE}: Bridging best-effort {Python} and real-time {C++} for
+  hot-swapping robotic control laws on commodity {Linux}.
+\newblock \emph{arXiv preprint arXiv:2603.07442}, 2026.
+\newblock \doi{10.48550/arXiv.2603.07442}.
+\newblock URL \url{https://arxiv.org/abs/2603.07442}.
+
+\bibitem[{Linux Kernel documentation
+  contributors}(n.d.{\natexlab{a}})]{linuxlivepatch}
+{Linux Kernel documentation contributors}.
+\newblock Livepatch.
+\newblock Linux Kernel documentation, n.d.{\natexlab{a}}.
+\newblock URL \url{https://docs.kernel.org/livepatch/livepatch.html}.
+\newblock Accessed September 2026.
+
+\bibitem[{Linux Kernel documentation
+  contributors}(n.d.{\natexlab{b}})]{linuxrcu}
+{Linux Kernel documentation contributors}.
+\newblock What is {RCU}?---read, copy, update.
+\newblock Linux Kernel documentation, n.d.{\natexlab{b}}.
+\newblock URL \url{https://docs.kernel.org/RCU/whatisRCU.html}.
+\newblock Accessed September 2026.
+
+\bibitem[Macenski et~al.(2022)Macenski, Foote, Gerkey, Lalancette, and
+  Woodall]{macenski2022ros2}
+Steven Macenski, Tully Foote, Brian Gerkey, Chris Lalancette, and William
+  Woodall.
+\newblock Robot operating system 2: Design, architecture, and uses in the wild.
+\newblock \emph{Science Robotics}, 7\penalty0 (66):\penalty0 eabm6074, 2022.
+\newblock \doi{10.1126/scirobotics.abm6074}.
+
+\bibitem[Michael(2004)]{michael2004hazard}
+Maged~M. Michael.
+\newblock Hazard pointers: Safe memory reclamation for lock-free objects.
+\newblock \emph{IEEE Transactions on Parallel and Distributed Systems},
+  15\penalty0 (6):\penalty0 491--504, 2004.
+\newblock \doi{10.1109/TPDS.2004.8}.
+
+\bibitem[Phan et~al.(2020)Phan, Grosu, Jansen, Paoletti, Smolka, and
+  Stoller]{phan2020neural}
+Dung~T. Phan, Radu Grosu, Nils Jansen, Nicola Paoletti, Scott~A. Smolka, and
+  Scott~D. Stoller.
+\newblock {Neural Simplex Architecture}.
+\newblock In \emph{NASA Formal Methods}, volume 12229 of \emph{Lecture Notes in
+  Computer Science}, pages 97--114. Springer, 2020.
+\newblock \doi{10.1007/978-3-030-55754-6_6}.
+
+\bibitem[Qin et~al.(2026{\natexlab{a}})Qin, Luan, See, Boukhers, Yang, and
+  Li]{qin2026governed}
+Xue Qin, Simin Luan, John See, Zeyd Boukhers, Cong Yang, and Zhijun Li.
+\newblock Governed capability evolution: Lifecycle-time compatibility checking
+  and rollback for {AI}-component-based systems, with embodied agents as case
+  study.
+\newblock \emph{arXiv preprint arXiv:2604.08059}, 2026{\natexlab{a}}.
+\newblock \doi{10.48550/arXiv.2604.08059}.
+\newblock URL \url{https://arxiv.org/abs/2604.08059v5}.
+\newblock Version 5.
+
+\bibitem[Qin et~al.(2026{\natexlab{b}})Qin, Luan, See, Yang, and
+  Li]{qin2026govbench}
+Xue Qin, Simin Luan, John See, Cong Yang, and Zhijun Li.
+\newblock {EmbodiedGovBench}: A benchmark for governance, recovery, and upgrade
+  safety in embodied agent systems.
+\newblock \emph{arXiv preprint arXiv:2604.11174}, 2026{\natexlab{b}}.
+\newblock URL \url{https://arxiv.org/abs/2604.11174v1}.
+\newblock Version 1.
+
+\bibitem[Tian et~al.(2026)Tian, Liu, Xu, Lu, Guan, Han, Yang, Gu, Qian, Zhang,
+  Zhu, Ye, Yang, Wang, Hu, Li, Zhang, Su, Ji, Wang, Feng, Liu, Zhang, Wu, Tang,
+  Gu, Cai, Zheng, Ma, Yin, Chu, Tang, and Xu]{tian2026abot}
+Jiayi Tian, Shiao Liu, Yuting Xu, Jia Lu, Zihao Guan, Honglin Han, Di~Yang,
+  Minqi Gu, Yifei Qian, Tianlin Zhang, Yanqing Zhu, Zeqian Ye, Menglin Yang,
+  Fei Wang, Xu~Hu, Xiuxian Li, Wei Zhang, Shihui Su, Yiyan Ji, Jingbo Wang,
+  Ziteng Feng, Jiaheng Liu, Zhaoxiang Zhang, Xiaolong Wu, Zixiao Tang, Zhining
+  Gu, Yang Cai, Linbo Zheng, Jingjing Ma, Mingyang Yin, Zedong Chu, Wenbin
+  Tang, and Mu~Xu.
+\newblock {ABot-AgentOS}: A general robotic agent {OS} with lifelong
+  multi-modal memory.
+\newblock \emph{arXiv preprint arXiv:2607.10350}, 2026.
+\newblock URL \url{https://arxiv.org/abs/2607.10350v3}.
+\newblock Version 3.
+
+\bibitem[Wang et~al.(2023)Wang, Xie, Jiang, Mandlekar, Xiao, Zhu, Fan, and
+  Anandkumar]{wang2023voyager}
+Guanzhi Wang, Yuqi Xie, Yunfan Jiang, Ajay Mandlekar, Chaowei Xiao, Yuke Zhu,
+  Linxi Fan, and Anima Anandkumar.
+\newblock {Voyager}: An open-ended embodied agent with large language models.
+\newblock \emph{arXiv preprint arXiv:2305.16291}, 2023.
+\newblock URL \url{https://arxiv.org/abs/2305.16291}.
+
+\end{thebibliography}

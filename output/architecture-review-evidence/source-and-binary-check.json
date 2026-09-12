@@ -1,0 +1,69 @@
+{
+  "checked_at_utc": "2026-09-11T19:25:09.148750+00:00",
+  "primary": "4f5aa9037832b9ee27145c5ffc87f4c3ca707e18",
+  "research": "6db7fe7e5515df665234a0030de3419a8ccccc6e",
+  "captures": [
+    {
+      "capture": "capture-r3",
+      "revision": "1e6e6d131a4b1eeec12c8c344046e698d5dc7ad4",
+      "source_digest": "26b672b60c7cf5857309b3062eea2248abe198910a814c24fc24c0be6089dc7c",
+      "source_count": 761,
+      "missing_sources": [],
+      "changed_current_sources": [
+        "papers/cl4fmagents2026/REPRODUCE.md",
+        "papers/cl4fmagents2026/appendix.tex",
+        "papers/cl4fmagents2026/costs.tex",
+        "papers/cl4fmagents2026/headline-results.tex",
+        "papers/cl4fmagents2026/hosted-cost-note.tex",
+        "papers/cl4fmagents2026/latency-details.tex",
+        "papers/cl4fmagents2026/latency-thresholds.tex",
+        "papers/cl4fmagents2026/main.tex",
+        "papers/cl4fmagents2026/protocol-figure.tex",
+        "papers/cl4fmagents2026/render_tables.py",
+        "papers/cl4fmagents2026/test_render_tables.py"
+      ],
+      "binaries": [
+        {
+          "path": "/home/utkarsh/Work/axiomOS/target/release/deps/bpf_update_campaign-85dc352b607f9c96",
+          "expected_sha256": "a10429bb09930be941f72cd93f2674ea13aff6fe789aa83f8079e805ce9e6f1e",
+          "actual_sha256": "a10429bb09930be941f72cd93f2674ea13aff6fe789aa83f8079e805ce9e6f1e",
+          "matches": true
+        },
+        {
+          "path": "/home/utkarsh/Work/axiomOS/target/release/deps/bpf_update_measurements-127c3d09f279cd4d",
+          "expected_sha256": "54cbcdcf053ed6b8608560e668bf1e186307b805ae77361e2f39f29731ec5324",
+          "actual_sha256": "54cbcdcf053ed6b8608560e668bf1e186307b805ae77361e2f39f29731ec5324",
+          "matches": true
+        }
+      ]
+    },
+    {
+      "capture": "capture-r3-adaptation",
+      "revision": "1e6e6d131a4b1eeec12c8c344046e698d5dc7ad4",
+      "source_digest": "26b672b60c7cf5857309b3062eea2248abe198910a814c24fc24c0be6089dc7c",
+      "source_count": 761,
+      "missing_sources": [],
+      "changed_current_sources": [
+        "papers/cl4fmagents2026/REPRODUCE.md",
+        "papers/cl4fmagents2026/appendix.tex",
+        "papers/cl4fmagents2026/costs.tex",
+        "papers/cl4fmagents2026/headline-results.tex",
+        "papers/cl4fmagents2026/hosted-cost-note.tex",
+        "papers/cl4fmagents2026/latency-details.tex",
+        "papers/cl4fmagents2026/latency-thresholds.tex",
+        "papers/cl4fmagents2026/main.tex",
+        "papers/cl4fmagents2026/protocol-figure.tex",
+        "papers/cl4fmagents2026/render_tables.py",
+        "papers/cl4fmagents2026/test_render_tables.py"
+      ],
+      "binaries": [
+        {
+          "path": "/home/utkarsh/Work/axiomOS/target/release/deps/bpf_update_adaptation-4bec9380451f979a",
+          "expected_sha256": "0ad62093bd8c642e5f2a2cc494e38e6435da3813d5a7a67eab88302a38f65c45",
+          "actual_sha256": "0ad62093bd8c642e5f2a2cc494e38e6435da3813d5a7a67eab88302a38f65c45",
+          "matches": true
+        }
+      ]
+    }
+  ]
+}
