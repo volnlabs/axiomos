@@ -4,5 +4,5 @@ read_verilog -noautowire firmware/shrike/fpga/forgefpga/ffpga/src/top.v firmware
 hierarchy -check -top top
 proc
 check -assert
-select -assert-none t:$dlatch t:$adlatch t:$dlatchsr
+select -assert-none t:$dlatch t:$adlatch t:$dlatchsr t:$dffsr
 stat

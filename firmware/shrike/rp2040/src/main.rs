@@ -40,27 +40,27 @@ enum ConfigurationUnavailable {
 
 /// Owns every safety-relevant R0.4 output. Unsupported operations return an
 /// error because this checkout lacks the vendor timing and generated image.
-struct R04Platform<PWR, EN, CS, LEFT, RIGHT, SPI> {
+struct R04Platform<PWR, EN, CS, RESET, RIGHT, SPI> {
     pwr: PWR,
     en: EN,
     cs: CS,
-    left_pwm: LEFT,
+    reset: RESET,
     right_pwm: RIGHT,
     _spi: SPI,
 }
 
-impl<PWR, EN, CS, LEFT, RIGHT, SPI> FpgaPlatform for R04Platform<PWR, EN, CS, LEFT, RIGHT, SPI>
+impl<PWR, EN, CS, RESET, RIGHT, SPI> FpgaPlatform for R04Platform<PWR, EN, CS, RESET, RIGHT, SPI>
 where
     PWR: OutputPin,
     EN: OutputPin,
     CS: OutputPin,
-    LEFT: SetDutyCycle,
+    RESET: OutputPin,
     RIGHT: SetDutyCycle,
 {
     type Error = ConfigurationUnavailable;
 
     fn force_safe(&mut self) {
-        let _ = self.left_pwm.set_duty_cycle(0);
+        let _ = self.reset.set_low();
         let _ = self.right_pwm.set_duty_cycle(0);
         let _ = self.en.set_low();
         let _ = self.pwr.set_low();
@@ -131,6 +131,7 @@ fn main() -> ! {
 
     let fpga_pwr = pins.gpio12.into_push_pull_output_in_state(PinState::Low);
     let fpga_en = pins.gpio13.into_push_pull_output_in_state(PinState::Low);
+    let fpga_reset = pins.gpio14.into_push_pull_output_in_state(PinState::Low);
     let fpga_cs = pins.gpio1.into_push_pull_output_in_state(PinState::High);
 
     let spi_pins = (
@@ -145,9 +146,7 @@ fn main() -> ! {
     let mut pwm_slices = hal::pwm::Slices::new(pac.PWM, &mut pac.RESETS);
     let pwm = &mut pwm_slices.pwm7;
     pwm.set_ph_correct();
-    let _ = pwm.channel_a.set_duty_cycle(0);
     let _ = pwm.channel_b.set_duty_cycle(0);
-    let _left_pwm_pin = pwm.channel_a.output_to(pins.gpio14);
     let _right_pwm_pin = pwm.channel_b.output_to(pins.gpio15);
     pwm.enable();
 
@@ -155,7 +154,7 @@ fn main() -> ! {
         pwr: fpga_pwr,
         en: fpga_en,
         cs: fpga_cs,
-        left_pwm: pwm_slices.pwm7.channel_a,
+        reset: fpga_reset,
         right_pwm: pwm_slices.pwm7.channel_b,
         _spi: spi,
     };

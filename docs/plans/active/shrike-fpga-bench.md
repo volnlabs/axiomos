@@ -317,8 +317,201 @@ tracked preflight script; documentation links pass at 116 files / 336 links.
 A working project copy is prepared at
 `.superpowers/sdd/shrike-fpga-bench/vendor-project/axiomos_r04.ffpga` (visible as
 `/workspace/.superpowers/sdd/shrike-fpga-bench/vendor-project/axiomos_r04.ffpga`
-inside the vendor environment). The hub remains launched for the operator;
-file-argument attempts exited without a persistent designer process, so opening
-the project is not verified. Native desktop UI control is unavailable in this
-session. The next GUI action is to open that copy and run the Forge build/I/O
-planner; any resulting project changes and reports require review before use.
+inside the vendor environment). Excluding PID isolation for the GUI launcher
+allowed its detached designer process to persist. The operator confirmed the
+project opened and completed synthesis on 2026-09-12 at 12:22 with zero errors,
+using Go Configure 6.55.001 and bundled Yosys 0.59+0 (`946048486`). Native desktop
+UI control remains unavailable in this session.
+
+The saved GUI-generated script uses `synth_xilinx` as its synthesis mapping.
+The post-synthesis report contains 1,253 primitives, including 660 LUTs,
+315 CARRY4, 230 flip-flops and one LDCE latch. The `frame_bad` asynchronous
+set/reset warning is emulated with flip-flops, a mux and that latch; downstream
+Forge acceptance remains unverified. These intermediate counts do not establish
+Forge device fit or timing. The project, exact script, matching RTL sources,
+Verilog netlist, EDIF and report are preserved with SHA-256 hashes under ignored
+`.superpowers/sdd/shrike-fpga-bench/vendor-synthesis/gui-synthesis-20260912-1222/`.
+The next GUI step is offline Generate Bitstream to obtain implementation reports.
+I/O assignments remain provisional; recovery, electrical and configuration
+handoff gates still apply before programming hardware.
+
+### First Forge place-and-route failure and arithmetic correction
+
+The operator's 2026-09-12 12:29 run failed with exit 3: 382 logic CLBs were
+required against 140 available, and carry chains reached 17 CLBs against a
+10-CLB limit. Forge also warned that the mapped data-clock latch was unsupported
+and emulated it in LUTs. The 16.424 MHz post-packing estimate was before routing;
+the clock group was `UDEF_clk`. Neither fit nor 50 MHz timing passed.
+
+The PWM gate's two 64-bit divide-by-1000 paths caused the arithmetic growth.
+Both gate mirrors now reduce the constant period/1000 ratio before synthesis
+(2500/1000 becomes 5/2), size the product to its proven range and size the PWM
+counter to the configured period. Clock/carrier calibration and integer-floor
+PWM behavior remain supported. `frame_bad` now starts invalid under either
+reset; a fresh qualified CS clears it. This removes asynchronous set/reset
+emulation without changing command acceptance after a fresh transaction.
+
+Both simulation benches pass. An exhaustive comparison with the original
+64-bit scaling formula passes all 4,096 signed duty values at periods 1, 20,
+2500, 2501 and 100,000,000. Structural preflight rejects `$dffsr` as well as
+inferred latches. The new mapping preflight reproduced the old capacity problem
+(273 carry blocks in that local run) and passes after the correction. Running
+the saved GUI synthesis script on the corrected sources yields 39 carry blocks,
+277 LUTs, 209 flip-flops and zero latches; the longest connected CARRY4 chain is
+six. These remain intermediate mapping results, not a Forge fit result.
+
+Failure summary, before/after mapping logs, structural log and candidate hashes
+are under ignored
+`.superpowers/sdd/shrike-fpga-bench/vendor-synthesis/pnr-failure-20260912-1229/`.
+The original GUI project remains preserved. The corrected copy is
+`.superpowers/sdd/shrike-fpga-bench/vendor-project-compact/axiomos_r04_compact.ffpga`.
+Its Forge synthesis/place-and-route rerun and explicit clock timing constraints
+remain pending; physical gates are unchanged.
+
+### Compact design fits and routes; board integration remains open
+
+The operator's 2026-09-12 12:39–12:40 Forge run completed normally (exit 0):
+92/140 logic CLBs (65.71%), longest carry chain six, 451 routed nets verified,
+zero final congestion and bitstream generation complete. The GUI resource
+report lists 461/1120 LUT5s and 209 flip-flops. This closes the device-capacity
+and carry-length failures for this exact source/configuration.
+
+Post-route achievable frequency is 79.719 MHz at `tt1p1v25c_Typical`.
+`PNR_TIMING.log` still assigns `<UDEF_clk>` an automatic 2000 ps period and
+reports WNS -10545 ps. That is an automatic 500 MHz target, not a constrained
+50 MHz sign-off. Define the intended 20 ns clock constraint and review timing
+corners, I/O timing and the direct-clock-without-CLKBUF warning before acceptance.
+
+`PNR_IO.log` confirms automatic placement of previously unassigned reset,
+e-stop, PWM, direction and output-enable signals. These fabric locations do
+not establish board package-pin connectivity. Review them through the I/O
+planner against the board schematic, reset/clock resources and continuity;
+do not accept the post-PnR mapping mismatch warning as a qualified pin map.
+
+The exact project, matching RTL, synthesis inputs/outputs, PnR reports and all
+bitstream variants are preserved with SHA-256 hashes under ignored
+`.superpowers/sdd/shrike-fpga-bench/vendor-synthesis/gui-pnr-20260912-1240/`
+(31 files, 25,733,596 bytes). The generated MCU variant is 46,408 bytes with
+SHA-256 `603b372b706457e81bcb267f0e76170b7d068667afca8e76385736e94383611f`.
+It is diagnostic evidence only: no programming or physical acceptance occurred.
+Recovery provenance/restore and configuration handoff remain open.
+
+
+### Explicit 50 MHz constraint and pin integration — 2026-09-12
+
+The approved nominal 20 ns SDC is registered in both source and working
+projects; separate 18 ns projects exercise all five installed timing corners.
+Fresh synthesis/PnR and bitstream generation completed via Forge 6.55.001's
+experimental, documented `GP6 --tcl` entry point. Each report reads back the
+intended period and timing corner. This initial run failed all-corner setup;
+the timing-closure run below supersedes it:
+
+| Build | Constraint (ns) | Post-route setup WNS (ns) | Fmax (MHz) | Setup |
+|---|---:|---:|---:|---|
+| guard-0-tt1p1v25c_Typical | 18 | +4.462 | 73.872 | PASS |
+| guard-1-ss0p99v85c_RCworst | 18 | -7.312 | 39.509 | FAIL |
+| guard-2-ss0p99vn40c_RCworst | 18 | -8.105 | 38.308 | FAIL |
+| guard-3-ff1p21v85c_RCbest | 18 | +8.947 | 110.473 | PASS |
+| guard-4-ff1p21vn40c_RCbest | 18 | +9.495 | 117.592 | PASS |
+| nominal | 20 | +6.462 | 73.872 | PASS |
+| trial-slow-hot-no-dense | 18 | -6.032 | 41.613 | FAIL |
+
+The nominal build uses 92/140 CLBs (65.71%), 461 LUT5s and 209 FFs.
+The no-dense-packing trial uses 118/140 CLBs and still fails setup, so its setting
+was not adopted. Both slow-corner achievable periods exceed 20 ns. These
+results establish typical-corner 50 MHz setup success, not full-corner closure.
+All seven tool exits were zero; bitstream generation does not imply timing pass.
+
+Fresh Forge I/O Planner export and each post-PnR report confirm all 17 explicit
+bindings from the pinned GPIO-expander reference. Runtime reset now uses
+RP2040 GPIO14 / FPGA GPIO18 / package9; GPIO7 is e-stop and GPIO8–11 are paired
+PWM/direction outputs with their OE bindings. Unused compatibility PWM inputs
+are unbound. The MCU initializes GPIO14 as ordinary GPIO LOW and force_safe
+asserts it LOW. NVM, PLL configuration, dedicated OSC_CLK and clkbuf_inhibit
+are retained. PWR/EN configuration control and runtime/recovery gates remain.
+
+Final exported timing includes setup only. Placement-estimated positive hold
+slack is not post-route hold sign-off; final hold/pulse evidence, asynchronous
+interface timing, oscillator measurement at board voltage, continuity and
+recovery remain open. No blanket timing exceptions or physical claims were added.
+Both simulation benches, structural and mapping preflights, nine flash-contract
+tests, board-profile test, MCU debug/release builds, formatting and both Clippy
+profiles pass. The fpga-runtime feature remains intentionally uncompilable.
+
+Exact inputs, all reports/bitstream variants, source/reference hashes, runnable
+readback checks and the full matrix are preserved under ignored
+`.superpowers/sdd/shrike-fpga-bench/vendor-synthesis/clock-pin-20260912/`.
+Open its `nominal/axiomos_r04_50mhz.ffpga` for the fresh nominal build; the older
+compact working project's build directory is historical. Nominal MCU image is
+46,408 bytes, SHA-256 `a3f71894eedf8fad621a4b158499607406c98d7b60dbb08cace7e3efa341a290`.
+No programming or physical acceptance occurred.
+
+### Timing closure with the 18 ns guard — 2026-09-12
+
+The production RTL now passes the nominal 20 ns clock and all five installed
+18 ns setup corners. Each final build was freshly synthesized, placed, routed
+and generated a bitstream from the same frozen sources/settings. The readback
+checker verifies the actual period and corner, all 17 I/O assignments, source
+and SDC bytes, synthesis/packing settings, retained NVM/PLL configuration and
+bitstream size/hash. All six builds have zero failing setup endpoints and TNS 0.
+
+| Build | Corner | Period (ns) | Setup WNS (ns) | Fmax (MHz) |
+|---|---|---:|---:|---:|
+| final-nominal | tt1p1v25c_Typical | 20 | +9.710 | 97.191 |
+| final-guard-0 | tt1p1v25c_Typical | 18 | +7.710 | 97.191 |
+| final-guard-1 | ss0p99v85c_RCworst | 18 | +0.300 | 56.500 |
+| final-guard-2 | ss0p99vn40c_RCworst | 18 | +0.475 | 57.065 |
+| final-guard-3 | ff1p21v85c_RCbest | 18 | +11.092 | 144.781 |
+| final-guard-4 | ff1p21vn40c_RCbest | 18 | +11.493 | 153.704 |
+
+All six use 114/140 CLBs (81.43%), 567 LUT5s and 255 FFs. The worst setup guard
+margin is +0.300 ns at slow 85 °C. This qualifies modeled setup timing for the
+50 MHz production profile; it does not establish board oscillator frequency,
+post-route hold/pulse width, asynchronous interface timing or physical safety.
+The prior slow-corner failures and intermediate unsuccessful trials are retained.
+
+The retained RTL changes precompute received-byte prefix checks, CRC and payload
+destinations before consumption; split range validation; predict PWM wrap and
+SPI byte boundaries; and split the watchdog increment into 11-bit pieces with
+registered carry. Frame-error set/clear priority is expressed directly. Small
+combinational boundaries preserve one-LUT history/receive enables. Command and
+status response cycles, signed duty bounds, replay behavior, E-stop assertion
+and the exact watchdog expiry/commit ordering remain unchanged in the regressions.
+No retiming or blanket timing exceptions were introduced.
+
+The selected synthesis flow is classic ABC with hard-mux inference disabled.
+The additional synthesis commands unset keep_hierarchy and flatten only after
+mapping, so Forge receives a flat netlist. Hard-mux inference produced a mapped
+simulation mismatch in an accelerated regression and was rejected. Native-LUT-only,
+extra routing, I/O packing and other RTL trials did not improve the selected
+result. The final compiler argument is `-TIMING_DRIVEN_PACKING_THR 0.8`;
+effective compiler configuration readback confirms the override from 0.7. Changing
+these settings or production parameters requires renewed mapping/route checks.
+
+Maintained safety/runtime benches, exhaustive range and PWM arithmetic/wrap
+checks, cycle-exact comparison with the frozen baseline, strict mapped state
+and 11-pin comparison, structural/mapping preflights, and the production saved
+netlist smoke all pass. The watchdog differential checks timeout values 1, 2,
+3, 255, 256, 257, 65539 and 2500000, including natural commit/expiry/recovery.
+The actual nominal netlist smoke checks the 2500-clock PWM period, duties,
+valid commit, coherent status, replay rejection, bad-CRC kill, recovery and E-stop.
+
+Evidence and runnable checks are under ignored
+`.superpowers/sdd/shrike-fpga-bench/vendor-synthesis/timing-closure-20260912/`:
+`results.json`, `verify-results.py`, `summary.md`, `SHA256SUMS`, `final-*` projects
+and reports, `final-qualified-preflights.log`, `final-qualified-baseline.log`,
+`mapped-regression/final-qualified.log`, `watchdog-parameter-check/final-qualified.log`
+and `production-mapped-smoke/final-nominal-smoke.log`. The extended native compiler
+stdout is retained for the last two final runs; all six retain the normal Forge
+reports, source/project snapshots and successful Tcl completion logs.
+
+Open `final-nominal/timing.ffpga` in that evidence directory for the fresh 50 MHz
+project. Older working-copy build directories remain historical. The final
+nominal MCU image is 46,408 bytes, SHA-256
+`2bb027130b9cdcfdda1e47e9b51fb437f138f9daab25ffcc589eb9468febbc4c`.
+
+The source `top.v` SHA-256 is
+`97656bc2501ec5fb531eb042e0bcdecddbc349505c5acc85668a49c650c41bdd`.
+No flashing, runtime enable or physical acceptance occurred. Clock measurement
+at the actual board voltage, continuity, recovery, post-route hold/pulse evidence
+and controlled hardware bring-up remain separate open gates.

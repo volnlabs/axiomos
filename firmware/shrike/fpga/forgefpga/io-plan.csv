@@ -1,14 +1,23 @@
-logical_signal,rp2040_gpio,fpga_gpio,package_pin,project_state,review_state
-spi_sck,2,3,16,assigned_from_pinned_scaffold,schematic_proven
-spi_ss_n,1,4,17,assigned_from_pinned_scaffold,schematic_proven
-spi_mosi,3,5,18,assigned_from_pinned_scaffold,schematic_proven
-spi_miso_ready,0,6,19,assigned_from_pinned_scaffold,schematic_proven
-spi_status_byte,,,,bit7_READY_bit6_COMMAND_VALID_bit5_WATCHDOG_EXPIRED_bits4_0_ZERO,protocol_contract_msb_first_mode0
-left_pwm_in,14,18,9,assigned_from_r04_mapping,schematic_proven
-right_pwm_in,15,17,8,HAND_ADDED_XY31_5_PROVISIONAL_PENDING_FORGE_IO_PLANNER,schematic_net_proven_project_coordinate_unverified
-rst_n,,device_nRST,11,unassigned,requires_forgefpga_reset_resource_review
-estop_n,,7,20,unassigned,PROVISIONAL_UNREVIEWED_PENDING_IO_PLANNER_AND_CONTINUITY
-left_pwm_out,,8,23,unassigned,PROVISIONAL_UNREVIEWED_PENDING_IO_PLANNER_AND_CONTINUITY
-right_pwm_out,,9,24,unassigned,PROVISIONAL_UNREVIEWED_PENDING_IO_PLANNER_AND_CONTINUITY
-left_direction_out,,,,unassigned,PROVISIONAL_UNREVIEWED_PENDING_IO_PLANNER_SCHEMATIC_AND_CONTINUITY
-right_direction_out,,,,unassigned,PROVISIONAL_UNREVIEWED_PENDING_IO_PLANNER_SCHEMATIC_AND_CONTINUITY
+logical_signal,rp2040_gpio,fpga_gpio,package_pin,project_state,review_state,fabric_resource,board_connection
+clk,,,,assigned_from_pinned_vendor_project,FORGE_EXPORT_CONFIRMED_PENDING_CONTINUITY,CLK_t[0:0]_W_in0,OSC_CLK West Input0
+clk_en,,,,assigned_from_pinned_vendor_project,FORGE_EXPORT_CONFIRMED_PENDING_CONTINUITY,IOB_t[0:0]_xy[0:25]_out0,OSC_EN
+spi_sck,2,3,16,assigned_from_pinned_vendor_project,FORGE_EXPORT_CONFIRMED_PENDING_CONTINUITY,IOB_t[0:0]_xy[0:9]_in0,RP2040 GPIO2
+spi_ss_n,1,4,17,assigned_from_pinned_vendor_project,FORGE_EXPORT_CONFIRMED_PENDING_CONTINUITY,IOB_t[0:0]_xy[0:10]_in0,RP2040 GPIO1
+spi_mosi,3,5,18,assigned_from_pinned_vendor_project,FORGE_EXPORT_CONFIRMED_PENDING_CONTINUITY,IOB_t[0:0]_xy[0:22]_in0,RP2040 GPIO3
+spi_miso,0,6,19,assigned_from_pinned_vendor_project,FORGE_EXPORT_CONFIRMED_PENDING_CONTINUITY,IOB_t[0:0]_xy[0:23]_out0,RP2040 GPIO0 MISO_READY
+spi_miso_en,,,,assigned_from_pinned_vendor_project,FORGE_EXPORT_CONFIRMED_PENDING_CONTINUITY,IOB_t[0:0]_xy[0:23]_out1,GPIO6 output enable
+rst_n,14,18,9,assigned_from_pinned_vendor_project,FORGE_EXPORT_CONFIRMED_PENDING_CONTINUITY,IOB_t[0:0]_xy[31:4]_in0,RP2040 GPIO14 through R7; J2 pin15
+estop_n,,7,20,assigned_from_pinned_vendor_project,FORGE_EXPORT_CONFIRMED_PENDING_CONTINUITY,IOB_t[0:0]_xy[0:24]_in0,J2 pin19
+left_pwm_out,,8,23,assigned_from_pinned_vendor_project,FORGE_EXPORT_CONFIRMED_PENDING_CONTINUITY,IOB_t[0:0]_xy[31:27]_out0,J3 PMOD pin6
+left_pwm_out_en,,,,assigned_from_pinned_vendor_project,FORGE_EXPORT_CONFIRMED_PENDING_CONTINUITY,IOB_t[0:0]_xy[31:27]_out1,GPIO8 output enable
+right_pwm_out,,9,24,assigned_from_pinned_vendor_project,FORGE_EXPORT_CONFIRMED_PENDING_CONTINUITY,IOB_t[0:0]_xy[31:26]_out0,J3 PMOD pin5
+right_pwm_out_en,,,,assigned_from_pinned_vendor_project,FORGE_EXPORT_CONFIRMED_PENDING_CONTINUITY,IOB_t[0:0]_xy[31:26]_out1,GPIO9 output enable
+left_direction_out,,10,1,assigned_from_pinned_vendor_project,FORGE_EXPORT_CONFIRMED_PENDING_CONTINUITY,IOB_t[0:0]_xy[31:25]_out0,J3 PMOD pin8
+left_direction_out_en,,,,assigned_from_pinned_vendor_project,FORGE_EXPORT_CONFIRMED_PENDING_CONTINUITY,IOB_t[0:0]_xy[31:25]_out1,GPIO10 output enable
+right_direction_out,,11,2,assigned_from_pinned_vendor_project,FORGE_EXPORT_CONFIRMED_PENDING_CONTINUITY,IOB_t[0:0]_xy[31:24]_out0,J3 PMOD pin7
+right_direction_out_en,,,,assigned_from_pinned_vendor_project,FORGE_EXPORT_CONFIRMED_PENDING_CONTINUITY,IOB_t[0:0]_xy[31:24]_out1,GPIO11 output enable
+left_pwm_in,,,,unbound_unused_compatibility_input,OPTIMIZED_AWAY,,
+right_pwm_in,,,,unbound_unused_compatibility_input,OPTIMIZED_AWAY,,
+device_PWR_nRST,12,PWR,11,not_an_RTL_port,SCHEMATIC_PROVEN_CONFIGURATION_POWER_CONTROL,,RP2040 GPIO12
+device_EN_nSLEEP,13,EN,10,not_an_RTL_port,SCHEMATIC_PROVEN_CONFIGURATION_CONTROL,,RP2040 GPIO13
+spi_status_byte,,,,bit7_READY_bit6_COMMAND_VALID_bit5_WATCHDOG_EXPIRED_bits4_0_ZERO,protocol_contract_msb_first_mode0,,

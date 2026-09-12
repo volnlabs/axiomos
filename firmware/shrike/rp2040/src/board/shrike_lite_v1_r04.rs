@@ -5,7 +5,7 @@
 
 pub const FPGA_CONFIG: [u8; 4] = [0, 1, 2, 3]; // MISO, SS, SCK, MOSI
 pub const FPGA_CONTROL: [u8; 2] = [12, 13]; // PWR, EN
-pub const FPGA_RUNTIME: [u8; 2] = [14, 15]; // FPGA GPIO18, GPIO17
+pub const FPGA_RUNTIME: [u8; 2] = [14, 15]; // rst_n (FPGA GPIO18/package 9), reserved PWM (GPIO17)
 pub const MCU_LED: u8 = 4;
 
 pub const MOTOR_DIRECTION: [u8; 4] = [6, 7, 8, 9];
