@@ -685,7 +685,7 @@ For the paper, add an output-fence comparator that allows old computation but re
 | Official FPGA verification script | Simple gate and runtime-link simulation passed | No synthesis, timing closure, loaded bitstream or bench qualification |
 | Source-linked counterexamples | Existing witnesses reproduced | Python models corroborated with source; no physical actuation |
 
-Raw [runtime test log](architecture-review-evidence/runtime-tests.log), [safety test log](architecture-review-evidence/safety-tests.log), and [paper verification log](architecture-review-evidence/paper-verification.log) preserve command output. Initial configuration/tool-mode failures are retained in the safety log: a missing required profile and an Icarus language-mode mismatch were corrected by using the repository's specified invocations; they are not presented as passing tests. No new hardware captures, flashing or actuation were performed.
+Raw [runtime test log](#unpublished-local-sources), [safety test log](#unpublished-local-sources), and [paper verification log](#unpublished-local-sources) preserve command output. Initial configuration/tool-mode failures are retained in the safety log: a missing required profile and an Icarus language-mode mismatch were corrected by using the repository's specified invocations; they are not presented as passing tests. No new hardware captures, flashing or actuation were performed.
 
 ## 19. Research opportunities
 
@@ -845,13 +845,13 @@ No whole-kernel formal verification, exhaustive unsafe-code audit, new Pi/MCU me
 | Dispatch/lifetime | [`execute_program`](../../../kernel/src/bpf/mod.rs#L1374), [`run_snapshot`](../../../kernel/src/bpf/mod.rs#L1515), [`epoch read/publish`](../../../kernel/crates/kernel_bpf/src/concurrency/epoch_snapshot.rs#L105), [`execution leases`](../../../kernel/src/bpf/mod.rs#L292) |
 | Interpreter/verifier | [`interpreter entry`](../../../kernel/crates/kernel_bpf/src/execution/interpreter.rs#L565), [`helper dispatch`](../../../kernel/crates/kernel_bpf/src/execution/interpreter.rs#L264), [`verifier exploration`](../../../kernel/crates/kernel_bpf/src/verifier/core.rs#L366), [`pruning`](../../../kernel/crates/kernel_bpf/src/verifier/pruner.rs#L242), [`cost model`](../../../kernel/crates/kernel_bpf/src/verifier/cost.rs#L1) |
 | Map/object construction | [`ELF map parsing`](../../../kernel/crates/kernel_bpf/src/loader/mod.rs#L113), [`relocation`](../../../kernel/crates/kernel_bpf/src/loader/reloc.rs#L234), [`map capture`](../../../kernel/src/bpf/mod.rs#L615), [`map destruction`](../../../kernel/src/bpf/mod.rs#L1939) |
-| Research implementation | [`R preparation/commit`](../../../target/physworldai-worktree/kernel/src/bpf/mod.rs#L1583), [`R installation`](../../../target/physworldai-worktree/kernel/src/bpf/mod.rs#L139), [`R timer order`](../../../target/physworldai-worktree/kernel/src/bpf/mod.rs#L2319), [`R gate`](../../../target/physworldai-worktree/kernel/crates/kernel_bpf/src/concurrency/exclusive_slot.rs#L43) |
+| Research implementation | [`R preparation/commit`](#unpublished-local-sources), [`R installation`](#unpublished-local-sources), [`R timer order`](#unpublished-local-sources), [`R gate`](#unpublished-local-sources) |
 | Effects/freshness | [`signed motor adapter`](../../../kernel/src/actuation.rs#L253), [`monitor decision`](../../../kernel/crates/kernel_bpf/src/actuation/mod.rs#L610), [`pair transport`](../../../kernel/src/arch/aarch64/platform/rpi5/control_link.rs#L289), [`watchdog`](../../../kernel/crates/shrike_link/src/watchdog.rs#L75), [`FPGA gate`](../../../firmware/shrike/fpga/forgefpga/ffpga/src/shrike_safety_gate.v#L1) |
 | Execution platform | [`CPU scratch`](../../../kernel/src/mcore/context.rs#L101), [`run queues`](../../../kernel/src/mcore/mtask/scheduler/run_queue.rs#L1), [`AArch64 timer`](../../../kernel/src/arch/aarch64/interrupts.rs#L145), [`serial`](../../../kernel/src/serial.rs#L33), [`profile`](../../../kernel/crates/kernel_bpf/src/profile/mod.rs#L166) |
 
 [H-origin]: https://github.com/volnlabs/axiomos/blob/4754923/README.md
 [H-pivot]: https://github.com/volnlabs/axiomos/blob/39a0840/README.md
-[H-charter]: /home/utkarsh/Work/axiom-lab/roadmap/architecture-north-star.md
+[H-charter]: #unpublished-local-sources
 [H-v05]: https://github.com/volnlabs/axiomos/blob/0567193e76283b82739b1348dcf8c727ccd9fc64/docs/design/active/v0.5-runtime-evolution.md#L302
 [H-v1-review]: ../../../docs/reviews/architecture/2026-09-06-v1-contract/README.md
 [H-pr35]: https://github.com/volnlabs/axiomos/pull/35
@@ -869,18 +869,37 @@ No whole-kernel formal verification, exhaustive unsafe-code audit, new Pi/MCU me
 [C-link]: ../../../kernel/src/arch/aarch64/platform/rpi5/control_link.rs#L289
 [C-firmware]: ../../../firmware/shrike/rp2040/src/main.rs#L1
 [C-audit]: ../../../kernel/crates/kernel_bpf/src/actuation/audit.rs#L5
-[R-update]: ../../../target/physworldai-worktree/kernel/src/bpf/mod.rs#L1583
-[R-gate]: ../../../target/physworldai-worktree/kernel/crates/kernel_bpf/src/concurrency/exclusive_slot.rs#L43
+[R-update]: #unpublished-local-sources
+[R-gate]: #unpublished-local-sources
 [P-paper]: ../../papers/physworldai2026/who-guards-the-update.pdf
-[E-cost]: ../../../target/cl4fmagents-v3/capture-r3/cost-logical-latency.csv
-[E-corrective]: ../../../target/cl4fmagents-v3/capture-r3-adaptation/corrective-stop.json
-[E-verification]: architecture-review-evidence/paper-verification.log
+[E-cost]: #unpublished-local-sources
+[E-corrective]: #unpublished-local-sources
+[E-verification]: #unpublished-local-sources
 [E-source-check]: architecture-review-evidence/source-and-binary-check.json
-[E-provenance]: architecture-review-evidence/benchmark-provenance.log
-[E-safety-tests]: architecture-review-evidence/safety-tests.log
+[E-provenance]: #unpublished-local-sources
+[E-safety-tests]: #unpublished-local-sources
 [Linux-RCU]: https://www.kernel.org/doc/html/latest/RCU/whatisRCU.html
 [DPDK-QSBR]: https://doc.dpdk.org/api/rte__rcu__qsbr_8h.html
 [PREEMPT-RT]: https://cdn.kernel.org/doc/html/latest/core-api/real-time/differences.html
 [SCHED-DEADLINE]: https://www.kernel.org/doc/html/latest/scheduler/sched-deadline.html
 [seL4-MCS]: https://trustworthy.systems/publications/full_text/Lyons_MAH_18.pdf
 [Chubby]: https://storage.googleapis.com/gweb-research2023-media/pubtools/4444.pdf
+
+## Unpublished local sources
+
+The original review used ignored captures, logs, a research worktree and a
+sibling planning repository. These files are not included in a fresh checkout.
+Links to this section identify that limitation; they do not establish published
+or freshly reproduced evidence. Original locations:
+
+- `/home/utkarsh/Work/axiom-lab/roadmap/architecture-north-star.md`
+- `../../../target/physworldai-worktree/kernel/src/bpf/mod.rs#L1583`
+- `../../../target/physworldai-worktree/kernel/crates/kernel_bpf/src/concurrency/exclusive_slot.rs#L43`
+- `../../../target/cl4fmagents-v3/capture-r3/cost-logical-latency.csv`
+- `../../../target/cl4fmagents-v3/capture-r3-adaptation/corrective-stop.json`
+- `architecture-review-evidence/paper-verification.log`
+- `architecture-review-evidence/benchmark-provenance.log`
+- `architecture-review-evidence/safety-tests.log`
+- `architecture-review-evidence/runtime-tests.log`
+- `../../../target/physworldai-worktree/kernel/src/bpf/mod.rs#L139`
+- `../../../target/physworldai-worktree/kernel/src/bpf/mod.rs#L2319`

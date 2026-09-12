@@ -741,40 +741,52 @@ If continuing implementation tomorrow, I would build these five concrete changes
 No kernel or firmware fixes were made as part of this review. The added files are this report and the runnable counterexamples; the recommendations above remain engineering work.
 
 <!-- Source links pin locations in the reviewed workspace; commit identity is stated at top. -->
-[roadmap]: /home/utkarsh/Work/axiom-lab/roadmap/release-roadmap.md
-[vision]: /home/utkarsh/Work/axiom-lab/roadmap/v1.0.0-vision.md
-[northstar]: /home/utkarsh/Work/axiom-lab/roadmap/architecture-north-star.md
-[research]: /home/utkarsh/Work/axiom-lab/roadmap/research-program.md
-[brainstorm]: /home/utkarsh/Work/axiom-lab/roadmap/2026-06-10-runtime-evolution-brainstorm.md
-[critical]: /home/utkarsh/Work/axiom-lab/roadmap/critical-path.md
-[runtime]: /home/utkarsh/Work/axiomOS/kernel/src/bpf/mod.rs:216
-[handles]: /home/utkarsh/Work/axiomOS/kernel/src/bpf/handles.rs:5
-[limits]: /home/utkarsh/Work/axiomOS/kernel/src/bpf/limits.rs
-[profile]: /home/utkarsh/Work/axiomOS/kernel/crates/kernel_bpf/src/profile/mod.rs:239
-[cost]: /home/utkarsh/Work/axiomOS/kernel/crates/kernel_bpf/src/verifier/cost.rs
-[admission]: /home/utkarsh/Work/axiomOS/kernel/crates/kernel_bpf/src/verifier/admission.rs
-[epoch]: /home/utkarsh/Work/axiomOS/kernel/crates/kernel_bpf/src/concurrency/epoch_snapshot.rs:109
-[credentials]: /home/utkarsh/Work/axiomOS/kernel/src/mcore/mtask/process/credentials.rs:25
-[sysbpf]: /home/utkarsh/Work/axiomOS/kernel/src/syscall/bpf.rs:389
-[actuation]: /home/utkarsh/Work/axiomOS/kernel/src/actuation.rs:17
-[helpers]: /home/utkarsh/Work/axiomOS/kernel/src/bpf/helpers.rs:223
-[authentication]: /home/utkarsh/Work/axiomOS/kernel/crates/kernel_bpf/src/signing/authentication.rs
-[signature]: /home/utkarsh/Work/axiomOS/kernel/crates/kernel_bpf/src/signing/signature.rs
-[audit]: /home/utkarsh/Work/axiomOS/kernel/crates/kernel_bpf/src/actuation/audit.rs:52
-[vectors]: /home/utkarsh/Work/axiomOS/kernel/src/arch/aarch64/exception_vectors.S:41
-[interrupts]: /home/utkarsh/Work/axiomOS/kernel/src/arch/aarch64/interrupts.rs:200
-[pwm]: /home/utkarsh/Work/axiomOS/kernel/src/arch/aarch64/platform/rpi5/pwm.rs:249
-[link]: /home/utkarsh/Work/axiomOS/kernel/src/arch/aarch64/platform/rpi5/control_link.rs:137
-[watchdog]: /home/utkarsh/Work/axiomOS/kernel/crates/shrike_link/src/watchdog.rs:75
-[mcucontrol]: /home/utkarsh/Work/axiomOS/firmware/shrike/control/src/control.rs:99
-[mcumain]: /home/utkarsh/Work/axiomOS/firmware/shrike/rp2040/src/main.rs:8
-[fpgalifecycle]: /home/utkarsh/Work/axiomOS/firmware/shrike/control/src/fpga.rs:131
-[top]: /home/utkarsh/Work/axiomOS/firmware/shrike/fpga/forgefpga/ffpga/src/top.v
-[gate]: /home/utkarsh/Work/axiomOS/firmware/shrike/fpga/forgefpga/ffpga/src/shrike_safety_gate.v
-[bench]: /home/utkarsh/Work/axiomOS/kernel/src/bench.rs:282
-[v03]: /home/utkarsh/Work/axiomOS/scripts/benchmark/analyze-v03.py:530
-[v04]: /home/utkarsh/Work/axiomOS/scripts/benchmark/analyze-v04.py:126
-[v03d]: /home/utkarsh/Work/axiomOS/scripts/hil/v03d-reduce.py:96
-[deploy]: /home/utkarsh/Work/axiomOS/userspace/tools/rk_cli/src/commands/deploy.rs:136
-[kernelbuild]: /home/utkarsh/Work/axiomOS/kernel/build.rs:14
-[artifactcheck]: /home/utkarsh/Work/axiomOS/scripts/verify/artifact-provenance.py
+[roadmap]: #unpublished-local-sources
+[vision]: #unpublished-local-sources
+[northstar]: #unpublished-local-sources
+[research]: #unpublished-local-sources
+[brainstorm]: #unpublished-local-sources
+[critical]: #unpublished-local-sources
+[runtime]: ../../../../kernel/src/bpf/mod.rs#L216
+[handles]: ../../../../kernel/src/bpf/handles.rs#L5
+[limits]: ../../../../kernel/src/bpf/limits.rs
+[profile]: ../../../../kernel/crates/kernel_bpf/src/profile/mod.rs#L239
+[cost]: ../../../../kernel/crates/kernel_bpf/src/verifier/cost.rs
+[admission]: ../../../../kernel/crates/kernel_bpf/src/verifier/admission.rs
+[epoch]: ../../../../kernel/crates/kernel_bpf/src/concurrency/epoch_snapshot.rs#L109
+[credentials]: ../../../../kernel/src/mcore/mtask/process/credentials.rs#L25
+[sysbpf]: ../../../../kernel/src/syscall/bpf.rs#L389
+[actuation]: ../../../../kernel/src/actuation.rs#L17
+[helpers]: ../../../../kernel/src/bpf/helpers.rs#L223
+[authentication]: ../../../../kernel/crates/kernel_bpf/src/signing/authentication.rs
+[signature]: ../../../../kernel/crates/kernel_bpf/src/signing/signature.rs
+[audit]: ../../../../kernel/crates/kernel_bpf/src/actuation/audit.rs#L52
+[vectors]: ../../../../kernel/src/arch/aarch64/exception_vectors.S#L41
+[interrupts]: ../../../../kernel/src/arch/aarch64/interrupts.rs#L200
+[pwm]: ../../../../kernel/src/arch/aarch64/platform/rpi5/pwm.rs#L249
+[link]: ../../../../kernel/src/arch/aarch64/platform/rpi5/control_link.rs#L137
+[watchdog]: ../../../../kernel/crates/shrike_link/src/watchdog.rs#L75
+[mcucontrol]: ../../../../firmware/shrike/control/src/control.rs#L99
+[mcumain]: ../../../../firmware/shrike/rp2040/src/main.rs#L8
+[fpgalifecycle]: ../../../../firmware/shrike/control/src/fpga.rs#L131
+[top]: ../../../../firmware/shrike/fpga/forgefpga/ffpga/src/top.v
+[gate]: ../../../../firmware/shrike/fpga/forgefpga/ffpga/src/shrike_safety_gate.v
+[bench]: ../../../../kernel/src/bench.rs#L282
+[v03]: ../../../../scripts/benchmark/analyze-v03.py#L530
+[v04]: ../../../../scripts/benchmark/analyze-v04.py#L126
+[v03d]: ../../../../scripts/hil/v03d-reduce.py#L96
+[deploy]: ../../../../userspace/tools/rk_cli/src/commands/deploy.rs#L136
+[kernelbuild]: ../../../../kernel/build.rs#L14
+[artifactcheck]: ../../../../scripts/verify/artifact-provenance.py
+
+## Unpublished local sources
+
+These planning references were read in the reviewer’s sibling checkout. They
+are not shipped in this repository; the original locations are retained below.
+
+- `roadmap`: `/home/utkarsh/Work/axiom-lab/roadmap/release-roadmap.md`
+- `vision`: `/home/utkarsh/Work/axiom-lab/roadmap/v1.0.0-vision.md`
+- `northstar`: `/home/utkarsh/Work/axiom-lab/roadmap/architecture-north-star.md`
+- `research`: `/home/utkarsh/Work/axiom-lab/roadmap/research-program.md`
+- `brainstorm`: `/home/utkarsh/Work/axiom-lab/roadmap/2026-06-10-runtime-evolution-brainstorm.md`
+- `critical`: `/home/utkarsh/Work/axiom-lab/roadmap/critical-path.md`

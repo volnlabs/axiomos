@@ -1,7 +1,7 @@
 ---
 title: Hardware-first path from PR 35 to v1
 status: active
-updated: 2026-09-11
+updated: 2026-09-12
 ---
 
 # Hardware-first implementation sequence
@@ -39,7 +39,7 @@ and reducers. No new ABI, protocol, registry or acceptance framework is needed f
 this sequencing change. The long-run capture procedure still needs qualification;
 the current short-capture harness is not a validated 24-hour runner.
 
-- [ ] Resolve the analyzer's early termination and qualify acquisition/storage
+- [ ] Qualify sustained acquisition/storage with the retained FX2 counter fix
   before a long run. An incomplete capture is not a smaller passing soak.
 - [ ] Freeze clean source, feature-specific Pi images, RP2040 firmware, FPGA
   bitstream, boot firmware, wiring, instrument identities/uncertainty and workload.
@@ -80,32 +80,27 @@ affected bench checks whenever later changes touch actuation, execution or timin
 
 ## Retained progress and next action
 
-The September 9 campaigns establish Pi GPIO dispatch, a 100-response physical
-reflex diagnostic, 200 GPIO e-stop diagnostic presses (largest measured response
-6.125 microseconds), and physical PWM clamping/invalid-channel rejection. The
-e-stop image automatically re-arms for diagnostics; it does not close production
-latching behavior. The measured roughly 5-microsecond typical GPIO reflex does
-not meet the legacy sub-1-microsecond fallback.
+The [September 12 baseline record](../../reviews/releases/2026-09-12-v0.5-fpga-baseline/README.md)
+supersedes the partial September 9 progress report. It records 10,000 paired
+monitor samples, 10,000 correlated physical GPIO reflex responses, 200 GPIO
+stop diagnostic responses, and the complete 1,000-request unloaded PWM corpus.
+Each result belongs to the distinct image identified in that record. The GPIO
+reflex functional check passed; its 500 ns target and 1 microsecond fallback
+failed (maximum 9.625 microseconds). Diagnostic automatic re-arm does not prove
+production stop latching.
 
-The containment series has 200 accepted requests in two 50-pulse batches; 40
-additional diagnostic requests are separate. The single-boot 500-pulse attempt
-ended early after 359,656,448 samples at nominal 6 MHz (about 59.94 seconds).
-Its 245 correct UART requests do not count toward acceptance because physical
-coverage is incomplete. The analyzer reported repeated empty USB timeouts;
-the underlying cause remains unconfirmed. Reboot/rate/port changes are diagnostic
-attempts, not established fixes.
+The earlier incomplete captures and USB failures remain retained failures in
+`.reboot-saves/2026-09-07/` in the operator's main checkout. Later captures used
+the retained 64-bit FX2 sample-counter correction and achieved a continuous
+48,120,000,000-sample reflex capture. This does not qualify a 24-hour acquisition
+or establish that every earlier USB failure had the same cause.
 
-These records are under `.reboot-saves/2026-09-07/pi5-corpus-20260909/` in the
-operator's main checkout: `corpus-series-progress.json`, the per-run reviews,
-and `one-shot/aborted-capture-01-review.json`. The tested corpus kernel is
-`7d9c5f64cb134ce5e3b670920e25680877140d20`; host tools are at
-`9b7d63b49475d831b25dc3f60ababe2b74ac457c`. Saved captures are not automatically
-evidence for a future frozen image. No operational FPGA, motor or 24-hour soak
-pass is recorded here.
-
-Next: inspect USB topology after host reboot, isolate the acquisition failure,
-then complete containment. The previously accepted batching route has 800 requests
-remaining; a fresh single-boot campaign requires all 1,000 requests in that boot.
+Next: execute the [Shrike/FPGA bench plan](shrike-fpga-bench.md): recovery,
+reviewed pins and configuration timing, generated bitstream, concrete adapter,
+unloaded chain faults and physical FPGA stop/re-arm, then pilot and soak.
+Do not repeat the unchanged 10,000-response reflex capture. No operational FPGA
+or 24-hour electronics acceptance pass is recorded. v0.5 design and test
+preparation proceed separately; this branch covers only the bench path.
 
 ## Hardware inputs blocking the operational MCU adapter
 
@@ -187,8 +182,8 @@ adequate electrical reversal dead time.
 ## Next engineering handoff
 
 The original V03-C private decision-monitor corpus cannot close physical
-containment. The later live helper/PWM campaign supplies partial physical evidence
-as recorded above; finish its required population. The legacy L298N per-wheel
+containment. The later live helper/PWM campaign completed its physical corpus
+as recorded in the September 12 baseline above. The legacy L298N per-wheel
 adapter is not promoted into the FPGA runtime.
 
 Finish review and software regression checks on this prerequisite branch, then
