@@ -3,7 +3,7 @@
 use shrike_link::tx::TxState;
 use shrike_link::{Decoder, Msg, MAX_FRAME};
 
-use crate::{ByteIo, MotorPairSink};
+use crate::{ByteIo, MicrosClock, MotorPairSink};
 
 /// Errors require inhibition and a fresh drain; partial frames cannot be retried
 /// blindly after an I/O failure with an unknown accepted prefix.
@@ -105,12 +105,13 @@ impl LinkQuiescence {
         sink: &mut impl MotorPairSink,
         decoder: &mut Decoder,
         tx: &mut TelemetryTx,
-        now: u64,
+        clock: &impl MicrosClock,
     ) -> Result<Self, TransportError> {
         sink.inhibit();
         *decoder = Decoder::new();
         *tx = TelemetryTx::new();
         io.reset().map_err(|_| TransportError::Io)?;
+        let now = clock.now_us();
         Ok(Self {
             quiet_since: Some(now),
             last_poll: now,
@@ -119,17 +120,32 @@ impl LinkQuiescence {
 
     /// Drain at most 64 received bytes; every observed byte restarts the full
     /// quiet interval. Clock regression requires another explicit begin.
-    pub fn poll(&mut self, io: &mut impl ByteIo, now: u64) -> Result<bool, TransportError> {
-        if now < self.last_poll || self.quiet_since.is_none() {
-            self.quiet_since = None;
+    pub fn poll(
+        &mut self,
+        io: &mut impl ByteIo,
+        clock: &impl MicrosClock,
+    ) -> Result<bool, TransportError> {
+        let Some(mut quiet_since) = self.quiet_since else {
             return Err(TransportError::ClockRegression);
-        }
-        self.last_poll = now;
+        };
         for _ in 0..64 {
-            if io.read().is_none() {
-                return Ok(now - self.quiet_since.unwrap() >= Self::QUIET_US);
+            let before_read = clock.now_us();
+            if before_read < self.last_poll {
+                self.quiet_since = None;
+                return Err(TransportError::ClockRegression);
             }
-            self.quiet_since = Some(now);
+            let received = io.read().is_some();
+            let after_read = clock.now_us();
+            if after_read < before_read {
+                self.quiet_since = None;
+                return Err(TransportError::ClockRegression);
+            }
+            self.last_poll = after_read;
+            if !received {
+                return Ok(before_read - quiet_since >= Self::QUIET_US);
+            }
+            quiet_since = after_read;
+            self.quiet_since = Some(after_read);
         }
         Ok(false)
     }
@@ -138,9 +154,12 @@ impl LinkQuiescence {
 #[cfg(test)]
 mod tests {
     extern crate std;
+    use self::std::cell::Cell;
     use self::std::collections::VecDeque;
+    use self::std::rc::Rc;
     use self::std::vec::Vec;
     use super::*;
+    use crate::MicrosClock;
 
     #[derive(Default)]
     struct Io {
@@ -151,11 +170,18 @@ mod tests {
         fail_reset: bool,
         over_report: bool,
         resets: usize,
+        clock: Option<Rc<Cell<u64>>>,
+        reset_elapsed_us: u64,
+        read_elapsed_us: VecDeque<u64>,
     }
     impl ByteIo for Io {
         type Error = ();
         fn read(&mut self) -> Option<u8> {
-            self.rx.pop_front()
+            let received = self.rx.pop_front();
+            if let (Some(clock), Some(elapsed)) = (&self.clock, self.read_elapsed_us.pop_front()) {
+                clock.set(clock.get().saturating_add(elapsed));
+            }
+            received
         }
         fn try_write(&mut self, bytes: &[u8]) -> Result<usize, ()> {
             if self.fail_write {
@@ -175,6 +201,9 @@ mod tests {
                 return Err(());
             }
             self.rx.clear();
+            if let Some(clock) = &self.clock {
+                clock.set(clock.get().saturating_add(self.reset_elapsed_us));
+            }
             // Already captured bytes are historical; only queued RX is modeled.
             Ok(())
         }
@@ -190,6 +219,20 @@ mod tests {
         }
         fn inhibit(&mut self) {
             self.stopped = true;
+        }
+    }
+    struct Clock(Rc<Cell<u64>>);
+    impl Clock {
+        fn new(now: u64) -> Self {
+            Self(Rc::new(Cell::new(now)))
+        }
+        fn set(&self, now: u64) {
+            self.0.set(now);
+        }
+    }
+    impl MicrosClock for Clock {
+        fn now_us(&self) -> u64 {
+            self.0.get()
         }
     }
     fn messages(wire: &[u8]) -> Vec<Msg> {
@@ -259,19 +302,24 @@ mod tests {
         tx.queue(Msg::HeartbeatToPi { seq: 99 });
         tx.service(&mut io).unwrap();
         io.rx.extend([1, 2, 3]);
+        let clock = Clock::new(100);
         let mut drain =
-            LinkQuiescence::begin(&mut io, &mut sink, &mut decoder, &mut tx, 100).unwrap();
+            LinkQuiescence::begin(&mut io, &mut sink, &mut decoder, &mut tx, &clock).unwrap();
         assert!(sink.stopped);
         assert_eq!(io.resets, 1);
         assert!(io.rx.is_empty());
         assert_eq!(io.wire.len(), 3); // physical actions are not rolled back
         io.quota = usize::MAX;
         assert_eq!(tx.service(&mut io), Ok(0));
-        assert_eq!(drain.poll(&mut io, 200_099), Ok(false));
+        clock.set(200_099);
+        assert_eq!(drain.poll(&mut io, &clock), Ok(false));
         io.rx.push_back(0x7e); // delayed peer data restarts the entire quiet interval
-        assert_eq!(drain.poll(&mut io, 200_100), Ok(false));
-        assert_eq!(drain.poll(&mut io, 400_099), Ok(false));
-        assert_eq!(drain.poll(&mut io, 400_100), Ok(true));
+        clock.set(200_100);
+        assert_eq!(drain.poll(&mut io, &clock), Ok(false));
+        clock.set(400_099);
+        assert_eq!(drain.poll(&mut io, &clock), Ok(false));
+        clock.set(400_100);
+        assert_eq!(drain.poll(&mut io, &clock), Ok(true));
         assert!(sink.stopped); // eligibility does not rearm or manufacture a session
         let mut frame = [0; shrike_link::MAX_FRAME];
         let msg = Msg::HeartbeatToShrike { seq: 2 };
@@ -286,22 +334,89 @@ mod tests {
         let mut sink = Sink::default();
         let mut decoder = Decoder::new();
         let mut tx = TelemetryTx::new();
+        let clock = Clock::new(1);
         let mut drain =
-            LinkQuiescence::begin(&mut io, &mut sink, &mut decoder, &mut tx, 1).unwrap();
+            LinkQuiescence::begin(&mut io, &mut sink, &mut decoder, &mut tx, &clock).unwrap();
         io.rx.extend(core::iter::repeat_n(7, 65));
-        assert_eq!(drain.poll(&mut io, 300_000), Ok(false));
+        clock.set(300_000);
+        assert_eq!(drain.poll(&mut io, &clock), Ok(false));
         assert_eq!(io.rx.len(), 1);
-        assert_eq!(drain.poll(&mut io, 300_001), Ok(false));
+        clock.set(300_001);
+        assert_eq!(drain.poll(&mut io, &clock), Ok(false));
+        clock.set(300_000);
         assert_eq!(
-            drain.poll(&mut io, 300_000),
+            drain.poll(&mut io, &clock),
             Err(TransportError::ClockRegression)
         );
+        clock.set(900_000);
         assert_eq!(
-            drain.poll(&mut io, 900_000),
+            drain.poll(&mut io, &clock),
             Err(TransportError::ClockRegression)
         );
         io.fail_reset = true;
-        assert!(LinkQuiescence::begin(&mut io, &mut sink, &mut decoder, &mut tx, 900_000).is_err());
+        assert!(LinkQuiescence::begin(&mut io, &mut sink, &mut decoder, &mut tx, &clock).is_err());
         assert!(sink.stopped);
+    }
+
+    #[test]
+    fn reset_elapsed_time_is_not_credited_to_the_quiet_interval() {
+        let clock = Clock::new(0);
+        let mut io = Io {
+            clock: Some(clock.0.clone()),
+            reset_elapsed_us: 50,
+            ..Io::default()
+        };
+        let mut sink = Sink::default();
+        let mut decoder = Decoder::new();
+        let mut tx = TelemetryTx::new();
+        let mut drain =
+            LinkQuiescence::begin(&mut io, &mut sink, &mut decoder, &mut tx, &clock).unwrap();
+
+        clock.set(200_000);
+        assert_eq!(drain.poll(&mut io, &clock), Ok(false));
+        clock.set(200_050);
+        assert_eq!(drain.poll(&mut io, &clock), Ok(true));
+    }
+
+    #[test]
+    fn receive_elapsed_time_is_not_credited_to_the_quiet_interval() {
+        let clock = Clock::new(0);
+        let mut io = Io {
+            clock: Some(clock.0.clone()),
+            read_elapsed_us: [50, 0, 0, 0].into(),
+            ..Io::default()
+        };
+        let mut sink = Sink::default();
+        let mut decoder = Decoder::new();
+        let mut tx = TelemetryTx::new();
+        let mut drain =
+            LinkQuiescence::begin(&mut io, &mut sink, &mut decoder, &mut tx, &clock).unwrap();
+
+        io.rx.push_back(1);
+        assert_eq!(drain.poll(&mut io, &clock), Ok(false));
+        clock.set(200_000);
+        assert_eq!(drain.poll(&mut io, &clock), Ok(false));
+        clock.set(200_050);
+        assert_eq!(drain.poll(&mut io, &clock), Ok(true));
+    }
+
+    #[test]
+    fn empty_observation_before_deadline_does_not_use_later_return_time() {
+        let clock = Clock::new(0);
+        let mut io = Io {
+            clock: Some(clock.0.clone()),
+            read_elapsed_us: [50, 0].into(),
+            ..Io::default()
+        };
+        let mut sink = Sink::default();
+        let mut decoder = Decoder::new();
+        let mut tx = TelemetryTx::new();
+        let mut drain =
+            LinkQuiescence::begin(&mut io, &mut sink, &mut decoder, &mut tx, &clock).unwrap();
+
+        clock.set(199_950);
+        assert_eq!(drain.poll(&mut io, &clock), Ok(false));
+        assert_eq!(clock.now_us(), 200_000);
+        assert_eq!(drain.poll(&mut io, &clock), Ok(true));
     }
 }
