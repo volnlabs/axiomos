@@ -53,9 +53,9 @@ pub static PWM1: Lazy<Mutex<Rp1Pwm>> = Lazy::new(|| {
 
 /// Initialize Raspberry Pi 5 platform
 ///
-/// This should be called early in boot to set up essential peripherals
-/// like UART for debug output.
+/// Called on the boot core before enabling the MMU or interrupts.
 pub fn init() {
-    // Keep early platform init side-effect free. Firmware already sets up
-    // debug UART routing; first real log write will lazily initialize UART.
+    gpio::start_active_cooler();
+    // Firmware already sets up debug UART routing; the first log write
+    // lazily initializes UART.
 }

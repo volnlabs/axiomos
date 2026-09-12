@@ -154,6 +154,18 @@ stage has a retained capture and explicit pass decision.
 
 ### 4.1 Kernel and rootfs
 
+The official Pi 5 Active Cooler must be connected to the dedicated four-pin fan
+socket. axiomos starts it at full speed during early platform initialization by
+driving internal `FAN_PWM` GPIO45 low. Firmware owns the preceding power-on
+interval and [stops the fan after its detection probe](https://github.com/raspberrypi/rpi-eeprom/blob/master/firmware-2712/release-notes.md#2025-01-06-stop-the-fan-after-after-fan-probe-latest).
+Keep the existing `pciex4_reset=0` boot setting; no fan `dtparam` is needed.
+Cooling stays on independently of motor PWM and e-stop handling.
+
+- [ ] Confirm fan rotation after kernel entry on three cold boots and throughout
+  the one-hour representative pilot, with motors disconnected. Retain UART logs,
+  image and firmware identities, and observed fan behavior. A stopped fan blocks
+  the long soak; the host GPIO register test alone does not prove cooling.
+
 - [ ] Baseline boot reaches `QEMU_BOOT_OK`-equivalent physical boot markers and
   `INIT_PROCESS_STARTED` in UART output.
 - [ ] Record absence of kernel panic, page fault, repeated reboot, or watchdog
