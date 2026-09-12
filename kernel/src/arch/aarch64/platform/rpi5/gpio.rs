@@ -10,7 +10,7 @@
 //! - Pull-up/pull-down configuration
 //! - Event detection (edges, levels)
 
-use super::memory_map::{RP1_GPIO_BASE, RP1_PADS_BANK0_BASE};
+use super::memory_map::{RP1_GPIO_BASE, RP1_PADS_BANK0_BASE, RP1_PERIPHERAL_BASE_PHYS};
 use super::mmio::MmioReg;
 
 /// GPIO function select values
@@ -168,6 +168,29 @@ fn device_sync() {
     unsafe {
         core::arch::asm!("dsb osh", options(nostack, preserves_flags));
     }
+}
+
+/// Start the official active cooler during single-core, pre-MMU platform init.
+pub(super) fn start_active_cooler() {
+    // FAN_PWM is GPIO45: IO_BANK2 pin 11 (bank 2 starts at GPIO34).
+    // LOW commands full speed; firmware leaves it HIGH/off after fan probing.
+    // Register layout: https://datasheets.raspberrypi.com/rp1/rp1-peripherals.pdf
+    const FAN_CTRL: usize = 0x000D_8000 + 11 * GPIO_REG_STRIDE + reg::CTRL;
+    const FAN_PAD: usize = 0x000F_8000 + PADS_GPIO0_OFFSET + 11 * PADS_GPIO_STRIDE;
+
+    // SAFETY: Called only by early Pi 5 init with interrupts/MMU disabled.
+    // pciex4_reset=0 preserves firmware's RP1 mapping at the physical BAR base;
+    // these aligned u32 registers belong solely to the internal fan GPIO.
+    unsafe {
+        MmioReg::<u32>::new(RP1_PERIPHERAL_BASE_PHYS + FAN_CTRL).modify(|v| {
+            (v & !(ctrl::FUNCSEL_MASK | ctrl::OUTOVER_MASK | ctrl::OEOVER_MASK))
+                | GpioFunction::Gpio as u32
+                | (ctrl::OUTOVER_LOW << ctrl::OUTOVER_SHIFT)
+                | (ctrl::OEOVER_ENABLE << ctrl::OEOVER_SHIFT)
+        });
+        MmioReg::<u32>::new(RP1_PERIPHERAL_BASE_PHYS + FAN_PAD).modify(|v| v & !pads::OUT_DISABLE);
+    }
+    device_sync();
 }
 
 impl Rp1Gpio {
