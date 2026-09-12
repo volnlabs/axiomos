@@ -41,6 +41,12 @@ def historical(path: Path) -> bool:
     relative = path.relative_to(ROOT)
     return (
         relative.parts[:3] == ("docs", "reviews", "releases")
+        or relative.parts[:4]
+        == ("docs", "reviews", "architecture", "2026-09-06-v1-contract")
+        or relative.parts
+        == ("docs", "reviews", "architecture", "architecture-convergence-report.md")
+        or relative.parts[:4]
+        == ("docs", "reviews", "architecture", "architecture-review-evidence")
         or relative.parts[:1] == ("artifacts",)
         or relative.parts[:2] == ("docs", "archive")
         or relative.parts[:2] == (".superpowers", "sdd")
