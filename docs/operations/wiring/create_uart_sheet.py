@@ -6,8 +6,8 @@ from reportlab.lib.pagesizes import A4
 from pathlib import Path
 out = Path(__file__).resolve().with_name('axiomos-test-01-pi5-uart-wiring.pdf')
 c = canvas.Canvas(str(out), pagesize=A4)
-c.setTitle('AxiomOS | Test 01 | Pi 5 boot and serial wiring')
-c.setAuthor('AxiomOS engineering')
+c.setTitle('axiomos | Test 01 | Pi 5 boot and serial wiring')
+c.setAuthor('axiomos engineering')
 W,H=A4
 ink=HexColor('#182536'); muted=HexColor('#526477'); blue=HexColor('#2366A5'); teal=HexColor('#13776B')
 def text(x,y,s,size=10,color=ink,font='Helvetica'):
@@ -74,7 +74,7 @@ for y,label,url in [
  (70,'Raspberry Pi: Debug Probe connections','https://www.raspberrypi.com/documentation/microcontrollers/debug-probe.html'),
  (57,'Raspberry Pi: Pi 5 dedicated UART10 header','https://www.raspberrypi.com/documentation/computers/configuration.html#primary-and-secondary-uarts')]:
  text(36,y,label,8,blue);c.linkURL(url,(36,y-2,350,y+9),relative=0)
-text(36,40,'AxiomOS console: kernel/src/arch/aarch64/platform/rpi5/uart.rs @ 34fe92c',8,muted)
+text(36,40,'axiomos console: kernel/src/arch/aarch64/platform/rpi5/uart.rs @ 34fe92c',8,muted)
 text(521,25,'1 / 1',8,muted)
 c.showPage();c.save()
 print(out)
