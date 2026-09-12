@@ -73,6 +73,8 @@ done
 PREFIX="$RUN_DIR/shrike-gpio23-pulse-$(printf '%02d' "$((idx + 1))")"
 UART_LOG="$PREFIX-uart.log"
 LOGIC_LOG="$PREFIX.sr"
+RAW_LOG="$PREFIX.bin"
+CONVERT_LOG="$PREFIX-convert.log"
 ANALYZER_LOG="$PREFIX-analyzer.log"
 SHRIKE_LOG="$PREFIX-shrike.log"
 printf 'rate=%s samples=%s count=%s high_ms=%s low_ms=%s output_mode=%s\n' \
@@ -141,10 +143,12 @@ fi
 ! rg -aq 'PI5_GPIO_IRQ_PROVEN' "$UART_LOG" || die "unexpected sensor edge before capture; cold boot required"
 
 # Continuous capture includes idle baseline, every pulse and the final stop.
+# libsigrok 0.5.2 rewrites srzip for every USB packet. Its growing archive work
+# can starve acquisition. Stream raw bytes here; package after capture stops.
 # Do not trigger on an edge that we have not yet authorized Shrike to generate.
 timeout --signal=TERM --kill-after=2s "${CAPTURE_SECONDS}s" \
     sigrok-cli -l 4 -d "$LOGIC_CONN" -c "samplerate=$SAMPLERATE" -C D0,D1 \
-    --samples "$CAPTURE_SAMPLES" -O srzip -o "$LOGIC_LOG" > "$ANALYZER_LOG" 2>&1 &
+    --samples "$CAPTURE_SAMPLES" -O binary -o "$RAW_LOG" > "$ANALYZER_LOG" 2>&1 &
 LOGIC_PID=$!
 waited=0
 until rg -q 'Received SR_DF_LOGIC' "$ANALYZER_LOG"; do
@@ -187,7 +191,21 @@ SHRIKE_TOUCHED=0
 kill "$UART_PID" 2>/dev/null || true
 wait "$UART_PID" 2>/dev/null || true
 UART_PID=""
-sha256sum "$UART_LOG" "$LOGIC_LOG" "$ANALYZER_LOG" "$SHRIKE_LOG" "$PREFIX-config.txt" | tee "$PREFIX.sha256" || die "could not hash capture artifacts"
+# FX2 D0/D1 use one raw byte per sample. A short stream must never pass merely
+# because sigrok exited zero. Keep the original binary even if packaging fails.
+python3 - "$RAW_LOG" "$CAPTURE_SAMPLES" <<'PY' || die "raw sample count mismatch; retain capture for diagnosis"
+from pathlib import Path
+import sys
+actual = Path(sys.argv[1]).stat().st_size
+expected = int(sys.argv[2])
+if actual != expected:
+    raise SystemExit(f"raw sample count {actual} != {expected}")
+PY
+echo "ACQUISITION COMPLETE — packaging saved samples; Pi may be powered off."
+sigrok-cli -i "$RAW_LOG" -I "binary:numchannels=8:samplerate=$((SAMPLES_PER_MS * 1000))" \
+    -C 0=D0,1=D1 -O srzip -o "$LOGIC_LOG" > "$CONVERT_LOG" 2>&1 || die "capture packaging failed; raw samples retained"
+[ -s "$LOGIC_LOG" ] || die "capture packaging failed; raw samples retained"
+sha256sum "$UART_LOG" "$LOGIC_LOG" "$RAW_LOG" "$ANALYZER_LOG" "$CONVERT_LOG" "$SHRIKE_LOG" "$PREFIX-config.txt" | tee "$PREFIX.sha256" || die "could not hash capture artifacts"
 rg -a 'PI5_OUT_ARM|PI5_GPIO_IRQ_PROVEN|PI5_REFLEX_REARM|PI5_ESTOP_REARM|PI5_MC|PI5_MA sample_id=|PI5_PWM_REQUEST' "$UART_LOG" || true
 if [ "$OUTPUT_MODE" != gpio ]; then
     python3 - "$UART_LOG" "$OUTPUT_MODE" "$PULSE_COUNT" "$REPO/scripts/hil/pwm-containment-reduce.py" <<'PY' || die "PWM${OUTPUT_MODE#pwm} software correlation failed; retain capture for diagnosis"

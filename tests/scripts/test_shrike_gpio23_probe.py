@@ -51,13 +51,24 @@ import time
 event_log = pathlib.Path(os.environ["EVENT_LOG"])
 mode = os.environ.get("SIGROK_MODE", "data")
 if "-i" in sys.argv:
-    print("; mock csv", flush=True)
-    print("0,0,0", flush=True)
+    assert sys.argv[sys.argv.index("-O") + 1] == "srzip"
+    assert sys.argv[sys.argv.index("-I") + 1].startswith("binary:numchannels=8:samplerate=")
+    assert sys.argv[sys.argv.index("-C") + 1] == "0=D0,1=D1"
+    assert "SIGROK_END" in event_log.read_text()
+    with event_log.open("a") as stream:
+        stream.write("SIGROK_CONVERT\n")
+    if mode == "convert-fail":
+        raise SystemExit(1)
+    pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"mock srzip\n")
     raise SystemExit(0)
 assert "-t" not in sys.argv
 assert sys.argv[sys.argv.index("-l") + 1] == "4"
 output = pathlib.Path(sys.argv[sys.argv.index("-o") + 1])
-output.write_bytes(b"mock capture\n")
+with event_log.open("a") as stream:
+    stream.write("SIGROK_FORMAT=" + sys.argv[sys.argv.index("-O") + 1] + "\n")
+with output.open("wb") as stream:
+    count = int(sys.argv[sys.argv.index("--samples") + 1])
+    stream.truncate(count - 1 if mode == "short" else count)
 if mode == "fail":
     print("analyzer failed", file=sys.stderr, flush=True)
     raise SystemExit(1)
@@ -69,6 +80,8 @@ with event_log.open("a", encoding="utf-8") as stream:
     stream.write("SIGROK_" + ("HEADER" if mode == "header" else "LOGIC") + "\n")
     stream.flush()
 time.sleep(4)
+with event_log.open("a") as stream:
+    stream.write("SIGROK_END\n")
 '''
 
 
@@ -348,6 +361,26 @@ class ShrikeGpio23PulseTests(unittest.TestCase):
         self.assertIn("RETURN_CODE=0", output)
         self.assertIn("for _ in range(500)", commands)
         self.assertIn("waveform review required", output)
+
+    def test_raw_capture_is_packaged_only_after_acquisition(self):
+        output, commands, events = self.run_harness(
+            "data", corpus_uart(), output_mode="pwm-corpus", pulse_count="5", samplerate="6m")
+        self.assertIn("RETURN_CODE=0", output)
+        self.assertIn("SIGROK_FORMAT=binary", events)
+        self.assertLess(events.index("SIGROK_END"), events.index("SIGROK_CONVERT"))
+        self.assertIn("GPIO_SAFE", commands)
+
+    def test_short_raw_capture_and_packaging_failure_do_not_pass(self):
+        for mode, message in (("short", "raw sample count"), ("convert-fail", "capture packaging failed")):
+            with self.subTest(mode=mode):
+                output, commands, events = self.run_harness(
+                    mode, corpus_uart(), output_mode="pwm-corpus", pulse_count="5", samplerate="6m")
+                self.assertIn("RETURN_CODE=1", output)
+                self.assertIn(message, output)
+                self.assertNotIn("CAPTURE COMPLETE", output)
+                self.assertIn("GPIO_SAFE", commands)
+                if mode == "short":
+                    self.assertNotIn("SIGROK_CONVERT", events)
 
     def test_long_run_rejects_short_uart_window_before_stimulus(self):
         output, commands, _ = self.run_harness(
