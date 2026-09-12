@@ -630,3 +630,25 @@ the concrete adapter and before deploying its changed image.
 
 Retained `summary.json` SHA-256: `5c2c821504b1f6145a31013bba7bc2bca1e96f37dad8914dda12798f437bd86b`.
 Retained `manifest.txt` SHA-256: `ca3012b5be04e2b7844a7af731f770d612cf89e9a3b453cced86fb30ba078ee8`.
+
+
+### Elapsed-I/O quiescence correction — 2026-09-13
+
+Commit `41a5a01` closes an additional local drain-model timing gap. Previously,
+reset/receive handling time could count toward the 200 ms quiet interval. The
+model now starts its timer after reset completes, brackets each receive attempt
+with the existing monotonic clock, uses the earlier timestamp to qualify an
+empty observation and the later timestamp to restart quiet after a byte.
+Regression checks cover 50 microseconds spent in reset, receive and empty-read
+return handling. Clock regression still poisons readiness; each poll still reads
+at most 64 bytes. No session or rearm authority is created.
+
+Independent review passed. The follow-up passes 111 host tests, strict Clippy,
+19 control Miri tests and the RP2040 no_std target check. Focused commands,
+source hash, regression failure/pass and logs are retained under ignored
+`target/audit-verification/quiescence-41a5a01/`, covered by `SHA256SUMS`.
+The full audit above belongs to `05b078d`; the successful GitHub run
+[34709566663](https://github.com/volnlabs/axiomos/actions/runs/34709566663)
+belongs to `5d4745c`. The new correction has the separately recorded focused
+verification, not a retroactive full-audit claim. Actual UART/FIFO observations,
+clock calibration and the real adapter still require the physical gate.
