@@ -11,6 +11,7 @@
 - [`reviews/`](reviews/) for point-in-time engineering findings.
 - [`operations/`](operations/) for build, boot, test, debug, and release procedures.
 - [`performance/`](performance/) for benchmark methodology, results, and evidence.
+- [`papers/`](papers/) for manuscript sources and retained publication bundles.
 - [`archive/`](archive/) for superseded or historical material.
 - [`plans/active/repository-inventory.md`](plans/active/repository-inventory.md) for the repository migration plan.
 

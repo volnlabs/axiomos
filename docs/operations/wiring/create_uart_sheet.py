@@ -4,7 +4,7 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.colors import HexColor, white
 from reportlab.lib.pagesizes import A4
 from pathlib import Path
-out = Path('/home/utkarsh/Work/axiomOS/output/pdf/axiomos-test-01-pi5-uart-wiring.pdf')
+out = Path(__file__).resolve().with_name('axiomos-test-01-pi5-uart-wiring.pdf')
 c = canvas.Canvas(str(out), pagesize=A4)
 c.setTitle('AxiomOS | Test 01 | Pi 5 boot and serial wiring')
 c.setAuthor('AxiomOS engineering')

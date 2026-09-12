@@ -26,7 +26,7 @@ This review uses the following immutable reference points. “Current” means C
 | R | `research/physworldai-2026`, `6db7fe7e5515df665234a0030de3419a8ccccc6e` | Paper implementation, inspected separately |
 | R predecessor | `research/cl4fmagents-transactional-publication`, `505128c184c98e33ba02d8a9390c4f89baf632e1` | Same relevant BPF implementation; different paper packaging lineage |
 | D | `release/v0.5.0-alpha.3`, `0567193e76283b82739b1348dcf8c727ccd9fc64` | Proposed design; not evidence that its lifecycle exists in C |
-| P | `output/pdf/physworldai2026/who-guards-the-update.pdf` | Ten-page manuscript, SHA-256 `2ae864ac12215e4efb91a2591a052b4762df00f291ea821e18c8b4d37ffcff4b` |
+| P | `docs/papers/physworldai2026/who-guards-the-update.pdf` | Ten-page manuscript, SHA-256 `2ae864ac12215e4efb91a2591a052b4762df00f291ea821e18c8b4d37ffcff4b` |
 
 **Evidence labels:** DI = documented intent; CP = behavior established by inspected code; HI = historical implementation/source; IN = inference. Performance findings separately use **measured**, **strongly inferred**, or **speculative**. A passing test establishes its exercised property, not unrestricted system correctness. Existing local reviews and untracked plans are explicitly treated as reviews/proposals rather than accepted contracts.
 
@@ -438,11 +438,11 @@ The source-linked counterexamples reproduced two heartbeat/timeout witnesses, tw
 
 Important counterevidence prevents overstatement:
 
-- Production unsigned loading is disabled except explicit test/development builds; malformed signed containers still fail. Child capabilities are intersections, not ambient privilege amplification. The signed loader currently receives load/read rights, not device-attach or actuation rights. This is fail-closed but leaves a production provisioning gap. [`credentials.rs`](../kernel/src/mcore/mtask/process/credentials.rs:25), [`init`](../userspace/core/init/src/main.rs:184), [`trust`](../kernel/src/bpf/trust.rs:1).
-- C discards signer provenance after authentication; R retains authentication for commit checks. Unsigned header flags/time are not currently used to grant authority, so their lack of signature coverage is a future signed-policy hazard, not a demonstrated current authorization bypass. [`signing/verifier.rs`](../kernel/crates/kernel_bpf/src/signing/verifier.rs:123).
+- Production unsigned loading is disabled except explicit test/development builds; malformed signed containers still fail. Child capabilities are intersections, not ambient privilege amplification. The signed loader currently receives load/read rights, not device-attach or actuation rights. This is fail-closed but leaves a production provisioning gap. [`credentials.rs`](../../../kernel/src/mcore/mtask/process/credentials.rs#L25), [`init`](../../../userspace/core/init/src/main.rs#L184), [`trust`](../../../kernel/src/bpf/trust.rs#L1).
+- C discards signer provenance after authentication; R retains authentication for commit checks. Unsigned header flags/time are not currently used to grant authority, so their lack of signature coverage is a future signed-policy hazard, not a demonstrated current authorization bypass. [`signing/verifier.rs`](../../../kernel/crates/kernel_bpf/src/signing/verifier.rs#L123).
 - The MCU library clears arming on e-stop and requires a new setpoint after release. The defect is not “every stop path is broken.” The FPGA and heartbeat-timeout contracts differ from that stronger rule.
-- Actual RP2040 `main` is intentionally fail-safe and inert: it does not run the simulated control loop, `VALIDATED_FPGA_ARTIFACT` is absent, and `fpga-runtime` deliberately fails compilation. That is an honest hardware qualification gate, not evidence of an operational rover. [`main.rs`](../firmware/shrike/rp2040/src/main.rs:1).
-- Local `apply_safe_drive` writes RP1 PWM even for link-owned channels. Remote containment depends on the stop protocol, timeout and physical gate; its return value does not confirm remote application. [`actuation.rs`](../kernel/src/actuation.rs:88).
+- Actual RP2040 `main` is intentionally fail-safe and inert: it does not run the simulated control loop, `VALIDATED_FPGA_ARTIFACT` is absent, and `fpga-runtime` deliberately fails compilation. That is an honest hardware qualification gate, not evidence of an operational rover. [`main.rs`](../../../firmware/shrike/rp2040/src/main.rs#L1).
+- Local `apply_safe_drive` writes RP1 PWM even for link-owned channels. Remote containment depends on the stop protocol, timeout and physical gate; its return value does not confirm remote application. [`actuation.rs`](../../../kernel/src/actuation.rs#L88).
 - Map leases, generation checks, monotonic child rights, nonwrapping installations, bounded quotas and safe frame ownership are genuine improvements. Deleting them to shorten the path would weaken the intended system.
 
 ## 12. Optimization roadmap
@@ -840,40 +840,40 @@ No whole-kernel formal verification, exhaustive unsafe-code audit, new Pi/MCU me
 
 | Concern | Primary code anchors |
 |---|---|
-| Program identity/ownership | [`ProgramEntry` and runtimes](../kernel/src/bpf/mod.rs:216), [`register_program`](../kernel/src/bpf/mod.rs:898), [`generational handles`](../kernel/src/bpf/handles.rs:5) |
-| Preparation/attachment | [`load_program_authorized`](../kernel/src/bpf/mod.rs:980), [`attach_program_for`](../kernel/src/bpf/mod.rs:1174), [`snapshot preparation`](../kernel/src/bpf/mod.rs:470), [`syscall attach`](../kernel/src/syscall/bpf.rs:389) |
-| Dispatch/lifetime | [`execute_program`](../kernel/src/bpf/mod.rs:1374), [`run_snapshot`](../kernel/src/bpf/mod.rs:1515), [`epoch read/publish`](../kernel/crates/kernel_bpf/src/concurrency/epoch_snapshot.rs:105), [`execution leases`](../kernel/src/bpf/mod.rs:292) |
-| Interpreter/verifier | [`interpreter entry`](../kernel/crates/kernel_bpf/src/execution/interpreter.rs:565), [`helper dispatch`](../kernel/crates/kernel_bpf/src/execution/interpreter.rs:264), [`verifier exploration`](../kernel/crates/kernel_bpf/src/verifier/core.rs:366), [`pruning`](../kernel/crates/kernel_bpf/src/verifier/pruner.rs:242), [`cost model`](../kernel/crates/kernel_bpf/src/verifier/cost.rs:1) |
-| Map/object construction | [`ELF map parsing`](../kernel/crates/kernel_bpf/src/loader/mod.rs:113), [`relocation`](../kernel/crates/kernel_bpf/src/loader/reloc.rs:234), [`map capture`](../kernel/src/bpf/mod.rs:615), [`map destruction`](../kernel/src/bpf/mod.rs:1939) |
-| Research implementation | [`R preparation/commit`](../target/physworldai-worktree/kernel/src/bpf/mod.rs:1583), [`R installation`](../target/physworldai-worktree/kernel/src/bpf/mod.rs:139), [`R timer order`](../target/physworldai-worktree/kernel/src/bpf/mod.rs:2319), [`R gate`](../target/physworldai-worktree/kernel/crates/kernel_bpf/src/concurrency/exclusive_slot.rs:43) |
-| Effects/freshness | [`signed motor adapter`](../kernel/src/actuation.rs:253), [`monitor decision`](../kernel/crates/kernel_bpf/src/actuation/mod.rs:610), [`pair transport`](../kernel/src/arch/aarch64/platform/rpi5/control_link.rs:289), [`watchdog`](../kernel/crates/shrike_link/src/watchdog.rs:75), [`FPGA gate`](../firmware/shrike/fpga/forgefpga/ffpga/src/shrike_safety_gate.v:1) |
-| Execution platform | [`CPU scratch`](../kernel/src/mcore/context.rs:101), [`run queues`](../kernel/src/mcore/mtask/scheduler/run_queue.rs:1), [`AArch64 timer`](../kernel/src/arch/aarch64/interrupts.rs:145), [`serial`](../kernel/src/serial.rs:33), [`profile`](../kernel/crates/kernel_bpf/src/profile/mod.rs:166) |
+| Program identity/ownership | [`ProgramEntry` and runtimes](../../../kernel/src/bpf/mod.rs#L216), [`register_program`](../../../kernel/src/bpf/mod.rs#L898), [`generational handles`](../../../kernel/src/bpf/handles.rs#L5) |
+| Preparation/attachment | [`load_program_authorized`](../../../kernel/src/bpf/mod.rs#L980), [`attach_program_for`](../../../kernel/src/bpf/mod.rs#L1174), [`snapshot preparation`](../../../kernel/src/bpf/mod.rs#L470), [`syscall attach`](../../../kernel/src/syscall/bpf.rs#L389) |
+| Dispatch/lifetime | [`execute_program`](../../../kernel/src/bpf/mod.rs#L1374), [`run_snapshot`](../../../kernel/src/bpf/mod.rs#L1515), [`epoch read/publish`](../../../kernel/crates/kernel_bpf/src/concurrency/epoch_snapshot.rs#L105), [`execution leases`](../../../kernel/src/bpf/mod.rs#L292) |
+| Interpreter/verifier | [`interpreter entry`](../../../kernel/crates/kernel_bpf/src/execution/interpreter.rs#L565), [`helper dispatch`](../../../kernel/crates/kernel_bpf/src/execution/interpreter.rs#L264), [`verifier exploration`](../../../kernel/crates/kernel_bpf/src/verifier/core.rs#L366), [`pruning`](../../../kernel/crates/kernel_bpf/src/verifier/pruner.rs#L242), [`cost model`](../../../kernel/crates/kernel_bpf/src/verifier/cost.rs#L1) |
+| Map/object construction | [`ELF map parsing`](../../../kernel/crates/kernel_bpf/src/loader/mod.rs#L113), [`relocation`](../../../kernel/crates/kernel_bpf/src/loader/reloc.rs#L234), [`map capture`](../../../kernel/src/bpf/mod.rs#L615), [`map destruction`](../../../kernel/src/bpf/mod.rs#L1939) |
+| Research implementation | [`R preparation/commit`](../../../target/physworldai-worktree/kernel/src/bpf/mod.rs#L1583), [`R installation`](../../../target/physworldai-worktree/kernel/src/bpf/mod.rs#L139), [`R timer order`](../../../target/physworldai-worktree/kernel/src/bpf/mod.rs#L2319), [`R gate`](../../../target/physworldai-worktree/kernel/crates/kernel_bpf/src/concurrency/exclusive_slot.rs#L43) |
+| Effects/freshness | [`signed motor adapter`](../../../kernel/src/actuation.rs#L253), [`monitor decision`](../../../kernel/crates/kernel_bpf/src/actuation/mod.rs#L610), [`pair transport`](../../../kernel/src/arch/aarch64/platform/rpi5/control_link.rs#L289), [`watchdog`](../../../kernel/crates/shrike_link/src/watchdog.rs#L75), [`FPGA gate`](../../../firmware/shrike/fpga/forgefpga/ffpga/src/shrike_safety_gate.v#L1) |
+| Execution platform | [`CPU scratch`](../../../kernel/src/mcore/context.rs#L101), [`run queues`](../../../kernel/src/mcore/mtask/scheduler/run_queue.rs#L1), [`AArch64 timer`](../../../kernel/src/arch/aarch64/interrupts.rs#L145), [`serial`](../../../kernel/src/serial.rs#L33), [`profile`](../../../kernel/crates/kernel_bpf/src/profile/mod.rs#L166) |
 
 [H-origin]: https://github.com/volnlabs/axiomos/blob/4754923/README.md
 [H-pivot]: https://github.com/volnlabs/axiomos/blob/39a0840/README.md
 [H-charter]: /home/utkarsh/Work/axiom-lab/roadmap/architecture-north-star.md
 [H-v05]: https://github.com/volnlabs/axiomos/blob/0567193e76283b82739b1348dcf8c727ccd9fc64/docs/design/active/v0.5-runtime-evolution.md#L302
-[H-v1-review]: ../docs/reviews/architecture/2026-09-06-v1-contract/README.md
+[H-v1-review]: ../../../docs/reviews/architecture/2026-09-06-v1-contract/README.md
 [H-pr35]: https://github.com/volnlabs/axiomos/pull/35
-[C-runtime]: ../kernel/src/bpf/mod.rs:216
-[C-epoch]: ../kernel/crates/kernel_bpf/src/concurrency/epoch_snapshot.rs:105
-[C-context]: ../kernel/src/mcore/context.rs:101
-[C-runqueues]: ../kernel/src/mcore/mtask/scheduler/run_queue.rs:1
-[C-jit-policy]: ../docs/decisions/0004-bpf-jit-policy.md
-[C-init]: ../kernel/src/lib.rs:60
-[C-sysbpf]: ../kernel/src/syscall/bpf.rs:389
-[C-usermem]: ../kernel/crates/kernel_usermem/src/lib.rs
-[C-memory]: ../docs/architecture/memory.md
-[C-verifier]: ../kernel/crates/kernel_bpf/src/verifier/core.rs:212
-[C-actuation]: ../kernel/src/actuation.rs:193
-[C-link]: ../kernel/src/arch/aarch64/platform/rpi5/control_link.rs:289
-[C-firmware]: ../firmware/shrike/rp2040/src/main.rs:1
-[C-audit]: ../kernel/crates/kernel_bpf/src/actuation/audit.rs:5
-[R-update]: ../target/physworldai-worktree/kernel/src/bpf/mod.rs:1583
-[R-gate]: ../target/physworldai-worktree/kernel/crates/kernel_bpf/src/concurrency/exclusive_slot.rs:43
-[P-paper]: pdf/physworldai2026/who-guards-the-update.pdf
-[E-cost]: ../target/cl4fmagents-v3/capture-r3/cost-logical-latency.csv
-[E-corrective]: ../target/cl4fmagents-v3/capture-r3-adaptation/corrective-stop.json
+[C-runtime]: ../../../kernel/src/bpf/mod.rs#L216
+[C-epoch]: ../../../kernel/crates/kernel_bpf/src/concurrency/epoch_snapshot.rs#L105
+[C-context]: ../../../kernel/src/mcore/context.rs#L101
+[C-runqueues]: ../../../kernel/src/mcore/mtask/scheduler/run_queue.rs#L1
+[C-jit-policy]: ../../../docs/decisions/0004-bpf-jit-policy.md
+[C-init]: ../../../kernel/src/lib.rs#L60
+[C-sysbpf]: ../../../kernel/src/syscall/bpf.rs#L389
+[C-usermem]: ../../../kernel/crates/kernel_usermem/src/lib.rs
+[C-memory]: ../../../docs/architecture/memory.md
+[C-verifier]: ../../../kernel/crates/kernel_bpf/src/verifier/core.rs#L212
+[C-actuation]: ../../../kernel/src/actuation.rs#L193
+[C-link]: ../../../kernel/src/arch/aarch64/platform/rpi5/control_link.rs#L289
+[C-firmware]: ../../../firmware/shrike/rp2040/src/main.rs#L1
+[C-audit]: ../../../kernel/crates/kernel_bpf/src/actuation/audit.rs#L5
+[R-update]: ../../../target/physworldai-worktree/kernel/src/bpf/mod.rs#L1583
+[R-gate]: ../../../target/physworldai-worktree/kernel/crates/kernel_bpf/src/concurrency/exclusive_slot.rs#L43
+[P-paper]: ../../papers/physworldai2026/who-guards-the-update.pdf
+[E-cost]: ../../../target/cl4fmagents-v3/capture-r3/cost-logical-latency.csv
+[E-corrective]: ../../../target/cl4fmagents-v3/capture-r3-adaptation/corrective-stop.json
 [E-verification]: architecture-review-evidence/paper-verification.log
 [E-source-check]: architecture-review-evidence/source-and-binary-check.json
 [E-provenance]: architecture-review-evidence/benchmark-provenance.log

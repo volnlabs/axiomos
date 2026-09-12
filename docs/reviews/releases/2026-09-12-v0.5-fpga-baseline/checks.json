@@ -1,0 +1,93 @@
+{
+  "recorded_at": "2026-09-12T05:49:40.415871+00:00",
+  "source_parent": "acd56b03c8ba04702878e63abac9a61419ae0df1",
+  "scope": "Documentation relocation and focused baseline verification; full release gate not run. Some checks use retained ignored local build/evidence files.",
+  "checks": [
+    {
+      "command": [
+        "python3",
+        "-B",
+        "docs/papers/cl4fmagents2026/verify.py"
+      ],
+      "cwd": ".",
+      "exit_code": 0,
+      "output": "PASS: 4 content pages + references; anonymous text/metadata; resolved build; exact retained intervals.\n"
+    },
+    {
+      "command": [
+        "python3",
+        "-B",
+        "scripts/verify/benchmark-provenance.py"
+      ],
+      "cwd": ".",
+      "exit_code": 0,
+      "output": "benchmark provenance check: PASS (1 attributable campaign(s), 1 provisional evidence set(s))\n"
+    },
+    {
+      "command": [
+        "bash",
+        "scripts/verify/fpga-safety-gate.sh"
+      ],
+      "cwd": ".",
+      "exit_code": 0,
+      "output": "PASS: shrike_safety_gate\nfirmware/shrike/fpga/tb_shrike_safety_gate.sv:51: $finish called at 1067000 (1ps)\nPASS: axiomos_r04_forgefpga_runtime_link\nfirmware/shrike/fpga/forgefpga/sim/tb_axiomos_r04_top.v:497: $finish called at 587872000 (1ps)\nNOTE: software simulation passed; ForgeFPGA synthesis/bitstream evidence is not produced by this gate.\n"
+    },
+    {
+      "command": [
+        "sha256sum",
+        "-c",
+        "SHA256SUMS"
+      ],
+      "cwd": "docs/papers/physworldai2026",
+      "exit_code": 0,
+      "output": "who-guards-the-update.pdf: OK\npaper-source.zip: OK\nOPENREVIEW_TEXT.txt: OK\nVERIFICATION.md: OK\nREADME.md: OK\n"
+    },
+    {
+      "command": [
+        "sha256sum",
+        "-c",
+        "MANIFEST.sha256"
+      ],
+      "cwd": "docs/papers/physworldai2026/paper-source",
+      "exit_code": 0,
+      "output": "Makefile: OK\nREADME.md: OK\nappendix.tex: OK\ncosts.tex: OK\nheadline-results.tex: OK\nhosted-cost-note.tex: OK\nlatency-details.tex: OK\nlatency-thresholds.tex: OK\nmain.tex: OK\nneurips_2026.sty: OK\nprotocol-figure.tex: OK\nreferences.bib: OK\nstop.tex: OK\nsweep.tex: OK\nwho-guards-the-update.pdf: OK\n"
+    },
+    {
+      "command": [
+        "python3",
+        "-B",
+        "scripts/verify/doc-links.py"
+      ],
+      "cwd": ".",
+      "exit_code": 1,
+      "output": "documentation link check: FAIL\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:744: missing local link target '/home/utkarsh/Work/axiom-lab/roadmap/release-roadmap.md'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:745: missing local link target '/home/utkarsh/Work/axiom-lab/roadmap/v1.0.0-vision.md'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:746: missing local link target '/home/utkarsh/Work/axiom-lab/roadmap/architecture-north-star.md'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:747: missing local link target '/home/utkarsh/Work/axiom-lab/roadmap/research-program.md'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:748: missing local link target '/home/utkarsh/Work/axiom-lab/roadmap/2026-06-10-runtime-evolution-brainstorm.md'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:749: missing local link target '/home/utkarsh/Work/axiom-lab/roadmap/critical-path.md'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:750: missing local link target '/home/utkarsh/Work/axiomOS/kernel/src/bpf/mod.rs:216'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:751: missing local link target '/home/utkarsh/Work/axiomOS/kernel/src/bpf/handles.rs:5'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:752: missing local link target '/home/utkarsh/Work/axiomOS/kernel/src/bpf/limits.rs'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:753: missing local link target '/home/utkarsh/Work/axiomOS/kernel/crates/kernel_bpf/src/profile/mod.rs:239'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:754: missing local link target '/home/utkarsh/Work/axiomOS/kernel/crates/kernel_bpf/src/verifier/cost.rs'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:755: missing local link target '/home/utkarsh/Work/axiomOS/kernel/crates/kernel_bpf/src/verifier/admission.rs'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:756: missing local link target '/home/utkarsh/Work/axiomOS/kernel/crates/kernel_bpf/src/concurrency/epoch_snapshot.rs:109'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:757: missing local link target '/home/utkarsh/Work/axiomOS/kernel/src/mcore/mtask/process/credentials.rs:25'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:758: missing local link target '/home/utkarsh/Work/axiomOS/kernel/src/syscall/bpf.rs:389'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:759: missing local link target '/home/utkarsh/Work/axiomOS/kernel/src/actuation.rs:17'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:760: missing local link target '/home/utkarsh/Work/axiomOS/kernel/src/bpf/helpers.rs:223'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:761: missing local link target '/home/utkarsh/Work/axiomOS/kernel/crates/kernel_bpf/src/signing/authentication.rs'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:762: missing local link target '/home/utkarsh/Work/axiomOS/kernel/crates/kernel_bpf/src/signing/signature.rs'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:763: missing local link target '/home/utkarsh/Work/axiomOS/kernel/crates/kernel_bpf/src/actuation/audit.rs:52'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:764: missing local link target '/home/utkarsh/Work/axiomOS/kernel/src/arch/aarch64/exception_vectors.S:41'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:765: missing local link target '/home/utkarsh/Work/axiomOS/kernel/src/arch/aarch64/interrupts.rs:200'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:766: missing local link target '/home/utkarsh/Work/axiomOS/kernel/src/arch/aarch64/platform/rpi5/pwm.rs:249'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:767: missing local link target '/home/utkarsh/Work/axiomOS/kernel/src/arch/aarch64/platform/rpi5/control_link.rs:137'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:768: missing local link target '/home/utkarsh/Work/axiomOS/kernel/crates/shrike_link/src/watchdog.rs:75'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:769: missing local link target '/home/utkarsh/Work/axiomOS/firmware/shrike/control/src/control.rs:99'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:770: missing local link target '/home/utkarsh/Work/axiomOS/firmware/shrike/rp2040/src/main.rs:8'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:771: missing local link target '/home/utkarsh/Work/axiomOS/firmware/shrike/control/src/fpga.rs:131'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:772: missing local link target '/home/utkarsh/Work/axiomOS/firmware/shrike/fpga/forgefpga/ffpga/src/top.v'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:773: missing local link target '/home/utkarsh/Work/axiomOS/firmware/shrike/fpga/forgefpga/ffpga/src/shrike_safety_gate.v'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:774: missing local link target '/home/utkarsh/Work/axiomOS/kernel/src/bench.rs:282'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:775: missing local link target '/home/utkarsh/Work/axiomOS/scripts/benchmark/analyze-v03.py:530'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:776: missing local link target '/home/utkarsh/Work/axiomOS/scripts/benchmark/analyze-v04.py:126'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:777: missing local link target '/home/utkarsh/Work/axiomOS/scripts/hil/v03d-reduce.py:96'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:778: missing local link target '/home/utkarsh/Work/axiomOS/userspace/tools/rk_cli/src/commands/deploy.rs:136'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:779: missing local link target '/home/utkarsh/Work/axiomOS/kernel/build.rs:14'\n  docs/reviews/architecture/2026-09-06-v1-contract/README.md:780: missing local link target '/home/utkarsh/Work/axiomOS/scripts/verify/artifact-provenance.py'\n  docs/reviews/architecture/architecture-convergence-report.md:854: missing local link target '/home/utkarsh/Work/axiom-lab/roadmap/architecture-north-star.md'\n"
+    },
+    {
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "cwd": ".",
+      "exit_code": 0,
+      "output": ""
+    }
+  ],
+  "file_preservation": {
+    "files": 94,
+    "intended_changed_files": [
+      "docs/operations/wiring/create_uart_sheet.py",
+      "docs/operations/wiring/draw_estop_wiring.py",
+      "docs/operations/wiring/draw_pwm_wiring.py",
+      "docs/reviews/architecture/architecture-convergence-report.md",
+      "docs/papers/cl4fmagents2026/verify.py"
+    ],
+    "all_other_files_byte_identical": true
+  },
+  "wiring_generators": "3 destination expressions resolve to relocated PDF files; PDFs not regenerated",
+  "documentation_links": {
+    "before_failures": 91,
+    "after_failures": 38,
+    "new_failures": 0
+  }
+}

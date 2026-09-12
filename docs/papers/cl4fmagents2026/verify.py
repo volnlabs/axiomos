@@ -5,7 +5,7 @@ import re
 import subprocess
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[1]
+ROOT = HERE.parents[2]
 
 
 def output(*args):
