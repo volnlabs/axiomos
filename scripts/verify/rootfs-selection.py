@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -57,6 +58,9 @@ def main():
         assert build(b, target) == b.read_bytes(), "Cargo reused rootfs A after selecting B"
         fallback = build(None, target)
         assert fallback != b.read_bytes(), "Cargo reused external rootfs after unsetting selection"
+        # Cross mke2fs's one-second timestamp boundary so an unpinned clock
+        # cannot accidentally produce matching images on a fast CI runner.
+        time.sleep(1.1)
         assert fallback == build(None, fixture / "target-clean"), "fallback clean rebuild differs"
         print("PASS: rootfs A -> B -> unset and clean fallback rebuild")
 
