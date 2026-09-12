@@ -32,12 +32,16 @@ fn main() {
             // current time into the superblock. Pin all three. The hash seed
             // UUID must be non-zero — mke2fs treats the all-zero UUID as unset
             // and falls back to a random seed.
+            // Ubuntu 24.04's e2fsprogs 1.47.0 needs E2FSPROGS_FAKE_TIME;
+            // SOURCE_DATE_EPOCH is supported only by newer versions. Use the
+            // same non-zero epoch for both: zero means wall clock in 1.47.0.
             const DISK_UUID: &str = "a5106f0e-9d4f-4b7a-8c21-3f6d0e5b1c94";
             let dest = format!("{}/disk.img", out_dir);
             // mke2fs on an existing file can behave differently; start clean.
             let _ = std::fs::remove_file(&dest);
             let status = std::process::Command::new("mke2fs")
-                .env("SOURCE_DATE_EPOCH", "0")
+                .env("SOURCE_DATE_EPOCH", "1")
+                .env("E2FSPROGS_FAKE_TIME", "1")
                 .arg("-q")
                 .arg("-t")
                 .arg("ext2")
