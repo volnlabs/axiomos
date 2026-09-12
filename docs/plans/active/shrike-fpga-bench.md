@@ -60,7 +60,8 @@ they are not operational FPGA acceptance. No unchanged capture is repeated.
   upstream, and create the ignored project-local worktree without changing main.
 - [x] Correct stale progress/firmware documentation and broken documentation
   references (52 in the fresh worktree; 38 in the operator checkout). Do not weaken the link checker or edit v0.5 designs.
-- [ ] Retain focused checks and a full candidate gate before physical deployment.
+- [x] Retain focused checks and a full candidate gate before physical deployment.
+  The disabled software candidate passes; changed deployment images require a new gate.
 
 ### Task 2: Board and vendor readiness
 
@@ -563,3 +564,69 @@ The source `top.v` SHA-256 is
 No flashing, runtime enable or physical acceptance occurred. Clock measurement
 at the actual board voltage, continuity, recovery, post-route hold/pulse evidence
 and controlled hardware bring-up remain separate open gates.
+
+### M1 host prerequisites — 2026-09-12
+
+The software continuation is frozen at `05b078dc02ebfdcd381f3c144ffda9c00838c046`.
+`5fba4fe` carries the qualified naming fix and three atomic-zero/readback
+regressions; `c6e05b5` replaces separate wheel writes with one ordered paired
+sink and bounded UART ownership; `05b078d` adds the portable evidence verifier,
+its rejection tests and audit integration. The main CI fix `135e53b` is already
+an ancestor. No runtime branch, hardware pins, FPGA source or retained build
+archive was changed by this continuation.
+
+Each fresh pair reaches `FpgaLifecycle` once with its accepted Pi sequence and
+separate post-transaction acknowledgement. Zero-before-reverse survives a
+single RX batch. A fault or stop inhibits the sink, resets local transport and
+returns borrowed peripherals for explicit requalification. It never invents a
+stop sequence or automatically rearms. Reverse telemetry owns at most one active
+and one pending frame, advances only on accepted bytes, and reports software
+queue losses. UART acceptance is not delivery; hardware FIFO loss on reset is
+unknown. The local drain model requires 200 ms of continuous quiescence and
+cannot establish a session or authorize motion.
+
+Focused checks passed: 108 Shrike host tests, host Clippy with `-D warnings`,
+14 evidence-verifier tests, 15 observer tests, both RTL simulations, nine flash
+contract tests, one board-profile test, and correctly linked RP2040 debug/release
+builds plus Clippy. The runtime feature still fails compilation deliberately;
+flash-contract tests prove missing recovery rejects before copying. An initial
+root-directory target build omitted the firmware linker configuration and is
+excluded as linked firmware evidence; the correct-directory builds supersede it.
+The initial strict Clippy warning was an existing boolean assertion and was
+corrected before freezing the candidate. Retained focused logs, command record,
+artifact hashes and these exclusions are under ignored
+`target/audit-verification/fpga-m1-05b078d-focused/`.
+
+The portable verifier independently reproduces all six required setup corners
+and validates all 17,984 manifest entries. Negative tests reject corrupted or
+unbound files, duplicate identities/settings/results, malformed or contradictory
+timing records, substituted corners, incomplete pin tokens and false completion
+records. Review findings were fixed and scoped re-review passed. The retained
+archive still reports physical qualification pending, runtime disabled and
+programming false.
+
+The recovery UF2/provenance, actual bench connection, continuity, configuration
+handoff and remaining physical timing inputs are still missing. The concrete
+`R04Platform`, physical reset/drain qualification, functional/fault campaign,
+one-hour pilot and 24-hour soak remain open. M1 and v0.5 are not complete;
+broad M2–M7 runtime implementation remains behind the hardware-first gate.
+
+The full audit on the clean frozen commit passed **149 checks, zero failures,
+two gate skips** in 28 minutes 7 seconds (17:23:17–17:51:24 UTC). Run:
+
+```sh
+scripts/verify/engineering-audit.sh --full \
+  --output target/audit-verification/fpga-m1-05b078d-full
+```
+
+The retained manifest, exact commands, logs, environment, lockfile and production
+artifact hashes are in that directory. QEMU signed/release/SMP1, release-profile
+tests, fresh RISC-V Clippy, Lean, concurrency models and Miri pass. The two gate
+skips are optional QEMU fault injection (`RUN_AUDIT_FAULT` unset) and the explicitly
+deferred SMP4 scheduler check. Test-level ignored cases remain visible in the
+raw logs. This supersedes the earlier failing software gate for this candidate;
+it does not supersede any physical gate. Repeat the full gate after integrating
+the concrete adapter and before deploying its changed image.
+
+Retained `summary.json` SHA-256: `5c2c821504b1f6145a31013bba7bc2bca1e96f37dad8914dda12798f437bd86b`.
+Retained `manifest.txt` SHA-256: `ca3012b5be04e2b7844a7af731f770d612cf89e9a3b453cced86fb30ba078ee8`.
