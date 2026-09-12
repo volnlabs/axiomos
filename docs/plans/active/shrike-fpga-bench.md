@@ -19,8 +19,8 @@ they are not operational FPGA acceptance. No unchanged capture is repeated.
 
 - [x] Fast-forward the requested branch from `volngithub/main`, establish its
   upstream, and create the ignored project-local worktree without changing main.
-- [ ] Correct stale progress/firmware documentation and the 38 existing broken
-  documentation references. Do not weaken the link checker or edit v0.5 designs.
+- [x] Correct stale progress/firmware documentation and broken documentation
+  references (52 in the fresh worktree; 38 in the operator checkout). Do not weaken the link checker or edit v0.5 designs.
 - [ ] Retain focused checks and a full candidate gate before physical deployment.
 
 ### Task 2: Board and vendor readiness
@@ -57,7 +57,7 @@ they are not operational FPGA acceptance. No unchanged capture is repeated.
 
 ### Task 4: Bounded host observer
 
-- [ ] Add `scripts/hil/shrike-bench.py` with capture/replay/self-test modes,
+- [x] Add `scripts/hil/shrike-bench.py` with capture/replay/self-test modes,
   reusing installed sigrok, `zstd -1` and existing validation rules. No web UI,
   database, new kernel recorder or alternative acceptance framework.
 - Consume raw one-byte digital samples and UART records incrementally. Preserve
@@ -123,3 +123,125 @@ reports 38 failures. No full-gate or new physical pass is claimed.
 Record each task's commands, results and remaining external inputs here as work
 progresses. Keep raw local evidence outside tracked source and never attribute
 earlier diagnostic images to the new candidate.
+
+## Execution record — 2026-09-12
+
+The feature branch was fast-forwarded to the baseline and pushed to
+`volngithub` before creating this plan; implementation is isolated in the
+requested worktree. The existing 10,000-event reflex analysis is carried forward.
+No boards are currently enumerated under `/dev/serial/by-id` on this host.
+
+Documentation links now pass in a fresh worktree: 116 Markdown files and 335
+local links. Missing ignored research artifacts and sibling planning sources
+are explicitly marked unpublished, with original paths retained. No acceptance
+threshold or link-checker exception was introduced. The historical baseline's
+38-failure record is unchanged; the fresh worktree exposed 14 further references
+to operator-only evidence.
+
+Vendor readiness remains blocked on concrete inputs:
+
+- [Renesas Go Configure Software Hub](https://www.renesas.com/en/software-tool/go-configure-software-hub)
+  lists Ubuntu 24.04 support and v6.55.001 for Ubuntu (64-bit), 247.58 MB,
+  published August 14, 2026. Its
+  [official installer link](https://www.renesas.com/en/document/sws/go-configure-software-hub-v655001-ubuntu-64-bit)
+  requires MyRenesas login; the unauthenticated request redirects to login and
+  then receives a Cloudflare challenge. No browser session is available to this
+  agent. The installer has not been downloaded or installed. Supply the official
+  downloaded installer locally to resume; never supply account credentials in
+  the repository. The Arch host is not the planned supported Ubuntu environment;
+  Docker access is denied and passwordless sudo is unavailable. User-accessible
+  QEMU/KVM is present, so a supported Ubuntu guest remains a possible setup once
+  the installer is available.
+- [Vicharak release v1.0.0](https://github.com/vicharak-in/shrike/releases/tag/v1.0.0)
+  remains the only published release on recheck. Its Shrike-Lite MicroPython
+  UF2 is 676,864 bytes, but the release does not bind it to V1.0/R0.4 recovery.
+  `factory_uf2.ready=false` remains correct. Board-compatible provenance and an
+  observed restore are required before custom flashing.
+- `forgefpga/io-plan.csv` still leaves physical e-stop, final PWM and direction
+  pads provisional/unassigned. The I/O planner, actual board continuity review,
+  configuration/READY bounds and generated fit/timing reports are outstanding.
+  `R04Platform` cannot be completed using guessed values. `fpga-runtime` stays
+  disabled. These dependencies block physical chain, pilot and soak execution.
+
+The full audit is retained under the ignored
+`artifacts/runs/1789194472-check-all/`, with console output in
+`.superpowers/sdd/shrike-fpga-bench/full-gate.log`. It started before the RP2040
+workspace fix and is not a clean final-candidate pass. Its result is recorded
+below; a started gate is not a pass.
+
+### Configuration reference retained
+
+[Renesas Configuration Guide](https://www.renesas.com/en/document/mah/forgefpga-configuration-guide),
+R19US0005EU0250 Rev.2.5 (2026-01-28), section 8.1/page 28 and Figure 26 were
+read and visually checked. The PDF is retained beside the local gate log;
+SHA-256 `abdf240a09ecdbf7e9019a05c71d10a018e1c31be6525d587a9e903002ef6651`.
+It specifies `FPGA_bitstream_MCU.bin`, a 3 ms initial delay, a 3 microsecond
+CS pulse, CONFIG completion and SPI high-impedance handoff within 10 microseconds.
+These are reference requirements to reconcile with the R0.4 circuit and capture,
+not measured board timings. Do not use the external-flash bitstream interchangeably.
+
+The text names CONFIG as SPI_SO initially and SPI_SI in a later step; Figure 26
+shows completion on MISO. Resolve that inconsistency against the datasheet and
+board nets. Configuration completion is a pin level, distinct from our runtime
+`0x80` READY status and separate `A5 00` accepted-sequence read. Qualification
+must cover the high-impedance interval and runtime pin reacquisition; a successful
+host lifecycle mock does not establish either transition electrically.
+
+### Software checks and observer
+
+`0ff336a` adds an explicit standalone Cargo workspace to the RP2040 package.
+Without it, Cargo climbs out of the nested worktree and rejects the package as
+an undeclared member of the operator's main checkout. The existing flash-contract
+regression reproduced the failure; after the fix all nine tests pass, including
+the disabled release UF2 build. Debug and release RP2040 Clippy checks with
+`-D clippy::all` also pass. Lockfiles and runtime guards are unchanged.
+
+The observer is confined to `scripts/hil/shrike-bench.py` and
+`tests/scripts/test_shrike_bench.py`. Run its hardware-free checks with:
+
+```sh
+python3 -B scripts/hil/shrike-bench.py self-test
+```
+
+The recorder retains all eight sampled bits with bounded 4 MiB compression
+blocks, ordered chunk and UART/analyzer integrity records, and cumulative
+campaign accounting. Use one dedicated campaign directory for pilot, soak and
+failed attempts; unrelated writers must not bypass its lock. Its independent
+oracle is a frozen repeated workload advanced by physical stimulus strobes.
+The configuration schema and synthetic example are in the script and test;
+that example is not a board wiring profile. Freeze real pins, timing uncertainty,
+workload and sigrok/library/patch hashes before using capture mode.
+
+The software check cannot replace the separate SPI diagnostic captures or
+V04-A/B/C populations. It neither generates Pi commands nor decodes sampled
+UART bits. Captured serial V04 records are checked incrementally, and physical
+acceptance remains false in every software/synthetic report. The real pilot
+must still prove continuous USB capture and <=1.5 GB/hour including all logs.
+
+Independent review found a last-cycle duty-validation gap, analyzer-log clipping
+before error scanning, missing UART chunk continuity and a malformed completion
+value accepted by truthiness. These findings and a further overlong pulse ending at a strobe are fixed in
+`0f7d79e`; the reviewer independently reran the counterexamples and healthy
+boundary sweep. All 15 self-test groups pass. The latest parent run processed
+24,000,000 synthetic samples in 0.233 seconds combined (98.5 MiB/s), with
+45,040 KiB peak RSS. This regular trace is a software check, not a real storage
+forecast. Physical capture still requires the board and pilot qualifications.
+
+### Audit checkpoint
+
+At the handoff checkpoint, the initial full audit has 139 completed PASS stages,
+four FAIL stages and two explicit SKIPs; `miri-bpf-cloud` is still running and
+tracked-lockfile finalization follows it. The audit continues writing its own
+results in `artifacts/runs/1789194472-check-all/`. It is not a passing full gate.
+The four recorded failures are product naming, flash contract, and RP2040
+debug/release Clippy. The last three pass on the focused reruns after `0ff336a`;
+those reruns do not rewrite the failed original audit. Historical-name lint
+failures remain in moved architecture reviews, original source paths and the
+UART-sheet generator. Do not rename evidence identities or relax the gate to
+claim readiness. A clean final-candidate full pass remains required before
+physical deployment.
+
+Next dependent action: obtain the official Ubuntu installer locally, establish
+board-compatible recovery, then review the actual FPGA pins and configuration
+handoff before completing the concrete adapter. v0.5 implementation is outside
+this branch; motors, drivers and motor power remain disconnected.
