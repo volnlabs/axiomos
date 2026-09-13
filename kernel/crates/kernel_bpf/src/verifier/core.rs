@@ -515,15 +515,15 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
             return self.verify_jump(insn, state, idx);
         }
 
-        // Memory instructions
-        if insn.is_memory() {
-            self.verify_memory(insn, state, idx)?;
+        // Wide loads also match is_memory(); validate them before generic memory instructions.
+        if insn.is_wide() {
+            self.verify_wide_load(insn, state, idx)?;
             return Ok(InsnResult::Continue);
         }
 
-        // Wide instruction (64-bit immediate load)
-        if insn.is_wide() {
-            self.verify_wide_load(insn, state, idx)?;
+        // Memory instructions
+        if insn.is_memory() {
+            self.verify_memory(insn, state, idx)?;
             return Ok(InsnResult::Continue);
         }
 
@@ -1579,6 +1579,60 @@ mod tests {
 
         let result = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn verify_wide_load_rejects_frame_pointer_write() {
+        let wide = crate::bytecode::insn::WideInsn::ld_dw_imm(10, 0x1234_5678_9abc_def0);
+        let insns = [
+            BpfInsn::mov64_imm(0, 0),
+            wide.insn,
+            wide.next,
+            BpfInsn::exit(),
+        ];
+        assert!(matches!(
+            Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns),
+            Err(VerifyError::WriteToReadOnly { insn_idx: 1 })
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn verify_wide_load_initializes_destination() {
+        use crate::execution::{BpfContext, BpfExecutor, Interpreter};
+
+        let wide = crate::bytecode::insn::WideInsn::ld_dw_imm(0, 0x1234_5678_9abc_def0);
+        let insns = [wide.insn, wide.next, BpfInsn::exit()];
+        let program = Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns)
+            .expect("wide load initializes R0");
+        assert_eq!(
+            Interpreter::<ActiveProfile>::new().execute(&program, &BpfContext::empty()),
+            Ok(0x1234_5678_9abc_def0)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn verify_wide_load_fuzz_crash_regression() {
+        // Original 263-byte input from CI run 34745506370, crash-46a5f5f87620bfea5035f81c023caf18583b5f30.
+        // Match the fuzz harness: ignore an incomplete trailing instruction.
+        let insns: Vec<_> = include_bytes!("../../tests/fixtures/wide_load_r10.bin")
+            .chunks_exact(BpfInsn::SIZE)
+            .map(|bytes| {
+                BpfInsn::new(
+                    bytes[0],
+                    bytes[1] & 0xf,
+                    bytes[1] >> 4,
+                    i16::from_le_bytes(bytes[2..4].try_into().unwrap()),
+                    i32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+                )
+            })
+            .collect();
+        assert!(matches!(
+            Verifier::<ActiveProfile>::verify(BpfProgType::SocketFilter, &insns),
+            Err(VerifyError::WriteToReadOnly { insn_idx: 7 })
+        ));
     }
 
     #[test]
