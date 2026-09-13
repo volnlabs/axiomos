@@ -16,7 +16,7 @@ and the final timing-closure record for the current status.
 | Nominal 20 ns and all five 18 ns setup corners | Complete; worst setup margin +0.300 ns |
 | Project/I/O-planner/post-route pin assignments | All 17 match; electrical continuity remains open |
 | Post-route hold/pulse, asynchronous interfaces, actual oscillator | Open; setup success does not close these requirements |
-| Factory recovery UF2 and observed restoration | Open; `factory_uf2.ready=false` and flash guard retained |
+| Factory recovery UF2 and observed restoration | Same-image ROM restore/readback passed; cold BOOT-button entry open, `factory_uf2.ready=false` |
 | Paired sink, reverse TX ownership and local drain model | Host implementation and focused regressions pass; no hardware acceptance |
 | Concrete configuration/runtime adapter and physical reset/drain | Open; `fpga-runtime` remains disabled |
 | Functional/fault campaign, one-hour pilot, 24-hour soak | Open; no new physical acceptance |
@@ -686,3 +686,37 @@ GitHub CI completed successfully for FPGA `9897e2c`
 runtime `ba59cf6`
 ([34711022161](https://github.com/volnlabs/axiomos/actions/runs/34711022161)),
 including their previously pending cloud BPF Miri jobs.
+
+### ROM restoration and complete flash readback — 2026-09-13
+
+The operator confirmed PCB markings V1.0/R0.4. Before restoration, the host
+unmounted the MicroPython mass-storage volume and retained a read-only 4 MiB
+flash dump. Record counts, offsets, lengths and device/host SHA-256 agreed;
+a second independent read produced the same hash. The vendor UF2 payload
+matched the installed firmware, and the unused padding in its final erase
+sector was already erased.
+
+`machine.bootloader()` entered RP2040 ROM USB loading on the same physical USB
+path. The ROM enumerated as `2e8a:0003`, reported UF2 Bootloader v3.0 and
+`Board-ID: RPI-RP2`. The initiating `mpremote` command returned an error while
+closing the vanished serial device; ROM enumeration established the transition,
+so the command was not retried. Copying the hash-checked vendor UF2 and syncing
+both succeeded. MicroPython returned with the same USB serial and firmware
+identity. After the operator restored the temporary serial ACL, the full
+4,194,304-byte readback matched the original dump, SHA-256
+`eb7f2a9b0d3cc79906a8ec19a2c9d93bdf923c6d5dae397e758a91bd0e6331d7`.
+The filesystem remained empty.
+
+This is a physical PASS for same-image restoration through software-entered
+ROM loading and complete flash preservation on this board. Cold BOOT-button
+entry remains untested; it must establish recovery without running MicroPython
+before the existing custom-flash gate opens. The verified vendor UF2 and its
+provenance are now in the existing recovery cache, with `factory_uf2.ready=false`.
+No custom runtime or FPGA image was deployed. This does not qualify electrical
+connections, configuration/READY timing, FPGA outputs or the control chain.
+
+Raw dump, capture script, exact commands, USB observations, pre/post hashes and
+verdict are retained under ignored
+`.superpowers/sdd/shrike-fpga-bench/recovery-20260913T012539Z/`, with
+`SHA256SUMS`. The next operator step is a cold USB connection while holding
+BOOT, followed by inspection of ROM enumeration on this board.

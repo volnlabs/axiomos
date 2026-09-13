@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Host checks for the R0.4 W25Q32 contract."""
 
+import shutil
 import struct
 import subprocess
 import tempfile
@@ -37,8 +38,9 @@ class FlashContractTests(unittest.TestCase):
         *,
         allow_missing_factory: bool = True,
         converter_version: str | None = None,
+        root: Path = ROOT,
     ) -> subprocess.CompletedProcess[str]:
-        command = ["python3", str(CHECK), "--root", str(ROOT)]
+        command = ["python3", str(CHECK), "--root", str(root)]
         if allow_missing_factory:
             command.append("--allow-missing-factory")
         if uf2:
@@ -62,6 +64,32 @@ class FlashContractTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("NOT READY", result.stderr)
         self.assertIn("board-compatible factory UF2", result.stderr)
+
+    def test_ready_recovery_requires_the_exact_cached_image(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            relative_cache = Path("firmware/shrike/recovery/vicharak-763d0a7")
+            cache = root / relative_cache
+            shutil.copytree(ROOT / relative_cache, cache)
+            layout = root / "firmware/shrike/rp2040/memory.x"
+            layout.parent.mkdir(parents=True)
+            shutil.copyfile(ROOT / "firmware/shrike/rp2040/memory.x", layout)
+            manifest = cache / "SOURCE.toml"
+            manifest.write_text(manifest.read_text().replace("ready = false", "ready = true"))
+            result = self.check(root=root, allow_missing_factory=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            image = cache / "shrike-lite-micropython-v1.0.0.uf2"
+            original = image.read_bytes()
+            image.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+            result = self.check(root=root, allow_missing_factory=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("factory UF2 hash mismatch", result.stderr)
+
+            image.unlink()
+            result = self.check(root=root, allow_missing_factory=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(image.name, result.stderr)
 
     def test_rejects_a_different_converter_version(self) -> None:
         result = self.check(converter_version="2.1.0")
