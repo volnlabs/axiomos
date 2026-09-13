@@ -31,6 +31,21 @@ def uf2_block(address: int) -> bytes:
     ) + bytes(476) + struct.pack("<I", 0x0AB16F30)
 
 
+def recovery_fixture(root: Path, *, ready: bool) -> Path:
+    relative_cache = Path("firmware/shrike/recovery/vicharak-763d0a7")
+    cache = root / relative_cache
+    shutil.copytree(ROOT / relative_cache, cache)
+    firmware = root / "firmware/shrike/rp2040"
+    firmware.mkdir(parents=True)
+    for name in ("memory.x", "verify_flash_contract.py", "flash-uf2.sh"):
+        shutil.copy2(ROOT / "firmware/shrike/rp2040" / name, firmware / name)
+    manifest = cache / "SOURCE.toml"
+    manifest.write_text(manifest.read_text().replace(
+        f"ready = {str(not ready).lower()}", f"ready = {str(ready).lower()}"
+    ))
+    return cache
+
+
 class FlashContractTests(unittest.TestCase):
     def check(
         self,
@@ -60,7 +75,10 @@ class FlashContractTests(unittest.TestCase):
         self.assertIn("cargo build --locked --release", command)
 
     def test_recovery_is_not_ready_without_a_board_compatible_factory_uf2(self) -> None:
-        result = self.check(allow_missing_factory=False)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            recovery_fixture(root, ready=False)
+            result = self.check(root=root, allow_missing_factory=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("NOT READY", result.stderr)
         self.assertIn("board-compatible factory UF2", result.stderr)
@@ -68,14 +86,7 @@ class FlashContractTests(unittest.TestCase):
     def test_ready_recovery_requires_the_exact_cached_image(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            relative_cache = Path("firmware/shrike/recovery/vicharak-763d0a7")
-            cache = root / relative_cache
-            shutil.copytree(ROOT / relative_cache, cache)
-            layout = root / "firmware/shrike/rp2040/memory.x"
-            layout.parent.mkdir(parents=True)
-            shutil.copyfile(ROOT / "firmware/shrike/rp2040/memory.x", layout)
-            manifest = cache / "SOURCE.toml"
-            manifest.write_text(manifest.read_text().replace("ready = false", "ready = true"))
+            cache = recovery_fixture(root, ready=True)
             result = self.check(root=root, allow_missing_factory=False)
             self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -98,6 +109,8 @@ class FlashContractTests(unittest.TestCase):
 
     def test_flash_script_cannot_copy_a_custom_uf2_without_factory_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "fixture"
+            recovery_fixture(root, ready=False)
             image = Path(directory) / "custom.uf2"
             mount = Path(directory) / "RPI-RP2"
             mount.mkdir()
@@ -106,7 +119,7 @@ class FlashContractTests(unittest.TestCase):
                 subprocess.check_output(["sha256sum", str(image)], text=True)
             )
             result = subprocess.run(
-                [str(FLASH), str(image), str(mount)],
+                [str(root / FLASH.relative_to(ROOT)), str(image), str(mount)],
                 text=True,
                 capture_output=True,
                 check=False,
@@ -139,18 +152,19 @@ class FlashContractTests(unittest.TestCase):
         subprocess.run([str(BUILD)], cwd=ROOT, check=True)
         image = Path("firmware/shrike/rp2040/target/thumbv6m-none-eabi/release/shrike_rp2040.uf2")
         with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "fixture"
+            recovery_fixture(root, ready=True)
             mount = Path(directory) / "RPI-RP2"
             mount.mkdir()
             result = subprocess.run(
-                [str(FLASH), str(image), str(mount)],
+                [str(root / FLASH.relative_to(ROOT)), str(image), str(mount)],
                 cwd=ROOT,
                 text=True,
                 capture_output=True,
                 check=False,
             )
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("NOT READY", result.stderr)
-            self.assertFalse((mount / image.name).exists())
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((mount / image.name).read_bytes(), (ROOT / image).read_bytes())
 
     def test_rejects_a_uf2_block_in_the_reserved_fpga_region(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

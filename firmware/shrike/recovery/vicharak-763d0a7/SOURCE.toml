@@ -5,8 +5,11 @@ board = "Shrike-lite V1.0/R0.4"
 
 # The pinned source contains these vendor hardware-test payloads. The separate
 # v1.0.0 UF2 below was matched to the installed firmware on an operator-confirmed
-# V1.0/R0.4 and restored through ROM USB loading on 2026-09-13. Cold BOOT-button
-# entry still needs observation before custom flashing is permitted.
+# V1.0/R0.4 and restored through ROM USB loading on 2026-09-13. Hold BOOT and
+# press/release RST with USB connected: this firmware-independent entry, vendor
+# restore and complete flash readback passed on the board identified below.
+# Cold BOOT-held USB reconnection failed; its cause remains unknown. Recovery
+# readiness does not qualify the FPGA adapter, electrical connections or timing.
 [files]
 "main.py" = "ce408fb16ee49d321131d28a4fc21ec9e28d4ea207c22e18ae0496d29f189fea"
 "blink_all.bin" = "cd40b215efa40f272fe788202417d7f312a4e8f772fb06c2f96beafaf4fb65fd"
@@ -20,15 +23,16 @@ board = "Shrike-lite V1.0/R0.4"
 "blink_all.bin" = "test/bitstreams/v1_4/blink_all.bin"
 
 [factory_uf2]
-ready = false
+ready = true
 file = "shrike-lite-micropython-v1.0.0.uf2"
 sha256 = "fe776218fed072c44055a9b5cc2dd29229ce169f59b2e0d89eeec29f72b42648"
 board = "Shrike-lite V1.0/R0.4"
 source = "https://github.com/vicharak-in/shrike/releases/download/v1.0.0/shrike-lite-micropython.uf2"
 observed_usb_serial = "de65143857942625"
 observed_restore_date = "2026-09-13"
-observed_restore_entry = "MicroPython machine.bootloader() -> RP2040 ROM USB UF2"
+observed_restore_entry = "Hold BOOT; press/release RST with USB connected -> RP2040 ROM USB UF2"
 observed_flash_bytes = 4194304
 observed_flash_sha256_before_and_after = "eb7f2a9b0d3cc79906a8ec19a2c9d93bdf923c6d5dae397e758a91bd0e6331d7"
-physical_boot_entry_verified = false
+physical_boot_entry_verified = true
+cold_boot_entry_verified = false
 evidence = ".superpowers/sdd/shrike-fpga-bench/recovery-20260913T012539Z/"

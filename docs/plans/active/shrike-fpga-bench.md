@@ -16,7 +16,7 @@ and the final timing-closure record for the current status.
 | Nominal 20 ns and all five 18 ns setup corners | Complete; worst setup margin +0.300 ns |
 | Project/I/O-planner/post-route pin assignments | All 17 match; electrical continuity remains open |
 | Post-route hold/pulse, asynchronous interfaces, actual oscillator | Open; setup success does not close these requirements |
-| Factory recovery UF2 and observed restoration | Same-image ROM restore/readback passed; cold BOOT-button entry open, `factory_uf2.ready=false` |
+| Factory recovery UF2 and observed restoration | BOOT + RST entry, vendor restore and full flash readback passed on the identified board; `factory_uf2.ready=true`. Cold-plug entry failed. |
 | Paired sink, reverse TX ownership and local drain model | Host implementation and focused regressions pass; no hardware acceptance |
 | Concrete configuration/runtime adapter and physical reset/drain | Open; `fpga-runtime` remains disabled |
 | Functional/fault campaign, one-hour pilot, 24-hour soak | Open; no new physical acceptance |
@@ -65,7 +65,7 @@ they are not operational FPGA acceptance. No unchanged capture is repeated.
 
 ### Task 2: Board and vendor readiness
 
-- [ ] Obtain an attributable board-compatible recovery UF2, its SHA-256 and
+- [x] Obtain an attributable board-compatible recovery UF2, its SHA-256 and
   restoration procedure. Prove restoration before custom runtime flashing.
   Keep the existing flash guard. Use missing/corrupt fixtures for negative
   recovery tests once the actual recovery record becomes ready.
@@ -729,3 +729,37 @@ the complete audit passed with `TMPDIR` on the workspace filesystem. No reserve
 or production code was changed. Both audit results are retained under
 `target/audit-verification/recovery-readback-20260913/` and
 `target/audit-verification/recovery-readback-disk-tmp-20260913/` respectively.
+
+### Physical BOOT + RST recovery — 2026-09-13
+
+Three attempted cold BOOT-held USB connections returned MicroPython. The
+operator confirmed the upper BOOT button was held throughout the third attempt.
+Those failures remain retained; their cause is unknown. The R0.4 schematic
+connects BOOT through 1 kOhm to flash CS and RST to RP2040 RUN. The RP2040
+[hardware guide](https://datasheets.raspberrypi.com/rp2040/hardware-design-with-rp2040.pdf)
+documents boot selection with flash CS low at hardware reset.
+
+With USB connected, the operator held BOOT, pressed/released RST, then released
+BOOT after three seconds. The operator confirmed this sequence worked. The
+host observed ROM `2e8a:0003`, serial `E0C9125B0D9B`, on the same USB path `3-2`,
+with `RPI-RP2` and UF2 Bootloader v3.0. Copy and sync of the exact cached vendor
+UF2 succeeded. MicroPython returned as `de65143857942625`; after unmounting its
+volume, the read-only identity and full 4 MiB flash hash again matched the
+original backup (`eb7f2a9b0d3cc79906a8ec19a2c9d93bdf923c6d5dae397e758a91bd0e6331d7`).
+The filesystem remained empty. No software bootloader command was used for
+this entry.
+
+The firmware-independent recovery requirement is satisfied by BOOT + RST on
+this board. This supersedes the earlier requirement to prove that property
+specifically through cold reconnection; it does not turn the failed cold-entry
+attempts into passes. `factory_uf2.ready=true` records this observed procedure
+and exact artifact. The operational adapter, `fpga-runtime` guard, electrical
+and timing gates remain unchanged. No custom runtime or FPGA image was flashed.
+
+The same retained recovery directory contains `physical-entry-*`,
+`physical-restore-*`, the complete button-attempt USB traces and checksums.
+Run `verify_physical_restoration.py` there to verify both the original backup
+evidence and this physical-entry restore. Host flash tests use explicit ready
+and not-ready temporary fixtures, preserving rejection coverage independently
+of this board's recovery status; the relative-path test verifies a complete
+copy into a temporary directory.
