@@ -302,7 +302,9 @@ jobs:
     # detection is profile-agnostic (only const sizes differ between profiles),
     # so cloud-profile alone covers the unsafe surface; embedded is dropped
     # until the hang is understood.
-    timeout-minutes: 30
+    # The 2026-09-13 cloud job hit 30 min after 445 passing tests; the prior
+    # successful job took 28m39s. Allow runner variance while keeping a cap.
+    timeout-minutes: 40
     strategy:
       matrix:
         profile: [cloud-profile]
