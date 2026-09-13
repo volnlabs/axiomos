@@ -720,3 +720,12 @@ verdict are retained under ignored
 `.superpowers/sdd/shrike-fpga-bench/recovery-20260913T012539Z/`, with
 `SHA256SUMS`. The next operator step is a cold USB connection while holding
 BOOT, followed by inspection of ROM enumeration on this board.
+
+Software integration on `4558e52` passes all ten flash-contract tests and the
+quick engineering audit: 85 passed, zero failed, one optional QEMU fault-injection
+skip. The first audit had one failed observer suite because `/tmp` had about
+3 GB free, below the unchanged 5 GB evidence reserve. All 15 observer tests and
+the complete audit passed with `TMPDIR` on the workspace filesystem. No reserve
+or production code was changed. Both audit results are retained under
+`target/audit-verification/recovery-readback-20260913/` and
+`target/audit-verification/recovery-readback-disk-tmp-20260913/` respectively.
