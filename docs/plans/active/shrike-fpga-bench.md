@@ -652,3 +652,37 @@ The full audit above belongs to `05b078d`; the successful GitHub run
 belongs to `5d4745c`. The new correction has the separately recorded focused
 verification, not a retroactive full-audit claim. Actual UART/FIFO observations,
 clock calibration and the real adapter still require the physical gate.
+
+### USB identity and installed firmware comparison — 2026-09-13
+
+The operator connected the Shrike over USB. It enumerated as `2e8a:0005`,
+serial `de65143857942625`, with CDC ACM and mass-storage interfaces. After the
+operator granted temporary access to `/dev/ttyACM0`, an `mpremote 1.28.0`
+query with `resume` reported `Vicharak Shrike FPGA with RP2040` and MicroPython
+`v1.26.0-preview.527.g599f545a3.dirty`, built 2025-10-11. The root filesystem
+was empty. USB-only isolation was requested; wiring and the PCB's printed
+revision have not been independently verified.
+
+The [vendor v1.0.0 release](https://github.com/vicharak-in/shrike/releases/tag/v1.0.0)
+candidate `shrike-lite-micropython.uf2` is 676,864 bytes, SHA-256
+`fe776218fed072c44055a9b5cc2dd29229ce169f59b2e0d89eeec29f72b42648`.
+Its 1,322 checked RP2040 UF2 blocks contain a contiguous 338,432-byte payload
+at `0x10000000`, SHA-256
+`d2de7a9f4502566a9fd23f5e6f2e265e515408c19224eb9cdd3848cb29b7b378`.
+A read-only hash of that exact installed flash range matched the vendor payload.
+This establishes installed payload identity; it does not establish restoration,
+the contents of other flash regions, PCB revision or FPGA operation.
+
+Raw identity/access observations, the downloaded candidate, decoded payload,
+comparison command/result and checksums are retained under ignored
+`.superpowers/sdd/shrike-fpga-bench/usb-readiness-20260913T011315Z/` and
+`.superpowers/sdd/shrike-fpga-bench/identity-20260913T011557Z/`.
+No firmware was flashed and no GPIO output command was issued. Physical PCB
+identification and an observed recovery remain required; `factory_uf2.ready`
+stays false. The continuity, configuration, timing and runtime gates remain open.
+
+GitHub CI completed successfully for FPGA `9897e2c`
+([34711561388](https://github.com/volnlabs/axiomos/actions/runs/34711561388)) and
+runtime `ba59cf6`
+([34711022161](https://github.com/volnlabs/axiomos/actions/runs/34711022161)),
+including their previously pending cloud BPF Miri jobs.
