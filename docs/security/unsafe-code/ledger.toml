@@ -1,6 +1,10 @@
 version = 1
-baseline_sites = 694
-baseline_fingerprint = "sha256:7da4b56b8bc1a521373022057b4a657bde8410440dc0dff55bcb990852f1fb17"
+baseline_sites = 695
+baseline_fingerprint = "sha256:a5a38157427c7b48e637b153a0f57f8de087c9757aa1abaae0f3eab30c985e67"
+
+# 2026-09-12: Pi 5 cooler startup adds one platform-MMIO block, confined to
+# single-core pre-MMU init and GPIO45's physical control/pad registers.
+# Host register tests cover its writes; physical cooler validation is pending.
 
 # 2026-09-09: reviewed prerequisite delta: seven motor-pair no_mangle
 # attributes (production helper and isolated test/fuzz stubs), minus one
