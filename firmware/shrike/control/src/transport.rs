@@ -12,6 +12,8 @@ pub enum TransportError {
     Io,
     InvalidWriteCount,
     ClockRegression,
+    DeadlineOverflow,
+    TimedOut,
 }
 
 /// One active frame and one pending frame. Priority replies may replace
@@ -176,10 +178,14 @@ pub struct LinkQuiescence {
     /// A fault poisons this drain attempt until a fresh successful `begin`.
     quiet_since: Result<u64, TransportError>,
     last_poll: u64,
+    deadline: u64,
 }
 
 impl LinkQuiescence {
     pub const QUIET_US: u64 = 200_000;
+    /// The reference profile's local UART attempt limit; unrelated to the
+    /// 80 ms controller handoff timeout. Activity never extends this deadline.
+    pub const TIMEOUT_US: u64 = 1_000_000;
 
     pub fn begin(
         io: &mut impl ByteIo,
@@ -188,15 +194,38 @@ impl LinkQuiescence {
         tx: &mut TelemetryTx,
         clock: &impl MicrosClock,
     ) -> Result<Self, TransportError> {
+        let started = clock.now_us();
         sink.inhibit();
         *decoder = Decoder::new();
         *tx = TelemetryTx::new();
         io.reset().map_err(|_| TransportError::Io)?;
         let now = clock.now_us();
-        Ok(Self {
+        let mut drain = Self {
             quiet_since: Ok(now),
-            last_poll: now,
-        })
+            last_poll: started,
+            deadline: started
+                .checked_add(Self::TIMEOUT_US)
+                .ok_or(TransportError::DeadlineOverflow)?,
+        };
+        drain.check_time(now)?;
+        Ok(drain)
+    }
+
+    fn check_time(&mut self, now: u64) -> Result<(), TransportError> {
+        self.quiet_since?;
+        let error = if now < self.last_poll {
+            Some(TransportError::ClockRegression)
+        } else if now >= self.deadline {
+            Some(TransportError::TimedOut)
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            self.quiet_since = Err(error);
+            return Err(error);
+        }
+        self.last_poll = now;
+        Ok(())
     }
 
     /// Drain at most 64 received bytes; every observed byte restarts the full
@@ -210,10 +239,7 @@ impl LinkQuiescence {
         let mut quiet_since = self.quiet_since?;
         for _ in 0..64 {
             let before_read = clock.now_us();
-            if before_read < self.last_poll {
-                self.quiet_since = Err(TransportError::ClockRegression);
-                return Err(TransportError::ClockRegression);
-            }
+            self.check_time(before_read)?;
             let received = match io.read() {
                 Ok(byte) => byte.is_some(),
                 Err(_) => {
@@ -222,11 +248,7 @@ impl LinkQuiescence {
                 }
             };
             let after_read = clock.now_us();
-            if after_read < before_read {
-                self.quiet_since = Err(TransportError::ClockRegression);
-                return Err(TransportError::ClockRegression);
-            }
-            self.last_poll = after_read;
+            self.check_time(after_read)?;
             if !received {
                 // One extra microsecond covers timer quantization after I/O.
                 return Ok(before_read - quiet_since > Self::QUIET_US);
@@ -688,6 +710,109 @@ mod tests {
         assert_eq!(drain.poll(&mut io, &clock), Ok(false));
         clock.set(200_050 + 1);
         assert_eq!(drain.poll(&mut io, &clock), Ok(true));
+    }
+
+    #[test]
+    fn drain_activity_cannot_extend_the_attempt_deadline_or_revive_failure() {
+        let clock = Clock::new(0);
+        let mut io = Io::default();
+        let mut sink = Sink::default();
+        let mut decoder = Decoder::new();
+        let mut tx = TelemetryTx::new();
+        let mut drain =
+            LinkQuiescence::begin(&mut io, &mut sink, &mut decoder, &mut tx, &clock).unwrap();
+        for now in (50_000..1_000_000).step_by(50_000) {
+            clock.set(now);
+            io.rx.push_back(1);
+            assert_eq!(drain.poll(&mut io, &clock), Ok(false));
+        }
+        clock.set(1_000_000);
+        assert_eq!(drain.poll(&mut io, &clock), Err(TransportError::TimedOut));
+        let reads = io.reads;
+        for now in [1_300_000, 0] {
+            clock.set(now);
+            assert_eq!(drain.poll(&mut io, &clock), Err(TransportError::TimedOut));
+            assert_eq!(io.reads, reads);
+        }
+        assert!(sink.stopped);
+        assert!(io.wire.is_empty());
+    }
+
+    #[test]
+    fn drain_deadline_includes_reset_and_read_io_and_rejects_overflow() {
+        for (start, reset_elapsed, error) in [
+            (0, 1_000_000, TransportError::TimedOut),
+            (u64::MAX - 999_999, 0, TransportError::DeadlineOverflow),
+        ] {
+            let clock = Clock::new(start);
+            let mut io = Io {
+                clock: Some(clock.0.clone()),
+                reset_elapsed_us: reset_elapsed,
+                ..Io::default()
+            };
+            let mut sink = Sink::default();
+            assert_eq!(
+                LinkQuiescence::begin(
+                    &mut io,
+                    &mut sink,
+                    &mut Decoder::new(),
+                    &mut TelemetryTx::new(),
+                    &clock
+                )
+                .err(),
+                Some(error)
+            );
+            assert!(sink.stopped);
+            assert_eq!(io.resets, 1);
+        }
+        for received in [false, true] {
+            let clock = Clock::new(0);
+            let mut io = Io {
+                clock: Some(clock.0.clone()),
+                read_elapsed_us: [1].into(),
+                ..Io::default()
+            };
+            let mut drain = LinkQuiescence::begin(
+                &mut io,
+                &mut Sink::default(),
+                &mut Decoder::new(),
+                &mut TelemetryTx::new(),
+                &clock,
+            )
+            .unwrap();
+            if received {
+                io.rx.push_back(1);
+            }
+            clock.set(999_999);
+            assert_eq!(drain.poll(&mut io, &clock), Err(TransportError::TimedOut));
+            assert_eq!(io.reads, 1);
+            assert_eq!(drain.poll(&mut io, &clock), Err(TransportError::TimedOut));
+            assert_eq!(io.reads, 1);
+        }
+    }
+
+    #[test]
+    fn reset_clock_reversal_rejects_the_attempt_after_inhibiting() {
+        struct ReversingClock(Cell<u64>);
+        impl MicrosClock for ReversingClock {
+            fn now_us(&self) -> u64 {
+                let now = self.0.get();
+                self.0.set(now - 1);
+                now
+            }
+        }
+        let mut io = Io::default();
+        let mut sink = Sink::default();
+        let result = LinkQuiescence::begin(
+            &mut io,
+            &mut sink,
+            &mut Decoder::new(),
+            &mut TelemetryTx::new(),
+            &ReversingClock(Cell::new(10)),
+        );
+        assert_eq!(result.err(), Some(TransportError::ClockRegression));
+        assert!(sink.stopped);
+        assert_eq!(io.resets, 1);
     }
 
     #[test]

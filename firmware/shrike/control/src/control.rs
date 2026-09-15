@@ -70,11 +70,12 @@ pub trait EstopLine {
     fn asserted(&mut self) -> bool;
 }
 
-/// Tunables — all defaulted in `main.rs`, surfaced here so a bench can adjust.
+/// Control-loop configuration supplied by the outer driver or host tests.
 pub struct Config {
-    /// Managed reference mode waits silently for SessionOffer after the outer
-    /// driver has drained both peers and explicitly requalified the zero sink.
-    pub require_session: bool,
+    /// The exact session reserved by explicit outer-driver requalification.
+    /// Managed mode waits silently and rejects every other offer. None selects
+    /// the legacy path; the expected identity is not itself proof of a drain.
+    pub expected_session: Option<core::num::NonZeroU32>,
     /// Watchdog: max gap between fresh Pi5 frames before motors fail safe.
     pub link_timeout_us: u64,
     /// How often to fire the ultrasonic + report a Sensor frame.
@@ -259,19 +260,26 @@ where
             // Only a successful post-transaction sink acknowledgement below
             // can produce the corresponding reverse reply.
             let (msg, reply) = match msg {
-                Msg::SessionOffer { session } if cfg.require_session && peer_session.is_none() => (
-                    Msg::MotorSetpoint {
-                        seq: 0,
-                        left: 0,
-                        right: 0,
-                    },
-                    Some(Msg::SessionReady { session }),
-                ),
+                Msg::SessionOffer { session }
+                    if cfg
+                        .expected_session
+                        .is_some_and(|expected| expected.get() == session)
+                        && peer_session.is_none() =>
+                {
+                    (
+                        Msg::MotorSetpoint {
+                            seq: 0,
+                            left: 0,
+                            right: 0,
+                        },
+                        Some(Msg::SessionReady { session }),
+                    )
+                }
                 Msg::SafeBarrier {
                     session,
                     correlation,
                     sequence,
-                } if cfg.require_session
+                } if cfg.expected_session.is_some()
                     && peer_session == Some(session)
                     && correlation > last_barrier =>
                 {
@@ -288,7 +296,9 @@ where
                         }),
                     )
                 }
-                Msg::MotorSetpoint { .. } if cfg.require_session && peer_session.is_none() => {
+                Msg::MotorSetpoint { .. }
+                    if cfg.expected_session.is_some() && peer_session.is_none() =>
+                {
                     return terminate(
                         io,
                         motors,
@@ -476,7 +486,7 @@ where
             );
         }
 
-        if !cfg.require_session || peer_session.is_some() {
+        if cfg.expected_session.is_none() || peer_session.is_some() {
             if now.wrapping_sub(last_ping) >= cfg.ping_period_us {
                 ultra.trigger();
                 last_ping = now;
@@ -761,7 +771,7 @@ mod tests {
 
     fn config(link_timeout_us: u64, ping_period_us: u64, heartbeat_us: u64) -> Config {
         Config {
-            require_session: false,
+            expected_session: None,
             link_timeout_us,
             ping_period_us,
             peer_heartbeat_period_us: heartbeat_us,

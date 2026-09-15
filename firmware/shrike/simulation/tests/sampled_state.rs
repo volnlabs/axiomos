@@ -10,7 +10,7 @@ use shrike_rp2040_host_sim::mocks::{
 
 fn default_config() -> Config {
     Config {
-        require_session: false,
+        expected_session: None,
         link_timeout_us: 100_000,
         ping_period_us: 50_000,
         peer_heartbeat_period_us: 20_000,
@@ -112,7 +112,7 @@ fn hardware_estop_sampled_after_barrier_apply_suppresses_safe_ack() {
         &mut estop,
         &mut motors,
         Config {
-            require_session: true,
+            expected_session: Some(core::num::NonZeroU32::new(session).unwrap()),
             link_timeout_us: 100,
             ping_period_us: u64::MAX,
             peer_heartbeat_period_us: 0,

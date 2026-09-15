@@ -12,16 +12,16 @@ use shrike_rp2040_host_sim::mocks::{
 
 fn config(timeout: u64) -> Config {
     Config {
-        require_session: false,
+        expected_session: None,
         link_timeout_us: timeout,
         ping_period_us: u64::MAX,
         peer_heartbeat_period_us: 0,
     }
 }
 
-fn managed_config(timeout: u64) -> Config {
+fn managed_config(timeout: u64, session: u32) -> Config {
     Config {
-        require_session: true,
+        expected_session: Some(core::num::NonZeroU32::new(session).unwrap()),
         link_timeout_us: timeout,
         ping_period_us: 1,
         peer_heartbeat_period_us: 1,
@@ -45,6 +45,41 @@ fn decoded(bytes: &[u8]) -> Vec<Msg> {
         .filter_map(|&byte| decoder.push(byte))
         .map(Result::unwrap)
         .collect()
+}
+
+#[test]
+fn unrelated_session_offer_cannot_authorize_buffered_motion() {
+    // This run belongs to the explicitly prepared session 7. Neither an old
+    // offer nor a future offer may establish authority for the following pair.
+    for session in [6, 8, u32::MAX] {
+        let mut io = MockByteIo::new(frames(&[
+            Msg::SessionOffer { session },
+            Msg::MotorSetpoint {
+                seq: 1,
+                left: 600,
+                right: 600,
+            },
+        ]));
+        let mut motors = MockMotorPair::new();
+        let summary = run(
+            &mut io,
+            &MockClock::new(0),
+            &mut MockUltrasonic::new(vec![]),
+            &mut MockEstop::new(false),
+            &mut motors,
+            managed_config(100, 7),
+            Some(1),
+        )
+        .unwrap();
+        assert_eq!(
+            summary.termination,
+            RunTermination::Fault(FaultReason::UnexpectedMessage)
+        );
+        assert_eq!(summary.motor_pairs_accepted, 0);
+        assert_eq!(motors.calls, [MotorPairCall::Inhibit]);
+        assert!(io.output.is_empty());
+        assert_eq!(io.resets, 1);
+    }
 }
 
 #[test]
@@ -74,7 +109,7 @@ fn rx_error_discards_queued_safe_replies_and_partial_motion_and_preserves_reset_
             &mut MockUltrasonic::new(vec![]),
             &mut MockEstop::new(false),
             &mut motors,
-            managed_config(100),
+            managed_config(100, 7),
             Some(2),
         )
         .unwrap();
@@ -123,7 +158,7 @@ fn managed_peer_is_silent_and_rejects_motion_before_session_offer() {
         &mut silent_ultra,
         &mut MockEstop::new(false),
         &mut MockMotorPair::new(),
-        managed_config(100),
+        managed_config(100, 7),
         Some(2),
     )
     .unwrap();
@@ -143,7 +178,7 @@ fn managed_peer_is_silent_and_rejects_motion_before_session_offer() {
         &mut MockUltrasonic::new(vec![]),
         &mut MockEstop::new(false),
         &mut motors,
-        managed_config(100),
+        managed_config(100, 7),
         Some(1),
     )
     .unwrap();
@@ -178,7 +213,7 @@ fn managed_offer_and_barrier_echo_exact_identity_and_block_stale_motion() {
         &mut MockUltrasonic::new(vec![]),
         &mut MockEstop::new(false),
         &mut motors,
-        managed_config(100),
+        managed_config(100, 0x1020_3040),
         Some(1),
     )
     .unwrap();
@@ -234,7 +269,7 @@ fn managed_session_consumes_zero_and_rejects_equal_first_barrier_without_ack() {
         &mut MockUltrasonic::new(vec![]),
         &mut MockEstop::new(false),
         &mut motors,
-        managed_config(100),
+        managed_config(100, session),
         Some(1),
     )
     .unwrap();
@@ -282,7 +317,7 @@ fn managed_ack_capacity_failure_is_terminal_and_does_not_ack_third_barrier() {
         &mut MockUltrasonic::new(vec![]),
         &mut MockEstop::new(false),
         &mut motors,
-        managed_config(100),
+        managed_config(100, session),
         Some(1),
     )
     .unwrap();
@@ -731,7 +766,7 @@ fn managed_fpga_posttransaction_mismatch_cannot_emit_acknowledgement() {
             &mut MockUltrasonic::new(vec![]),
             &mut MockEstop::new(false),
             &mut motors,
-            managed_config(100),
+            managed_config(100, 7),
             Some(1),
         )
         .unwrap();
@@ -781,7 +816,7 @@ fn managed_fpga_session_zero_then_newer_barrier_one_produces_exact_replies() {
         &mut MockUltrasonic::new(vec![]),
         &mut MockEstop::new(false),
         &mut motors,
-        managed_config(100),
+        managed_config(100, session),
         Some(1),
     )
     .unwrap();
@@ -820,7 +855,7 @@ fn managed_timeout_after_barrier_apply_suppresses_safe_ack() {
         &mut MockUltrasonic::new(vec![]),
         &mut MockEstop::new(false),
         &mut motors,
-        managed_config(100),
+        managed_config(100, 7),
         Some(1),
     )
     .unwrap();
