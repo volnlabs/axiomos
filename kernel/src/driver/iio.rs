@@ -223,19 +223,17 @@ mod v04_tests {
 
     #[test]
     fn v04_context_guard_clears_slot_on_drop() {
-        let slot = &V04_ACTIVE_SAMPLE_IDS[0];
-        slot.store(0, Ordering::Release);
-        drop(V04DispatchGuard::new(slot, 8).unwrap());
+        let slot = AtomicU64::new(0);
+        drop(V04DispatchGuard::new(&slot, 8).unwrap());
         assert_eq!(slot.load(Ordering::Acquire), 0);
     }
 
     #[cfg(not(target_os = "none"))]
     #[test]
     fn v04_context_guard_clears_slot_during_unwind() {
-        let slot = &V04_ACTIVE_SAMPLE_IDS[0];
-        slot.store(0, Ordering::Release);
+        let slot = AtomicU64::new(0);
         let result = catch_unwind(AssertUnwindSafe(|| {
-            let _guard = V04DispatchGuard::new(slot, 9).unwrap();
+            let _guard = V04DispatchGuard::new(&slot, 9).unwrap();
             panic!("exercise dispatch cleanup");
         }));
         assert!(result.is_err());

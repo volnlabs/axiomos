@@ -1,6 +1,6 @@
 version = 1
 baseline_sites = 694
-baseline_fingerprint = "sha256:7da4b56b8bc1a521373022057b4a657bde8410440dc0dff55bcb990852f1fb17"
+baseline_fingerprint = "sha256:52d7273c75c4295ca7566a526d9f75553535a58a52ca279999fc586147b66141"
 
 # 2026-09-09: reviewed prerequisite delta: seven motor-pair no_mangle
 # attributes (production helper and isolated test/fuzz stubs), minus one
@@ -12,6 +12,9 @@ baseline_fingerprint = "sha256:7da4b56b8bc1a521373022057b4a657bde8410440dc0dff55
 # 2026-09-12: reviewed stack/helper provenance repair and prior HIL line
 # relocations. The helper test now reads its eight-byte payload under Miri.
 # The additional unsafe block is confined to the test-only helper stub.
+
+# 2026-09-15: reviewed v0.5 ownership, capability and bounded-verifier edits.
+# Unsafe constructs/counts/obligations are unchanged; source locations moved.
 
 # Rules are evaluated in order. Keep narrow, high-risk obligations before broad
 # subsystem rules. The first matching rule supplies every site-level field.
