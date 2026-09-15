@@ -42,7 +42,7 @@ Replace the example port with the connected debug-UART device. The host configur
 
 ```sh
 rk runtime --port /dev/ttyUSB0 query
-rk runtime --port /dev/ttyUSB0 upload controller.bmb
+rk runtime --port /dev/ttyUSB0 upload controller.axmb
 rk runtime --port /dev/ttyUSB0 query --operation 0
 rk runtime --port /dev/ttyUSB0 activate --expected-generation 0 --artifact 0
 rk runtime --port /dev/ttyUSB0 stop
@@ -64,7 +64,11 @@ Upload accepts the [canonical managed bundle](managed-bundle-v1.md), not the
 legacy ELF container emitted by `rk sign`. It streams 256-byte management chunks
 into the one bounded kernel upload. Finalize reports an accepted operation ID;
 query that ID to distinguish preparation, resident state, handoff, commitment
-and failure. Managed bundle authoring examples and recorder export remain open.
+and failure. Use `rk bundle` to sign normalized raw instructions and `rk verify`
+to authenticate the result locally. The [managed C examples](../../examples/bpf/managed/README.md)
+provide two stateless controllers and one fresh-private-array controller with
+build/sign commands. Local signing and authentication do not perform kernel
+verification, admission or activation. Recorder export remains open.
 
 On a timeout or serial error, the CLI exits with an unknown-outcome diagnostic;
 it does not automatically retransmit or re-execute the operation. Reconnect and

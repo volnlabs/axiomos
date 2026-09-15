@@ -1,5 +1,5 @@
 # Sourced by engineering-audit.sh; shares its gate functions and result state.
-require_commands cargo clang rustc rustup git python3 timeout sha256sum
+require_commands cargo clang llvm-objcopy rustc rustup git python3 timeout sha256sum
 if [[ "$MODE" == "full" ]]; then
     require_commands iverilog lake qemu-system-x86_64 riscv64-unknown-elf-gcc
 fi

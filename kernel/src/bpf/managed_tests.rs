@@ -1,5 +1,11 @@
 extern crate std;
 
+use alloc::format;
+use alloc::string::String;
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use ed25519_dalek::{Signer, SigningKey};
 use kernel_bpf::bytecode::insn::BpfInsn;
 use kernel_bpf::signing::managed::*;
@@ -776,4 +782,185 @@ fn managed_objects_reject_legacy_access_and_bound_artifacts() {
         Err(BpfError::ResourceLimit)
     ));
     drop(instance);
+}
+
+static MANAGED_EXAMPLE_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+struct ManagedExampleBuild {
+    dir: PathBuf,
+    program: alloc::vec::Vec<BpfInsn>,
+}
+
+impl Drop for ManagedExampleBuild {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn compile_managed_example(name: &str, flags: &[&str]) -> ManagedExampleBuild {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../examples/bpf/managed")
+        .join(format!("{name}.c"));
+    let dir = std::env::temp_dir().join(format!(
+        "axiomos-managed-example-{}-{}",
+        std::process::id(),
+        MANAGED_EXAMPLE_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let object = dir.join(format!("{name}.o"));
+    let raw = dir.join(format!("{name}.bin"));
+
+    let compile = Command::new("clang")
+        .args([
+            "-target", "bpfel", "-mcpu=v3", "-O2", "-g0", "-Wall", "-Werror", "-c",
+        ])
+        .args(flags)
+        .arg(&source)
+        .arg("-o")
+        .arg(&object)
+        .output()
+        .expect("clang with the BPF target is required for managed example tests");
+    assert!(
+        compile.status.success(),
+        "clang failed for {}:\n{}",
+        source.display(),
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let extract = Command::new("llvm-objcopy")
+        .args(["--only-section=.text", "-O", "binary"])
+        .arg(&object)
+        .arg(&raw)
+        .output()
+        .expect("llvm-objcopy is required for managed example tests");
+    assert!(
+        extract.status.success(),
+        "llvm-objcopy failed for {}:\n{}",
+        object.display(),
+        String::from_utf8_lossy(&extract.stderr)
+    );
+
+    let bytes = std::fs::read(&raw).unwrap();
+    assert!(!bytes.is_empty());
+    assert!(bytes.len().is_multiple_of(BpfInsn::SIZE));
+    let program = bytes
+        .chunks_exact(BpfInsn::SIZE)
+        .map(|bytes| {
+            BpfInsn::new(
+                bytes[0],
+                bytes[1] & 0x0f,
+                bytes[1] >> 4,
+                i16::from_le_bytes(bytes[2..4].try_into().unwrap()),
+                i32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+            )
+        })
+        .collect();
+
+    ManagedExampleBuild { dir, program }
+}
+
+fn managed_sensor_context(sensor_value: i64, sensor_valid: u32) -> ManagedControlContextV1 {
+    ManagedControlContextV1 {
+        version: kernel_abi::MANAGED_CONTROL_CONTEXT_V1_VERSION,
+        size: kernel_abi::MANAGED_CONTROL_CONTEXT_V1_SIZE,
+        sensor_value,
+        sensor_valid,
+        ..Default::default()
+    }
+}
+
+fn execute_example(
+    instance: &BehaviorInstance,
+    sensor_value: i64,
+    sensor_valid: u32,
+) -> (i16, i16) {
+    let result = instance
+        .execute(&managed_sensor_context(sensor_value, sensor_valid))
+        .unwrap();
+    let pair = result
+        .request
+        .expect("example must capture exactly one pair");
+    (pair.left, pair.right)
+}
+
+#[test]
+fn compiled_conservative_obstacle_example_handles_threshold_and_invalid_echoes() {
+    // Negative requests must reach helper 1009 sign-extended to 64 bits.
+    for cruise in [250, -250] {
+        let define = format!("-DCRUISE_PERMILLE={cruise}");
+        let build = compile_managed_example("conservative_obstacle", &[&define]);
+        let artifact = artifact_from_program(101, false, EFFECT_MOTOR_PAIR, None, &build.program);
+        let mut manager = BpfManager::new();
+        let id = manager.register_managed_artifact(artifact).unwrap();
+        let instance = manager.create_managed_instance(id).unwrap();
+
+        for (echo_us, valid, expected) in [
+            (i64::MIN, 1, (0, 0)),
+            (0, 1, (0, 0)),
+            (i64::MAX, 0, (0, 0)),
+            (1_399, 1, (0, 0)),
+            (1_400, 1, (cruise, cruise)),
+            (i64::MAX, 1, (cruise, cruise)),
+        ] {
+            assert_eq!(execute_example(&instance, echo_us, valid), expected);
+        }
+    }
+}
+
+#[test]
+fn compiled_slow_approach_example_stops_near_and_slows_before_cruise() {
+    let build = compile_managed_example("slow_approach", &[]);
+    let artifact = artifact_from_program(102, false, EFFECT_MOTOR_PAIR, None, &build.program);
+    let mut manager = BpfManager::new();
+    let id = manager.register_managed_artifact(artifact).unwrap();
+    let instance = manager.create_managed_instance(id).unwrap();
+
+    for (echo_us, valid, expected) in [
+        (-1, 1, (0, 0)),
+        (2_000, 0, (0, 0)),
+        (600, 1, (0, 0)),
+        (601, 1, (100, 100)),
+        (1_399, 1, (100, 100)),
+        (1_400, 1, (300, 300)),
+    ] {
+        assert_eq!(execute_example(&instance, echo_us, valid), expected);
+    }
+}
+
+#[test]
+fn compiled_clear_streak_example_resets_and_new_instances_start_fresh() {
+    let build = compile_managed_example("clear_streak", &[]);
+    let artifact = artifact_from_program(
+        103,
+        false,
+        EFFECT_MOTOR_PAIR,
+        Some(PrivateArray {
+            value_size: 4,
+            max_entries: 1,
+        }),
+        &build.program,
+    );
+    let mut manager = BpfManager::new();
+    let id = manager.register_managed_artifact(artifact).unwrap();
+    let first = manager.create_managed_instance(id).unwrap();
+
+    assert_eq!(execute_example(&first, 2_000, 1), (0, 0));
+    assert_eq!(execute_example(&first, 2_000, 1), (0, 0));
+    assert_eq!(execute_example(&first, 2_000, 1), (180, 180));
+    assert_eq!(execute_example(&first, 700, 1), (0, 0));
+    assert_eq!(execute_example(&first, 2_000, 1), (0, 0));
+    assert_eq!(execute_example(&first, 2_000, 0), (0, 0));
+    assert_eq!(execute_example(&first, 2_000, 1), (0, 0));
+
+    let rollback_equivalent = manager.create_managed_instance(id).unwrap();
+    assert_eq!(execute_example(&rollback_equivalent, 2_000, 1), (0, 0));
+    assert_eq!(execute_example(&rollback_equivalent, 2_000, 1), (0, 0));
+    assert_eq!(execute_example(&rollback_equivalent, 2_000, 1), (180, 180));
+
+    drop(first);
+    assert_eq!(manager.reclaim_managed_instances(), 1);
+    let replacement = manager.create_managed_instance(id).unwrap();
+    assert_eq!(execute_example(&replacement, 2_000, 1), (0, 0));
+    assert_eq!(execute_example(&replacement, 2_000, 1), (0, 0));
+    assert_eq!(execute_example(&replacement, 2_000, 1), (180, 180));
 }

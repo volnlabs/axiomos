@@ -25,6 +25,8 @@ let res = bpf(8, attach_attr_ptr, size);
 ### C BPF Programs (Reference)
 
 The `hello.bpf.c` file shows the standard C structure for BPF programs.
+[Managed controller examples](managed/README.md) show signed-bundle source and
+raw instruction builds for the bounded managed runtime.
 
 To compile (requires clang with BPF target):
 ```bash

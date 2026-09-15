@@ -44,10 +44,10 @@ colored = "2.0"
 # Hash for program integrity
 sha3 = "0.10"
 kernel_abi = { path = "../../../kernel/crates/kernel_abi" }
+kernel_bpf = { path = "../../../kernel/crates/kernel_bpf", default-features = false, features = ["cloud-profile"] }
 shrike_link = { path = "../../../kernel/crates/shrike_link" }
 zerocopy = { version = "0.9.0-alpha.0", default-features = false }
 
 [dev-dependencies]
-kernel_bpf = { path = "../../../kernel/crates/kernel_bpf", default-features = false, features = ["cloud-profile"] }
 signed_bpf_loader = { path = "../signed_bpf_loader", features = ["managed-runtime"] }
 tempfile = "3.20"

@@ -103,6 +103,71 @@ fn cli_sign_verify_round_trip_matches_kernel_authentication() {
 }
 
 #[test]
+fn cli_verifies_managed_bundles_with_exact_trust_and_keeps_admission_separate() {
+    use kernel_bpf::signing::managed::{Manifest, MANIFEST_SIZE};
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+
+    let temp = tempfile::tempdir().unwrap();
+    let (private, public) = generate_keypair(&temp, "managed");
+    let key = Ed25519KeyPair::from_pkcs8(&fs::read(&private).unwrap()).unwrap();
+    let public_bytes: [u8; 32] = key.public_key().as_ref().try_into().unwrap();
+    let payload = [0xb7, 0, 0, 0, 0, 0, 0, 0, 0x95, 0, 0, 0, 0, 0, 0, 0];
+    let mut header = Manifest {
+        behavior_id: [0xa5; 16],
+        revision: 1 << 40,
+        envelope: false,
+        effects: 0,
+        private_array: None,
+    }
+    .unsigned_header(&payload, &public_bytes)
+    .unwrap();
+    let hash = kernel_bpf::signing::managed::signing_hash(&header);
+    header[MANIFEST_SIZE..].copy_from_slice(key.sign(hash.as_bytes()).as_ref());
+    let signed = [header.as_slice(), payload.as_slice()].concat();
+    let bundle = temp.path().join("controller.axmb");
+    fs::write(&bundle, &signed).unwrap();
+
+    let valid = rk(
+        &["verify", "--input", path(&bundle), "--key", path(&public)],
+        temp.path(),
+    );
+    assert!(valid.status.success(), "{}", text(&valid.stderr));
+    assert!(text(&valid.stdout).contains("Managed bundle authentication successful"));
+    assert!(text(&valid.stdout).contains("admission"));
+
+    let trusted = temp.path().join("trusted");
+    fs::create_dir(&trusted).unwrap();
+    // Flip only the compressed point's sign bit: a valid distinct key with the
+    // same legacy prefix must neither authorize this bundle nor shadow its key.
+    let mut collision = public_bytes;
+    collision[31] ^= 0x80;
+    TrustedKey::from_bytes(&collision).unwrap();
+    fs::write(trusted.join("collision.pub"), collision).unwrap();
+    let args = [
+        "verify",
+        "--input",
+        path(&bundle),
+        "--trusted-dir",
+        path(&trusted),
+    ];
+    assert!(!rk(&args, temp.path()).status.success());
+    fs::write(trusted.join("actual.pub"), public_bytes).unwrap();
+    assert!(rk(&args, temp.path()).status.success());
+    let mut tampered = signed;
+    *tampered.last_mut().unwrap() ^= 1;
+    fs::write(&bundle, &tampered).unwrap();
+    assert!(!rk(&args, temp.path()).status.success());
+    fs::write(&bundle, b"AXMB").unwrap();
+    assert!(!rk(&args, temp.path()).status.success());
+    let mut oversized = vec![0; kernel_bpf::signing::managed::MAX_BUNDLE_BYTES + 1];
+    oversized[..4].copy_from_slice(b"AXMB");
+    fs::write(&bundle, oversized).unwrap();
+    let rejected = rk(&args, temp.path());
+    assert!(!rejected.status.success());
+    assert!(text(&rejected.stderr).contains("256 KiB"));
+}
+
+#[test]
 fn cli_trust_store_resolves_signer_and_rejects_tampering() {
     let temp = tempfile::tempdir().expect("temporary directory");
     let (private_key, public_key) = generate_keypair(&temp, "operator");

@@ -1,10 +1,13 @@
 //! Program verification command.
 
 use std::fs;
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use colored::Colorize;
+use kernel_bpf::signing::managed::{AuthenticatedBundle, BundleError, MAX_BUNDLE_BYTES};
+use kernel_bpf::signing::{SignatureVerifier, SigningError, TrustedKey};
 use ring::signature::{UnparsedPublicKey, ED25519};
 use sha3::{Digest, Sha3_256};
 
@@ -19,8 +22,40 @@ pub fn verify_program(
 ) -> Result<()> {
     println!("{} {}", "Verifying:".cyan(), input);
 
-    // Read the signed program
-    let data = fs::read(input).with_context(|| format!("Failed to read input file: {}", input))?;
+    let mut file =
+        fs::File::open(input).with_context(|| format!("Failed to read input file: {}", input))?;
+    let mut magic = [0; 4];
+    file.read_exact(&mut magic)
+        .context("File too small to be a signed program")?;
+    let mut data = magic.to_vec();
+    if magic == *kernel_bpf::signing::managed::MAGIC {
+        file.take((MAX_BUNDLE_BYTES - magic.len() + 1) as u64)
+            .read_to_end(&mut data)?;
+        anyhow::ensure!(
+            data.len() <= MAX_BUNDLE_BYTES,
+            "Managed bundle exceeds 256 KiB"
+        );
+        let bundle = authenticate_managed(&data, key_path, trusted_dir)?;
+        let identity = bundle.identity();
+        let manifest = bundle.manifest();
+        println!(
+            "{}",
+            serde_json::json!({
+                "behavior_id": hex_string(&identity.behavior_id), "revision": identity.revision,
+                "bundle_digest": hex_string(identity.bundle_digest.as_bytes()),
+                "payload_digest": hex_string(identity.payload_digest.as_bytes()),
+                "signer_public_key": hex_string(&identity.signer_public_key),
+                "signer_fingerprint": hex_string(identity.signer_fingerprint.as_bytes()),
+                "envelope": manifest.envelope, "effects": manifest.effects,
+                "private_array": manifest.private_array.map(|array| serde_json::json!({
+                    "value_size": array.value_size, "max_entries": array.max_entries
+                })), "instruction_count": bundle.instructions().len()
+            })
+        );
+        println!("Managed bundle authentication successful; bytecode verification and live admission are still required.");
+        return Ok(());
+    }
+    file.read_to_end(&mut data)?;
 
     if data.len() < HEADER_SIZE {
         anyhow::bail!("File too small to be a signed program");
@@ -92,6 +127,45 @@ pub fn verify_program(
             anyhow::bail!("Signature verification failed");
         }
     }
+}
+
+fn authenticate_managed<'a>(
+    data: &'a [u8],
+    key_path: Option<&str>,
+    trusted_dir: Option<&str>,
+) -> Result<AuthenticatedBundle<'a>> {
+    let try_key = |path: &Path| -> Result<_> {
+        let mut bytes = Vec::new();
+        fs::File::open(path)?.take(33).read_to_end(&mut bytes)?;
+        let key = TrustedKey::from_bytes(&bytes)
+            .map_err(|error| anyhow::anyhow!("Invalid public key {}: {error:?}", path.display()))?;
+        let verifier = SignatureVerifier::from_trusted_keys(&[key])
+            .map_err(|error| anyhow::anyhow!("Cannot load trusted key: {error:?}"))?;
+        Ok(verifier.authenticate_managed(data))
+    };
+    if let Some(path) = key_path {
+        return try_key(Path::new(path))?
+            .map_err(|error| anyhow::anyhow!("Managed bundle authentication failed: {error:?}"));
+    }
+    let directory = trusted_dir
+        .map(PathBuf::from)
+        .or_else(|| config::trusted_keys_dir().ok())
+        .context("No trusted keys directory found")?;
+    // Let the kernel authenticator select by the full public key. A matching
+    // legacy eight-byte prefix neither authorizes nor shadows the actual signer.
+    for entry in fs::read_dir(&directory)
+        .with_context(|| format!("Read trusted keys from {}", directory.display()))?
+    {
+        let path = entry?.path();
+        if path.extension().is_some_and(|ext| ext == "pub") {
+            match try_key(&path)? {
+                Ok(bundle) => return Ok(bundle),
+                Err(BundleError::Authentication(SigningError::UntrustedSigner)) => {}
+                Err(error) => anyhow::bail!("Managed bundle authentication failed: {error:?}"),
+            }
+        }
+    }
+    anyhow::bail!("No trusted key matches the full managed signer identity")
 }
 
 /// Find a public key by signer ID in the trusted keys directory.

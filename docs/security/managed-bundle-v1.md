@@ -72,6 +72,31 @@ hashing likewise run in the worker, never in a bounded upload syscall or timer.
 The implementation and executable negative cases are in
 [managed.rs](../../kernel/crates/kernel_bpf/src/signing/managed.rs).
 
+## Host authoring and authentication
+
+`rk bundle` signs a raw, nonempty stream of little-endian 8-byte instruction
+slots using an external Ed25519 PKCS#8 key. Supply `--behavior-id` as exactly
+32 hexadecimal characters, `--revision`, and explicit `--motor-pair` and/or
+`--envelope` declarations when needed. Private state requires both
+`--array-value-size` and `--array-entries`; their checked product cannot exceed
+16 KiB. Unsupported declarations, ELF input and payloads exceeding the complete
+256 KiB bundle limit reject. The output must be a new file, preventing an
+existing bundle or signing key from being overwritten.
+
+The command reuses the kernel's canonical manifest builder and signing hash.
+`rk verify --input controller.axmb --key /path/to/signer.pub` reuses its managed
+authenticator and reports the full signed identity. Directory trust selection
+also matches the full public key; a legacy eight-byte prefix match is
+insufficient. Both commands keep authentication separate from bytecode
+verification and live admission. Legacy `rk sign` and `RBPF` verification remain
+available for legacy callers.
+
+The [C examples](../../examples/bpf/managed/README.md) include build and signing
+commands. Their host tests compile the actual sources and use the existing
+artifact verifier, manager, instance factory and interpreter to check their
+requests and fresh private state. These are software fixtures; their sonar
+thresholds and requested speeds remain unqualified calibration values.
+
 ## Managed verification and invocation
 
 `ManagedContract` retains the binding declarations and the intersection of the
@@ -211,8 +236,9 @@ the qualified workload still needs IRQ-off and deadline measurements.
 Eleven commands use independently versioned, padding-free native ABI structures
 through `SYS_BPF`, dispatched before the legacy `BpfAttr` size check. All require
 `BEHAVIOR_ADMIN`, exact version 1 and structure length, and zero reserved fields.
-Ordinary init children have no administration capability. Dedicated installer
-provisioning and debug-UART transport remain integration work.
+Ordinary init children have no administration capability. The
+[dedicated installer](runtime-installer-v1.md) provides bounded debug-UART
+transport and receives only administration authority in the managed image.
 
 | Command | Number | Structure / bytes | Result |
 |---|---|---|---|

@@ -174,7 +174,7 @@ jobs:
         - name: Install dependencies
           run: |
             sudo apt update
-            sudo apt install -y xorriso
+            sudo apt install -y xorriso clang llvm
         - name: Test (per-crate, host-testable)
           # Audit fix R1: matrix now includes kernel_usermem (PR #2.1) and
           # kernel_elfloader (PR #10) plus its audit-h05 regression suite.
