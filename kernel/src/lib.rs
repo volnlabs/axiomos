@@ -2,6 +2,7 @@
 #![cfg_attr(not(test), no_main)]
 #![cfg_attr(target_arch = "x86_64", feature(abi_x86_interrupt))]
 #![feature(negative_impls)]
+#![feature(allocator_api)]
 extern crate alloc;
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]

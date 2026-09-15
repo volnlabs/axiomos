@@ -1,6 +1,6 @@
 version = 1
-baseline_sites = 696
-baseline_fingerprint = "sha256:481384a0178af46a7c58619a7aa5dc0837f2ffce33d338155d91a5c10a4b78e7"
+baseline_sites = 700
+baseline_fingerprint = "sha256:f44712f3aef3da7151d3ce80bf858bef6cfbc65c60bb714d111c72d64a52a9a2"
 
 # 2026-09-09: reviewed prerequisite delta: seven motor-pair no_mangle
 # attributes (production helper and isolated test/fuzz stubs), minus one
@@ -23,6 +23,10 @@ baseline_fingerprint = "sha256:481384a0178af46a7c58619a7aa5dc0837f2ffce33d338155
 # verifier-proven input extents and live matching binding leases are required;
 # stack pointers are reconstructed from the live borrow. Managed dispatch is
 # not yet connected to the kernel. Focused managed Miri13 passes.
+
+# 2026-09-15: the managed allocation accounting test owns its synthetic heap
+# backing and validates the pinned allocator normalization and Box/Arc layouts.
+# The four added unsafe constructs remain confined to this test fixture.
 
 [[obligation]]
 id = "TEST-HARNESS"
@@ -177,6 +181,17 @@ callers = "RISC-V boot, trap entry, shutdown and demo runtime"
 tests = "RISC-V target clippy/check; boot, syscall, and trap integration coverage is incomplete."
 priority = "P1"
 reviewed = "2026-07-12"
+
+[[obligation]]
+id = "BPF-MANAGED-ALLOCATION-TEST"
+paths = ["kernel/src/bpf/managed_allocation.rs"]
+scope = "test/tooling"
+owner = "BPF runtime/security maintainers"
+invariant = "The linked-list heap exclusively manages its owned boxed UnsafeCell backing after one initialization; RefCell serializes this single-threaded allocator, and allocation/deallocation use identical layouts while Box and Arc charge checks retain every allocation until drop."
+callers = "managed allocation accounting unit tests"
+tests = "Focused embedded kernel unit test and Miri runs cover zero/minimum/rounding/overflow charges, real Box/Arc allocation sizes, clone retention, deallocation, and backing-storage release."
+priority = "P1"
+reviewed = "2026-09-15"
 
 [[obligation]]
 id = "BPF-HELPERS"

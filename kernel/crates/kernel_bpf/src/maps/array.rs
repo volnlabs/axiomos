@@ -118,6 +118,11 @@ impl ArrayStorage {
 }
 
 impl<P: PhysicalProfile> ArrayMap<P> {
+    /// Retained backing capacity, including unused capacity after a resize.
+    pub fn storage_bytes(&self) -> usize {
+        self.data.read().buffer.capacity()
+    }
+
     /// Heap bytes reserved by an array map's value storage.
     pub const fn allocation_size(value_size: u32, max_entries: u32) -> Option<usize> {
         (value_size as usize).checked_mul(max_entries as usize)

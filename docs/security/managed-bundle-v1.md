@@ -107,12 +107,42 @@ and timestamp provenance remain integration work. The current Pi adapter emits
 raw sonar echo microseconds; selecting and documenting the managed source is
 required before its reference image is qualified.
 
-The worker must construct fresh ARRAY storage and install exact local runtime
-bindings with the existing map leases before connecting this library entry to
-kernel dispatch. It must also account retained output buffers, apply admission,
-and discard requests on later deadline/policy/queue failure. No timer slot,
-publication, UART handoff or physical qualification is established by these
-library tests. Helper costs remain uncalibrated model values.
+`BehaviorArtifact::prepare` decodes and verifies the same authenticated payload
+under a `VerificationBudget`. It retains identity, binding contract, code and
+scalar verifier results; temporary decode and handle buffers are released.
+The trusted worker supplies signer and slot policy. The returned code capacity
+remains charged to the budget. When passing an artifact to
+`BpfManager::register_managed_artifact`, the caller saves `code_bytes()` and
+releases that originating output charge after every return, including duplicate
+or rejected registration. Insertion transfers ownership and accounting to the
+existing manager; other outcomes drop the supplied artifact.
+
+The manager retains at most three artifacts and two instances using the existing
+generational tables and explicit `KernelManaged` ownership. Before execution,
+`prepare_managed_storage` fallibly preallocates and charges those tables.
+`begin_managed_instance` reserves the instance position, private map slot and
+allocation charges. Its single-use preparation object builds zeroed ARRAY state
+outside `BPF_MANAGER` with IRQs enabled; `finish_managed_instance` registers it
+or refunds a failed/cancelled build. The worker must always finish its accepted
+preparation, including cancellation. Dropping the permit alone leaves its
+bounded reservation busy.
+
+`BehaviorInstance::execute` uses the existing interpreter, CPU stack and map
+leases with exactly the retained local sizes, permissions and generations.
+Fresh instances share immutable code but no private state. Ordinary hooks and
+legacy map APIs cannot access these managed objects. Worker reclamation requires
+exclusive ownership, including absence of weak references that would retain an
+allocation header. Code, array capacity, boxes, reference-count headers and
+registry capacity stay charged until release. Layout charges match the pinned
+Rust toolchain and `linked_list_allocator` implementation; the real allocator
+fixture checks Box/Arc charges and final release under Miri.
+
+The asynchronous worker, global upload/verifier-workspace reservation and timing
+admission remain integration work. Kernel dispatch must also discard captured
+requests on later deadline/policy/queue failure. No installation generation,
+timer slot, retirement batch, publication, UART handoff or physical qualification
+is established by these tests. Helper costs remain uncalibrated model values.
 
 See [managed verification](../../kernel/crates/kernel_bpf/src/verifier/managed.rs)
-and [managed execution](../../kernel/crates/kernel_bpf/src/execution/interpreter.rs).
+and [managed execution](../../kernel/crates/kernel_bpf/src/execution/interpreter.rs),
+plus [kernel ownership and bindings](../../kernel/src/bpf/managed.rs).

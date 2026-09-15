@@ -3,6 +3,9 @@ name = "kernel"
 version = "0.1.0"
 edition = "2021"
 
+[dev-dependencies]
+ed25519-dalek = { version = "2.2", default-features = false }
+
 [dependencies]
 kernel_abi = { path = "crates/kernel_abi" }
 kernel_bpf = { path = "crates/kernel_bpf", default-features = false }

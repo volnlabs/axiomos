@@ -930,6 +930,7 @@ dependencies = [
  "cc",
  "conquer-once",
  "cordyceps",
+ "ed25519-dalek",
  "elf",
  "fdt",
  "itertools 0.14.0",

@@ -12,6 +12,7 @@ pub(super) const MAX_MAP_GRANTS: usize = 64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ObjectOwner {
     Process(u64),
+    KernelManaged,
     Reserved,
     Orphaned,
 }

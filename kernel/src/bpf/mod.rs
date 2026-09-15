@@ -2,6 +2,8 @@ mod authorization;
 mod handles;
 pub mod helpers;
 mod limits;
+pub mod managed;
+mod managed_allocation;
 mod snapshot;
 mod trust;
 
@@ -213,11 +215,32 @@ struct PreparedHookSnapshot {
 }
 
 struct ProgramEntry {
-    program: Arc<ProgramRuntime>,
+    program: ProgramObject,
     wcet_cycles: u64,
     charged_bytes: usize,
     owner: ObjectOwner,
     authorization: BpfLoadAuthorization,
+}
+
+enum ProgramObject {
+    Legacy(Arc<ProgramRuntime>),
+    Managed(Arc<kernel_bpf::verifier::BehaviorArtifact>),
+}
+
+impl ProgramObject {
+    fn legacy(&self) -> Option<&Arc<ProgramRuntime>> {
+        match self {
+            Self::Legacy(program) => Some(program),
+            Self::Managed(_) => None,
+        }
+    }
+
+    fn strong_count(&self) -> usize {
+        match self {
+            Self::Legacy(program) => Arc::strong_count(program),
+            Self::Managed(artifact) => Arc::strong_count(artifact),
+        }
+    }
 }
 
 struct MapEntry {
@@ -269,44 +292,53 @@ pub(crate) struct ProgramRuntime {
 }
 
 impl ProgramRuntime {
+    #[cfg(test)]
     fn map(&self, handle: u32, required: MapAccess) -> Option<&MapRuntime> {
-        let slot = handles::slot(handle);
-        let generation = handles::generation(handle);
-        let entry = self.maps.get(slot)?.as_ref()?;
-        if entry.generation != generation {
-            return None;
-        }
-        let permitted = match entry.perm {
-            MapPerm::ReadWrite => MapAccess::READ_WRITE,
-            MapPerm::ReadOnly => MapAccess::READ,
-            MapPerm::WriteOnly => MapAccess::WRITE,
-            MapPerm::Unavailable => MapAccess::NONE,
-        };
-        permitted
-            .contains(required)
-            .then_some(entry.runtime.as_ref())
+        resolve_map_binding(&self.maps, handle, required)
     }
+}
+
+fn resolve_map_binding(
+    maps: &[Option<ProgramMapRuntime>],
+    handle: u32,
+    required: MapAccess,
+) -> Option<&MapRuntime> {
+    let slot = handles::slot(handle);
+    let generation = handles::generation(handle);
+    let entry = maps.get(slot)?.as_ref()?;
+    if entry.generation != generation {
+        return None;
+    }
+    let permitted = match entry.perm {
+        MapPerm::ReadWrite => MapAccess::READ_WRITE,
+        MapPerm::ReadOnly => MapAccess::READ,
+        MapPerm::WriteOnly => MapAccess::WRITE,
+        MapPerm::Unavailable => MapAccess::NONE,
+    };
+    permitted
+        .contains(required)
+        .then_some(entry.runtime.as_ref())
 }
 
 const MAX_EXECUTION_MAP_LEASES: usize = 128;
 
 struct BpfExecution<'a> {
-    runtime: &'a ProgramRuntime,
+    maps: &'a [Option<ProgramMapRuntime>],
     leased: [*const MapRuntime; MAX_EXECUTION_MAP_LEASES],
     leased_count: usize,
 }
 
 impl<'a> BpfExecution<'a> {
-    fn new(runtime: &'a ProgramRuntime) -> Self {
+    fn with_bindings(maps: &'a [Option<ProgramMapRuntime>]) -> Self {
         Self {
-            runtime,
+            maps,
             leased: [core::ptr::null(); MAX_EXECUTION_MAP_LEASES],
             leased_count: 0,
         }
     }
 
     fn map(&mut self, handle: u32, required: MapAccess) -> Option<&MapRuntime> {
-        let map = self.runtime.map(handle, required)?;
+        let map = resolve_map_binding(self.maps, handle, required)?;
         let ptr = core::ptr::from_ref(map);
         if self.leased[..self.leased_count].contains(&ptr) {
             return Some(map);
@@ -328,10 +360,71 @@ impl<'a> BpfExecution<'a> {
 impl Drop for BpfExecution<'_> {
     fn drop(&mut self) {
         for ptr in &self.leased[..self.leased_count] {
-            // SAFETY: each pointer comes from the live ProgramRuntime and is
-            // retained by its Arc until this execution returns.
+            // SAFETY: each pointer comes from the borrowed runtime bindings;
+            // their Arcs remain live until this execution returns.
             unsafe { &**ptr }.leased.store(false, Ordering::Release);
         }
+    }
+}
+
+/// Shared managed/legacy execution boundary: existing CPU stack and context in
+/// the kernel, with a thread-local context substitute for host unit tests.
+fn with_bpf_runtime<R>(
+    maps: &[Option<ProgramMapRuntime>],
+    f: impl FnOnce(&mut [u8]) -> R,
+) -> Result<R, BpfError> {
+    #[cfg(not(test))]
+    {
+        let cpu = crate::mcore::context::ExecutionContext::try_load()
+            .ok_or(BpfError::ReentrantExecution)?;
+        cpu.with_bpf_stack(|stack| {
+            let mut execution = BpfExecution::with_bindings(maps);
+            cpu.with_bpf_execution(core::ptr::from_mut(&mut execution).cast(), || f(stack))
+        })
+        .flatten()
+        .ok_or(BpfError::ReentrantExecution)
+    }
+    #[cfg(test)]
+    {
+        let mut execution = BpfExecution::with_bindings(maps);
+        host_execution::run(&mut execution, f)
+    }
+}
+
+#[cfg(test)]
+mod host_execution {
+    extern crate std;
+    use core::cell::Cell;
+
+    use super::*;
+
+    std::thread_local! {
+        static CURRENT: Cell<*mut core::ffi::c_void> = const { Cell::new(core::ptr::null_mut()) };
+    }
+
+    pub(super) fn current() -> *mut BpfExecution<'static> {
+        CURRENT.with(|slot| slot.get().cast())
+    }
+
+    pub(super) fn run<R>(
+        execution: &mut BpfExecution<'_>,
+        f: impl FnOnce(&mut [u8]) -> R,
+    ) -> Result<R, BpfError> {
+        CURRENT.with(|slot| {
+            if !slot.get().is_null() {
+                return Err(BpfError::ReentrantExecution);
+            }
+            struct Reset<'a>(&'a Cell<*mut core::ffi::c_void>);
+            impl Drop for Reset<'_> {
+                fn drop(&mut self) {
+                    self.0.set(core::ptr::null_mut());
+                }
+            }
+            slot.set(core::ptr::from_mut(execution).cast());
+            let _reset = Reset(slot);
+            let mut stack = [0u8; <ActiveProfile as PhysicalProfile>::MAX_STACK_SIZE];
+            Ok(f(&mut stack))
+        })
     }
 }
 
@@ -340,12 +433,16 @@ fn with_current_execution_map<R>(
     required: MapAccess,
     f: impl FnOnce(&MapRuntime) -> R,
 ) -> Option<R> {
-    let cpu = crate::mcore::context::ExecutionContext::try_load()?;
-    let execution = cpu.current_bpf_execution().cast::<BpfExecution<'static>>();
+    #[cfg(not(test))]
+    let execution = crate::mcore::context::ExecutionContext::try_load()?
+        .current_bpf_execution()
+        .cast::<BpfExecution<'static>>();
+    #[cfg(test)]
+    let execution = host_execution::current();
     if execution.is_null() {
         return None;
     }
-    // SAFETY: execute_program installs this CPU-local pointer for the dynamic
+    // SAFETY: with_bpf_runtime installs this CPU-local pointer for the dynamic
     // extent of interpreter execution, and nested execution is rejected.
     let execution = unsafe { &mut *execution };
     execution.map(handle, required).map(f)
@@ -406,6 +503,12 @@ pub struct BpfManager {
     program_bytes: usize,
     live_maps: usize,
     map_bytes: usize,
+    // Fixed instance retention, inside the existing manager. Last drops occur
+    // only when the worker explicitly reclaims these entries.
+    managed_instances: [Option<managed::InstanceEntry>; 2],
+    managed_tables: Option<(usize, usize)>,
+    managed_instance_preparation: Option<managed::InstanceReservation>,
+    next_managed_preparation: u64,
 }
 
 /// Default fire frequency assumed for a hook, in Hz. Every hook is assumed to
@@ -492,7 +595,12 @@ impl BpfManager {
             for &prog_id in program_ids {
                 if let Some(entry) = self.program_entry(prog_id) {
                     programs
-                        .push(&entry.program)
+                        .push(
+                            entry
+                                .program
+                                .legacy()
+                                .expect("only legacy programs enter hooks"),
+                        )
                         .expect("attach admission enforces the fixed hook fanout");
                 }
             }
@@ -506,7 +614,12 @@ impl BpfManager {
                 self.gpio_routes.for_each_program(0, pin, fired, |prog_id| {
                     if let Some(entry) = self.program_entry(prog_id) {
                         programs
-                            .push(&entry.program)
+                            .push(
+                                entry
+                                    .program
+                                    .legacy()
+                                    .expect("only legacy programs enter hooks"),
+                            )
                             .expect("GPIO route admission enforces the fixed IRQ fanout");
                     }
                 });
@@ -536,6 +649,10 @@ impl BpfManager {
             program_bytes: 0,
             live_maps: 0,
             map_bytes: 0,
+            managed_instances: core::array::from_fn(|_| None),
+            managed_tables: None,
+            managed_instance_preparation: None,
+            next_managed_preparation: 0,
         };
         let envelope = EnvelopeMap::<ActiveProfile>::init_from_profile();
         crate::actuation::ACTUATION_MONITOR
@@ -804,8 +921,7 @@ impl BpfManager {
             let Some(entry) = slot.as_ref() else {
                 continue;
             };
-            if entry.owner != ObjectOwner::Process(owner) || Arc::strong_count(&entry.program) != 1
-            {
+            if entry.owner != ObjectOwner::Process(owner) || entry.program.strong_count() != 1 {
                 continue;
             }
             let entry = slot.take().expect("owned program entry was present");
@@ -912,7 +1028,7 @@ impl BpfManager {
             &mut self.program_generations,
             self.limits.max_program_slots,
             ProgramEntry {
-                program: Arc::new(ProgramRuntime { program, maps }),
+                program: ProgramObject::Legacy(Arc::new(ProgramRuntime { program, maps })),
                 wcet_cycles,
                 charged_bytes: charge,
                 owner: ObjectOwner::Process(owner),
@@ -1204,7 +1320,11 @@ impl BpfManager {
         let (map_value_sizes, map_perms, map_generations) =
             self.map_metadata_for_owner(owner, program_entry.authorization.map_access);
         let ctx_data_size = attach_ctx_data_size(attach_type);
-        let program = &program_entry.program.program;
+        let program = &program_entry
+            .program
+            .legacy()
+            .ok_or(BpfError::PermissionDenied)?
+            .program;
         let mut verify_config = self.verify_config_with_ctx_data(
             &map_value_sizes,
             &map_perms,
@@ -1358,7 +1478,7 @@ impl BpfManager {
             .get_mut(slot)
             .and_then(Option::as_mut)
             .ok_or(BpfError::NotLoaded)?;
-        if Arc::strong_count(&entry.program) != 1 {
+        if entry.program.strong_count() != 1 {
             return Err(BpfError::ObjectBusy);
         }
 
@@ -1374,7 +1494,10 @@ impl BpfManager {
     pub fn execute(&self, program_id: u32, ctx: &BpfContext<'_>) -> Result<u64, BpfError> {
         let program = self.program_entry(program_id).ok_or(BpfError::NotLoaded)?;
 
-        Self::execute_program(&program.program, ctx)
+        Self::execute_program(
+            program.program.legacy().ok_or(BpfError::PermissionDenied)?,
+            ctx,
+        )
     }
 
     /// Execute a BPF program directly against its immutable runtime view.
@@ -1382,24 +1505,16 @@ impl BpfManager {
         runtime: &ProgramRuntime,
         ctx: &BpfContext<'_>,
     ) -> Result<u64, BpfError> {
-        let cpu = crate::mcore::context::ExecutionContext::try_load()
-            .ok_or(BpfError::ReentrantExecution)?;
-        cpu.with_bpf_stack(|stack| {
-            let mut execution = BpfExecution::new(runtime);
-            cpu.with_bpf_execution(core::ptr::from_mut(&mut execution).cast(), || {
-                let interpreter = Interpreter::<ActiveProfile>::new();
-                interpreter.execute_with_stack(&runtime.program, ctx, stack)
-            })
-            .ok_or(BpfError::ReentrantExecution)?
-        })
-        .ok_or(BpfError::ReentrantExecution)?
+        with_bpf_runtime(&runtime.maps, |stack| {
+            Interpreter::<ActiveProfile>::new().execute_with_stack(&runtime.program, ctx, stack)
+        })?
     }
 
     /// Clone a loaded runtime by id (verifier-cost instrumentation only).
     #[cfg(feature = "verifier-cost")]
     pub(crate) fn get_program(&self, prog_id: u32) -> Option<Arc<ProgramRuntime>> {
         self.program_entry(prog_id)
-            .map(|entry| entry.program.clone())
+            .and_then(|entry| entry.program.legacy().cloned())
     }
 
     #[cfg(feature = "verifier-cost")]
@@ -1445,6 +1560,12 @@ impl BpfManager {
     /// Return true if a GPIO route can be admitted without overflowing the
     /// fixed IRQ fan-out buffer.
     pub fn can_register_gpio_route(&self, chip: u8, pin: u8, edge: GpioEdge, prog_id: u32) -> bool {
+        if self
+            .program_entry(prog_id)
+            .is_some_and(|entry| entry.program.legacy().is_none())
+        {
+            return false;
+        }
         self.gpio_routes
             .can_insert_with_limit(chip, pin, edge, prog_id, GPIO_IRQ_FANOUT_LIMIT)
     }
@@ -1501,6 +1622,12 @@ impl BpfManager {
         edge: GpioEdge,
         prog_id: u32,
     ) -> Result<(), BpfError> {
+        if self
+            .program_entry(prog_id)
+            .is_some_and(|entry| entry.program.legacy().is_none())
+        {
+            return Err(BpfError::PermissionDenied);
+        }
         if !self.can_register_gpio_route(chip, pin, edge, prog_id) {
             log::error!(
                 "BpfManager: GPIO route fan-out exceeded for chip={} pin={} edge={:?}",
@@ -1609,7 +1736,22 @@ impl BpfManager {
             || self.maps.iter().enumerate().any(|(slot, entry)| {
                 entry.is_none() && handles::can_reuse(self.map_generations[slot])
             });
-        if self.live_maps >= self.limits.max_live_maps
+        let reserved = usize::from(
+            self.managed_instance_preparation
+                .as_ref()
+                .is_some_and(|r| r.map_bytes != 0),
+        );
+        let available_slots = self.limits.max_map_slots.saturating_sub(self.maps.len())
+            + self
+                .maps
+                .iter()
+                .enumerate()
+                .filter(|(slot, entry)| {
+                    entry.is_none() && handles::can_reuse(self.map_generations[*slot])
+                })
+                .count();
+        if self.live_maps + reserved >= self.limits.max_live_maps
+            || available_slots <= reserved
             || !has_slot
             || charge > self.limits.max_single_map_bytes
         {
@@ -1713,7 +1855,11 @@ impl BpfManager {
     }
 
     pub fn map_lookup(&self, map_id: u32, key: &[u8]) -> Option<Vec<u8>> {
-        let map = &self.map_entry(map_id)?.runtime;
+        let entry = self.map_entry(map_id)?;
+        if entry.owner == ObjectOwner::KernelManaged {
+            return None;
+        }
+        let map = &entry.runtime;
         let _lease = map.try_lease().ok()?;
         map.map.lookup(key)
     }
@@ -1731,7 +1877,11 @@ impl BpfManager {
     }
 
     fn ensure_map_writable(&self, map_id: u32) -> Result<(), BpfError> {
-        match self.map_entry(map_id).ok_or(BpfError::NotLoaded)?.perm {
+        let entry = self.map_entry(map_id).ok_or(BpfError::NotLoaded)?;
+        if entry.owner == ObjectOwner::KernelManaged {
+            return Err(BpfError::PermissionDenied);
+        }
+        match entry.perm {
             MapPerm::Unavailable => Err(BpfError::PermissionDenied),
             MapPerm::WriteOnly | MapPerm::ReadWrite => Ok(()),
             MapPerm::ReadOnly => Err(BpfError::ReadOnlyMap),
@@ -1806,7 +1956,9 @@ impl BpfManager {
     }
 
     pub fn get_map_def(&self, map_id: u32) -> Option<&kernel_bpf::maps::MapDef> {
-        self.map_entry(map_id).map(|entry| entry.runtime.map.def())
+        self.map_entry(map_id)
+            .filter(|entry| entry.owner != ObjectOwner::KernelManaged)
+            .map(|entry| entry.runtime.map.def())
     }
 
     pub fn get_map_def_for(
@@ -1998,7 +2150,11 @@ impl BpfManager {
     /// Returns the event data if available, or None if the ringbuf is empty.
     /// This is used by the BPF_RINGBUF_POLL syscall command.
     pub fn ringbuf_poll(&self, map_id: u32) -> Option<Vec<u8>> {
-        let map = &self.map_entry(map_id)?.runtime;
+        let entry = self.map_entry(map_id)?;
+        if entry.owner == ObjectOwner::KernelManaged {
+            return None;
+        }
+        let map = &entry.runtime;
         let _lease = map.try_lease().ok()?;
         // RingBufMap::lookup() delegates to poll(), which reads and advances the tail
         map.map.lookup(&[])
@@ -2254,7 +2410,12 @@ mod tests {
                 BpfLoadAuthorization::new(LoadCaller::Unprivileged, false, MapAccess::READ),
             )
             .expect("load owner program");
-        let runtime = &manager.program_entry(program_id).unwrap().program;
+        let runtime = manager
+            .program_entry(program_id)
+            .unwrap()
+            .program
+            .legacy()
+            .unwrap();
 
         assert!(runtime.map(referenced, MapAccess::READ).is_some());
         assert!(runtime.map(referenced, MapAccess::WRITE).is_none());
@@ -2337,7 +2498,13 @@ mod tests {
         let program_id = manager
             .load_raw_program(vec![BpfInsn::mov64_imm(0, 0), BpfInsn::exit()])
             .expect("load snapshot test program");
-        let runtime = manager.program_entry(program_id).unwrap().program.clone();
+        let runtime = manager
+            .program_entry(program_id)
+            .unwrap()
+            .program
+            .legacy()
+            .unwrap()
+            .clone();
         let mut snapshot = HookSnapshot::empty();
 
         snapshot
@@ -2627,6 +2794,8 @@ mod tests {
             .as_ref()
             .expect("loaded entry")
             .program
+            .legacy()
+            .unwrap()
             .clone();
         assert_eq!(manager.unload_program(first), Err(BpfError::ObjectBusy));
         drop(in_flight);
@@ -2856,6 +3025,8 @@ mod tests {
             .as_ref()
             .expect("program entry")
             .program
+            .legacy()
+            .unwrap()
             .clone();
 
         assert!(!manager.reclaim_owner(7));
@@ -3012,6 +3183,6 @@ mod tests {
         );
         assert!(ids[..HOOK_FANOUT_LIMIT]
             .iter()
-            .all(|id| { Arc::strong_count(&manager.program_entry(*id).unwrap().program) == 1 }));
+            .all(|id| { manager.program_entry(*id).unwrap().program.strong_count() == 1 }));
     }
 }
