@@ -9,6 +9,9 @@ use zerocopy::{FromBytes, IntoBytes};
 
 use super::*;
 
+#[path = "preparation_workflow_tests.rs"]
+mod workflow;
+
 #[test]
 fn rearm_shares_operation_capacity_and_preserves_installation_resources() {
     let (mut worker, slot, manager) = fixture_worker();
@@ -380,7 +383,9 @@ fn rearm_worker_retries_bounded_polling_without_restarting_the_operation() {
     ));
 }
 
-fn rearm_ready_fixture() -> (
+fn rearm_ready_fixture(
+    operation: u64,
+) -> (
     shrike_link::handoff::Handoff,
     shrike_link::handoff::RearmReceipt,
 ) {
@@ -389,7 +394,9 @@ fn rearm_ready_fixture() -> (
     use shrike_link::Msg;
     let mut handoff = Handoff::new();
     let mut tx = TxState::new();
-    handoff.rearm_on_transport(41, 0, 1000, &mut tx).unwrap();
+    handoff
+        .rearm_on_transport(operation, 0, 1000, &mut tx)
+        .unwrap();
     handoff.enqueue(&mut tx, 0).unwrap();
     while tx.next_byte().is_some() {}
     handoff.sent(1).unwrap();
@@ -409,7 +416,7 @@ fn rearm_ready_fixture() -> (
 fn rearm_busy_commit_retains_one_shot_receipt_until_same_operation_finishes() {
     use shrike_link::handoff::HandoffError;
     for outcome in 0..3 {
-        let (mut handoff, receipt) = rearm_ready_fixture();
+        let (mut handoff, receipt) = rearm_ready_fixture(41);
         let mut retained = Some(receipt);
         assert_eq!(
             commit_rearm_receipt(&mut retained, |_| Err(HandoffError::Busy)),
@@ -832,8 +839,6 @@ fn retained_identity_query_is_bounded_read_only_and_checks_exact_roles() {
 }
 
 fn signed_bundle(revision: u64, program: &[BpfInsn]) -> (Vec<u8>, Arc<SignatureVerifier>) {
-    let key = SigningKey::from_bytes(&[41; 32]);
-    let payload = program.as_bytes();
     let manifest = Manifest {
         behavior_id: [9; 16],
         revision,
@@ -844,6 +849,12 @@ fn signed_bundle(revision: u64, program: &[BpfInsn]) -> (Vec<u8>, Arc<SignatureV
             max_entries: 1,
         }),
     };
+    signed_manifest(manifest, program)
+}
+
+fn signed_manifest(manifest: Manifest, program: &[BpfInsn]) -> (Vec<u8>, Arc<SignatureVerifier>) {
+    let key = SigningKey::from_bytes(&[41; 32]);
+    let payload = program.as_bytes();
     let mut header = manifest
         .unsigned_header(payload, key.verifying_key().as_bytes())
         .unwrap();

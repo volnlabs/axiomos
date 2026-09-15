@@ -1,6 +1,9 @@
 version = 1
 baseline_sites = 720
-baseline_fingerprint = "sha256:73363c4782cae8a95652fdc7f4d518a92da69aa022a145680a50fbe4c3d44518"
+baseline_fingerprint = "sha256:d930a64f0c90bfeb5d625972f9a67d08cc014dc4bb32f40bce3248fb35adc7cd"
+
+# 2026-09-16: release-boundary safe-output selection removes cached link mode;
+# existing MMIO/counter unsafe sites only move. No new unsafe syntax or owner.
 
 # 2026-09-16: RP2040 TX-idle uses existing UART register accessors;
 # their unsafe PAC sites moved without adding raw access or ownership.

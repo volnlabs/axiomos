@@ -5,6 +5,7 @@ edition = "2021"
 
 [dev-dependencies]
 ed25519-dalek = { version = "2.2", default-features = false }
+signed_bpf_loader = { path = "../userspace/tools/signed_bpf_loader", features = ["managed-runtime"] }
 
 [dependencies]
 kernel_abi = { path = "crates/kernel_abi" }

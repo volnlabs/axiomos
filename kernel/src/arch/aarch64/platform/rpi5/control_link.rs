@@ -175,8 +175,6 @@ pub struct ControlLink {
     rearm: Option<rearm::Rearm>,
     #[cfg(feature = "managed-runtime")]
     rearm_failure: Option<(u64, HandoffError)>,
-    #[cfg(feature = "managed-runtime")]
-    safe_idle: bool,
 }
 
 impl ControlLink {
@@ -412,10 +410,6 @@ impl ControlLink {
                     out.estop = true;
                 }
             }
-        }
-        #[cfg(feature = "managed-runtime")]
-        if estop_queue_empty && self.safe_idle && self.handoff.motion_permitted() {
-            self.set_safe_motor_pair(now, None);
         }
         if estop_queue_empty && self.tx.is_idle() {
             self.flush_pending_motor(now);
@@ -783,8 +777,6 @@ fn init() -> Result<(), InitError> {
                 rearm: None,
                 #[cfg(feature = "managed-runtime")]
                 rearm_failure: None,
-                #[cfg(feature = "managed-runtime")]
-                safe_idle: true,
             };
             #[cfg(feature = "managed-runtime")]
             let quantum_ns = match counter_sample().1 {
@@ -920,7 +912,6 @@ pub(crate) fn request_rearm(operation: u64) -> Result<(), HandoffError> {
         link.dec = Decoder::new();
         link.rearm_failure = None;
         link.rearm = Some(pending);
-        link.safe_idle = true;
         // Rearm owns both fresh quiet intervals; the startup drain never counts
         // as peer qualification and does not keep ordinary liveness running.
         link.local_quiescence = true;
@@ -1002,7 +993,6 @@ pub(crate) fn commit_rearm(receipt: &RearmReceipt) -> Result<(), HandoffError> {
         link.session = LinkSession::new(LINK_TIMEOUT_NS, HEARTBEAT_PERIOD_NS);
         link.session.on_inbound(now_ns());
         link.link_loss_reported = false;
-        link.safe_idle = true;
         Ok(())
     })
     .unwrap_or(Err(HandoffError::NotEstablished))
@@ -1035,7 +1025,6 @@ pub(crate) fn handoff_boundary(
     frequency: u64,
 ) -> Result<Option<u64>, HandoffError> {
     let result = with_link(|link| {
-        link.safe_idle = slot.snapshot().inhibited || slot.snapshot().active.is_none();
         if link.rearm.is_some() {
             // A rearm never resumes the retained installation. There is no
             // installation handoff to run while this management op owns TX.
@@ -1044,7 +1033,7 @@ pub(crate) fn handoff_boundary(
         if link.pending_estop.is_some() {
             link.handoff.disarm();
         }
-        let result = slot.handoff_boundary(
+        slot.handoff_boundary(
             kernel_time::periodic::PeriodicRelease {
                 actual: crate::arch::aarch64::interrupts::physical_counter(),
                 ..release
@@ -1053,12 +1042,8 @@ pub(crate) fn handoff_boundary(
             &mut link.handoff,
             &mut link.tx,
             &mut link.motor_seq,
-        );
-        // Publication can clear inhibition in this very boundary. Idle zeros
-        // must not overwrite the new controller's first pending command.
-        let snapshot = slot.snapshot();
-        link.safe_idle = result.is_err() || snapshot.inhibited || snapshot.active.is_none();
-        result
+            now_ns(),
+        )
     });
     result.unwrap_or_else(|| {
         if slot.needs_handoff_transport() {

@@ -5,6 +5,9 @@ use kernel_bpf::verifier::admission::AdmissionLedger;
 use super::*;
 use crate::bpf::managed::tests::{artifact, artifact_from_program, stateful_managed_program};
 
+#[path = "installation_interleavings.rs"]
+mod interleavings;
+
 fn candidate(manager: &mut BpfManager, revision: u64) -> u32 {
     assert!(manager.preparation.candidate.is_none());
     let id = manager
@@ -47,6 +50,166 @@ fn peer_ready() -> Handoff {
         .on_reply(shrike_link::Msg::SessionReady { session: 1 }, 0)
         .unwrap());
     handoff
+}
+
+#[test]
+fn release_selects_safe_zero_or_the_fresh_controller_without_overwriting_its_first_pair() {
+    use kernel_bpf::bytecode::insn::BpfInsn;
+    use shrike_link::tx::MotorRequest;
+    let mut manager = BpfManager::new();
+    let mut slot = ControlSlot::new();
+    let mut handoff = peer_ready();
+    let mut tx = TxState::new();
+    let mut sequence = 0;
+    slot.handoff_boundary(
+        release(1, 10, 10),
+        1000,
+        &mut handoff,
+        &mut tx,
+        &mut sequence,
+        0,
+    )
+    .unwrap();
+    let zero = tx
+        .pending_motor()
+        .expect("ready inhibited slot selects trusted zero at its release");
+    assert_eq!((zero.left, zero.right), (0, 0));
+    let artifact = manager
+        .register_managed_artifact(artifact_from_program(
+            1,
+            false,
+            EFFECT_MOTOR_PAIR,
+            None,
+            &[
+                BpfInsn::mov64_imm(1, 200),
+                BpfInsn::mov64_imm(2, 300),
+                BpfInsn::call(kernel_abi::BPF_HELPER_MANAGED_MOTOR_PAIR_V1),
+                BpfInsn::mov64_imm(0, 0),
+                BpfInsn::exit(),
+            ],
+        ))
+        .unwrap();
+    manager.preparation.candidate = Some(artifact);
+    stage(&mut slot, &mut manager, None);
+    slot.handoff_boundary(
+        release(2, 20, 20),
+        1000,
+        &mut handoff,
+        &mut tx,
+        &mut sequence,
+        0,
+    )
+    .unwrap();
+    assert!(
+        tx.pending_motor().is_none(),
+        "barrier discards unsent idle zero"
+    );
+    acknowledge(&mut handoff, &mut tx, 21, 25);
+    assert_eq!(
+        slot.handoff_boundary(
+            release(3, 30, 30),
+            1000,
+            &mut handoff,
+            &mut tx,
+            &mut sequence,
+            0
+        ),
+        Ok(Some(1))
+    );
+    assert!(
+        tx.pending_motor().is_none(),
+        "publication selects the controller, not idle output"
+    );
+    let report = slot.run_release(
+        release(3, 30, 30),
+        1000,
+        crate::bpf::control::SensorSnapshot::default(),
+        80_000_000,
+        &mut || 31,
+        |pair, _, _, _| {
+            tx.replace_motor_request(MotorRequest {
+                left: pair.left,
+                right: pair.right,
+                queued_at: 31,
+                origin: None,
+            });
+            crate::actuation::MotorPairSubmission {
+                decision: Some(kernel_bpf::actuation::MotorPairDecision::Allow {
+                    left: pair.left,
+                    right: pair.right,
+                }),
+                outcome: crate::actuation::MotorPairSubmissionOutcome::Queued,
+            }
+        },
+    );
+    assert!(report.failure.is_none());
+    slot.handoff_boundary(
+        release(4, 40, 40),
+        1000,
+        &mut handoff,
+        &mut tx,
+        &mut sequence,
+        0,
+    )
+    .unwrap();
+    let frame = tx.start_pending_motor(sequence.wrapping_add(1)).unwrap();
+    assert_eq!((frame.request.left, frame.request.right), (200, 300));
+    let mut decoder = shrike_link::Decoder::new();
+    let mut wire = None;
+    while let Some(byte) = tx.next_byte() {
+        if let Some(message) = decoder.push(byte) {
+            wire = Some(message.unwrap());
+        }
+    }
+    assert_eq!(
+        wire,
+        Some(shrike_link::Msg::MotorSetpoint {
+            seq: sequence.wrapping_add(1),
+            left: 200,
+            right: 300
+        })
+    );
+    sequence = sequence.wrapping_add(1);
+    drain(&mut slot, &mut manager);
+    slot.begin_deactivation(&mut manager, 1, artifact).unwrap();
+    slot.handoff_boundary(
+        release(5, 50, 50),
+        1000,
+        &mut handoff,
+        &mut tx,
+        &mut sequence,
+        0,
+    )
+    .unwrap();
+    acknowledge(&mut handoff, &mut tx, 51, 55);
+    assert_eq!(
+        slot.handoff_boundary(
+            release(6, 60, 60),
+            1000,
+            &mut handoff,
+            &mut tx,
+            &mut sequence,
+            0
+        ),
+        Ok(Some(2))
+    );
+    let zero = tx
+        .pending_motor()
+        .expect("deactivation selects zero on its commit release");
+    assert_eq!((zero.left, zero.right), (0, 0));
+    // A failed boundary revokes even this pending safe request and session.
+    assert!(slot
+        .handoff_boundary(
+            release(2, 20, 20),
+            1000,
+            &mut handoff,
+            &mut tx,
+            &mut sequence,
+            0
+        )
+        .is_err());
+    assert!(tx.pending_motor().is_none());
+    assert!(!handoff.motion_permitted());
 }
 
 fn release(sequence: u64, scheduled: u64, actual: u64) -> PeriodicRelease {
@@ -118,7 +281,8 @@ fn inactive_retirement_skips_handoff_and_holds_charge_until_last_reader_release(
             1000,
             &mut handoff,
             &mut tx,
-            &mut sequence
+            &mut sequence,
+            0
         ),
         Ok(None)
     );
@@ -326,7 +490,8 @@ fn deactivation_requires_safe_ack_and_retires_state_before_refunding_admission()
             1000,
             &mut handoff,
             &mut tx,
-            &mut sequence
+            &mut sequence,
+            0
         ),
         Ok(None)
     );
@@ -341,7 +506,8 @@ fn deactivation_requires_safe_ack_and_retires_state_before_refunding_admission()
             1000,
             &mut handoff,
             &mut tx,
-            &mut sequence
+            &mut sequence,
+            0
         ),
         Ok(Some(3))
     );
@@ -492,7 +658,8 @@ fn real_boundary_records_discarded_originals_for_handoff_and_failure() {
                         1000,
                         &mut handoff,
                         &mut tx,
-                        &mut sequence
+                        &mut sequence,
+                        0
                     )
                     .is_err(),
                     fail
@@ -503,6 +670,7 @@ fn real_boundary_records_discarded_originals_for_handoff_and_failure() {
                     &mut handoff,
                     &mut tx,
                     &mut sequence,
+                    0,
                 );
             });
             let drops: alloc::vec::Vec<_> = records
@@ -560,18 +728,39 @@ fn real_boundary_commits_only_matching_ack_at_next_release_and_keeps_retirement_
         let a = candidate(&mut manager, 1);
         stage(&mut slot, &mut manager, None);
         assert_eq!(
-            slot.handoff_boundary(release(1, 100, 100), 1000, &mut handoff, &mut tx, &mut seq),
+            slot.handoff_boundary(
+                release(1, 100, 100),
+                1000,
+                &mut handoff,
+                &mut tx,
+                &mut seq,
+                0
+            ),
             Ok(None)
         );
         assert!(slot.snapshot().inhibited);
         assert_eq!(slot.snapshot().generation, 0);
         acknowledge(&mut handoff, &mut tx, 101, 102);
         assert_eq!(
-            slot.handoff_boundary(release(1, 100, 103), 1000, &mut handoff, &mut tx, &mut seq),
+            slot.handoff_boundary(
+                release(1, 100, 103),
+                1000,
+                &mut handoff,
+                &mut tx,
+                &mut seq,
+                0
+            ),
             Ok(None)
         );
         assert_eq!(
-            slot.handoff_boundary(release(2, 110, 110), 1000, &mut handoff, &mut tx, &mut seq),
+            slot.handoff_boundary(
+                release(2, 110, 110),
+                1000,
+                &mut handoff,
+                &mut tx,
+                &mut seq,
+                0
+            ),
             Ok(Some(1))
         );
         assert_eq!(slot.snapshot().active, Some(a));
@@ -582,14 +771,28 @@ fn real_boundary_commits_only_matching_ack_at_next_release_and_keeps_retirement_
         stage(&mut slot, &mut manager, None);
         let charge = slot.snapshot().active_charge_ns_per_s;
         assert_eq!(
-            slot.handoff_boundary(release(3, 120, 120), 1000, &mut handoff, &mut tx, &mut seq),
+            slot.handoff_boundary(
+                release(3, 120, 120),
+                1000,
+                &mut handoff,
+                &mut tx,
+                &mut seq,
+                0
+            ),
             Ok(None)
         );
         assert_eq!(slot.snapshot().active, Some(a));
         assert_eq!(slot.snapshot().active_charge_ns_per_s, charge);
         acknowledge(&mut handoff, &mut tx, 121, 129);
         assert_eq!(
-            slot.handoff_boundary(release(4, 130, 130), 1000, &mut handoff, &mut tx, &mut seq),
+            slot.handoff_boundary(
+                release(4, 130, 130),
+                1000,
+                &mut handoff,
+                &mut tx,
+                &mut seq,
+                0
+            ),
             Ok(Some(2))
         );
         assert_eq!(
@@ -599,12 +802,26 @@ fn real_boundary_commits_only_matching_ack_at_next_release_and_keeps_retirement_
         drain(&mut slot, &mut manager);
         stage(&mut slot, &mut manager, Some(a));
         assert_eq!(
-            slot.handoff_boundary(release(5, 140, 140), 1000, &mut handoff, &mut tx, &mut seq),
+            slot.handoff_boundary(
+                release(5, 140, 140),
+                1000,
+                &mut handoff,
+                &mut tx,
+                &mut seq,
+                0
+            ),
             Ok(None)
         );
         acknowledge(&mut handoff, &mut tx, 141, 149);
         assert_eq!(
-            slot.handoff_boundary(release(6, 150, 150), 1000, &mut handoff, &mut tx, &mut seq),
+            slot.handoff_boundary(
+                release(6, 150, 150),
+                1000,
+                &mut handoff,
+                &mut tx,
+                &mut seq,
+                0
+            ),
             Ok(Some(3))
         );
         assert_eq!(
@@ -613,7 +830,14 @@ fn real_boundary_commits_only_matching_ack_at_next_release_and_keeps_retirement_
         );
         slot.stop();
         assert_eq!(
-            slot.handoff_boundary(release(7, 160, 160), 1000, &mut handoff, &mut tx, &mut seq),
+            slot.handoff_boundary(
+                release(7, 160, 160),
+                1000,
+                &mut handoff,
+                &mut tx,
+                &mut seq,
+                0
+            ),
             Ok(None)
         );
         assert!(
@@ -678,8 +902,15 @@ fn stop_cancel_timeout_and_reset_cannot_publish_even_with_matching_ack() {
         let mut handoff = peer_ready();
         let mut tx = TxState::new();
         let mut seq = 0;
-        slot.handoff_boundary(release(1, 100, 100), 1000, &mut handoff, &mut tx, &mut seq)
-            .unwrap();
+        slot.handoff_boundary(
+            release(1, 100, 100),
+            1000,
+            &mut handoff,
+            &mut tx,
+            &mut seq,
+            0,
+        )
+        .unwrap();
         acknowledge(
             &mut handoff,
             &mut tx,
@@ -697,7 +928,7 @@ fn stop_cancel_timeout_and_reset_cannot_publish_even_with_matching_ack() {
         }
         let at = if fault == 2 { 180 } else { 110 };
         assert!(slot
-            .handoff_boundary(release(2, at, at), 1000, &mut handoff, &mut tx, &mut seq)
+            .handoff_boundary(release(2, at, at), 1000, &mut handoff, &mut tx, &mut seq, 0)
             .is_err());
         let after = slot.snapshot();
         assert_eq!(
@@ -812,8 +1043,15 @@ fn cancelled_transport_cannot_assign_its_failure_to_a_new_preparation() {
     let mut handoff = peer_ready();
     let mut tx = TxState::new();
     let mut seq = 0;
-    slot.handoff_boundary(release(1, 100, 100), 1000, &mut handoff, &mut tx, &mut seq)
-        .unwrap();
+    slot.handoff_boundary(
+        release(1, 100, 100),
+        1000,
+        &mut handoff,
+        &mut tx,
+        &mut seq,
+        0,
+    )
+    .unwrap();
     assert_eq!(handoff.operation(), Some(old));
     slot.cancel(old).unwrap();
     slot.abort_cancelled();
@@ -821,7 +1059,14 @@ fn cancelled_transport_cannot_assign_its_failure_to_a_new_preparation() {
     let new = stage(&mut slot, &mut manager, None);
     assert_ne!(new, old);
     assert_eq!(
-        slot.handoff_boundary(release(2, 110, 110), 1000, &mut handoff, &mut tx, &mut seq),
+        slot.handoff_boundary(
+            release(2, 110, 110),
+            1000,
+            &mut handoff,
+            &mut tx,
+            &mut seq,
+            0
+        ),
         Err(HandoffError::Stale)
     );
     assert_eq!(slot.operation_error(new), Some(kernel_abi::ECANCELED));

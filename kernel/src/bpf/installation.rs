@@ -889,6 +889,8 @@ impl ControlSlot {
     /// The production timer and host tests share this complete publication path.
     /// Caller holds the slot and link under CPU0 IRQ masking. It must check stop
     /// first; any error requires the trusted stop path after releasing the link.
+    /// `transport_now` is the UART queue's nanosecond clock; release/handoff
+    /// timestamps retain the physical-counter tick domain and are not mixed.
     pub(crate) fn handoff_boundary(
         &mut self,
         release: PeriodicRelease,
@@ -896,6 +898,7 @@ impl ControlSlot {
         handoff: &mut Handoff,
         tx: &mut TxState,
         motor_sequence: &mut u8,
+        transport_now: u64,
     ) -> Result<Option<u64>, HandoffError> {
         // A cancelled transaction can outlive worker cleanup in the transport
         // mailbox. Never relabel its failure with a subsequently accepted ID.
@@ -971,6 +974,25 @@ impl ControlSlot {
             let mut discarded = tx.clear_motor();
             discarded.frame = tx.cancel_unsent().frame;
             super::recorder::events::motor_discard(discarded, MANAGED_AUDIT_DISCARD_STOP);
+        } else if handoff.motion_permitted() && (self.inhibited || self.active.is_none()) {
+            // Select trusted safe output at the same boundary that publishes
+            // installations. The poller only transmits this complete request;
+            // it cannot overwrite a fresh controller using cached slot state.
+            let origin = self
+                .active
+                .as_ref()
+                .map(|active| shrike_link::tx::MotorOrigin {
+                    cycle: release.sequence,
+                    generation: self.generation,
+                    artifact_handle: active.artifact.handle,
+                });
+            let discarded = tx.prioritize_motor_request(shrike_link::tx::MotorRequest {
+                left: 0,
+                right: 0,
+                queued_at: transport_now,
+                origin,
+            });
+            super::recorder::events::motor_discard(discarded, MANAGED_AUDIT_DISCARD_SAFE_PAIR);
         }
         result
     }

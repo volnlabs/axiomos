@@ -960,6 +960,7 @@ dependencies = [
  "rustc-demangle",
  "sha3",
  "shrike_link",
+ "signed_bpf_loader",
  "spin",
  "thiserror",
  "uart_16550",
