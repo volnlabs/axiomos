@@ -1821,6 +1821,8 @@ version = "0.1.0"
 dependencies = [
  "kernel_abi",
  "minilib",
+ "shrike_link",
+ "zerocopy 0.9.0-alpha.0",
 ]
 
 [[package]]

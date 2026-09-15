@@ -56,7 +56,11 @@ export AXIOM_ARTIFACT_PATHS="$ARTIFACT_PATHS"
 # Run image assembly at the requested profile with a unique artifact-manifest
 # path. The environment value makes build.rs emit the paths from this exact
 # invocation; no timestamp or stale target-directory search is involved.
-ROOT_BUILD_ARGS=(build -p axiomos --target "$TARGET" --no-default-features --features aarch64_deps)
+ROOT_FEATURES=aarch64_deps
+case ",$FEATURES," in
+    *,managed-runtime,*) ROOT_FEATURES+=,managed-runtime-aarch64 ;;
+esac
+ROOT_BUILD_ARGS=(build -p axiomos --target "$TARGET" --no-default-features --features "$ROOT_FEATURES")
 if [ "$PROFILE" = "release" ]; then
     ROOT_BUILD_ARGS+=(--release)
 fi

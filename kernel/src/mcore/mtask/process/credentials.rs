@@ -23,7 +23,7 @@ impl BpfCapabilities {
     pub const PROGRAM_ATTACH: Self =
         Self(Self::ATTACH_TRACE.0 | Self::ATTACH_SCHEDULER.0 | Self::ATTACH_DEVICE.0);
 
-    /// Authority assigned to the first userspace process. Init can run the
+    /// Legacy init authority. Init can run the
     /// lifecycle probes and delegate the shipped scheduler demos, but it has no
     /// device attach, actuation or managed deployment authority.
     pub const USERSPACE_INIT: Self = Self(
@@ -36,6 +36,14 @@ impl BpfCapabilities {
             | Self::PRIVILEGED_VERIFY.0
             | Self::OBJECT_ADMIN.0,
     );
+
+    /// The managed image's bootstrap delegates only to its dedicated installer,
+    /// then drops this authority. It cannot load legacy code or actuate.
+    pub const BOOTSTRAP_INIT: Self = if cfg!(feature = "managed-runtime") {
+        Self::BEHAVIOR_ADMIN
+    } else {
+        Self::USERSPACE_INIT
+    };
 
     pub const ALL: Self = Self(
         Self::PROGRAM_LOAD.0
@@ -157,6 +165,29 @@ mod tests {
         assert_eq!(credentials.bpf_capabilities(), BpfCapabilities::ALL);
         assert!(credentials.has_bpf_capabilities(BpfCapabilities::ACTUATE));
         assert!(credentials.has_bpf_capabilities(BpfCapabilities::PRIVILEGED_VERIFY));
+    }
+
+    #[test]
+    fn managed_bootstrap_delegates_admin_then_cannot_regain_it() {
+        if !cfg!(feature = "managed-runtime") {
+            return;
+        }
+        let mut init = Credentials::kernel();
+        init.restrict_bpf_capabilities(BpfCapabilities::BOOTSTRAP_INIT);
+        let mut installer = Credentials::inherit(init);
+        installer.restrict_bpf_capabilities(BpfCapabilities::BEHAVIOR_ADMIN);
+        assert_eq!(
+            installer.bpf_capabilities(),
+            BpfCapabilities::BEHAVIOR_ADMIN
+        );
+        assert!(!installer.has_bpf_capabilities(BpfCapabilities::ACTUATE));
+        init.restrict_bpf_capabilities(BpfCapabilities::NONE);
+        init.restrict_bpf_capabilities(BpfCapabilities::ALL);
+        assert_eq!(init.bpf_capabilities(), BpfCapabilities::NONE);
+        assert_eq!(
+            Credentials::inherit(init).bpf_capabilities(),
+            BpfCapabilities::NONE
+        );
     }
 
     #[test]

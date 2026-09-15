@@ -49,6 +49,11 @@ fn hlt() {
 mod access;
 pub mod bpf;
 mod estop;
+#[cfg(any(
+    test,
+    all(target_arch = "aarch64", feature = "rpi5", feature = "managed-runtime")
+))]
+pub(crate) mod installer_io;
 mod managed;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 mod process;
@@ -362,6 +367,10 @@ fn dispatch_sys_open(
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn dispatch_sys_read(fd: usize, buf: usize, nbyte: usize) -> Result<usize, Errno> {
+    #[cfg(all(target_arch = "aarch64", feature = "rpi5", feature = "managed-runtime"))]
+    if let Some(result) = installer_io::dispatch_read(fd, buf, nbyte) {
+        return result;
+    }
     let cx = KernelAccess::new();
 
     let fd = i32::try_from(fd).map_err(|_| EINVAL)?;
@@ -378,6 +387,10 @@ fn dispatch_sys_read(fd: usize, buf: usize, nbyte: usize) -> Result<usize, Errno
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn dispatch_sys_write(fd: usize, buf: usize, nbyte: usize) -> Result<usize, Errno> {
+    #[cfg(all(target_arch = "aarch64", feature = "rpi5", feature = "managed-runtime"))]
+    if let Some(result) = installer_io::dispatch_write(fd, buf, nbyte) {
+        return result;
+    }
     #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
     if !WRITE_MARKER_SENT.swap(true, Ordering::Relaxed) {
         dbg_mark(b'w' as u32);

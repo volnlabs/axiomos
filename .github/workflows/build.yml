@@ -214,6 +214,10 @@ jobs:
         run: cargo test --manifest-path userspace/tools/rk_bridge/Cargo.toml
       - name: Test rk_cli
         run: cargo test --manifest-path userspace/tools/rk_cli/Cargo.toml
+      - name: Test managed installer and image feature propagation
+        run: |
+          cargo test --locked -p signed_bpf_loader --lib --features managed-runtime
+          python3 tests/scripts/test_rpi5_target_dir.py
       - name: Test Shrike-lite R0.4 board profile
         run: |
           rustc --edition=2021 --test firmware/shrike/rp2040/host-tests/r04_board_profile.rs -o /tmp/r04-board-profile-test

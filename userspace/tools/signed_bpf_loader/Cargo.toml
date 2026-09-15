@@ -3,6 +3,12 @@ name = "signed_bpf_loader"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+managed-runtime = ["dep:shrike_link", "dep:zerocopy"]
+
 [dependencies]
 minilib = { path = "../../core/minilib" }
 kernel_abi = { path = "../../../kernel/crates/kernel_abi" }
+shrike_link = { path = "../../../kernel/crates/shrike_link", optional = true }
+zerocopy = { workspace = true, optional = true }

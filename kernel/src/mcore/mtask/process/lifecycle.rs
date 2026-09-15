@@ -26,6 +26,9 @@ impl Process {
         *exit_code = Some(status);
         drop(exit_code);
 
+        #[cfg(all(target_arch = "aarch64", feature = "rpi5", feature = "managed-runtime"))]
+        crate::syscall::installer_io::release(self.pid().as_u64());
+
         // Publish the status before closing descriptors so an endpoint wakeup
         // cannot expose a zombie whose exit code is still absent. Detach the
         // table under its lock, then run endpoint destructors without that lock:

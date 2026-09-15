@@ -11,6 +11,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 GPIO = ROOT / "kernel/src/arch/aarch64/platform/rpi5/gpio.rs"
 PL011 = ROOT / "kernel/src/arch/aarch64/platform/rpi5/pl011.rs"
+DEBUG_UART = ROOT / "kernel/src/arch/aarch64/platform/rpi5/uart.rs"
 HARNESS = r'''
 #![allow(dead_code)]
 mod memory_map {
@@ -162,6 +163,79 @@ fn main() {
 }
 '''
 
+DEBUG_UART_HARNESS = r'''
+#![allow(dead_code)]
+mod memory_map { pub const BCM2712_UART10_BASE: usize = 0; }
+mod mmio {
+    use std::sync::Mutex;
+    struct Registers { words: [u32; 16], accesses: usize, writes: Vec<(usize, u32)>, error_on_flags: u32 }
+    static REGS: Mutex<Registers> = Mutex::new(Registers {
+        words: [0; 16], accesses: 0, writes: Vec::new(), error_on_flags: 0,
+    });
+    pub struct MmioReg<T> { addr: usize, marker: std::marker::PhantomData<T> }
+    impl MmioReg<u32> {
+        pub unsafe fn new(addr: usize) -> Self {
+            Self { addr, marker: std::marker::PhantomData }
+        }
+        pub fn read(&self) -> u32 {
+            let mut regs = REGS.lock().unwrap();
+            regs.accesses += 1;
+            assert!(regs.accesses <= 4, "a nonblocking operation must not poll");
+            if self.addr == 0x18 { regs.words[1] |= regs.error_on_flags; }
+            regs.words[self.addr / 4]
+        }
+        pub fn write(&self, value: u32) {
+            let mut regs = REGS.lock().unwrap();
+            regs.accesses += 1;
+            assert!(regs.accesses <= 4, "a nonblocking operation must not poll");
+            regs.words[self.addr / 4] = value;
+            regs.writes.push((self.addr, value));
+        }
+        pub fn is_set(&self, mask: u32) -> bool { self.read() & mask != 0 }
+        pub fn wait_clear(&self, _: u32) { unreachable!() }
+    }
+    pub fn prepare(flags: u32, status: u32, data: u32) {
+        let mut regs = REGS.lock().unwrap();
+        regs.words = [0; 16];
+        regs.words[0x18 / 4] = flags;
+        regs.words[0x04 / 4] = status;
+        regs.words[0] = data;
+        regs.accesses = 0;
+        regs.writes.clear();
+        regs.error_on_flags = 0;
+    }
+    pub fn late_error(error: u32) { REGS.lock().unwrap().error_on_flags = error; }
+    pub fn writes() -> Vec<(usize, u32)> { REGS.lock().unwrap().writes.clone() }
+}
+mod uart;
+fn main() {
+    let uart = unsafe { uart::Rp1Uart::new() };
+    mmio::prepare(1 << 4, 0, 0);
+    assert_eq!(uart.try_getc_checked(), Ok(None));
+    assert!(mmio::writes().is_empty());
+    mmio::prepare(0, 0, 0xa5);
+    assert_eq!(uart.try_getc_checked(), Ok(Some(0xa5)));
+    for errors in 1..=15 {
+        mmio::prepare(0, 0, (errors << 8) | 0x5a);
+        assert_eq!(uart.try_getc_checked(), Err(uart::ReceiveError(errors as u8)));
+        assert_eq!(mmio::writes(), [(0x04, 0)]);
+        mmio::prepare(1 << 4, errors, 0);
+        assert_eq!(uart.try_getc_checked(), Err(uart::ReceiveError(errors as u8)));
+        assert_eq!(mmio::writes(), [(0x04, 0)]);
+    }
+    mmio::prepare(1 << 4, 0, 0);
+    mmio::late_error(8);
+    assert_eq!(uart.try_getc_checked(), Err(uart::ReceiveError(8)));
+    mmio::prepare(1 << 5, 0, 0);
+    assert!(!uart.try_putc(0xa5));
+    assert!(mmio::writes().is_empty());
+    mmio::prepare(0, 0, 0);
+    assert!(uart.try_putc(0xa5));
+    assert_eq!(mmio::writes(), [(0x00, 0xa5)]);
+    println!("PASS: debug UART RX errors and nonblocking TX use bounded register accesses");
+}
+'''
+
 
 def main():
     with tempfile.TemporaryDirectory(prefix="rpi5-gpio-test-") as directory:
@@ -174,6 +248,10 @@ def main():
         subprocess.run([str(path / "check")], check=True)
         (path / "pl011.rs").write_text(PL011.read_text())
         (path / "main.rs").write_text(UART_HARNESS)
+        subprocess.run(["rustc", "--edition=2021", str(path / "main.rs"), "-o", str(path / "check")], check=True)
+        subprocess.run([str(path / "check")], check=True, timeout=5)
+        (path / "uart.rs").write_text(DEBUG_UART.read_text())
+        (path / "main.rs").write_text(DEBUG_UART_HARNESS)
         subprocess.run(["rustc", "--edition=2021", str(path / "main.rs"), "-o", str(path / "check")], check=True)
         subprocess.run([str(path / "check")], check=True, timeout=5)
 

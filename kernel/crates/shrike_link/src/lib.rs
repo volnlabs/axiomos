@@ -14,6 +14,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod handoff;
+pub mod installer;
 pub mod motor;
 pub mod ring;
 pub mod session;

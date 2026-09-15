@@ -43,6 +43,29 @@ struct BpfInsn {
 // SAFETY: Entry point for the init process, called by the kernel/loader.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    #[cfg(feature = "managed-runtime")]
+    {
+        // The qualified image runs one installer without the legacy diagnostic
+        // workloads. Its administration authority grants no direct actuation.
+        let pid =
+            minilib::spawn_restricted("/bin/signed_bpf_loader", kernel_abi::BPF_CAP_BEHAVIOR_ADMIN);
+        let restricted = minilib::restrict_bpf_capabilities(0);
+        if pid < 0 || restricted != 0 {
+            minilib::estop_trigger();
+            minilib::exit(1);
+        }
+        // No automatic respawn or stop on loader exit: accepted operations and
+        // installations retain their specified kernel-owned lifetime.
+        loop {
+            minilib::msleep(1000);
+        }
+    }
+    #[cfg(not(feature = "managed-runtime"))]
+    legacy_start()
+}
+
+#[cfg(not(feature = "managed-runtime"))]
+fn legacy_start() -> ! {
     if usercopy_fault_probe() {
         write(1, b"USERCOPY_EFAULT_OK\n");
     } else {

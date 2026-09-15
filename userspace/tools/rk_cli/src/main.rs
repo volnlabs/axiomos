@@ -31,6 +31,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Upload and administer managed controllers over the physical debug UART
+    Runtime {
+        /// Linux serial character device, for example /dev/ttyACM0
+        #[arg(long)]
+        port: std::path::PathBuf,
+        #[command(subcommand)]
+        command: commands::runtime::RuntimeCommand,
+    },
     /// Key management commands
     #[command(subcommand)]
     Key(KeyCommands),
@@ -176,6 +184,7 @@ fn main() -> Result<()> {
     }
 
     match cli.command {
+        Commands::Runtime { port, command } => commands::runtime::run(&port, command),
         Commands::Key(key_cmd) => match key_cmd {
             KeyCommands::Generate { output } => commands::key::generate(&output),
             KeyCommands::Export { key, format } => commands::key::export(&key, &format),

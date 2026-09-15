@@ -24,6 +24,8 @@ run_step quality-provenance-tests python3 -B tests/scripts/test_quality.py
 run_step gpio23-probe-prompt-tests python3 -B tests/scripts/test_gpio23_probe.py
 run_step shrike-gpio23-probe-tests python3 -B tests/scripts/test_shrike_gpio23_probe.py
 run_step rpi5-peripheral-register-tests python3 -B tests/scripts/test_rpi5_peripheral_output.py
+run_step rpi5-image-feature-tests python3 -B tests/scripts/test_rpi5_target_dir.py
+run_step managed-installer-tests cargo test --locked -p signed_bpf_loader --lib --features managed-runtime
 run_step rp2040-uart-test-build rustc --edition 2021 -D warnings --test \
     firmware/shrike/rp2040/host-tests/uart_adapter.rs -o "$OUTPUT_DIR/rp2040-uart-tests"
 run_step rp2040-uart-tests "$OUTPUT_DIR/rp2040-uart-tests"

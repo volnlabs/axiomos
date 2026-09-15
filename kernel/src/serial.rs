@@ -5,6 +5,18 @@
 ))]
 mod bench_buffer;
 
+#[cfg(all(target_arch = "aarch64", feature = "rpi5", feature = "managed-runtime"))]
+static SUPPRESSED_RECORDS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+#[cfg(all(target_arch = "aarch64", feature = "rpi5", feature = "managed-runtime"))]
+fn note_suppressed_record() {
+    let _ = SUPPRESSED_RECORDS.fetch_update(
+        core::sync::atomic::Ordering::Relaxed,
+        core::sync::atomic::Ordering::Relaxed,
+        |count| Some(count.saturating_add(1)),
+    );
+}
+
 #[cfg(all(target_arch = "aarch64", feature = "rpi5", feature = "bench"))]
 mod deferred_bench {
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -32,6 +44,10 @@ mod deferred_bench {
     // allocation, blocking lock or unbounded drain; GPIO still needs hardware
     // timing measurements with this bounded interference present.
     pub(super) fn drain() {
+        #[cfg(feature = "managed-runtime")]
+        if crate::syscall::installer_io::console_is_suppressed() {
+            return;
+        }
         if !ACTIVE.load(Ordering::Acquire) {
             return;
         }
@@ -41,6 +57,10 @@ mod deferred_bench {
         let Some(uart) = crate::arch::aarch64::platform::rpi5::UART.try_lock() else {
             return;
         };
+        #[cfg(feature = "managed-runtime")]
+        if crate::syscall::installer_io::console_is_suppressed() {
+            return;
+        }
         buffer.note_dropped(CONTENDED.swap(0, Ordering::Relaxed));
         buffer.drain(64, |byte| uart.try_putc(byte));
     }
@@ -116,6 +136,15 @@ mod aarch64_impl {
                 Aarch64::disable_interrupts();
             }
 
+            #[cfg(feature = "managed-runtime")]
+            if crate::syscall::installer_io::console_is_suppressed() {
+                super::note_suppressed_record();
+                if were_enabled {
+                    Aarch64::enable_interrupts();
+                }
+                return;
+            }
+
             #[cfg(feature = "bench")]
             if super::deferred_bench::ACTIVE.load(core::sync::atomic::Ordering::Acquire) {
                 super::deferred_bench::record(args);
@@ -124,7 +153,17 @@ mod aarch64_impl {
                 }
                 return;
             }
-            let _ = UART.lock().write_fmt(args);
+            let mut uart = UART.lock();
+            #[cfg(feature = "managed-runtime")]
+            if crate::syscall::installer_io::console_is_suppressed() {
+                super::note_suppressed_record();
+                drop(uart);
+                if were_enabled {
+                    Aarch64::enable_interrupts();
+                }
+                return;
+            }
+            let _ = uart.write_fmt(args);
 
             if were_enabled {
                 Aarch64::enable_interrupts();

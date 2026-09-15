@@ -98,6 +98,12 @@ mod cr {
     pub const RTS: u32 = 1 << 11;
 }
 
+/// Framing/parity/break/overrun flags in the low four bits, matching UARTRSR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReceiveError(pub u8);
+
+const DR_ERR_MASK: u32 = 0xF00;
+
 /// BCM2712 PL011 UART Driver
 pub struct Rp1Uart {
     base: usize,
@@ -134,7 +140,6 @@ impl Rp1Uart {
     }
 
     /// Send one raw byte only if the FIFO has room; never poll for space.
-    #[cfg(feature = "bench")]
     pub fn try_putc(&self, byte: u8) -> bool {
         if !self.can_write() {
             return false;
@@ -163,6 +168,26 @@ impl Rp1Uart {
         }
     }
 
+    /// Nonblocking checked receive for the managed installer transport.
+    /// Only an error-free empty FIFO is idle; receive errors invalidate the run.
+    pub fn try_getc_checked(&self) -> Result<Option<u8>, ReceiveError> {
+        let flags = self.reg_fr().read();
+        let status = self.reg_rsrecr().read() & 0xF;
+        if status != 0 {
+            self.reg_rsrecr().write(0);
+            return Err(ReceiveError(status as u8));
+        }
+        if flags & fr::RXFE != 0 {
+            return Ok(None);
+        }
+        let data = self.reg_dr().read();
+        if data & DR_ERR_MASK != 0 {
+            self.reg_rsrecr().write(0);
+            return Err(ReceiveError(((data & DR_ERR_MASK) >> 8) as u8));
+        }
+        Ok(Some((data & 0xFF) as u8))
+    }
+
     /// Check if transmit FIFO has space
     pub fn can_write(&self) -> bool {
         !self.reg_fr().is_set(fr::TXFF)
@@ -182,6 +207,11 @@ impl Rp1Uart {
     fn reg_fr(&self) -> MmioReg<u32> {
         // SAFETY: The base address is valid and the offset is within bounds.
         unsafe { MmioReg::new(self.base + reg::FR) }
+    }
+
+    fn reg_rsrecr(&self) -> MmioReg<u32> {
+        // SAFETY: The base address is valid and the offset is within bounds.
+        unsafe { MmioReg::new(self.base + reg::RSRECR) }
     }
 
     #[allow(dead_code)]

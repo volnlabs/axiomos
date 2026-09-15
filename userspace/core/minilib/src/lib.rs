@@ -168,6 +168,15 @@ fn managed_bpf<T>(cmd: u32, request: &mut T) -> Result<usize, kernel_abi::Errno>
     }
 }
 
+pub fn managed_bpf_bytes(cmd: u32, request: &mut [u8]) -> isize {
+    syscall3(
+        kernel_abi::SYS_BPF,
+        cmd as usize,
+        request.as_mut_ptr() as usize,
+        request.len(),
+    ) as isize
+}
+
 pub fn managed_upload_begin(
     expected_last_id: u64,
     total_bytes: u32,
@@ -230,6 +239,103 @@ pub fn managed_operation_query(
     };
     managed_bpf(kernel_abi::BPF_MANAGED_OPERATION_QUERY, &mut request)?;
     Ok(request)
+}
+
+fn managed_installation(
+    cmd: u32,
+    expected_last_id: u64,
+    expected_generation: u64,
+    artifact_handle: u32,
+) -> Result<u64, kernel_abi::Errno> {
+    let mut request = kernel_abi::ManagedInstallationRequestV1 {
+        version: kernel_abi::MANAGED_ADMIN_VERSION,
+        size: core::mem::size_of::<kernel_abi::ManagedInstallationRequestV1>() as u32,
+        expected_last_id,
+        expected_generation,
+        artifact_handle,
+        reserved: 0,
+    };
+    managed_bpf(cmd, &mut request).map(|id| id as u64)
+}
+
+pub fn managed_activate(
+    expected_last_id: u64,
+    expected_generation: u64,
+    artifact_handle: u32,
+) -> Result<u64, kernel_abi::Errno> {
+    managed_installation(
+        kernel_abi::BPF_MANAGED_ACTIVATE,
+        expected_last_id,
+        expected_generation,
+        artifact_handle,
+    )
+}
+
+pub fn managed_rollback(
+    expected_last_id: u64,
+    expected_generation: u64,
+    artifact_handle: u32,
+) -> Result<u64, kernel_abi::Errno> {
+    managed_installation(
+        kernel_abi::BPF_MANAGED_ROLLBACK,
+        expected_last_id,
+        expected_generation,
+        artifact_handle,
+    )
+}
+
+pub fn managed_deactivate(
+    expected_last_id: u64,
+    expected_generation: u64,
+    artifact_handle: u32,
+) -> Result<u64, kernel_abi::Errno> {
+    managed_installation(
+        kernel_abi::BPF_MANAGED_DEACTIVATE,
+        expected_last_id,
+        expected_generation,
+        artifact_handle,
+    )
+}
+
+pub fn managed_retire(
+    expected_last_id: u64,
+    expected_generation: u64,
+    artifact_handle: u32,
+) -> Result<u64, kernel_abi::Errno> {
+    managed_installation(
+        kernel_abi::BPF_MANAGED_RETIRE,
+        expected_last_id,
+        expected_generation,
+        artifact_handle,
+    )
+}
+
+pub fn managed_slot_query() -> Result<kernel_abi::ManagedSlotV1, kernel_abi::Errno> {
+    let mut request = kernel_abi::ManagedSlotV1 {
+        version: kernel_abi::MANAGED_ADMIN_VERSION,
+        size: core::mem::size_of::<kernel_abi::ManagedSlotV1>() as u32,
+        ..Default::default()
+    };
+    managed_bpf(kernel_abi::BPF_MANAGED_SLOT_QUERY, &mut request)?;
+    Ok(request)
+}
+
+pub fn managed_installation_cancel(
+    id: u64,
+    expected_generation: u64,
+    artifact_handle: u32,
+    target_kind: u32,
+) -> Result<(), kernel_abi::Errno> {
+    let mut request = kernel_abi::ManagedInstallationCancelV1 {
+        version: kernel_abi::MANAGED_ADMIN_VERSION,
+        size: core::mem::size_of::<kernel_abi::ManagedInstallationCancelV1>() as u32,
+        id,
+        expected_generation,
+        artifact_handle,
+        target_kind,
+        reserved: 0,
+    };
+    managed_bpf(kernel_abi::BPF_MANAGED_INSTALLATION_CANCEL, &mut request).map(|_| ())
 }
 
 pub fn estop_trigger() -> c_int {

@@ -451,6 +451,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
 
 [[package]]
+name = "minilib"
+version = "0.1.0"
+dependencies = [
+ "kernel_abi",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -553,16 +560,20 @@ dependencies = [
  "clap",
  "colored",
  "env_logger",
+ "kernel_abi",
  "kernel_bpf",
  "log",
  "ring",
  "serde",
  "serde_json",
  "sha3",
+ "shrike_link",
+ "signed_bpf_loader",
  "tempfile",
  "thiserror",
  "toml",
  "walkdir",
+ "zerocopy",
 ]
 
 [[package]]
@@ -688,10 +699,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
+name = "shrike_link"
+version = "0.1.0"
+
+[[package]]
 name = "signature"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
+
+[[package]]
+name = "signed_bpf_loader"
+version = "0.1.0"
+dependencies = [
+ "kernel_abi",
+ "minilib",
+ "shrike_link",
+ "zerocopy",
+]
 
 [[package]]
 name = "spin"

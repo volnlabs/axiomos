@@ -6,6 +6,7 @@ edition = "2021"
 [features]
 default = []
 bpf-unsigned-development = []
+managed-runtime = []
 
 [dependencies]
 minilib = { path = "../minilib" }

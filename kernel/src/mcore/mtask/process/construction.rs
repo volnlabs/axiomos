@@ -121,7 +121,7 @@ impl Process {
         Self::create_from_executable_with_bpf_capabilities(
             parent,
             path,
-            BpfCapabilities::USERSPACE_INIT,
+            BpfCapabilities::BOOTSTRAP_INIT,
         )
     }
 
