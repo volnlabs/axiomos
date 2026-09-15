@@ -2,7 +2,7 @@
 //! and worker custody remain separate; physical session rearm stays fail-closed.
 use alloc::sync::Arc;
 
-use kernel_abi::ManagedControlContextV1;
+use kernel_abi::*;
 use kernel_bpf::execution::{BpfError, ManagedInvocationResult};
 use kernel_bpf::verifier::admission::{ManagedAdmissionError, ManagedAdmissionReservation};
 use kernel_bpf::verifier::BehaviorArtifact;
@@ -208,6 +208,28 @@ struct Pending {
     cancelled: bool,
     error: Option<kernel_abi::Errno>,
     handoff: bool,
+}
+
+impl Pending {
+    fn audit(self, event: u32, generation: u64, inhibited: bool, phase: u32) {
+        super::recorder::events::lifecycle(
+            0,
+            ManagedAuditLifecycleV1 {
+                operation_kind: MANAGED_AUDIT_LIFECYCLE,
+                event,
+                instance_id: self.id,
+                expected_generation: self.expected,
+                target_generation: self.generation,
+                observed_generation: generation,
+                artifact_handle: self.target.handle(),
+                action: self.target.audit_action(),
+                phase,
+                error: self.error.map_or(0, |error| i32::from(error) as u32),
+                flags: u32::from(inhibited) * MANAGED_AUDIT_LIFECYCLE_INHIBITED,
+                reserved: 0,
+            },
+        );
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -588,6 +610,12 @@ impl ControlSlot {
             failed: None,
             consumed_candidate: None,
         });
+        pending.audit(
+            MANAGED_AUDIT_COMMITTED,
+            self.generation,
+            self.inhibited,
+            MANAGED_OPERATION_COMMITTED,
+        );
         Ok(())
     }
 
@@ -652,16 +680,34 @@ impl ControlSlot {
             .as_mut()
             .filter(|p| p.id == id)
             .ok_or(BpfError::NotLoaded)?;
+        let changed = !pending.cancelled;
         pending.error.get_or_insert(kernel_abi::ECANCELED);
         pending.cancelled = true;
+        if changed {
+            pending.audit(
+                MANAGED_AUDIT_CANCELLED,
+                self.generation,
+                self.inhibited,
+                MANAGED_OPERATION_CLEANUP,
+            );
+        }
         Ok(())
     }
 
     pub(crate) fn stop(&mut self) {
         self.inhibited = true;
         if let Some(pending) = &mut self.pending {
+            let changed = !pending.cancelled;
             pending.error.get_or_insert(kernel_abi::ECANCELED);
             pending.cancelled = true;
+            if changed {
+                pending.audit(
+                    MANAGED_AUDIT_CANCELLED,
+                    self.generation,
+                    self.inhibited,
+                    MANAGED_OPERATION_CLEANUP,
+                );
+            }
         }
     }
 
@@ -692,8 +738,17 @@ impl ControlSlot {
         if pending.cancelled || !prepared {
             return Err(BpfError::ObjectBusy);
         }
+        let changed = !pending.handoff;
         pending.handoff = true;
         self.inhibited = true;
+        if changed {
+            pending.audit(
+                MANAGED_AUDIT_HANDOFF,
+                self.generation,
+                self.inhibited,
+                MANAGED_OPERATION_HANDOFF,
+            );
+        }
         Ok(())
     }
 
@@ -763,6 +818,12 @@ impl ControlSlot {
             failed: None,
             consumed_candidate,
         });
+        pending.audit(
+            MANAGED_AUDIT_COMMITTED,
+            self.generation,
+            self.inhibited,
+            MANAGED_OPERATION_COMMITTED,
+        );
         Ok(self.generation)
     }
 

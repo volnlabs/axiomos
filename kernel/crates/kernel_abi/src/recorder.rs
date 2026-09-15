@@ -24,6 +24,42 @@ pub const MANAGED_AUDIT_UPLOAD_HAS_IDENTITY: u32 = 1;
 pub const MANAGED_AUDIT_UPLOAD_HAS_ARTIFACT: u32 = 2;
 pub const MANAGED_AUDIT_UPLOAD_HAS_COST: u32 = 4;
 
+pub const MANAGED_AUDIT_LIFECYCLE: u32 = 2;
+pub const MANAGED_AUDIT_LIFECYCLE_HAS_PUBLIC_ID: u32 = 1;
+pub const MANAGED_AUDIT_LIFECYCLE_INHIBITED: u32 = 2;
+pub const MANAGED_AUDIT_ACCEPTED: u32 = 1;
+pub const MANAGED_AUDIT_PREPARING: u32 = 2;
+pub const MANAGED_AUDIT_BUILT: u32 = 3;
+pub const MANAGED_AUDIT_HANDOFF: u32 = 4;
+pub const MANAGED_AUDIT_COMMITTED: u32 = 5;
+pub const MANAGED_AUDIT_CANCELLED: u32 = 6;
+pub const MANAGED_AUDIT_CLEANUP: u32 = 7;
+pub const MANAGED_AUDIT_RETIRED: u32 = 8;
+
+/// OPERATION lifecycle payload. Correlation is the public operation ID only
+/// with HAS_PUBLIC_ID; timer events use zero and join by instance_id.
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable,
+)]
+pub struct ManagedAuditLifecycleV1 {
+    pub operation_kind: u32,
+    pub event: u32,
+    pub instance_id: u64,
+    pub expected_generation: u64,
+    pub target_generation: u64,
+    pub observed_generation: u64,
+    pub artifact_handle: u32,
+    /// 1 activate, 2 rollback, 3 deactivate, 4 retire inactive artifact.
+    pub action: u32,
+    pub phase: u32,
+    pub error: u32,
+    pub flags: u32,
+    pub reserved: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<ManagedAuditLifecycleV1>() == 64);
+
 /// OPERATION payload. Correlation is the public operation ID, not a generation.
 #[repr(C)]
 #[derive(

@@ -209,9 +209,47 @@ identity. A verifier rejection or cancellation after successful authentication
 can retain identity without a registered artifact. Missing, reordered, mismatched
 or partial identity fragments cannot establish identity; the future semantic
 decoder must reject them or report an explicit gap. Ring loss never fails an
-operation. Activation/handoff/rollback/retirement producers, sink correlation and
-semantic acceptance decoding remain open; raw export still declares
+operation. Sink correlation and semantic acceptance decoding remain open; raw export still declares
 `payloads_decoded: false`.
+
+#### Lifecycle boundaries
+
+OPERATION `operation_kind = 2` uses `ManagedAuditLifecycleV1`. Its 64 bytes are
+kind/event (two u32s), internal instance ID, expected/target/observed generations
+(four u64s), then artifact handle, action, phase, positive errno, flags and
+reserved zero (six u32s). Actions are activate (1), rollback (2), deactivate (3),
+and retire inactive artifact (4). The handle always names that operation's target.
+Flags are `HAS_PUBLIC_ID = 1` and `INHIBITED = 2`.
+
+Events are acceptance (1), worker preparation start (2), build outcome (3), safe
+handoff entry (4), authoritative commit (5), cancellation/inhibition of pending
+work (6), retirement custody transferred to the worker (7), and reclamation
+settled (8). The phase is the observed operation phase; event 6 carries CLEANUP,
+since final CANCELLED/FAILED status waits for worker settlement. Build failure
+also carries CLEANUP and its retained errno. An unchanged cancellation or handoff
+entry is not recorded repeatedly.
+
+Acceptance and worker records carry the public operation ID in envelope
+correlation and set HAS_PUBLIC_ID. Slot-boundary records use correlation zero
+without that flag; their internal instance ID joins the earlier acceptance
+mapping. Public operation IDs and internal IDs are independent counters. The
+timer neither acquires the manager lock nor invents equality between them.
+Missing mappings after recorder wrap must be reported as gaps by the decoder.
+
+Handoff entry records inhibition before sink readiness. Commit records append
+only after the authoritative ownership/scalar changes, so a replacement or
+rollback shows the new generation. Inactive artifact retirement leaves that
+generation unchanged. The later reclamation-settled event occurs only after
+retained readers release their references and the worker completes refunds;
+reader-Busy retries do not repeat the event. A handoff timeout retains its first
+error through inhibition and reclamation and never manufactures a commit.
+Event 8 settles the operation's retirement batch; it does not mean the named
+target artifact was unloaded (a newly activated target remains active).
+
+These records describe software lifecycle boundaries. The existing transport
+receipt guards publication, but detailed sink command/acknowledgement records,
+physical output observation, session qualification and semantic acceptance
+decoding are still required.
 
 LINK subtype 1 has its u32 subtype at byte 0 and the physical counter frequency
 at byte 8 (u64); other payload bytes are zero. LINK subtype 2 stores a local

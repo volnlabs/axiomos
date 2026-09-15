@@ -272,13 +272,23 @@ fn failure_code(failure: Option<CycleFailure>) -> (u32, u32) {
 // These wrappers never take the slot, manager or actuator locks. Producers in
 // those critical sections can safely append without changing lock order.
 fn observe(f: impl FnOnce(&mut State, u64)) {
-    #[cfg(all(feature = "managed-runtime", target_arch = "aarch64", feature = "rpi5"))]
+    #[cfg(test)]
+    tests::observe(f);
+    #[cfg(all(
+        not(test),
+        feature = "managed-runtime",
+        target_arch = "aarch64",
+        feature = "rpi5"
+    ))]
     let _ = super::with_owner(|state| {
         let ticks = crate::arch::aarch64::interrupts::physical_counter();
         f(state, ticks);
         Ok(())
     });
-    #[cfg(not(all(feature = "managed-runtime", target_arch = "aarch64", feature = "rpi5")))]
+    #[cfg(all(
+        not(test),
+        not(all(feature = "managed-runtime", target_arch = "aarch64", feature = "rpi5"))
+    ))]
     let _ = f;
 }
 
@@ -295,6 +305,21 @@ pub(crate) fn upload(
     cost: Option<u64>,
 ) {
     observe(|state, ticks| state.record_upload(operation, identity, cost, ticks));
+}
+
+pub(crate) fn lifecycle(public_id: u64, payload: ManagedAuditLifecycleV1) {
+    observe(|state, ticks| {
+        let _ = state.window.append(Record {
+            ticks,
+            correlation: public_id,
+            kind: MANAGED_AUDIT_OPERATION,
+            payload: payload
+                .as_bytes()
+                .try_into()
+                .expect("64-byte lifecycle payload"),
+            ..Record::EMPTY
+        });
+    });
 }
 
 pub(crate) fn trusted_stop(source: AuditSource) {
@@ -326,6 +351,11 @@ pub(crate) fn completion_miss(release: PeriodicRelease, report: CycleReport, obs
 
 #[cfg(test)]
 pub(crate) mod tests {
+    extern crate std;
+    use alloc::boxed::Box;
+    use alloc::vec::Vec;
+    use core::cell::RefCell;
+
     use kernel_bpf::execution::ManagedMotorPair;
     use kernel_time::periodic::PeriodicSchedule;
     use zerocopy::FromBytes;
@@ -334,14 +364,36 @@ pub(crate) mod tests {
     use crate::actuation::MotorPairSubmission;
     use crate::bpf::control::SensorSnapshot;
 
-    pub(crate) fn upload_records(
-        operation: &ManagedOperationV1,
-        identity: Option<(&[u8; MANIFEST_SIZE], &ArtifactIdentity)>,
-        cost: Option<u64>,
-    ) -> alloc::vec::Vec<Record> {
-        let mut state = State::new();
-        state.record_upload(operation, identity, cost, 123);
-        let mut records = alloc::vec::Vec::new();
+    std::thread_local! {
+        static CAPTURE: RefCell<Option<Box<State>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn observe(f: impl FnOnce(&mut State, u64)) {
+        CAPTURE.with(|capture| {
+            if let Some(state) = capture.borrow_mut().as_mut() {
+                let ticks = state.window.status().next;
+                f(state, ticks);
+            }
+        });
+    }
+
+    /// Test-local capture of real producers; no host hardware owner is enabled.
+    pub(crate) fn capture_records(f: impl FnOnce()) -> Vec<Record> {
+        CAPTURE.with(|capture| {
+            assert!(capture.borrow().is_none());
+            *capture.borrow_mut() = Some(Box::new(State::new()));
+        });
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        let state = CAPTURE.with(|capture| capture.borrow_mut().take().unwrap());
+        if let Err(error) = result {
+            std::panic::resume_unwind(error);
+        }
+        assert_eq!(
+            state.window.status().oldest,
+            0,
+            "capture exceeds retained test window"
+        );
+        let mut records = Vec::new();
         while (records.len() as u64) < state.window.status().next {
             let batch = state.window.read(records.len() as u64).unwrap();
             records.extend_from_slice(&batch.records[..batch.count]);

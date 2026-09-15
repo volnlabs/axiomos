@@ -10,6 +10,240 @@ use zerocopy::{FromBytes, IntoBytes};
 use super::*;
 
 #[test]
+fn lifecycle_audit_observes_real_commit_rollback_cancel_and_retirement_boundaries() {
+    let (mut worker, slot, manager) = fixture_worker();
+    let mut expected = 0;
+    let mut generation = 0;
+    let mut operations = Vec::new();
+    let records = crate::bpf::recorder::events::tests::capture_records(|| {
+        for revision in 1..=3 {
+            let target = if revision <= 2 {
+                let (uploaded, target) =
+                    resident_via_worker(&mut worker, &slot, &manager, expected, revision);
+                expected = uploaded;
+                target
+            } else {
+                LifecycleTarget::Previous(slot.lock().snapshot().previous.unwrap())
+            };
+            let id = manager
+                .lock()
+                .request_installation(&mut slot.lock(), expected, generation, target)
+                .unwrap();
+            let instance = slot.lock().snapshot().pending.unwrap();
+            assert_ne!(id, instance);
+            operations.push((id, instance, generation, target));
+            assert!(service_worker(&mut worker, &slot, &manager));
+            host_commit(&slot);
+            generation += 1;
+            assert!(service_worker(&mut worker, &slot, &manager));
+            expected = id;
+        }
+        let target = LifecycleTarget::Previous(slot.lock().snapshot().previous.unwrap());
+        let id = manager
+            .lock()
+            .request_installation(&mut slot.lock(), expected, generation, target)
+            .unwrap();
+        let instance = slot.lock().snapshot().pending.unwrap();
+        operations.push((id, instance, generation, target));
+        assert!(service_worker(&mut worker, &slot, &manager));
+        slot.lock().stop();
+        slot.lock().stop(); // Unchanged cancellation is not repeated.
+        assert!(service_worker(&mut worker, &slot, &manager));
+        assert_eq!(slot.lock().snapshot().generation, generation);
+    });
+    let lifecycle: Vec<_> = records
+        .iter()
+        .filter_map(|record| {
+            if record.kind != MANAGED_AUDIT_OPERATION {
+                return None;
+            }
+            let payload = ManagedAuditLifecycleV1::read_from_bytes(&record.payload).unwrap();
+            (payload.operation_kind == MANAGED_AUDIT_LIFECYCLE)
+                .then_some((record.correlation, payload))
+        })
+        .collect();
+    assert!(
+        !lifecycle.is_empty(),
+        "real lifecycle transitions must append records"
+    );
+    for (index, &(id, instance, expected_generation, target)) in operations.iter().enumerate() {
+        let observed: Vec<_> = lifecycle
+            .iter()
+            .filter(|(_, p)| p.instance_id == instance)
+            .collect();
+        let events: Vec<_> = observed.iter().map(|(_, p)| p.event).collect();
+        assert_eq!(
+            events,
+            if index == 3 {
+                alloc::vec![
+                    MANAGED_AUDIT_ACCEPTED,
+                    MANAGED_AUDIT_PREPARING,
+                    MANAGED_AUDIT_BUILT,
+                    MANAGED_AUDIT_CANCELLED,
+                    MANAGED_AUDIT_CLEANUP,
+                    MANAGED_AUDIT_RETIRED
+                ]
+            } else {
+                alloc::vec![
+                    MANAGED_AUDIT_ACCEPTED,
+                    MANAGED_AUDIT_PREPARING,
+                    MANAGED_AUDIT_BUILT,
+                    MANAGED_AUDIT_HANDOFF,
+                    MANAGED_AUDIT_COMMITTED,
+                    MANAGED_AUDIT_CLEANUP,
+                    MANAGED_AUDIT_RETIRED
+                ]
+            }
+        );
+        for &&(public_id, p) in &observed {
+            assert_eq!(p.expected_generation, expected_generation);
+            assert_eq!(p.target_generation, expected_generation + 1);
+            assert_eq!(p.artifact_handle, target.handle());
+            assert_eq!(p.action, if index < 2 { 1 } else { 2 });
+            let timer = matches!(
+                p.event,
+                MANAGED_AUDIT_HANDOFF | MANAGED_AUDIT_COMMITTED | MANAGED_AUDIT_CANCELLED
+            );
+            assert_eq!(public_id, if timer { 0 } else { id });
+            assert_eq!(p.flags & MANAGED_AUDIT_LIFECYCLE_HAS_PUBLIC_ID != 0, !timer);
+            if p.event == MANAGED_AUDIT_CANCELLED {
+                assert_eq!(p.phase, MANAGED_OPERATION_CLEANUP);
+            }
+            assert_eq!(
+                p.observed_generation,
+                expected_generation + u64::from(index != 3 && p.event >= MANAGED_AUDIT_COMMITTED)
+            );
+        }
+        let final_record = observed.last().unwrap().1;
+        assert_eq!(
+            final_record.phase,
+            if index == 3 {
+                MANAGED_OPERATION_CANCELLED
+            } else {
+                MANAGED_OPERATION_COMMITTED
+            }
+        );
+        assert_eq!(
+            final_record.error,
+            if index == 3 {
+                i32::from(ECANCELED) as u32
+            } else {
+                0
+            }
+        );
+    }
+}
+
+#[test]
+fn lifecycle_audit_deactivation_retirement_and_handoff_failure_keep_actual_outcomes() {
+    let (mut worker, slot, manager) = fixture_worker();
+    let (upload, target) = resident_via_worker(&mut worker, &slot, &manager, 0, 1);
+    let active = manager
+        .lock()
+        .request_installation(&mut slot.lock(), upload, 0, target)
+        .unwrap();
+    service_worker(&mut worker, &slot, &manager);
+    host_commit(&slot);
+    service_worker(&mut worker, &slot, &manager);
+    let handle = slot.lock().snapshot().active.unwrap();
+    let mut retire_instance = 0;
+    let mut failed_instance = 0;
+    let records = crate::bpf::recorder::events::tests::capture_records(|| {
+        let deactivate = manager
+            .lock()
+            .request_installation(
+                &mut slot.lock(),
+                active,
+                1,
+                LifecycleTarget::Deactivate(handle),
+            )
+            .unwrap();
+        host_commit(&slot);
+        service_worker(&mut worker, &slot, &manager);
+        assert_eq!(slot.lock().snapshot().active, None);
+        let reader = manager.lock().managed_artifact(handle).unwrap().clone();
+        let retire = manager
+            .lock()
+            .request_installation(
+                &mut slot.lock(),
+                deactivate,
+                2,
+                LifecycleTarget::Retire(handle),
+            )
+            .unwrap();
+        retire_instance = slot.lock().snapshot().pending.unwrap();
+        assert!(!service_worker(&mut worker, &slot, &manager));
+        assert!(!service_worker(&mut worker, &slot, &manager));
+        assert!(manager.lock().managed_slot_busy);
+        drop(reader);
+        assert!(service_worker(&mut worker, &slot, &manager));
+        let (uploaded, target) = resident_via_worker(&mut worker, &slot, &manager, retire, 2);
+        manager
+            .lock()
+            .request_installation(&mut slot.lock(), uploaded, 2, target)
+            .unwrap();
+        failed_instance = slot.lock().snapshot().pending.unwrap();
+        service_worker(&mut worker, &slot, &manager);
+        slot.lock().enter_handoff(failed_instance).unwrap();
+        slot.lock().fail_handoff(
+            failed_instance,
+            shrike_link::handoff::HandoffError::TimedOut,
+        );
+        service_worker(&mut worker, &slot, &manager);
+        assert_eq!(slot.lock().snapshot().generation, 2);
+        assert!(slot.lock().snapshot().inhibited);
+    });
+    let lifecycle: Vec<_> = records
+        .iter()
+        .filter_map(|record| {
+            if record.kind != MANAGED_AUDIT_OPERATION {
+                return None;
+            }
+            let p = ManagedAuditLifecycleV1::read_from_bytes(&record.payload).unwrap();
+            (p.operation_kind == MANAGED_AUDIT_LIFECYCLE).then_some(p)
+        })
+        .collect();
+    for (action, expected) in [
+        (3, alloc::vec![1, 4, 5, 7, 8]),
+        (4, alloc::vec![1, 5, 7, 8]),
+    ] {
+        let events: Vec<_> = lifecycle
+            .iter()
+            .filter(|p| p.action == action)
+            .map(|p| p.event)
+            .collect();
+        assert_eq!(events, expected);
+    }
+    for p in lifecycle
+        .iter()
+        .filter(|p| p.instance_id == retire_instance)
+    {
+        assert_eq!(
+            (
+                p.expected_generation,
+                p.target_generation,
+                p.observed_generation
+            ),
+            (2, 2, 2)
+        );
+    }
+    let failed: Vec<_> = lifecycle
+        .iter()
+        .filter(|p| p.instance_id == failed_instance)
+        .collect();
+    assert!(!failed.iter().any(|p| p.event == MANAGED_AUDIT_COMMITTED));
+    let final_record = failed.last().unwrap();
+    assert_eq!(
+        (final_record.event, final_record.phase, final_record.error),
+        (
+            MANAGED_AUDIT_RETIRED,
+            MANAGED_OPERATION_FAILED,
+            i32::from(ETIMEDEOUT) as u32
+        )
+    );
+}
+
+#[test]
 fn preparation_audit_retains_authenticated_rejections_and_exact_registered_identity() {
     for case in 0..4 {
         let program = if case == 2 {
@@ -28,18 +262,16 @@ fn preparation_audit_retains_authenticated_rejections_and_exact_registered_ident
         if case == 3 {
             manager.managed_operation_cancel(7, id).unwrap();
         }
-        manager.commit_managed_work(&prepared).unwrap();
+        let records = crate::bpf::recorder::events::tests::capture_records(|| {
+            manager.commit_managed_work(&prepared).unwrap();
+        });
         let operation = manager.managed_operation_query(id).unwrap();
         let usage = manager.resource_usage();
-        let identity = prepared.identity.as_ref().map(|identity| {
-            (
-                prepared.buffer[..MANIFEST_SIZE].try_into().unwrap(),
-                identity,
-            )
-        });
+        let identity = prepared
+            .identity
+            .as_ref()
+            .map(|identity| (&prepared.buffer[..MANIFEST_SIZE], identity));
         let cost = prepared.artifact.as_ref().map(|a| a.wcet_cycles());
-        let records =
-            crate::bpf::recorder::events::tests::upload_records(&operation, identity, cost);
         assert_eq!(records.len(), if case == 1 { 1 } else { 5 });
         assert_eq!(records[0].kind, MANAGED_AUDIT_OPERATION);
         let outcome = ManagedAuditUploadV1::read_from_bytes(&records[0].payload).unwrap();
@@ -75,7 +307,7 @@ fn preparation_audit_retains_authenticated_rejections_and_exact_registered_ident
         for (index, record) in records.iter().enumerate() {
             assert_eq!(
                 (record.sequence, record.correlation, record.ticks),
-                (index as u64, id, 123)
+                (index as u64, id, 0)
             );
             if index != 0 {
                 assert_eq!(record.kind, MANAGED_AUDIT_ARTIFACT);

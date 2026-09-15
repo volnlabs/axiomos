@@ -10,7 +10,9 @@ use kernel_bpf::signing::managed::{
 use kernel_bpf::signing::SignatureVerifier;
 use kernel_bpf::verifier::{BehaviorArtifact, VerificationBudget, VerifyError};
 
-use super::installation::{ControlSlot, InstallationPreparation, RetireBatch, Retirement};
+use super::installation::{
+    ControlSlot, InstallationPreparation, RetireBatch, Retirement, SlotSnapshot,
+};
 use super::managed::ManagedReclamation;
 use super::{managed_allocation as charge, BpfManager};
 
@@ -51,6 +53,30 @@ pub(super) struct PreparationState {
 }
 
 impl PreparationState {
+    fn audit_lifecycle(&self, snapshot: SlotSnapshot, event: u32) {
+        if let Some(lifecycle) = self.lifecycle {
+            super::recorder::events::lifecycle(
+                self.active.id,
+                ManagedAuditLifecycleV1 {
+                    operation_kind: MANAGED_AUDIT_LIFECYCLE,
+                    event,
+                    instance_id: lifecycle.instance_id,
+                    expected_generation: lifecycle.generation
+                        - u64::from(!matches!(lifecycle.target, LifecycleTarget::Retire(_))),
+                    target_generation: lifecycle.generation,
+                    observed_generation: snapshot.generation,
+                    artifact_handle: lifecycle.target.handle(),
+                    action: lifecycle.target.audit_action(),
+                    phase: self.active.phase,
+                    error: self.active.error,
+                    flags: MANAGED_AUDIT_LIFECYCLE_HAS_PUBLIC_ID
+                        | (u32::from(snapshot.inhibited) * MANAGED_AUDIT_LIFECYCLE_INHIBITED),
+                    reserved: 0,
+                },
+            );
+        }
+    }
+
     pub(super) fn upload_accepted(&self) -> bool {
         matches!(
             self.phase,
@@ -119,7 +145,16 @@ pub(crate) enum LifecycleTarget {
 }
 
 impl LifecycleTarget {
-    fn handle(self) -> u32 {
+    pub(super) fn audit_action(self) -> u32 {
+        match self {
+            Self::Candidate(_) => 1,
+            Self::Previous(_) => 2,
+            Self::Deactivate(_) => 3,
+            Self::Retire(_) => 4,
+        }
+    }
+
+    pub(super) fn handle(self) -> u32 {
         match self {
             Self::Candidate(handle)
             | Self::Previous(handle)
@@ -479,6 +514,7 @@ impl BpfManager {
         state.lifecycle = Some(lifecycle);
         state.installation = preparation;
         state.phase = Phase::Lifecycle;
+        state.audit_lifecycle(slot.snapshot(), MANAGED_AUDIT_ACCEPTED);
         Ok(id)
     }
 
@@ -815,6 +851,9 @@ impl WorkerState {
             if !abandon {
                 manager.preparation.active.phase = MANAGED_OPERATION_PREPARING;
             }
+            manager
+                .preparation
+                .audit_lifecycle(slot.snapshot(), MANAGED_AUDIT_PREPARING);
             return WorkerAction::Install(preparation, abandon);
         }
         if let Some(lifecycle) = manager.preparation.lifecycle {
@@ -835,6 +874,9 @@ impl WorkerState {
         }
         if let Some(batch) = slot.take_retirement() {
             assert!(self.retirement.is_none());
+            manager
+                .preparation
+                .audit_lifecycle(slot.snapshot(), MANAGED_AUDIT_CLEANUP);
             return WorkerAction::Retire(batch);
         }
         if let Some(retirement) = &mut self.retirement {
@@ -862,6 +904,7 @@ impl WorkerState {
                 } else {
                     MANAGED_OPERATION_FAILED
                 };
+                state.audit_lifecycle(slot.snapshot(), MANAGED_AUDIT_RETIRED);
                 state.complete();
             }
         }
@@ -921,6 +964,9 @@ impl WorkerState {
                                 }) as u32;
                         }
                     }
+                    manager
+                        .preparation
+                        .audit_lifecycle(slot.snapshot(), MANAGED_AUDIT_BUILT);
                 });
             }
             WorkerAction::Retire(batch) => {
