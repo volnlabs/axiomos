@@ -1479,6 +1479,60 @@ mod tests {
     use crate::verifier::{HelperId, LoadCaller, MapPerm};
 
     #[test]
+    fn ctx_payload_scalar_at_zero_cannot_be_dereferenced() {
+        let insns = [
+            BpfInsn::new(0x79, 2, 1, 0, 0), // r2 = ctx.data
+            BpfInsn::new(0x79, 3, 2, 0, 0), // r3 = payload scalar, not a pointer
+            BpfInsn::new(0x79, 0, 3, 0, 0), // unsafe nested dereference
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ];
+        let result = Verifier::<ActiveProfile>::verify_with_config(
+            BpfProgType::SocketFilter,
+            &insns,
+            VerifyConfig {
+                ctx_size: core::mem::size_of::<crate::execution::BpfContext<'_>>() as u32,
+                ctx_data_size: 16,
+                ..VerifyConfig::default()
+            },
+        );
+        assert!(
+            matches!(
+                result,
+                Err(VerifyError::InvalidMemoryAccess { insn_idx: 2, .. })
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn ctx_payload_scalar_survives_pointer_copies_and_offsets() {
+        let insns = [
+            BpfInsn::mov64_reg(3, 1),
+            BpfInsn::add64_imm(3, 8),
+            BpfInsn::new(0x79, 2, 3, -8, 0), // root data field via copied pointer
+            BpfInsn::mov64_reg(4, 2),
+            BpfInsn::add64_imm(4, 8),
+            BpfInsn::new(0x79, 0, 4, -8, 0), // payload first scalar
+            BpfInsn::exit(),
+        ];
+        let result = Verifier::<ActiveProfile>::verify_with_config(
+            BpfProgType::SocketFilter,
+            &insns,
+            VerifyConfig {
+                ctx_size: core::mem::size_of::<crate::execution::BpfContext<'_>>() as u32,
+                ctx_data_size: 16,
+                caller: LoadCaller::Unprivileged,
+                ..VerifyConfig::default()
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "payload scalar must be returnable: {result:?}"
+        );
+    }
+
+    #[test]
     fn stack_size_keeps_deep_branch_after_shallow_branch_revisits_join() {
         // Exploration visits the taken/deep branch first. Both branches join
         // immediately after the store, then the shallow path revisits the join.

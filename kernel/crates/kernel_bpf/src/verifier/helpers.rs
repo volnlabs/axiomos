@@ -301,6 +301,7 @@ impl ArgType {
                         | RegType::PtrToMapValue
                         | RegType::PtrToPacket
                         | RegType::PtrToCtx
+                        | RegType::PtrToCtxData
                 )
             }
             Self::PtrToMemOrNull => {
@@ -311,11 +312,12 @@ impl ArgType {
                         | RegType::PtrToMapValue
                         | RegType::PtrToPacket
                         | RegType::PtrToCtx
+                        | RegType::PtrToCtxData
                         | RegType::NullPtr
                         | RegType::Scalar // Allow scalar 0 as null
                 )
             }
-            Self::PtrToCtx => matches!(reg_type, RegType::PtrToCtx),
+            Self::PtrToCtx => matches!(reg_type, RegType::PtrToCtx | RegType::PtrToCtxData),
             Self::AnyPtr => reg_type.is_pointer(),
             Self::PtrToRingbuf => {
                 // Ring buffer map pointer

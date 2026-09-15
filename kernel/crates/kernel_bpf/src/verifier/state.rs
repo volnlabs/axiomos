@@ -34,8 +34,11 @@ pub enum RegType {
     /// Pointer to map key
     PtrToMapKey,
 
-    /// Pointer to context
+    /// Pointer to the BpfContext wrapper at entry
     PtrToCtx,
+
+    /// Read-only pointer to context payload bytes, whose fields are scalars
+    PtrToCtxData,
 
     /// Pointer to packet data
     PtrToPacket,
@@ -71,6 +74,7 @@ impl RegType {
             Self::PtrToStack
                 | Self::PtrToMapValue
                 | Self::PtrToCtx
+                | Self::PtrToCtxData
                 | Self::PtrToPacket
                 | Self::PtrToPacketMeta
         )
@@ -215,12 +219,11 @@ impl RegState {
 
     /// Create a read-only pointer to the bytes behind `BpfContext::data`.
     ///
-    /// This intentionally uses `PtrToCtx`, not `PtrToPacket`: hook payloads are
-    /// kernel-owned event structs and must be readable/passable to helpers, but
-    /// stores through them are not allowed.
+    /// Payload bytes are readable/passable to helpers, but cannot be written.
+    /// Their fields do not inherit the wrapper's data-pointer interpretation.
     pub fn ctx_data_ptr(size: u32) -> Self {
         Self {
-            reg_type: RegType::PtrToCtx,
+            reg_type: RegType::PtrToCtxData,
             scalar_value: None,
             ptr_offset: 0,
             map_id: None,
@@ -829,6 +832,9 @@ mod tests {
         assert!(RegType::PtrToStack.can_write());
         assert!(RegType::PtrToCtx.can_read());
         assert!(!RegType::PtrToCtx.can_write());
+        assert!(RegType::PtrToCtxData.is_pointer());
+        assert!(RegType::PtrToCtxData.can_read());
+        assert!(!RegType::PtrToCtxData.can_write());
     }
 
     #[test]
