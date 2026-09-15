@@ -6,6 +6,16 @@ use kernel_bpf::verifier::LoadCaller;
 
 pub(super) const MAX_MAP_GRANTS: usize = 64;
 
+/// Object lifetime is independent of the numeric range of process identifiers.
+/// Legacy kernel convenience calls still use `Process(0)`; reserved views and
+/// maps retained after their owner exits never confer process ownership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ObjectOwner {
+    Process(u64),
+    Reserved,
+    Orphaned,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MapAccess(u8);
 
@@ -106,7 +116,7 @@ impl MapGrants {
 pub(super) struct PinnedMap {
     pub(super) path: String,
     pub(super) map_id: u32,
-    pub(super) owner: u64,
+    pub(super) owner: ObjectOwner,
     pub(super) offered: MapAccess,
 }
 
@@ -201,7 +211,7 @@ mod tests {
             PinnedMap {
                 path: "/maps/control".into(),
                 map_id: 3,
-                owner: 7,
+                owner: ObjectOwner::Process(7),
                 offered: MapAccess::READ,
             },
             |_| Err(BpfError::OutOfMemory),
@@ -214,7 +224,7 @@ mod tests {
             PinnedMap {
                 path: "/maps/control".into(),
                 map_id: 3,
-                owner: 7,
+                owner: ObjectOwner::Process(7),
                 offered: MapAccess::READ,
             },
         )

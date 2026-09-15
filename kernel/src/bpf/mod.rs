@@ -13,7 +13,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(test)]
 use authorization::MAX_MAP_GRANTS;
-use authorization::{append_pinned_map, MapGrants, PinnedMap};
+use authorization::{append_pinned_map, MapGrants, ObjectOwner, PinnedMap};
 pub use authorization::{BpfLoadAuthorization, MapAccess};
 use kernel_abi::{
     BpfObjectInfo, BPF_MAP_TYPE_ARRAY, BPF_MAP_TYPE_HASH, BPF_MAP_TYPE_RINGBUF,
@@ -115,7 +115,6 @@ fn read_cycles() -> u64 {
 pub const ENVELOPE_MAP_ID: u32 = 0;
 pub const RESERVED_MAP_COUNT: u32 = 1;
 
-const PINNED_MAP_OWNER: u64 = u64::MAX;
 /// Maximum GPIO programs resolved for one IRQ edge. Must match the stack buffer
 /// used by the Pi 5 GPIO IRQ handler.
 pub const GPIO_IRQ_FANOUT_LIMIT: usize = 8;
@@ -217,7 +216,7 @@ struct ProgramEntry {
     program: Arc<ProgramRuntime>,
     wcet_cycles: u64,
     charged_bytes: usize,
-    owner: u64,
+    owner: ObjectOwner,
     authorization: BpfLoadAuthorization,
 }
 
@@ -225,7 +224,7 @@ struct MapEntry {
     runtime: Arc<MapRuntime>,
     perm: MapPerm,
     charged_bytes: usize,
-    owner: u64,
+    owner: ObjectOwner,
     grants: MapGrants,
 }
 
@@ -354,7 +353,7 @@ fn with_current_execution_map<R>(
 
 impl MapEntry {
     fn access_for(&self, owner: u64) -> Option<MapAccess> {
-        if self.owner == owner {
+        if self.owner == ObjectOwner::Process(owner) {
             return Some(MapAccess::READ_WRITE);
         }
         self.grants.access_for(owner)
@@ -561,7 +560,7 @@ impl BpfManager {
             runtime: Arc::new(MapRuntime::new(map)),
             perm,
             charged_bytes: 0,
-            owner: 0,
+            owner: ObjectOwner::Reserved,
             grants: MapGrants::new(),
         }));
         self.map_generations.push(0);
@@ -582,7 +581,7 @@ impl BpfManager {
                 runtime: Arc::new(MapRuntime::new(map)),
                 perm: MapPerm::ReadWrite,
                 charged_bytes: charge,
-                owner,
+                owner: ObjectOwner::Process(owner),
                 grants: MapGrants::new(),
             },
         )?;
@@ -620,7 +619,7 @@ impl BpfManager {
             .maps
             .iter()
             .map(|slot| match slot.as_ref() {
-                Some(entry) if entry.charged_bytes == 0 => {
+                Some(entry) if entry.owner == ObjectOwner::Reserved => {
                     let access = MapAccess::READ_WRITE.intersect(authorized);
                     if access.contains(MapAccess::READ) && access.contains(MapAccess::WRITE) {
                         (entry.runtime.map.def().value_size, entry.perm)
@@ -724,7 +723,7 @@ impl BpfManager {
             let Some(entry) = slot.as_ref() else {
                 continue;
             };
-            if entry.owner != PINNED_MAP_OWNER || entry.charged_bytes == 0 {
+            if entry.owner != ObjectOwner::Orphaned || entry.charged_bytes == 0 {
                 continue;
             }
             let map_id = handles::encode(map_slot, map_generations[map_slot]);
@@ -749,12 +748,10 @@ impl BpfManager {
             .programs
             .iter()
             .filter_map(Option::as_ref)
-            .any(|entry| entry.owner == owner)
-            || self
-                .maps
-                .iter()
-                .filter_map(Option::as_ref)
-                .any(|entry| entry.owner == owner && entry.charged_bytes != 0);
+            .any(|entry| entry.owner == ObjectOwner::Process(owner))
+            || self.maps.iter().filter_map(Option::as_ref).any(|entry| {
+                entry.owner == ObjectOwner::Process(owner) && entry.charged_bytes != 0
+            });
         #[cfg(not(test))]
         let snapshot = match self.prepare_hook_snapshot() {
             Ok(snapshot) => snapshot,
@@ -770,7 +767,7 @@ impl BpfManager {
                 let owned = handles::decode(program_generations, prog_id)
                     .and_then(|slot| programs.get(slot))
                     .and_then(Option::as_ref)
-                    .is_some_and(|entry| entry.owner == owner);
+                    .is_some_and(|entry| entry.owner == ObjectOwner::Process(owner));
                 if owned {
                     attached.remove(index);
                     admission.release(attach_type, prog_id);
@@ -782,7 +779,10 @@ impl BpfManager {
         attachments.retain(|_, attached| !attached.is_empty());
 
         for (slot, entry) in self.programs.iter().enumerate() {
-            if entry.as_ref().is_some_and(|entry| entry.owner == owner) {
+            if entry
+                .as_ref()
+                .is_some_and(|entry| entry.owner == ObjectOwner::Process(owner))
+            {
                 self.gpio_routes
                     .remove(handles::encode(slot, self.program_generations[slot]));
             }
@@ -795,8 +795,8 @@ impl BpfManager {
             entry.grants.revoke_owner(owner);
         }
         for pin in &mut self.pinned_maps {
-            if pin.owner == owner {
-                pin.owner = PINNED_MAP_OWNER;
+            if pin.owner == ObjectOwner::Process(owner) {
+                pin.owner = ObjectOwner::Orphaned;
             }
         }
 
@@ -804,7 +804,8 @@ impl BpfManager {
             let Some(entry) = slot.as_ref() else {
                 continue;
             };
-            if entry.owner != owner || Arc::strong_count(&entry.program) != 1 {
+            if entry.owner != ObjectOwner::Process(owner) || Arc::strong_count(&entry.program) != 1
+            {
                 continue;
             }
             let entry = slot.take().expect("owned program entry was present");
@@ -816,7 +817,7 @@ impl BpfManager {
             .programs
             .iter()
             .filter_map(Option::as_ref)
-            .any(|entry| entry.owner == owner)
+            .any(|entry| entry.owner == ObjectOwner::Process(owner))
         {
             return false;
         }
@@ -827,16 +828,16 @@ impl BpfManager {
             let Some(entry) = slot.as_ref() else {
                 continue;
             };
-            if entry.owner != owner || entry.charged_bytes == 0 {
+            if entry.owner != ObjectOwner::Process(owner) || entry.charged_bytes == 0 {
                 continue;
             }
             let map_id = handles::encode(map_slot, map_generations[map_slot]);
             if pinned_maps.iter().any(|pin| pin.map_id == map_id) {
-                slot.as_mut().expect("owned map entry was present").owner = PINNED_MAP_OWNER;
+                slot.as_mut().expect("owned map entry was present").owner = ObjectOwner::Orphaned;
                 continue;
             }
             if Arc::strong_count(&entry.runtime) != 1 {
-                slot.as_mut().expect("owned map entry was present").owner = PINNED_MAP_OWNER;
+                slot.as_mut().expect("owned map entry was present").owner = ObjectOwner::Orphaned;
                 continue;
             }
             let entry = slot.take().expect("owned map entry was present");
@@ -875,7 +876,7 @@ impl BpfManager {
             .programs
             .iter()
             .filter_map(Option::as_ref)
-            .filter(|entry| entry.owner == owner)
+            .filter(|entry| entry.owner == ObjectOwner::Process(owner))
             .try_fold((0usize, 0usize), |(objects, bytes), entry| {
                 Some((
                     objects.checked_add(1)?,
@@ -914,7 +915,7 @@ impl BpfManager {
                 program: Arc::new(ProgramRuntime { program, maps }),
                 wcet_cycles,
                 charged_bytes: charge,
-                owner,
+                owner: ObjectOwner::Process(owner),
                 authorization,
             },
         )?;
@@ -1324,7 +1325,7 @@ impl BpfManager {
 
     fn ensure_program_owner(&self, owner: u64, prog_id: u32) -> Result<(), BpfError> {
         let entry = self.program_entry(prog_id).ok_or(BpfError::NotLoaded)?;
-        if entry.owner == owner {
+        if entry.owner == ObjectOwner::Process(owner) {
             Ok(())
         } else {
             Err(BpfError::PermissionDenied)
@@ -1625,7 +1626,7 @@ impl BpfManager {
             .maps
             .iter()
             .filter_map(Option::as_ref)
-            .filter(|entry| entry.owner == owner && entry.charged_bytes != 0)
+            .filter(|entry| entry.owner == ObjectOwner::Process(owner) && entry.charged_bytes != 0)
             .try_fold((0usize, 0usize), |(objects, bytes), entry| {
                 Some((
                     objects.checked_add(1)?,
@@ -1739,7 +1740,7 @@ impl BpfManager {
 
     fn ensure_map_owner(&self, owner: u64, map_id: u32) -> Result<(), BpfError> {
         let entry = self.map_entry(map_id).ok_or(BpfError::NotLoaded)?;
-        if entry.owner == owner {
+        if entry.owner == ObjectOwner::Process(owner) {
             Ok(())
         } else {
             Err(BpfError::PermissionDenied)
@@ -1753,7 +1754,7 @@ impl BpfManager {
         required: MapAccess,
     ) -> Result<(), BpfError> {
         let entry = self.map_entry(map_id).ok_or(BpfError::NotLoaded)?;
-        let access = if entry.charged_bytes == 0 {
+        let access = if entry.owner == ObjectOwner::Reserved {
             MapAccess::READ_WRITE
         } else {
             entry.access_for(owner).ok_or(BpfError::PermissionDenied)?
@@ -1851,7 +1852,7 @@ impl BpfManager {
 
         if let Some(existing) = self.pinned_maps.iter().find(|pin| pin.path == path) {
             return if existing.map_id == map_id
-                && existing.owner == owner
+                && existing.owner == ObjectOwner::Process(owner)
                 && existing.offered == offered
             {
                 Ok(())
@@ -1867,7 +1868,7 @@ impl BpfManager {
             PinnedMap {
                 path,
                 map_id,
-                owner,
+                owner: ObjectOwner::Process(owner),
                 offered,
             },
         )
@@ -1896,7 +1897,7 @@ impl BpfManager {
             return Err(BpfError::PermissionDenied);
         }
         let entry = self.map_entry(map_id).ok_or(BpfError::NotLoaded)?;
-        if entry.owner != owner {
+        if entry.owner != ObjectOwner::Process(owner) {
             let slot = self.map_slot(map_id).ok_or(BpfError::NotLoaded)?;
             self.maps[slot]
                 .as_mut()
@@ -1922,7 +1923,9 @@ impl BpfManager {
             .position(|pin| pin.path == path)
             .ok_or(BpfError::NotLoaded)?;
         let pin = &self.pinned_maps[index];
-        if pin.owner != owner && (pin.owner != PINNED_MAP_OWNER || !allow_orphan_cleanup) {
+        if pin.owner != ObjectOwner::Process(owner)
+            && (pin.owner != ObjectOwner::Orphaned || !allow_orphan_cleanup)
+        {
             return Err(BpfError::PermissionDenied);
         }
         let map_id = pin.map_id;
@@ -1933,7 +1936,7 @@ impl BpfManager {
             .any(|(other_index, pin)| other_index != index && pin.map_id == map_id);
         let orphaned = self
             .map_entry(map_id)
-            .is_some_and(|entry| entry.owner == PINNED_MAP_OWNER);
+            .is_some_and(|entry| entry.owner == ObjectOwner::Orphaned);
         self.pinned_maps.remove(index);
         if last_pin && orphaned {
             self.reclaim_unpinned_orphan_maps_if_quiescent();
@@ -2680,7 +2683,11 @@ mod tests {
 
     #[test]
     fn program_verification_rejects_foreign_map_ids() {
-        let mut manager = BpfManager::new_with_limits(tiny_limits());
+        let mut limits = tiny_limits();
+        limits.max_program_bytes = 128;
+        limits.max_single_program_bytes = 128;
+        limits.max_owner_program_bytes = 128;
+        let mut manager = BpfManager::new_with_limits(limits);
         let map_id = manager
             .create_map_for(1, MapType::Array as u32, 4, 8, 1)
             .expect("owner map");
@@ -2714,7 +2721,11 @@ mod tests {
 
     #[test]
     fn program_map_helpers_cannot_exceed_credential_snapshot() {
-        let mut manager = BpfManager::new_with_limits(tiny_limits());
+        let mut limits = tiny_limits();
+        limits.max_program_bytes = 128;
+        limits.max_single_program_bytes = 128;
+        limits.max_owner_program_bytes = 128;
+        let mut manager = BpfManager::new_with_limits(limits);
         let owner = 1;
         let map_id = manager
             .create_map_for(owner, MapType::Array as u32, 4, 8, 1)
@@ -2787,6 +2798,43 @@ mod tests {
     }
 
     #[test]
+    fn orphaned_map_ownership_cannot_alias_a_process_id() {
+        let mut manager = BpfManager::new_with_limits(tiny_limits());
+        let map_id = manager
+            .create_map_for(7, MapType::Array as u32, 4, 8, 1)
+            .unwrap();
+        manager
+            .pin_map_with_access_for(7, "/orphan".into(), map_id, MapAccess::READ)
+            .unwrap();
+        assert!(manager.reclaim_owner(7));
+        let retained = manager.resource_usage();
+
+        for pid in [0, u64::MAX] {
+            assert_eq!(
+                manager.map_update_for(pid, map_id, &0u32.to_ne_bytes(), &[1; 8], 0),
+                Err(BpfError::PermissionDenied)
+            );
+            assert_eq!(
+                manager.get_pinned_map_for(pid, "/orphan", MapAccess::READ),
+                Ok(map_id)
+            );
+            assert_eq!(
+                manager.map_update_for(pid, map_id, &0u32.to_ne_bytes(), &[1; 8], 0),
+                Err(BpfError::PermissionDenied)
+            );
+            assert_eq!(
+                manager.unpin_map_for(pid, "/orphan", false),
+                Err(BpfError::PermissionDenied)
+            );
+            assert!(manager.reclaim_owner(pid));
+            assert_eq!(manager.resource_usage(), retained);
+        }
+        manager.unpin_map_for(0, "/orphan", true).unwrap();
+        assert_eq!(manager.resource_usage().live_maps, 0);
+        assert_eq!(manager.resource_usage().map_bytes, 0);
+    }
+
+    #[test]
     fn owner_reclamation_waits_for_inflight_program_snapshots() {
         let mut manager = BpfManager::new_with_limits(tiny_limits());
         let map_id = manager
@@ -2849,16 +2897,35 @@ mod tests {
 
     #[test]
     fn orphan_unpin_is_nonblocking_and_reclaims_after_program_quiescence() {
-        let mut manager = BpfManager::new_with_limits(tiny_limits());
+        let mut limits = tiny_limits();
+        limits.max_program_bytes = 128;
+        limits.max_single_program_bytes = 128;
+        limits.max_owner_program_bytes = 128;
+        let mut manager = BpfManager::new_with_limits(limits);
         let map_id = manager
             .create_map_for(7, MapType::Array as u32, 4, 8, 1)
             .expect("owner map");
         manager
             .pin_map_for(7, "/deferred-orphan".into(), map_id)
             .expect("pin owner map");
+        manager
+            .get_pinned_map_for(8, "/deferred-orphan", MapAccess::READ)
+            .expect("grant foreign program read access");
         let program_id = manager
-            .load_raw_program_for(8, vec![BpfInsn::mov64_imm(0, 0), BpfInsn::exit()])
-            .expect("unrelated live program");
+            .load_raw_program_for(
+                8,
+                vec![
+                    BpfInsn::mov64_imm(1, 0),
+                    BpfInsn::new(0x7b, 10, 1, -8, 0),
+                    BpfInsn::mov64_imm(1, map_id as i32),
+                    BpfInsn::mov64_reg(2, 10),
+                    BpfInsn::add64_imm(2, -8),
+                    BpfInsn::call(HelperId::MapLookupElem as i32),
+                    BpfInsn::mov64_imm(0, 0),
+                    BpfInsn::exit(),
+                ],
+            )
+            .expect("live program retains the referenced map");
 
         assert!(manager.reclaim_owner(7));
         manager
@@ -2869,7 +2936,7 @@ mod tests {
 
         manager
             .unload_program_for(8, program_id)
-            .expect("quiesce unrelated program");
+            .expect("release the last program reference");
         assert_eq!(manager.resource_usage().live_maps, 0);
         assert_eq!(manager.resource_usage().map_bytes, 0);
     }
@@ -2911,6 +2978,7 @@ mod tests {
         let mut limits = BpfLimits::for_active_profile();
         limits.max_live_programs = HOOK_FANOUT_LIMIT + 1;
         limits.max_program_slots = HOOK_FANOUT_LIMIT + 1;
+        limits.max_owner_programs = HOOK_FANOUT_LIMIT + 1;
         limits.max_program_bytes = (HOOK_FANOUT_LIMIT + 1) * 16;
         limits.max_single_program_bytes = 16;
         let mut manager = BpfManager::new_with_limits(limits);
