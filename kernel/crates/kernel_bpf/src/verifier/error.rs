@@ -10,6 +10,8 @@ use crate::bytecode::registers::Register;
 /// Errors that can occur during BPF program verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyError {
+    /// Byte allowance, checked allocation size, or heap reservation exhausted.
+    ResourceExhausted,
     // ========================================
     // Core safety violations (both profiles)
     // ========================================
@@ -278,6 +280,7 @@ pub enum VerifyError {
 impl fmt::Display for VerifyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ResourceExhausted => write!(f, "verifier storage exhausted"),
             Self::InvalidOpcode { insn_idx, opcode } => {
                 write!(
                     f,

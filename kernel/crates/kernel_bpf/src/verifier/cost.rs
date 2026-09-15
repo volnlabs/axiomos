@@ -15,8 +15,8 @@
 //! deliberately conservative: every instruction is charged its worst case, and
 //! the program is charged its most expensive path.
 
-use alloc::vec::Vec;
-
+use super::budget::{BudgetVec, VerificationBudget};
+use super::error::VerifyResult;
 use crate::bytecode::insn::BpfInsn;
 use crate::bytecode::opcode::AluOp;
 use crate::verifier::{ControlFlowGraph, HelperId};
@@ -136,11 +136,18 @@ pub fn insn_cycle_cost(insn: &BpfInsn) -> u32 {
 /// loop-free fragment, and skipping keeps the function total (non-looping) if
 /// it is ever called on a program with a cycle.
 pub fn wcet_cycles(insns: &[BpfInsn], cfg: &ControlFlowGraph) -> u64 {
+    try_wcet_cycles(insns, cfg, None).expect("legacy WCET allocation")
+}
+pub(super) fn try_wcet_cycles(
+    insns: &[BpfInsn],
+    cfg: &super::cfg::BudgetControlFlowGraph<'_>,
+    budget: Option<&VerificationBudget>,
+) -> VerifyResult<u64> {
     let n = insns.len();
     if n == 0 {
-        return 0;
+        return Ok(0);
     }
-    let mut cost_from: Vec<u64> = alloc::vec![0; n];
+    let mut cost_from = BudgetVec::filled(budget, n, 0u64)?;
     for i in (0..n).rev() {
         let mut best_succ = 0u64;
         for s in cfg.successors(i) {
@@ -152,7 +159,7 @@ pub fn wcet_cycles(insns: &[BpfInsn], cfg: &ControlFlowGraph) -> u64 {
         }
         cost_from[i] = u64::from(insn_cycle_cost(&insns[i])) + best_succ;
     }
-    COST_INVOCATION_BASE + cost_from[0]
+    Ok(COST_INVOCATION_BASE + cost_from[0])
 }
 
 #[cfg(test)]

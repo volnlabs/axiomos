@@ -8,6 +8,8 @@ extern crate alloc;
 
 use core::fmt;
 
+use super::budget::{BudgetVec, VerificationBudget};
+use super::error::VerifyResult;
 use crate::bytecode::registers::Register;
 
 /// Type of value held in a register.
@@ -590,13 +592,15 @@ pub enum StackSlot {
 /// `Vec<StackSlot>` of the *full* profile stack size — 512 KiB slots (~1 MiB)
 /// on the cloud profile — for **every** cloned verifier state, which dominated
 /// the verifier's memory and was the root of the loop-driven OOM bounded in
-/// #116. Real programs touch a tiny fraction of the stack, so the sparse map
+/// #116. Real programs touch a tiny fraction of the stack, so the sparse table
 /// is orders of magnitude smaller and makes per-state cloning cheap, which is
 /// what lets the recorded-state budget be raised.
 #[derive(Clone)]
-pub struct StackState {
+pub struct StackState<'a> {
     /// Non-`Invalid` slots, keyed by `idx = -offset - 1`.
-    slots: alloc::collections::BTreeMap<usize, StackSlot>,
+    // ponytail: sorted sparse slots have O(touched slots) insertion; use a
+    // fallible tree only if large, densely touched stacks make this costly.
+    slots: BudgetVec<'a, (usize, StackSlot)>,
 
     /// Number of addressable slots (the profile stack size). Bounds checks use
     /// this; it does not allocate.
@@ -606,11 +610,11 @@ pub struct StackState {
     max_depth: usize,
 }
 
-impl StackState {
+impl<'a> StackState<'a> {
     /// Create a new stack state with given capacity.
     pub fn new(max_size: usize) -> Self {
         Self {
-            slots: alloc::collections::BTreeMap::new(),
+            slots: BudgetVec::new(None),
             capacity: max_size,
             max_depth: 0,
         }
@@ -625,21 +629,39 @@ impl StackState {
             return None;
         }
         let idx = (-offset - 1) as usize;
-        Some(self.slots.get(&idx).copied().unwrap_or(StackSlot::Invalid))
+        Some(
+            self.slots
+                .binary_search_by_key(&idx, |&(i, _)| i)
+                .map(|i| self.slots[i].1)
+                .unwrap_or(StackSlot::Invalid),
+        )
     }
 
     /// Set the slot at the given offset from FP.
     pub fn set(&mut self, offset: i64, slot: StackSlot) -> bool {
+        self.try_set(offset, slot).expect("legacy stack allocation")
+    }
+
+    pub(super) fn try_clone(&self) -> VerifyResult<Self> {
+        Ok(Self {
+            slots: BudgetVec::copy_from(self.slots.budget(), &self.slots)?,
+            capacity: self.capacity,
+            max_depth: self.max_depth,
+        })
+    }
+
+    pub(super) fn try_set(&mut self, offset: i64, slot: StackSlot) -> VerifyResult<bool> {
         if offset >= 0 || offset < -(self.capacity as i64) {
-            return false;
+            return Ok(false);
         }
         let idx = (-offset - 1) as usize;
-        // Keep the map sparse: an `Invalid` slot is the default, so store it as
-        // absence rather than an entry.
-        if matches!(slot, StackSlot::Invalid) {
-            self.slots.remove(&idx);
-        } else {
-            self.slots.insert(idx, slot);
+        match self.slots.binary_search_by_key(&idx, |&(i, _)| i) {
+            Ok(i) if matches!(slot, StackSlot::Invalid) => {
+                self.slots.remove(i);
+            }
+            Ok(i) => self.slots[i].1 = slot,
+            Err(_) if matches!(slot, StackSlot::Invalid) => {}
+            Err(i) => self.slots.insert(i, (idx, slot))?,
         }
 
         // Update max depth
@@ -648,7 +670,7 @@ impl StackState {
             self.max_depth = depth;
         }
 
-        true
+        Ok(true)
     }
 
     /// Get the maximum stack depth used.
@@ -681,13 +703,13 @@ impl StackState {
     }
 }
 
-impl Default for StackState {
+impl Default for StackState<'_> {
     fn default() -> Self {
         Self::new(512) // Default 512 bytes
     }
 }
 
-impl fmt::Debug for StackState {
+impl fmt::Debug for StackState<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StackState")
             .field("max_depth", &self.max_depth)
@@ -698,13 +720,16 @@ impl fmt::Debug for StackState {
 }
 
 /// Complete verifier state at a program point.
+/// Compatibility type for analysis without a caller-owned allowance.
+pub type VerifierState = BudgetVerifierState<'static>;
+
 #[derive(Clone)]
-pub struct VerifierState {
+pub struct BudgetVerifierState<'a> {
     /// Register states
     pub regs: [RegState; Register::COUNT],
 
     /// Stack state
-    pub stack: StackState,
+    pub stack: StackState<'a>,
 
     /// Current instruction pointer
     pub insn_idx: usize,
@@ -713,7 +738,7 @@ pub struct VerifierState {
     pub insn_processed: usize,
 }
 
-impl VerifierState {
+impl<'a> BudgetVerifierState<'a> {
     /// Create initial verifier state for program entry.
     pub fn new_entry(stack_size: usize) -> Self {
         let mut regs = core::array::from_fn(|_| RegState::uninit());
@@ -730,6 +755,20 @@ impl VerifierState {
             insn_idx: 0,
             insn_processed: 0,
         }
+    }
+
+    pub(super) fn with_budget(mut self, budget: Option<&'a VerificationBudget>) -> Self {
+        self.stack.slots = BudgetVec::new(budget);
+        self
+    }
+
+    pub(super) fn try_clone(&self) -> VerifyResult<Self> {
+        Ok(Self {
+            regs: self.regs.clone(),
+            stack: self.stack.try_clone()?,
+            insn_idx: self.insn_idx,
+            insn_processed: self.insn_processed,
+        })
     }
 
     /// Get register state.
@@ -765,7 +804,7 @@ impl VerifierState {
     }
 }
 
-impl fmt::Debug for VerifierState {
+impl fmt::Debug for BudgetVerifierState<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VerifierState")
             .field("insn_idx", &self.insn_idx)

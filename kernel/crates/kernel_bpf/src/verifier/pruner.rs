@@ -30,10 +30,10 @@
 //! The per-pc retained set is bounded (see `DEFAULT_MAX_STATES_PER_PC`), so the
 //! subsumption walk stays linear in the number of explored states.
 
-use alloc::vec::Vec;
-
+use super::budget::{BudgetVec, VerificationBudget};
+use super::error::{VerifyError, VerifyResult};
 use super::liveness::RegSet;
-use super::state::{RegState, RegType, VerifierState};
+use super::state::{BudgetVerifierState as VerifierState, RegState, RegType};
 use crate::bytecode::registers::Register;
 
 /// Result of consulting the pruner before re-exploring a state.
@@ -109,7 +109,7 @@ impl StateSubsumes for RegState {
     }
 }
 
-impl StateSubsumes for VerifierState {
+impl StateSubsumes for VerifierState<'_> {
     fn subsumes(&self, other: &Self) -> bool {
         // Default subsumption considers every register live. Use
         // `subsumes_with_liveness` to ignore dead-register differences.
@@ -117,7 +117,7 @@ impl StateSubsumes for VerifierState {
     }
 }
 
-impl VerifierState {
+impl VerifierState<'_> {
     /// Subsumption check that ignores registers not in `live`.
     ///
     /// Two verifier states that disagree only on dead registers are
@@ -160,18 +160,21 @@ impl VerifierState {
 }
 
 /// Records explored states keyed by program counter so we can avoid
-/// re-exploring redundant ones. Memory consumption is bounded by
-/// `(distinct states) × (RegState cost)`; on a real program the verifier
-/// is expected to converge to a small set of state shapes per pc.
+/// re-exploring redundant ones. The byte allowance charges both retained
+/// register states and their sparse stack storage. The cumulative state cap
+/// separately bounds exploration work.
 ///
 /// For now this is keyed only by pc — multiple states at the same pc
 /// are kept in a small per-pc list and the pruner walks them. Linux's
 /// verifier uses a more elaborate hash + bucket structure; we'll move
 /// to that if profile data shows the linear walk dominating.
+/// Compatibility type for analysis without a caller-owned allowance.
+pub type StatePruner = BudgetStatePruner<'static>;
+
 #[derive(Debug, Default)]
-pub struct StatePruner {
+pub struct BudgetStatePruner<'a> {
     /// For each pc, the set of states we've already explored.
-    by_pc: alloc::collections::BTreeMap<usize, Vec<VerifierState>>,
+    by_pc: BudgetVec<'a, BudgetVec<'a, VerifierState<'a>>>,
     /// Running total of recorded states (kept incrementally so the budget
     /// check is O(1) rather than summing `by_pc` every instruction).
     count: usize,
@@ -187,16 +190,13 @@ pub struct StatePruner {
     max_states_per_pc: usize,
 }
 
-impl StatePruner {
+impl<'a> BudgetStatePruner<'a> {
     /// Default recorded-state budget.
     ///
-    /// Now that [`VerifierState`] stacks are sparse (`StackState` stores only
-    /// the touched slots, not a full 512 KiB image), each recorded state costs
-    /// ~1 KiB instead of ~1 MiB, so memory is no longer the binding constraint
-    /// — 8192 states is ~8 MiB. The per-pc subsumption walk is bounded to
-    /// [`Self::DEFAULT_MAX_STATES_PER_PC`] retained states, so total
-    /// verification work is linear in the number of explored states (no longer
-    /// O(states²)). The loop-free embedded fragment never approaches this.
+    /// This cumulative cap bounds exploration even when old states are evicted.
+    /// Memory is independently charged to the byte allowance: each retained
+    /// state owns registers and a variable-size sparse stack. The per-pc walk
+    /// is bounded to [`Self::DEFAULT_MAX_STATES_PER_PC`] retained states.
     pub const DEFAULT_MAX_STATES: usize = 8192;
 
     /// Default per-pc retained-state cap. Generous — real loops converge to a
@@ -207,11 +207,24 @@ impl StatePruner {
 
     pub fn new() -> Self {
         Self {
-            by_pc: alloc::collections::BTreeMap::new(),
+            by_pc: BudgetVec::new(None),
             count: 0,
             max_states: Self::DEFAULT_MAX_STATES,
             max_states_per_pc: Self::DEFAULT_MAX_STATES_PER_PC,
         }
+    }
+
+    pub(super) fn with_budget(mut self, budget: Option<&'a VerificationBudget>) -> Self {
+        self.by_pc = BudgetVec::new(budget);
+        self
+    }
+
+    pub(super) fn prepare(&mut self, count: usize) -> VerifyResult<()> {
+        self.by_pc.reserve(count)?;
+        while self.by_pc.len() < count {
+            self.by_pc.push(BudgetVec::new(self.by_pc.budget()))?;
+        }
+        Ok(())
     }
 
     /// True once the recorded-state budget is reached; the verifier should
@@ -243,7 +256,7 @@ impl StatePruner {
     /// `pc`. If any previously-recorded state at this pc subsumes the
     /// current one, return [`PruneDecision::Prune`]. Otherwise record
     /// the current state and return [`PruneDecision::Continue`].
-    pub fn check_or_record(&mut self, pc: usize, state: &VerifierState) -> PruneDecision {
+    pub fn check_or_record(&mut self, pc: usize, state: &VerifierState<'a>) -> PruneDecision {
         self.check_or_record_with_liveness(pc, state, RegSet::ALL)
     }
 
@@ -256,15 +269,28 @@ impl StatePruner {
     pub fn check_or_record_with_liveness(
         &mut self,
         pc: usize,
-        state: &VerifierState,
+        state: &VerifierState<'a>,
         live: RegSet,
     ) -> PruneDecision {
+        self.try_check_or_record(pc, state, live)
+            .expect("legacy pruner allocation")
+    }
+
+    pub(super) fn try_check_or_record(
+        &mut self,
+        pc: usize,
+        state: &VerifierState<'a>,
+        live: RegSet,
+    ) -> VerifyResult<PruneDecision> {
+        if pc >= self.by_pc.len() {
+            self.prepare(pc.checked_add(1).ok_or(VerifyError::ResourceExhausted)?)?;
+        }
         // Read the cap before the mutable `by_pc` borrow below.
         let cap = self.max_states_per_pc;
-        let entries = self.by_pc.entry(pc).or_default();
+        let entries = &mut self.by_pc[pc];
         for prior in entries.iter() {
             if prior.subsumes_with_liveness(state, live) {
-                return PruneDecision::Prune;
+                return Ok(PruneDecision::Prune);
             }
         }
         // Bound the retained per-pc set so the walk above stays O(cap), making
@@ -274,11 +300,11 @@ impl StatePruner {
         if entries.len() >= cap {
             entries.remove(0); // FIFO: drop the oldest
         }
-        entries.push(state.clone());
+        entries.push(state.try_clone()?)?;
         // `count` is cumulative (every Continue), independent of eviction, so it
         // still climbs to `max_states` → `at_capacity()` → reject (termination).
         self.count += 1;
-        PruneDecision::Continue
+        Ok(PruneDecision::Continue)
     }
 
     /// Drop all recorded state. Useful between independent program
@@ -299,7 +325,7 @@ impl StatePruner {
     /// Number of states currently retained at `pc` (after eviction). Test-only.
     #[cfg(test)]
     pub fn per_pc_len(&self, pc: usize) -> usize {
-        self.by_pc.get(&pc).map_or(0, alloc::vec::Vec::len)
+        self.by_pc.get(pc).map_or(0, |entries| entries.len())
     }
 }
 
@@ -310,7 +336,7 @@ mod tests {
     use crate::verifier::MapWritability;
     use crate::verifier::state::{ScalarValue, TnumValue};
 
-    fn entry_state() -> VerifierState {
+    fn entry_state() -> VerifierState<'static> {
         VerifierState::new_entry(512)
     }
 
@@ -437,7 +463,7 @@ mod tests {
 
     // Build N mutually-non-subsuming states by giving R0 distinct stack-pointer
     // offsets; `subsumes` requires equal `ptr_offset`, so none subsumes another.
-    fn distinct_ptr_state(off: i64) -> VerifierState {
+    fn distinct_ptr_state(off: i64) -> VerifierState<'static> {
         let mut s = entry_state();
         s.regs[Register::R0 as usize] = RegState::stack_ptr(off);
         s

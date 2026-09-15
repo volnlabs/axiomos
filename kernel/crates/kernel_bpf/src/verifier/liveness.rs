@@ -43,10 +43,9 @@
 //! and measure the pruning-rate improvement on a representative
 //! benchmark.
 
-use alloc::vec;
-use alloc::vec::Vec;
-
-use super::cfg::ControlFlowGraph;
+use super::budget::{BudgetVec, VerificationBudget};
+use super::cfg::BudgetControlFlowGraph as ControlFlowGraph;
+use super::error::VerifyResult;
 use crate::bytecode::insn::BpfInsn;
 use crate::bytecode::opcode::OpcodeClass;
 use crate::bytecode::registers::Register;
@@ -241,30 +240,44 @@ fn use_def(insn: &BpfInsn) -> UseDef {
 }
 
 /// Live-in / live-out sets per instruction.
+/// Compatibility type for analysis without a caller-owned allowance.
+pub type Liveness = BudgetLiveness<'static>;
+
 #[derive(Debug, Clone)]
-pub struct Liveness {
+pub struct BudgetLiveness<'a> {
     /// Live registers at the entry of instruction i.
-    live_in: Vec<RegSet>,
+    live_in: BudgetVec<'a, RegSet>,
     /// Live registers at the exit of instruction i (i.e. live-in of
     /// successors).
-    live_out: Vec<RegSet>,
+    live_out: BudgetVec<'a, RegSet>,
 }
 
-impl Liveness {
+impl<'a> BudgetLiveness<'a> {
     /// Run liveness analysis over `insns` using the CFG `cfg`. Returns
     /// a `Liveness` keyed by instruction index.
     pub fn analyze(insns: &[BpfInsn], cfg: &ControlFlowGraph) -> Self {
+        Self::try_analyze(insns, cfg, None).expect("legacy liveness allocation")
+    }
+    pub(super) fn try_analyze(
+        insns: &[BpfInsn],
+        cfg: &ControlFlowGraph<'_>,
+        budget: Option<&'a VerificationBudget>,
+    ) -> VerifyResult<Self> {
         let n = insns.len();
-        let mut live_in = vec![RegSet::EMPTY; n];
-        let mut live_out = vec![RegSet::EMPTY; n];
+        let mut live_in = BudgetVec::filled(budget, n, RegSet::EMPTY)?;
+        let mut live_out = BudgetVec::filled(budget, n, RegSet::EMPTY)?;
 
         if n == 0 {
-            return Self { live_in, live_out };
+            return Ok(Self { live_in, live_out });
         }
 
         // Pre-compute use/def for every instruction. Skips repeated work
         // in the fixpoint loop.
-        let ud: Vec<UseDef> = insns.iter().map(use_def).collect();
+        let mut ud = BudgetVec::new(budget);
+        ud.reserve(n)?;
+        for insn in insns {
+            ud.push(use_def(insn))?;
+        }
 
         // Backwards fixpoint. Bounded: each live-set is monotone over
         // RegSet (only grows), and RegSet has at most 11 elements.
@@ -296,7 +309,7 @@ impl Liveness {
             }
         }
 
-        Self { live_in, live_out }
+        Ok(Self { live_in, live_out })
     }
 
     /// Registers live at the entry of instruction `pc`.
@@ -331,6 +344,9 @@ impl Liveness {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+    use alloc::vec::Vec;
+
     use super::*;
 
     fn run(insns: &[BpfInsn]) -> Liveness {

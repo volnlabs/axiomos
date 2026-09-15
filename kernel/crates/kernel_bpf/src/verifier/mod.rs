@@ -37,6 +37,7 @@
 
 pub mod admission;
 mod alu;
+mod budget;
 mod caller;
 mod cfg;
 mod core;
@@ -53,6 +54,7 @@ pub(crate) use core::VerificationToken;
 pub use core::{MapPerm, Verifier, VerifyConfig, VerifyStats};
 
 pub use alu::{compute_alu_result, compute_alu_result_width, scalar_from_imm};
+pub use budget::VerificationBudget;
 pub use caller::LoadCaller;
 pub use cfg::ControlFlowGraph;
 pub use error::VerifyError;

@@ -5,21 +5,25 @@
 extern crate alloc;
 
 use alloc::collections::BTreeSet;
-use alloc::vec::Vec;
 
+use super::budget::{BudgetVec, VerificationBudget};
+use super::error::{VerifyError, VerifyResult};
 use crate::bytecode::insn::BpfInsn;
 
 /// Control flow graph for a BPF program.
+/// Compatibility type for analysis without a caller-owned allowance.
+pub type ControlFlowGraph = BudgetControlFlowGraph<'static>;
+
 #[derive(Debug, Clone)]
-pub struct ControlFlowGraph {
+pub struct BudgetControlFlowGraph<'a> {
     /// Number of instructions
     insn_count: usize,
 
     /// Basic block leaders (instruction indices that start blocks)
-    leaders: BTreeSet<usize>,
+    leaders: BudgetVec<'a, bool>,
 
     /// Edges in the CFG: (from_idx, to_idx)
-    edges: Vec<(usize, usize)>,
+    edges: BudgetVec<'a, (usize, usize)>,
 
     /// Successor adjacency in compressed-sparse-row form: the successors of
     /// instruction `i` are `succ_targets[succ_offsets[i]..succ_offsets[i+1]]`.
@@ -29,47 +33,57 @@ pub struct ControlFlowGraph {
     /// fixpoint, reachability BFS, WCET longest-path — quadratic in program
     /// size, which breaks the verifier's own linear cost bound
     /// (`docs/security/verifier-assurance.md`).
-    succ_offsets: Vec<u32>,
-    succ_targets: Vec<u32>,
+    succ_offsets: BudgetVec<'a, u32>,
+    succ_targets: BudgetVec<'a, u32>,
 
     /// Back edges (for loop detection)
-    back_edges: Vec<(usize, usize)>,
+    back_edges: BudgetVec<'a, (usize, usize)>,
 
     /// Instructions that can terminate the program
-    exit_points: Vec<usize>,
+    exit_points: BudgetVec<'a, usize>,
 }
 
-impl ControlFlowGraph {
+impl<'a> BudgetControlFlowGraph<'a> {
     /// Build a control flow graph from instructions.
     pub fn build(insns: &[BpfInsn]) -> Self {
+        Self::try_build(insns, None).expect("legacy CFG allocation")
+    }
+
+    pub(super) fn try_build(
+        insns: &[BpfInsn],
+        budget: Option<&'a VerificationBudget>,
+    ) -> VerifyResult<Self> {
+        if insns.len() > u32::MAX as usize / 2 {
+            return Err(VerifyError::ResourceExhausted);
+        }
         let mut cfg = Self {
             insn_count: insns.len(),
-            leaders: BTreeSet::new(),
-            edges: Vec::new(),
-            succ_offsets: Vec::new(),
-            succ_targets: Vec::new(),
-            back_edges: Vec::new(),
-            exit_points: Vec::new(),
+            leaders: BudgetVec::filled(budget, insns.len(), false)?,
+            edges: BudgetVec::new(budget),
+            succ_offsets: BudgetVec::new(budget),
+            succ_targets: BudgetVec::new(budget),
+            back_edges: BudgetVec::new(budget),
+            exit_points: BudgetVec::new(budget),
         };
 
         if insns.is_empty() {
-            return cfg;
+            return Ok(cfg);
         }
 
         // First instruction is always a leader
-        cfg.leaders.insert(0);
+        cfg.leaders[0] = true;
 
         // First pass: identify leaders and edges
         for (idx, insn) in insns.iter().enumerate() {
             if insn.is_exit() {
-                cfg.exit_points.push(idx);
+                cfg.exit_points.push(idx)?;
                 continue;
             }
 
             if insn.is_call() {
                 // Calls return to next instruction
                 if idx + 1 < insns.len() {
-                    cfg.edges.push((idx, idx + 1));
+                    cfg.edges.push((idx, idx + 1))?;
                 }
                 continue;
             }
@@ -80,58 +94,59 @@ impl ControlFlowGraph {
                 if jmp_op.is_unconditional() {
                     // Unconditional jump: only goes to target
                     if let Some(target) = target.filter(|&t| t < insns.len()) {
-                        cfg.edges.push((idx, target));
-                        cfg.leaders.insert(target);
+                        cfg.edges.push((idx, target))?;
+                        cfg.leaders[target] = true;
                     }
                 } else if jmp_op.is_conditional() {
                     // Conditional jump: can fall through or jump
                     if idx + 1 < insns.len() {
-                        cfg.edges.push((idx, idx + 1));
-                        cfg.leaders.insert(idx + 1);
+                        cfg.edges.push((idx, idx + 1))?;
+                        cfg.leaders[idx + 1] = true;
                     }
                     if let Some(target) = target.filter(|&t| t < insns.len()) {
-                        cfg.edges.push((idx, target));
-                        cfg.leaders.insert(target);
+                        cfg.edges.push((idx, target))?;
+                        cfg.leaders[target] = true;
                     }
                 }
             } else if insn.is_wide() {
                 // Wide instructions span two slots
                 if idx + 2 < insns.len() {
-                    cfg.edges.push((idx, idx + 2));
+                    cfg.edges.push((idx, idx + 2))?;
                 }
             } else {
                 // Normal instruction: falls through
                 if idx + 1 < insns.len() {
-                    cfg.edges.push((idx, idx + 1));
+                    cfg.edges.push((idx, idx + 1))?;
                 }
             }
         }
 
         // Identify back edges (for loop detection)
-        cfg.identify_back_edges();
+        cfg.identify_back_edges()?;
 
-        cfg.build_adjacency();
+        cfg.build_adjacency(budget)?;
 
-        cfg
+        Ok(cfg)
     }
 
     /// Build the CSR successor table from `edges` in two O(E) sweeps:
     /// count out-degrees → prefix-sum into offsets → scatter targets.
-    fn build_adjacency(&mut self) {
+    fn build_adjacency(&mut self, budget: Option<&'a VerificationBudget>) -> VerifyResult<()> {
         let n = self.insn_count;
-        let mut degree = alloc::vec![0u32; n];
-        for &(from, _) in &self.edges {
+        let mut degree = BudgetVec::filled(budget, n, 0u32)?;
+        for &(from, _) in self.edges.iter() {
             if from < n {
                 degree[from] += 1;
             }
         }
-        let mut offsets = alloc::vec![0u32; n + 1];
+        let mut offsets = BudgetVec::filled(budget, n + 1, 0u32)?;
         for i in 0..n {
             offsets[i + 1] = offsets[i] + degree[i];
         }
-        let mut targets = alloc::vec![0u32; self.edges.len()];
-        let mut cursor = offsets.clone();
-        for &(from, to) in &self.edges {
+        let mut targets = BudgetVec::filled(budget, self.edges.len(), 0u32)?;
+        degree.copy_from_slice(&offsets[..n]);
+        let mut cursor = degree;
+        for &(from, to) in self.edges.iter() {
             if from < n {
                 targets[cursor[from] as usize] = to as u32;
                 cursor[from] += 1;
@@ -139,6 +154,7 @@ impl ControlFlowGraph {
         }
         self.succ_offsets = offsets;
         self.succ_targets = targets;
+        Ok(())
     }
 
     /// Compute jump target from instruction index and offset.
@@ -153,12 +169,13 @@ impl ControlFlowGraph {
     }
 
     /// Identify back edges in the CFG (edges that go to earlier instructions).
-    fn identify_back_edges(&mut self) {
-        for &(from, to) in &self.edges {
+    fn identify_back_edges(&mut self) -> VerifyResult<()> {
+        for &(from, to) in self.edges.iter() {
             if to <= from {
-                self.back_edges.push((from, to));
+                self.back_edges.push((from, to))?;
             }
         }
+        Ok(())
     }
 
     /// Get the number of instructions.
@@ -168,12 +185,15 @@ impl ControlFlowGraph {
 
     /// Check if an instruction is a basic block leader.
     pub fn is_leader(&self, idx: usize) -> bool {
-        self.leaders.contains(&idx)
+        self.leaders.get(idx).copied().unwrap_or(false)
     }
 
     /// Get all basic block leaders.
     pub fn leaders(&self) -> impl Iterator<Item = usize> + '_ {
-        self.leaders.iter().copied()
+        self.leaders
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &leader)| leader.then_some(i))
     }
 
     /// Successors of instruction `idx` — O(out-degree) via the CSR table.
@@ -240,6 +260,32 @@ impl ControlFlowGraph {
         }
 
         false
+    }
+
+    /// Fallible reachability with one visit/enqueue per instruction.
+    pub(super) fn try_reachable(
+        &self,
+        budget: Option<&'a VerificationBudget>,
+    ) -> VerifyResult<BudgetVec<'a, bool>> {
+        let mut visited = BudgetVec::filled(budget, self.insn_count, false)?;
+        let mut queue = BudgetVec::new(budget);
+        queue.reserve(self.insn_count)?;
+        if self.insn_count != 0 {
+            visited[0] = true;
+            queue.push(0)?;
+        }
+        let mut head = 0;
+        while head < queue.len() {
+            let current = queue[head];
+            head += 1;
+            for succ in self.successors(current) {
+                if !visited[succ] {
+                    visited[succ] = true;
+                    queue.push(succ)?;
+                }
+            }
+        }
+        Ok(visited)
     }
 
     /// Get all reachable instructions.

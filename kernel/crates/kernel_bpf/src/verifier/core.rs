@@ -11,17 +11,20 @@ use core::marker::PhantomData;
 
 use super::LoadCaller;
 use super::alu::{compute_alu_result_width, scalar_from_imm};
-use super::cfg::ControlFlowGraph;
+use super::budget::{BudgetVec, VerificationBudget};
+use super::cfg::BudgetControlFlowGraph as ControlFlowGraph;
 use super::error::{VerifyError, VerifyResult};
 use super::helpers::{ArgType, HelperValidation, ReturnType, validate_helper_call};
-use super::liveness::{Liveness, RegSet};
+use super::liveness::{BudgetLiveness as Liveness, RegSet};
 use super::map_policy::{
     check_map_write_writability, map_lookup_value_size, map_lookup_writability,
     mutating_helper_map_arg, referenced_map_helper_arg,
 };
-use super::pruner::{PruneDecision, StatePruner};
+use super::pruner::{BudgetStatePruner as StatePruner, PruneDecision};
 use super::refine::refine_scalar;
-use super::state::{RegState, RegType, ScalarValue, StackSlot, VerifierState};
+use super::state::{
+    BudgetVerifierState as VerifierState, RegState, RegType, ScalarValue, StackSlot,
+};
 use crate::bytecode::insn::BpfInsn;
 use crate::bytecode::opcode::{AluOp, OpcodeClass};
 use crate::bytecode::program::{BpfProgType, BpfProgram};
@@ -127,7 +130,7 @@ pub struct VerifyStats {
 /// determines the constraints to enforce.
 pub struct Verifier<'a, P: PhysicalProfile = ActiveProfile> {
     /// Control flow graph
-    cfg: Option<ControlFlowGraph>,
+    cfg: Option<ControlFlowGraph<'a>>,
 
     /// Maximum stack depth over every explored path, including paths that
     /// later rejoin. No duplicate state/stack allocation is needed for this.
@@ -137,14 +140,14 @@ pub struct Verifier<'a, P: PhysicalProfile = ActiveProfile> {
     /// any program point — if a previously-recorded state at the same pc
     /// subsumes the current one, we skip exploration. See [`StatePruner`]
     /// for the subsumption check.
-    pruner: StatePruner,
+    pruner: StatePruner<'a>,
 
     /// Per-instruction liveness analysis. Pruner subsumption ignores
     /// registers not in `liveness.live_in(pc)`, so two states differing
     /// only on dead registers prune. Computed once per `verify_safety`
     /// call after the CFG is built; queried per-instruction by the
     /// pruner consultation.
-    liveness: Option<Liveness>,
+    liveness: Option<Liveness<'a>>,
 
     /// Caller-supplied sizes (context, map value) the verifier cannot infer
     /// from bytecode. Read by `verify_safety` (ctx range), `verify_call` (map
@@ -152,7 +155,8 @@ pub struct Verifier<'a, P: PhysicalProfile = ActiveProfile> {
     config: VerifyConfig<'a>,
 
     /// Map handles proven constant at helper call sites during path exploration.
-    referenced_map_handles: Vec<u32>,
+    referenced_map_handles: BudgetVec<'a, u32>,
+    budget: Option<&'a VerificationBudget>,
 
     /// Profile marker
     _profile: PhantomData<P>,
@@ -167,7 +171,8 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
             pruner: StatePruner::new(),
             liveness: None,
             config: VerifyConfig::default(),
-            referenced_map_handles: Vec::new(),
+            referenced_map_handles: BudgetVec::new(None),
+            budget: None,
             _profile: PhantomData,
         }
     }
@@ -213,14 +218,38 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
         insns: &[BpfInsn],
         config: VerifyConfig<'a>,
     ) -> VerifyResult<(BpfProgram<P>, VerifyStats)> {
+        Self::verify_inner(prog_type, insns, config, None)
+    }
+
+    /// Verify with a checked live buffer storage allowance. Scratch is refunded
+    /// on all exits; success retains the output code and handle vector charges
+    /// in `budget.used()`. Input storage and allocator overhead are separate.
+    pub fn verify_with_stats_bounded(
+        prog_type: BpfProgType,
+        insns: &[BpfInsn],
+        config: VerifyConfig<'a>,
+        budget: &'a VerificationBudget,
+    ) -> VerifyResult<(BpfProgram<P>, VerifyStats)> {
+        Self::verify_inner(prog_type, insns, config, Some(budget))
+    }
+
+    fn verify_inner(
+        prog_type: BpfProgType,
+        insns: &[BpfInsn],
+        config: VerifyConfig<'a>,
+        budget: Option<&'a VerificationBudget>,
+    ) -> VerifyResult<(BpfProgram<P>, VerifyStats)> {
         let mut verifier = Self::new();
         verifier.config = config;
+        verifier.budget = budget;
+        verifier.pruner = StatePruner::new().with_budget(budget);
+        verifier.referenced_map_handles = BudgetVec::new(budget);
 
         // Phase 1: Basic checks
         verifier.check_basic(insns)?;
 
         // Phase 2: Build CFG
-        let cfg = ControlFlowGraph::build(insns);
+        let cfg = ControlFlowGraph::try_build(insns, budget)?;
         verifier.cfg = Some(cfg);
 
         // Phase 3: Profile-specific constraints. These are purely structural
@@ -241,32 +270,46 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
         // verified bytecode.
         verifier.referenced_map_handles.sort_unstable();
         verifier.referenced_map_handles.dedup();
-        let stats = VerifyStats {
-            states_explored: verifier.pruner.recorded(),
-            wcet_cycles: super::cost::wcet_cycles(insns, verifier.cfg.as_ref().unwrap()),
-            referenced_map_handles: verifier.referenced_map_handles,
-        };
+        let states_explored = verifier.pruner.recorded();
+        let wcet_cycles =
+            super::cost::try_wcet_cycles(insns, verifier.cfg.as_ref().unwrap(), budget)?;
+        let handles =
+            core::mem::replace(&mut verifier.referenced_map_handles, BudgetVec::new(budget));
+        drop(verifier);
+        let code = BudgetVec::copy_from(budget, insns)?;
+        let code_bytes = core::mem::size_of_val(&*code);
 
         // Build the verified program
         let prog = BpfProgram::from_verified_parts(
             prog_type,
-            insns.to_vec(),
+            code.into_output(),
             stack_size,
             VerificationToken::new(),
         )
-        .map_err(|e| match e {
-            crate::bytecode::program::ProgramError::StackSizeExceeded { required, limit } => {
-                VerifyError::StackExceeded {
-                    used: required,
-                    limit,
+        .map_err(|e| {
+            // Construction consumes the code vector even on rejection.
+            if let Some(b) = budget {
+                b.refund(code_bytes);
+            }
+            match e {
+                crate::bytecode::program::ProgramError::StackSizeExceeded { required, limit } => {
+                    VerifyError::StackExceeded {
+                        used: required,
+                        limit,
+                    }
                 }
+                crate::bytecode::program::ProgramError::InsnCountExceeded { count, limit } => {
+                    VerifyError::InsnCountExceeded { count, limit }
+                }
+                _ => VerifyError::EmptyProgram,
             }
-            crate::bytecode::program::ProgramError::InsnCountExceeded { count, limit } => {
-                VerifyError::InsnCountExceeded { count, limit }
-            }
-            _ => VerifyError::EmptyProgram,
         })?;
 
+        let stats = VerifyStats {
+            states_explored,
+            wcet_cycles,
+            referenced_map_handles: handles.into_output(),
+        };
         Ok((prog, stats))
     }
 
@@ -323,30 +366,34 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
         let cfg = self.cfg.as_ref().unwrap();
 
         // Check reachability
-        let reachable = cfg.reachable_instructions();
+        let reachable = cfg.try_reachable(self.budget)?;
         for idx in 0..insns.len() {
             // Skip wide instruction continuations
             if idx > 0 && insns[idx - 1].is_wide() {
                 continue;
             }
 
-            if !reachable.contains(&idx) && !insns[idx].is_exit() {
+            if !reachable[idx] && !insns[idx].is_exit() {
                 return Err(VerifyError::UnreachableInstruction { insn_idx: idx });
             }
         }
 
+        drop(reachable);
+
         // Initialize depth accounting and pruner.
         self.max_stack_depth = 0;
         self.pruner.clear();
+        self.pruner.prepare(insns.len())?;
 
         // Compute liveness once per verification run; the pruner uses it
         // to ignore dead-register differences during subsumption.
-        self.liveness = Some(Liveness::analyze(insns, cfg));
+        self.liveness = Some(Liveness::try_analyze(insns, cfg, self.budget)?);
 
         // Start verification from entry. R1 is the context pointer; give it
         // the caller-declared accessible size so ctx loads can be bounds-
         // checked. With the default size 0, any ctx dereference is rejected.
-        let mut initial_state = VerifierState::new_entry(P::MAX_STACK_SIZE);
+        let mut initial_state =
+            VerifierState::new_entry(P::MAX_STACK_SIZE).with_budget(self.budget);
         initial_state.reg_mut(Register::R1).mem_range = Some(self.config.ctx_size);
         self.explore(insns, initial_state)?;
 
@@ -362,12 +409,12 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
     /// preserved: the taken (target) arm is followed inline while the
     /// fallthrough arm is deferred, so the pruner observes states in the same
     /// order as the recursive DFS and accept/reject decisions are unchanged.
-    /// The work-stack depth is bounded by the same recorded-state budget that
-    /// bounds memory (#116), so verification is now bounded in both heap and
-    /// native-stack use.
-    fn explore(&mut self, insns: &[BpfInsn], initial: VerifierState) -> VerifyResult<()> {
-        let mut work: Vec<VerifierState> = Vec::new();
-        work.push(initial);
+    /// The work-stack depth is bounded by the recorded-state work cap. Its
+    /// buffer and all deferred sparse stacks also charge the byte allowance;
+    /// native stack use does not grow with branch nesting.
+    fn explore(&mut self, insns: &[BpfInsn], initial: VerifierState<'a>) -> VerifyResult<()> {
+        let mut work = BudgetVec::new(self.budget);
+        work.push(initial)?;
 
         while let Some(mut state) = work.pop() {
             // Follow this path until it exits or is pruned; a branch pushes the
@@ -401,15 +448,12 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                     .as_ref()
                     .map(|l| l.live_in(idx))
                     .unwrap_or(RegSet::ALL);
-                if self.pruner.check_or_record_with_liveness(idx, &state, live)
-                    == PruneDecision::Prune
-                {
+                if self.pruner.try_check_or_record(idx, &state, live)? == PruneDecision::Prune {
                     break;
                 }
 
-                // Bound the verifier's memory (#116): each recorded state
-                // carries a full stack image, so reject once the budget is hit
-                // rather than allocating without bound on a loop.
+                // Bound cumulative exploration work independently of the byte
+                // allowance. Retained states carry registers and sparse stacks.
                 if self.pruner.at_capacity() {
                     return Err(VerifyError::StateLimitExceeded {
                         insn_idx: idx,
@@ -436,7 +480,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                         // Defer the fallthrough arm; continue the taken arm
                         // inline (preserving recursive DFS order). `true_branch`
                         // is the taken side, `false_branch` the fallthrough side.
-                        let mut fallthrough_state = state.clone();
+                        let mut fallthrough_state = state.try_clone()?;
                         if let Some(r) = refinement {
                             fallthrough_state.reg_mut(r.dst).scalar_value = Some(r.false_branch);
                         }
@@ -445,7 +489,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                         }
                         fallthrough_state.insn_idx = fallthrough;
                         fallthrough_state.insn_processed += 1;
-                        work.push(fallthrough_state);
+                        work.push(fallthrough_state)?;
 
                         if let Some(r) = refinement {
                             state.reg_mut(r.dst).scalar_value = Some(r.true_branch);
@@ -844,7 +888,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                         .and_then(|value| value.value)
                         .and_then(|value| u32::try_from(value).ok())
                 {
-                    self.referenced_map_handles.push(handle);
+                    self.referenced_map_handles.push(handle)?;
                 }
                 // Determine R0's region size *before* clobbering caller-saved
                 // registers, since a map lookup's value size depends on the map
@@ -1049,7 +1093,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
 
                     // Mark stack slots as written
                     for i in 0..size.size_bytes() {
-                        let _ = state.stack.set(offset + i as i64, StackSlot::Scalar);
+                        let _ = state.stack.try_set(offset + i as i64, StackSlot::Scalar)?;
                     }
                 } else {
                     check_ranged_deref(dst_state, insn.offset as i64, size.size_bytes(), idx)?;
@@ -1094,7 +1138,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                         });
                     }
                     for i in 0..size.size_bytes() {
-                        let _ = state.stack.set(offset + i as i64, StackSlot::Scalar);
+                        let _ = state.stack.try_set(offset + i as i64, StackSlot::Scalar)?;
                     }
                 } else {
                     check_ranged_deref(dst_state, insn.offset as i64, size.size_bytes(), idx)?;
@@ -1207,7 +1251,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
         // must fit the profile's budget. The CFG is loop-free here (back
         // edges rejected above), so the bound is meaningful. Relative cycle
         // units pending A76 calibration.
-        let cycles = super::cost::wcet_cycles(insns, cfg);
+        let cycles = super::cost::try_wcet_cycles(insns, cfg, self.budget)?;
         if cycles > P::WCET_CYCLE_BUDGET {
             return Err(VerifyError::WcetExceeded {
                 cycles,
