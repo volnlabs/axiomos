@@ -1,6 +1,6 @@
 version = 1
 baseline_sites = 705
-baseline_fingerprint = "sha256:3da87f4c06548f6a206a0b388306b1fc7613c1589fe525236111867313917ada"
+baseline_fingerprint = "sha256:b614883a1f9b17aa9e67cade4600985e585c830b5e2276324b6165200e063d2f"
 
 # 2026-09-09: reviewed prerequisite delta: seven motor-pair no_mangle
 # attributes (production helper and isolated test/fuzz stubs), minus one
@@ -15,6 +15,9 @@ baseline_fingerprint = "sha256:3da87f4c06548f6a206a0b388306b1fc7613c1589fe525236
 
 # 2026-09-15: reviewed v0.5 ownership, capability and bounded-verifier edits.
 # Unsafe constructs/counts/obligations are unchanged; source locations moved.
+
+# 2026-09-15: reviewed managed reclamation and formatting line relocations.
+# Unsafe constructs/counts/obligations remain unchanged at 705 classified sites.
 
 # Rules are evaluated in order. Keep narrow, high-risk obligations before broad
 # subsystem rules. The first matching rule supplies every site-level field.

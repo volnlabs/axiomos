@@ -76,6 +76,88 @@ pub(super) struct InstanceReservation {
     pub(super) map_bytes: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReclamationKind {
+    Instance {
+        instance_bytes: usize,
+        map_bytes: usize,
+    },
+    Artifact {
+        program_bytes: usize,
+    },
+}
+
+pub(super) struct ReclamationReservation {
+    id: u64,
+    kind: ReclamationKind,
+}
+
+enum ReclaimedObject {
+    Instance {
+        instance: InstanceEntry,
+        map: Option<MapEntry>,
+    },
+    Artifact(ProgramEntry),
+}
+
+/// Substantial managed ownership extracted under the manager lock. Consume it
+/// outside that lock to obtain the exact accounting receipt.
+pub(super) struct ManagedReclamation {
+    id: u64,
+    kind: ReclamationKind,
+    object: ReclaimedObject,
+}
+
+pub(super) struct ReclamationReceipt {
+    id: u64,
+    kind: ReclamationKind,
+}
+
+pub(super) struct FailedInstanceReceipt {
+    id: u64,
+}
+
+impl ManagedReclamation {
+    pub(super) fn release(self) -> ReclamationReceipt {
+        let Self { id, kind, object } = self;
+        match object {
+            ReclaimedObject::Instance { instance, map } => {
+                drop(instance);
+                drop(map);
+            }
+            ReclaimedObject::Artifact(artifact) => drop(artifact),
+        }
+        ReclamationReceipt { id, kind }
+    }
+}
+
+pub(super) struct ManagedInstanceFinishError {
+    error: BpfError,
+    rejected: Option<Arc<BehaviorInstance>>,
+    reservation_id: Option<u64>,
+}
+
+impl core::fmt::Debug for ManagedInstanceFinishError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ManagedInstanceFinishError")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ManagedInstanceFinishError {
+    pub(super) const fn error(&self) -> BpfError {
+        self.error
+    }
+
+    /// Drop a rejected completed instance outside `BPF_MANAGER`, then return
+    /// the opaque reservation token needed for the short accounting refund.
+    pub(super) fn release(self) -> Option<FailedInstanceReceipt> {
+        drop(self.rejected);
+        self.reservation_id.map(|id| FailedInstanceReceipt { id })
+    }
+}
+
 impl InstancePreparation {
     /// Consumes the permit exactly once, outside BPF_MANAGER and with IRQs
     /// enabled. Failure drops all candidate allocations before reporting it.
@@ -216,10 +298,14 @@ impl BpfManager {
     /// EVERY return, including deduplication and rejection. Success transfers
     /// code into this manager's charge; all other outcomes drop the input code.
     /// This method does not grant control-slot authority or admit execution.
-    pub fn register_managed_artifact(
+    #[cfg(test)]
+    pub(super) fn register_managed_artifact(
         &mut self,
         artifact: BehaviorArtifact,
     ) -> Result<u32, BpfError> {
+        if self.managed_reclamation.is_some() {
+            return Err(BpfError::ObjectBusy);
+        }
         self.prepare_managed_storage()?;
         let runtime = Arc::try_new(artifact).map_err(|_| BpfError::OutOfMemory)?;
         self.register_managed_shared(runtime)
@@ -231,6 +317,9 @@ impl BpfManager {
         &mut self,
         runtime: Arc<BehaviorArtifact>,
     ) -> Result<u32, BpfError> {
+        if self.managed_reclamation.is_some() {
+            return Err(BpfError::ObjectBusy);
+        }
         if self.managed_tables.is_none() {
             return Err(BpfError::ResourceLimit);
         }
@@ -297,7 +386,7 @@ impl BpfManager {
         &mut self,
         artifact_id: u32,
     ) -> Result<InstancePreparation, BpfError> {
-        if self.managed_instance_preparation.is_some() {
+        if self.managed_instance_preparation.is_some() || self.managed_reclamation.is_some() {
             return Err(BpfError::ObjectBusy);
         }
         let slot = self
@@ -379,25 +468,51 @@ impl BpfManager {
     /// Commit prepared state or refund a failed/cancelled build. The successful
     /// path only moves preallocated objects, with all rejection before mutation.
     /// This is instance registration; installation publication remains separate.
-    pub fn finish_managed_instance(
+    pub(super) fn finish_managed_instance(
         &mut self,
         prepared: PreparedInstance,
-    ) -> Result<Arc<BehaviorInstance>, BpfError> {
-        let reservation = self
+    ) -> Result<Arc<BehaviorInstance>, ManagedInstanceFinishError> {
+        let PreparedInstance {
+            id: prepared_id,
+            result,
+        } = prepared;
+        let Some(reservation) = self
             .managed_instance_preparation
             .as_ref()
-            .filter(|r| r.id == prepared.id)
-            .ok_or(BpfError::NotLoaded)?;
-        let instance = match prepared.result {
+            .filter(|r| r.id == prepared_id)
+        else {
+            return Err(ManagedInstanceFinishError {
+                error: BpfError::NotLoaded,
+                rejected: result.ok(),
+                reservation_id: None,
+            });
+        };
+        let reservation_id = reservation.id;
+        let instance = match result {
             Ok(instance) => instance,
             Err(error) => {
                 self.program_bytes -= reservation.instance_bytes;
                 self.map_bytes -= reservation.map_bytes;
                 self.managed_instance_preparation = None;
-                return Err(error);
+                return Err(ManagedInstanceFinishError {
+                    error,
+                    rejected: None,
+                    reservation_id: None,
+                });
             }
         };
         let private_map_id = if let Some(private) = &instance.maps[1] {
+            let has_slot = self.maps.len() < self.limits.max_map_slots
+                || self.maps.iter().enumerate().any(|(slot, entry)| {
+                    entry.is_none() && handles::can_reuse(self.map_generations[slot])
+                });
+            if !has_slot {
+                return Err(ManagedInstanceFinishError {
+                    error: BpfError::ResourceLimit,
+                    rejected: Some(instance),
+                    reservation_id: Some(reservation_id),
+                });
+            }
             let insertion = handles::insert(
                 &mut self.maps,
                 &mut self.map_generations,
@@ -413,11 +528,11 @@ impl BpfManager {
             match insertion {
                 Ok(id) => Some(id),
                 Err(error) => {
-                    drop(instance);
-                    self.program_bytes -= reservation.instance_bytes;
-                    self.map_bytes -= reservation.map_bytes;
-                    self.managed_instance_preparation = None;
-                    return Err(error);
+                    return Err(ManagedInstanceFinishError {
+                        error,
+                        rejected: Some(instance),
+                        reservation_id: Some(reservation_id),
+                    });
                 }
             }
         } else {
@@ -433,69 +548,147 @@ impl BpfManager {
         Ok(instance)
     }
 
+    pub(super) fn finish_failed_managed_instance(
+        &mut self,
+        receipt: FailedInstanceReceipt,
+    ) -> Result<(), BpfError> {
+        let reservation = self
+            .managed_instance_preparation
+            .as_ref()
+            .filter(|reservation| reservation.id == receipt.id)
+            .ok_or(BpfError::NotLoaded)?;
+        self.program_bytes -= reservation.instance_bytes;
+        self.map_bytes -= reservation.map_bytes;
+        self.managed_instance_preparation = None;
+        Ok(())
+    }
+
     #[cfg(test)]
     fn create_managed_instance(
         &mut self,
         artifact_id: u32,
     ) -> Result<Arc<BehaviorInstance>, BpfError> {
         let prepared = self.begin_managed_instance(artifact_id)?.build();
-        self.finish_managed_instance(prepared)
+        match self.finish_managed_instance(prepared) {
+            Ok(instance) => Ok(instance),
+            Err(failure) => {
+                let error = failure.error();
+                if let Some(receipt) = failure.release() {
+                    self.finish_failed_managed_instance(receipt)?;
+                }
+                Err(error)
+            }
+        }
     }
 
-    /// Call in the preemptible worker, never in timer/reader context. A retained
-    /// invocation, staged/active installation or retire batch keeps this busy.
-    pub fn reclaim_managed_instances(&mut self) -> usize {
-        let mut reclaimed = 0;
-        for slot in &mut self.managed_instances {
-            let Some(entry) = slot.as_mut() else {
-                continue;
-            };
-            // Weak references also retain the allocation header. get_mut proves
-            // atomic strong/weak uniqueness, so neither header nor state can
-            // outlive the refund or be upgraded concurrently with retirement.
-            if Arc::get_mut(&mut entry.instance).is_none() {
-                continue;
-            }
-            if let Some(id) = entry.private_map_id {
-                let Some(map_slot) = handles::decode(&self.map_generations, id) else {
-                    continue;
-                };
-                let Some(map) = self.maps[map_slot].as_ref() else {
-                    continue;
-                };
+    fn next_reclamation_id(&self) -> Result<u64, BpfError> {
+        if self.managed_reclamation.is_some()
+            || self.managed_instance_preparation.is_some()
+            || self.preparation.accepted()
+        {
+            return Err(BpfError::ObjectBusy);
+        }
+        self.next_managed_reclamation
+            .checked_add(1)
+            .ok_or(BpfError::ResourceLimit)
+    }
+
+    fn reserve_reclamation(&mut self, id: u64, kind: ReclamationKind) {
+        self.next_managed_reclamation = id;
+        self.managed_reclamation = Some(ReclamationReservation { id, kind });
+    }
+
+    /// Extract one quiescent instance and its private map under the manager
+    /// lock. Destruction and accounting release are separate worker steps.
+    pub(super) fn begin_managed_instance_reclamation(
+        &mut self,
+    ) -> Result<ManagedReclamation, BpfError> {
+        let reclamation_id = self.next_reclamation_id()?;
+        let slot = self
+            .managed_instances
+            .iter_mut()
+            .position(|entry| {
+                entry
+                    .as_mut()
+                    .is_some_and(|entry| Arc::get_mut(&mut entry.instance).is_some())
+            })
+            .ok_or(BpfError::ObjectBusy)?;
+
+        let private_map_id = self.managed_instances[slot]
+            .as_ref()
+            .expect("selected instance exists")
+            .private_map_id;
+        let map_slot = if let Some(map_id) = private_map_id {
+            let map_slot =
+                handles::decode(&self.map_generations, map_id).ok_or(BpfError::NotLoaded)?;
+            {
+                let entry = self.managed_instances[slot]
+                    .as_ref()
+                    .expect("selected instance exists");
+                let binding = entry.instance.maps[1].as_ref().ok_or(BpfError::NotLoaded)?;
+                let map = self.maps[map_slot].as_ref().ok_or(BpfError::NotLoaded)?;
                 if map.owner != ObjectOwner::KernelManaged
-                    || Arc::strong_count(&map.runtime) != 2
+                    || !Arc::ptr_eq(&binding.runtime, &map.runtime)
                     || map
                         .runtime
                         .leased
                         .load(core::sync::atomic::Ordering::Acquire)
                 {
-                    continue;
+                    return Err(BpfError::ObjectBusy);
                 }
             }
-            let entry = slot.take().expect("instance was present");
-            let id = entry.private_map_id;
-            let bytes = entry.charged_bytes;
-            drop(entry);
-            self.program_bytes -= bytes;
-            if let Some(id) = id {
-                let map = self.maps[handles::slot(id)]
-                    .take()
-                    .expect("map was checked");
-                let bytes = map.charged_bytes;
-                drop(map);
-                self.map_bytes -= bytes;
-                self.live_maps -= 1;
+            let instance = Arc::get_mut(
+                &mut self.managed_instances[slot]
+                    .as_mut()
+                    .expect("selected instance exists")
+                    .instance,
+            )
+            .expect("selected instance stayed unique");
+            let binding = instance.maps[1].take().ok_or(BpfError::NotLoaded)?;
+            let map = self.maps[map_slot]
+                .as_mut()
+                .expect("private map was validated before detaching binding");
+            let generation = binding.generation;
+            let perm = binding.perm;
+            // This cannot free the map: its table entry retains a strong owner.
+            drop(binding);
+            if Arc::get_mut(&mut map.runtime).is_none() {
+                instance.maps[1] = Some(ProgramMapRuntime {
+                    generation,
+                    perm,
+                    runtime: map.runtime.clone(),
+                });
+                return Err(BpfError::ObjectBusy);
             }
-            reclaimed += 1;
-        }
-        reclaimed
+            Some(map_slot)
+        } else {
+            None
+        };
+
+        let instance = self.managed_instances[slot]
+            .take()
+            .expect("selected instance exists");
+        let map = map_slot.map(|slot| self.maps[slot].take().expect("private map was checked"));
+        let kind = ReclamationKind::Instance {
+            instance_bytes: instance.charged_bytes,
+            map_bytes: map.as_ref().map_or(0, |map| map.charged_bytes),
+        };
+        self.reserve_reclamation(reclamation_id, kind);
+        Ok(ManagedReclamation {
+            id: reclamation_id,
+            kind,
+            object: ReclaimedObject::Instance { instance, map },
+        })
     }
 
-    /// Explicit retirement only. Active/staged/previous references must be
-    /// removed by the lifecycle transaction before this can free the code.
-    pub fn retire_managed_artifact(&mut self, id: u32) -> Result<(), BpfError> {
-        let slot = self.program_slot(id).ok_or(BpfError::NotLoaded)?;
+    /// Extract one uniquely owned artifact. Active/staged/previous and Weak
+    /// references make it busy; the returned object is dropped by the worker.
+    pub(super) fn begin_managed_artifact_reclamation(
+        &mut self,
+        artifact_id: u32,
+    ) -> Result<ManagedReclamation, BpfError> {
+        let reclamation_id = self.next_reclamation_id()?;
+        let slot = self.program_slot(artifact_id).ok_or(BpfError::NotLoaded)?;
         let entry = self.programs[slot].as_mut().ok_or(BpfError::NotLoaded)?;
         let ProgramObject::Managed(artifact) = &mut entry.program else {
             return Err(BpfError::PermissionDenied);
@@ -503,15 +696,65 @@ impl BpfManager {
         if Arc::get_mut(artifact).is_none() {
             return Err(BpfError::ObjectBusy);
         }
-        let entry = self.programs[slot].take().expect("artifact was checked");
-        let bytes = entry.charged_bytes;
-        drop(entry);
-        self.program_bytes -= bytes;
-        self.live_programs -= 1;
+        let artifact = self.programs[slot].take().expect("artifact was checked");
+        let kind = ReclamationKind::Artifact {
+            program_bytes: artifact.charged_bytes,
+        };
+        self.reserve_reclamation(reclamation_id, kind);
+        Ok(ManagedReclamation {
+            id: reclamation_id,
+            kind,
+            object: ReclaimedObject::Artifact(artifact),
+        })
+    }
+
+    pub(super) fn finish_managed_reclamation(
+        &mut self,
+        receipt: ReclamationReceipt,
+    ) -> Result<(), BpfError> {
+        let reservation = self
+            .managed_reclamation
+            .as_ref()
+            .filter(|reservation| reservation.id == receipt.id && reservation.kind == receipt.kind)
+            .ok_or(BpfError::NotLoaded)?;
+        match reservation.kind {
+            ReclamationKind::Instance {
+                instance_bytes,
+                map_bytes,
+            } => {
+                self.program_bytes -= instance_bytes;
+                self.map_bytes -= map_bytes;
+                self.live_maps -= usize::from(map_bytes != 0);
+            }
+            ReclamationKind::Artifact { program_bytes } => {
+                self.program_bytes -= program_bytes;
+                self.live_programs -= 1;
+            }
+        }
+        self.managed_reclamation = None;
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn reclaim_managed_instances(&mut self) -> usize {
+        let mut reclaimed = 0;
+        while let Ok(reclamation) = self.begin_managed_instance_reclamation() {
+            let receipt = reclamation.release();
+            self.finish_managed_reclamation(receipt)
+                .expect("matching reclamation receipt");
+            reclaimed += 1;
+        }
+        reclaimed
+    }
+
+    #[cfg(test)]
+    pub fn retire_managed_artifact(&mut self, id: u32) -> Result<(), BpfError> {
+        let reclamation = self.begin_managed_artifact_reclamation(id)?;
+        let receipt = reclamation.release();
+        self.finish_managed_reclamation(receipt)
     }
 }
 
 #[cfg(test)]
 #[path = "managed_tests.rs"]
-mod tests;
+pub(super) mod tests;

@@ -10,7 +10,7 @@ use zerocopy::IntoBytes;
 use super::*;
 use crate::bpf::{BpfManager, BPF_MAP_TYPE_ARRAY};
 
-fn artifact(revision: u64) -> BehaviorArtifact {
+pub(in crate::bpf) fn artifact(revision: u64) -> BehaviorArtifact {
     artifact_with_state(
         revision,
         Some(PrivateArray {
@@ -20,7 +20,10 @@ fn artifact(revision: u64) -> BehaviorArtifact {
     )
 }
 
-fn artifact_with_state(revision: u64, private_array: Option<PrivateArray>) -> BehaviorArtifact {
+pub(in crate::bpf) fn artifact_with_state(
+    revision: u64,
+    private_array: Option<PrivateArray>,
+) -> BehaviorArtifact {
     artifact_from_program(
         revision,
         true,
@@ -124,15 +127,205 @@ fn managed_failed_registration_refunds_the_completed_build() {
     let id = manager.register_managed_artifact(artifact(1)).unwrap();
     let before = manager.resource_usage();
     let prepared = manager.begin_managed_instance(id).unwrap().build();
+    let reserved = manager.resource_usage();
     // Model unavailable publication capacity after work was accepted.
     manager.limits.max_map_slots = manager.maps.len();
-    assert!(matches!(
-        manager.finish_managed_instance(prepared),
-        Err(BpfError::ResourceLimit)
-    ));
+    let failure = match manager.finish_managed_instance(prepared) {
+        Ok(_) => panic!("publication capacity unexpectedly remained available"),
+        Err(failure) => failure,
+    };
+    assert_eq!(failure.error(), BpfError::ResourceLimit);
+    assert_eq!(manager.resource_usage(), reserved);
+    assert!(manager.managed_instance_preparation.is_some());
+    let receipt = failure.release().unwrap();
+    assert_eq!(manager.resource_usage(), reserved);
+    assert!(manager.managed_instance_preparation.is_some());
+    manager.finish_failed_managed_instance(receipt).unwrap();
     assert_eq!(manager.resource_usage(), before);
     assert!(manager.managed_instance_preparation.is_none());
     assert!(manager.managed_instances.iter().all(Option::is_none));
+}
+
+#[test]
+fn managed_reclamation_drops_outside_lock_before_exact_refund() {
+    let mut manager = BpfManager::new();
+    manager.prepare_managed_storage().unwrap();
+    let baseline = manager.resource_usage();
+    let id = manager.register_managed_artifact(artifact(1)).unwrap();
+    let instance = manager.create_managed_instance(id).unwrap();
+    let retained = manager.resource_usage();
+    drop(instance);
+
+    let reclaim = manager.begin_managed_instance_reclamation().unwrap();
+    assert_eq!(manager.resource_usage(), retained);
+    assert!(manager.managed_reclamation.is_some());
+    assert!(matches!(
+        manager.begin_managed_instance(id),
+        Err(BpfError::ObjectBusy)
+    ));
+    assert!(matches!(
+        manager.create_map(BPF_MAP_TYPE_ARRAY, 4, 8, 1),
+        Err(BpfError::ObjectBusy)
+    ));
+    assert!(matches!(
+        manager.register_managed_artifact(artifact(2)),
+        Err(BpfError::ObjectBusy)
+    ));
+    let receipt = reclaim.release();
+    assert_eq!(manager.resource_usage(), retained);
+    manager.finish_managed_reclamation(receipt).unwrap();
+    assert!(manager.managed_reclamation.is_none());
+    assert_eq!(manager.resource_usage().live_maps, baseline.live_maps);
+
+    let artifact_reclaim = manager.begin_managed_artifact_reclamation(id).unwrap();
+    assert_eq!(
+        manager.resource_usage().live_programs,
+        retained.live_programs
+    );
+    let receipt = artifact_reclaim.release();
+    assert_eq!(
+        manager.resource_usage().live_programs,
+        retained.live_programs
+    );
+    manager.finish_managed_reclamation(receipt).unwrap();
+    assert_eq!(manager.resource_usage(), baseline);
+}
+
+#[test]
+fn managed_reclamation_rejects_live_and_weak_readers_without_reserving() {
+    let mut manager = BpfManager::new();
+    let id = manager.register_managed_artifact(artifact(1)).unwrap();
+    let instance = manager.create_managed_instance(id).unwrap();
+    let retained = manager.resource_usage();
+    assert!(matches!(
+        manager.begin_managed_instance_reclamation(),
+        Err(BpfError::ObjectBusy)
+    ));
+    assert!(manager.managed_reclamation.is_none());
+    drop(instance);
+
+    let weak = Arc::downgrade(
+        &manager
+            .managed_instances
+            .iter()
+            .flatten()
+            .next()
+            .unwrap()
+            .instance,
+    );
+    assert!(matches!(
+        manager.begin_managed_instance_reclamation(),
+        Err(BpfError::ObjectBusy)
+    ));
+    assert_eq!(manager.resource_usage(), retained);
+    assert!(weak.upgrade().is_some());
+    drop(weak);
+
+    let private = manager.managed_instances[0].as_ref().unwrap().instance.maps[1]
+        .as_ref()
+        .unwrap()
+        .runtime
+        .clone();
+    let map_weak = Arc::downgrade(&private);
+    drop(private);
+    assert!(matches!(
+        manager.begin_managed_instance_reclamation(),
+        Err(BpfError::ObjectBusy)
+    ));
+    assert!(manager.managed_instances[0].as_ref().unwrap().instance.maps[1].is_some());
+    assert!(map_weak.upgrade().is_some());
+    drop(map_weak);
+
+    manager.managed_instances[0].as_ref().unwrap().instance.maps[1]
+        .as_ref()
+        .unwrap()
+        .runtime
+        .leased
+        .store(true, core::sync::atomic::Ordering::Release);
+    assert!(matches!(
+        manager.begin_managed_instance_reclamation(),
+        Err(BpfError::ObjectBusy)
+    ));
+    manager.managed_instances[0].as_ref().unwrap().instance.maps[1]
+        .as_ref()
+        .unwrap()
+        .runtime
+        .leased
+        .store(false, core::sync::atomic::Ordering::Release);
+    assert_eq!(manager.resource_usage(), retained);
+}
+
+#[test]
+fn managed_reclamation_counter_exhaustion_preserves_tables_bindings_and_charges() {
+    let mut manager = BpfManager::new();
+    let id = manager.register_managed_artifact(artifact(1)).unwrap();
+    let instance = manager.create_managed_instance(id).unwrap();
+    let private_id = manager.managed_instances[0]
+        .as_ref()
+        .unwrap()
+        .private_map_id
+        .unwrap();
+    let before = manager.resource_usage();
+    drop(instance);
+    manager.next_managed_reclamation = u64::MAX;
+
+    assert!(matches!(
+        manager.begin_managed_instance_reclamation(),
+        Err(BpfError::ResourceLimit)
+    ));
+    assert!(manager.managed_instances[0].as_ref().unwrap().instance.maps[1].is_some());
+    assert!(manager.map_entry(private_id).is_some());
+    assert_eq!(manager.resource_usage(), before);
+    assert!(manager.managed_reclamation.is_none());
+    assert!(matches!(
+        manager.begin_managed_artifact_reclamation(id),
+        Err(BpfError::ResourceLimit | BpfError::ObjectBusy)
+    ));
+    assert!(manager.managed_artifact(id).is_ok());
+
+    let mut artifact_manager = BpfManager::new();
+    let artifact_id = artifact_manager
+        .register_managed_artifact(artifact(2))
+        .unwrap();
+    let artifact_before = artifact_manager.resource_usage();
+    artifact_manager.next_managed_reclamation = u64::MAX;
+    assert!(matches!(
+        artifact_manager.begin_managed_artifact_reclamation(artifact_id),
+        Err(BpfError::ResourceLimit)
+    ));
+    assert!(artifact_manager.managed_artifact(artifact_id).is_ok());
+    assert_eq!(artifact_manager.resource_usage(), artifact_before);
+    assert!(artifact_manager.managed_reclamation.is_none());
+}
+
+#[test]
+fn managed_instance_preparation_blocks_unrelated_artifact_reclamation() {
+    let mut manager = BpfManager::new();
+    let candidate = manager.register_managed_artifact(artifact(1)).unwrap();
+    let unused = manager.register_managed_artifact(artifact(2)).unwrap();
+    let preparation = manager.begin_managed_instance(candidate).unwrap();
+    let reserved = manager.resource_usage();
+    let reservation_id = manager.managed_instance_preparation.as_ref().unwrap().id;
+
+    assert!(matches!(
+        manager.begin_managed_artifact_reclamation(unused),
+        Err(BpfError::ObjectBusy)
+    ));
+    assert_eq!(manager.resource_usage(), reserved);
+    assert_eq!(
+        manager.managed_instance_preparation.as_ref().unwrap().id,
+        reservation_id
+    );
+    assert!(manager.managed_artifact(unused).is_ok());
+    assert!(manager.managed_reclamation.is_none());
+
+    let instance = manager
+        .finish_managed_instance(preparation.build())
+        .unwrap();
+    assert_eq!(
+        instance.artifact().identity(),
+        manager.managed_artifact(candidate).unwrap().identity()
+    );
 }
 
 #[test]
@@ -206,7 +399,7 @@ fn managed_instance_allocation_failures_refund_reservation_without_touching_live
         assert!(
             matches!(
                 manager.finish_managed_instance(prepared),
-                Err(BpfError::OutOfMemory)
+                Err(error) if error.error() == BpfError::OutOfMemory
             ),
             "allocation checkpoint {fail_at}"
         );
@@ -247,7 +440,7 @@ fn managed_pending_preparation_is_exclusive_and_reserves_legacy_map_capacity() {
     ));
     assert!(matches!(
         manager.finish_managed_instance(pending.cancel()),
-        Err(BpfError::ObjectBusy)
+        Err(error) if error.error() == BpfError::ObjectBusy
     ));
     assert_eq!(manager.resource_usage(), before);
     assert!(manager.managed_instance_preparation.is_none());

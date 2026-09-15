@@ -510,6 +510,8 @@ pub struct BpfManager {
     managed_tables: Option<(usize, usize)>,
     managed_instance_preparation: Option<managed::InstanceReservation>,
     next_managed_preparation: u64,
+    managed_reclamation: Option<managed::ReclamationReservation>,
+    next_managed_reclamation: u64,
     preparation: preparation::PreparationState,
 }
 
@@ -655,6 +657,8 @@ impl BpfManager {
             managed_tables: None,
             managed_instance_preparation: None,
             next_managed_preparation: 0,
+            managed_reclamation: None,
+            next_managed_reclamation: 0,
             preparation: preparation::PreparationState::new(),
         };
         let envelope = EnvelopeMap::<ActiveProfile>::init_from_profile();
@@ -693,6 +697,9 @@ impl BpfManager {
         charge: usize,
         owner: u64,
     ) -> Result<u32, BpfError> {
+        if self.managed_reclamation.is_some() {
+            return Err(BpfError::ObjectBusy);
+        }
         let id = handles::insert(
             &mut self.maps,
             &mut self.map_generations,
@@ -975,6 +982,9 @@ impl BpfManager {
     }
 
     fn ensure_program_quota(&self, owner: u64, charge: usize) -> Result<(), BpfError> {
+        if self.managed_reclamation.is_some() {
+            return Err(BpfError::ObjectBusy);
+        }
         let has_slot = self.programs.len() < self.limits.max_program_slots
             || self.programs.iter().enumerate().any(|(slot, entry)| {
                 entry.is_none() && handles::can_reuse(self.program_generations[slot])

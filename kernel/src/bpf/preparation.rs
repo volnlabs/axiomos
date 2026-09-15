@@ -36,6 +36,13 @@ pub(super) struct PreparationState {
 }
 
 impl PreparationState {
+    pub(super) fn accepted(&self) -> bool {
+        matches!(
+            self.phase,
+            Phase::Queued | Phase::Preparing | Phase::Finishing
+        )
+    }
+
     pub(super) fn new() -> Self {
         Self {
             buffer: None,
@@ -282,7 +289,8 @@ impl BpfManager {
         {
             return Err(ENOMEM);
         }
-        if self.managed_instance_preparation.is_some()
+        if self.managed_reclamation.is_some()
+            || self.managed_instance_preparation.is_some()
             || self.managed_instances.iter().flatten().count() >= 2
         {
             return Err(EBUSY);

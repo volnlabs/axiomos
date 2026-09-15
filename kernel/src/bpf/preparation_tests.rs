@@ -370,3 +370,79 @@ fn managed_preparation_evicts_only_after_four_terminal_receipts() {
         );
     }
 }
+
+#[test]
+fn managed_preparation_waits_for_reclamation_release_and_refund() {
+    let (bytes, trust) = signed_bundle(1, &[BpfInsn::mov64_imm(0, 0), BpfInsn::exit()]);
+    let mut manager = manager_with_upload(trust);
+    let first = upload(&mut manager, 7, 0, &bytes);
+    let (prepared, _) = prepare_and_commit(&mut manager, first);
+    finish(&mut manager, prepared);
+    let artifact = manager
+        .managed_operation_query(first)
+        .unwrap()
+        .artifact_handle;
+    let second = upload(&mut manager, 7, first, &bytes);
+    let charged = manager.resource_usage();
+    let retired = manager
+        .begin_managed_artifact_reclamation(artifact)
+        .unwrap();
+    assert_eq!(manager.managed_upload_finalize(7, second), Err(EBUSY));
+    assert_eq!(manager.resource_usage(), charged);
+    let receipt = retired.release();
+    assert_eq!(manager.managed_upload_finalize(7, second), Err(EBUSY));
+    assert_eq!(manager.resource_usage(), charged);
+    manager.finish_managed_reclamation(receipt).unwrap();
+    assert_eq!(manager.managed_upload_finalize(7, second), Ok(second));
+    let prepared = manager.take_managed_work().unwrap().prepare();
+    manager.commit_managed_work(&prepared).unwrap();
+    finish(&mut manager, prepared);
+    let current = manager.managed_operation_query(second).unwrap();
+    assert_eq!(current.phase, MANAGED_OPERATION_RESIDENT);
+    assert_ne!(current.artifact_handle, artifact);
+    assert_eq!(manager.resource_usage(), charged);
+}
+
+#[test]
+fn managed_preparation_prevents_reclamation_from_disrupting_accepted_work() {
+    let (bytes, trust) = signed_bundle(1, &[BpfInsn::mov64_imm(0, 0), BpfInsn::exit()]);
+    let mut manager = manager_with_upload(trust);
+    let first = upload(&mut manager, 7, 0, &bytes);
+    let (prepared, _) = prepare_and_commit(&mut manager, first);
+    finish(&mut manager, prepared);
+    let artifact = manager
+        .managed_operation_query(first)
+        .unwrap()
+        .artifact_handle;
+    let second = upload(&mut manager, 7, first, &bytes);
+    manager.managed_upload_finalize(7, second).unwrap();
+    let charged = manager.resource_usage();
+    let reject_reclamation = |manager: &mut BpfManager| {
+        assert!(matches!(
+            manager.begin_managed_artifact_reclamation(artifact),
+            Err(BpfError::ObjectBusy)
+        ));
+        assert!(matches!(
+            manager.begin_managed_instance_reclamation(),
+            Err(BpfError::ObjectBusy)
+        ));
+        assert_eq!(manager.resource_usage(), charged);
+        assert!(manager.managed_reclamation.is_none());
+    };
+    reject_reclamation(&mut manager);
+    let work = manager.take_managed_work().unwrap();
+    reject_reclamation(&mut manager);
+    let prepared = work.prepare();
+    manager.commit_managed_work(&prepared).unwrap();
+    reject_reclamation(&mut manager);
+    finish(&mut manager, prepared);
+    assert_eq!(
+        manager.managed_operation_query(second).unwrap().phase,
+        MANAGED_OPERATION_RESIDENT
+    );
+    let reclamation = manager
+        .begin_managed_artifact_reclamation(artifact)
+        .unwrap();
+    let receipt = reclamation.release();
+    manager.finish_managed_reclamation(receipt).unwrap();
+}

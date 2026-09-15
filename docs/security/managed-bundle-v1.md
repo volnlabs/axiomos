@@ -111,11 +111,13 @@ required before its reference image is qualified.
 under a `VerificationBudget`. It retains identity, binding contract, code and
 scalar verifier results; temporary decode and handle buffers are released.
 The trusted worker supplies signer and slot policy. The returned code capacity
-remains charged to the budget. When passing an artifact to
-`BpfManager::register_managed_artifact`, the caller saves `output_charge()` and
-releases that originating output charge after every return, including duplicate
-or rejected registration. Insertion transfers ownership and accounting to the
-existing manager; other outcomes drop the supplied artifact.
+remains charged to the budget through `output_charge()`. The worker transfers
+that charge to its already-held global workspace reservation after fallible Arc
+construction. It retains a second Arc through `register_managed_shared`, so
+duplicate or rejected code is released outside the manager lock. Insertion
+transfers the retained code/wrapper charge from workspace to the existing table.
+The by-value registration convenience exists only in tests; those callers release
+the originating output charge after every return, including rejection.
 
 The manager retains at most three artifacts and two instances using the existing
 generational tables and explicit `KernelManaged` ownership. Before execution,
@@ -123,9 +125,11 @@ generational tables and explicit `KernelManaged` ownership. Before execution,
 `begin_managed_instance` reserves the instance position, private map slot and
 allocation charges. Its single-use preparation object builds zeroed ARRAY state
 outside `BPF_MANAGER` with IRQs enabled; `finish_managed_instance` registers it
-or refunds a failed/cancelled build. The worker must always finish its accepted
-preparation, including cancellation. Dropping the permit alone leaves its
-bounded reservation busy.
+or refunds a failed/cancelled build whose storage is already released. A
+completed instance rejected at registration is returned in an owned error; the
+worker releases it outside the lock, then consumes its receipt to refund the
+reservation. The worker must always finish accepted preparation, including
+cancellation. Dropping the permit or a receipt leaves bounded capacity busy.
 
 `BehaviorInstance::execute` uses the existing interpreter, CPU stack and map
 leases with exactly the retained local sizes, permissions and generations.
@@ -136,6 +140,18 @@ allocation header. Code, array capacity, boxes, reference-count headers and
 registry capacity stay charged until release. Layout charges match the pinned
 Rust toolchain and `linked_list_allocator` implementation; the real allocator
 fixture checks Box/Arc charges and final release under Miri.
+
+The reclamation API extracts one instance/private-map pair or one artifact from
+the existing tables without releasing its charges or capacity. The worker drops
+that owned object outside the manager lock, then consumes an opaque receipt to
+refund the exact reservation. Pending reclamation prevents program/map slot
+reuse and new preparation; accepted preparation likewise prevents reclamation
+from disrupting its reserved resources. Private-map reclamation temporarily
+removes the instance's redundant reference while the table retains ownership,
+then uses atomic Arc uniqueness to exclude both strong and weak readers. A busy
+reader or lease restores the original binding and leaves charges unchanged.
+The installation retirement batch and its worker dispatch remain integration
+work; these APIs and their host/Miri checks establish the release mechanism.
 
 The asynchronous worker and global upload/verifier-workspace reservation are
 implemented below. Timing admission remains integration work. Kernel dispatch
