@@ -296,15 +296,13 @@ jobs:
   miri-kernel-bpf:
     name: "Miri (kernel_bpf)"
     runs-on: ubuntu-latest
-    # Cap runtime so a hung Miri can't bill unbounded (up to GitHub's 6h max).
-    # The embedded-profile matrix entry hung for 90+ min on 2026-07-04 while
-    # cloud-profile finished in ~14 min — see the tracking issue. Miri's UB
-    # detection is profile-agnostic (only const sizes differ between profiles),
-    # so cloud-profile alone covers the unsafe surface; embedded is dropped
-    # until the hang is understood.
-    # The 2026-09-13 cloud job hit 30 min after 445 passing tests; the prior
-    # successful job took 28m39s. Allow runner variance while keeping a cap.
-    timeout-minutes: 40
+    # Retain the full suite under a bounded cap. Run 34938869549 exceeded 40m
+    # during managed signing; that complete eight-test suite passes locally in
+    # 3604s, in addition to the prior 28m39s full-runtime baseline. Allow setup
+    # and runner variance without falling back to GitHub's six-hour default.
+    # Cloud exercises the shared unsafe surface; focused embedded Miri also
+    # runs during local integration. Full physical qualification is separate.
+    timeout-minutes: 120
     strategy:
       matrix:
         profile: [cloud-profile]
