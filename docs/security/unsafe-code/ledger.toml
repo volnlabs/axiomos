@@ -1,6 +1,11 @@
 version = 1
 baseline_sites = 708
-baseline_fingerprint = "sha256:2fc0af2a5f1661d065fc805e77613827bfd3600edd54cc7570d45e332406e928"
+baseline_fingerprint = "sha256:b69b04339464e79b2f6dff63644e17a2ecec82dfe0d1dd86726e99f2b8f53903"
+
+# 2026-09-15: bounded lifecycle administration and failure receipts move existing
+# source sites without changing unsafe syntax, counts, kinds or obligations.
+# The cancelled-transport/new-preparation regression passes focused Miri;
+# embedded/cloud host suites and Pi5 compilation pass. Physical gates remain open.
 
 # 2026-09-15: correlated handoff/MCU integration adds no unsafe syntax;
 # all 708 constructs retain their kinds and obligations, with reviewed source

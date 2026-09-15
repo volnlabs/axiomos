@@ -1,7 +1,6 @@
-//! Exclusive fixed-slot ownership. Kernel-private until authority and correlated
-//! physical handoff are wired. CPU0 access and worker custody remain separate.
+//! Exclusive fixed-slot ownership and bounded administration. CPU0 publication
+//! and worker custody remain separate; physical session rearm stays fail-closed.
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use kernel_abi::ManagedControlContextV1;
 use kernel_bpf::execution::{BpfError, ManagedInvocationResult};
@@ -20,17 +19,41 @@ use super::BpfManager;
 /// One slot, separate from manager storage. Combined paths always lock this
 /// first, with local IRQs masked; the release boundary only uses try_lock.
 pub(super) static CONTROL_SLOT: spin::Mutex<ControlSlot> = spin::Mutex::new(ControlSlot::new());
-static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+static STOP_REQUESTED: spin::Mutex<Option<StopNotice>> = spin::Mutex::new(None);
+
+#[derive(Clone, Copy)]
+enum StopNotice {
+    Stop,
+    Handoff {
+        instance_id: u64,
+        error: HandoffError,
+    },
+}
+
+fn latch_stop(requested: &spin::Mutex<Option<StopNotice>>, notice: StopNotice) {
+    // Single bounded first-cause mailbox; generic e-stop consequences cannot
+    // replace the failure that requested them. No slot/actuator lock is acquired.
+    crate::mcore::context::with_interrupts_masked(|| {
+        requested.lock().get_or_insert(notice);
+    });
+}
 
 /// Trusted stop writers never take the slot lock (they may already hold the
 /// actuator lock). The next CPU0 slot boundary consumes this before publication.
 pub(crate) fn request_stop() {
-    STOP_REQUESTED.store(true, Ordering::Release);
+    latch_stop(&STOP_REQUESTED, StopNotice::Stop);
 }
 
-fn apply_requested_stop(slot: &mut ControlSlot, requested: &AtomicBool) {
-    if requested.swap(false, Ordering::AcqRel) {
-        slot.stop();
+pub(crate) fn request_handoff_failure(instance_id: u64, error: HandoffError) {
+    latch_stop(&STOP_REQUESTED, StopNotice::Handoff { instance_id, error });
+}
+
+fn apply_requested_stop(slot: &mut ControlSlot, requested: &spin::Mutex<Option<StopNotice>>) {
+    let notice = requested.lock().take();
+    match notice {
+        Some(StopNotice::Stop) => slot.stop(),
+        Some(StopNotice::Handoff { instance_id, error }) => slot.fail_handoff(instance_id, error),
+        None => {}
     }
 }
 
@@ -73,13 +96,19 @@ pub(crate) fn query_installation(
     id: u64,
 ) -> Result<kernel_abi::ManagedOperationV1, kernel_abi::Errno> {
     crate::mcore::context::with_interrupts_masked(|| {
-        if !qualified_topology() {
-            return Err(kernel_abi::ENOTSUP);
-        }
         let mut slot = CONTROL_SLOT.lock();
         apply_requested_stop(&mut slot, &STOP_REQUESTED);
         let manager = crate::BPF_MANAGER.get().ok_or(kernel_abi::ENODEV)?.lock();
         manager.query_installation(&slot, id)
+    })
+}
+
+pub(crate) fn query_slot() -> Result<kernel_abi::ManagedSlotV1, kernel_abi::Errno> {
+    crate::mcore::context::with_interrupts_masked(|| {
+        let mut slot = CONTROL_SLOT.lock();
+        apply_requested_stop(&mut slot, &STOP_REQUESTED);
+        let manager = crate::BPF_MANAGER.get().ok_or(kernel_abi::ENODEV)?.lock();
+        Ok(manager.managed_slot_query(&slot))
     })
 }
 
@@ -158,6 +187,7 @@ struct Pending {
     generation: u64,
     candidate: bool,
     cancelled: bool,
+    error: Option<kernel_abi::Errno>,
     handoff: bool,
 }
 
@@ -279,6 +309,17 @@ impl ControlSlot {
         })
     }
 
+    pub(super) fn operation_error(&self, id: u64) -> Option<kernel_abi::Errno> {
+        self.pending
+            .filter(|pending| pending.id == id)
+            .and_then(|pending| pending.error)
+    }
+
+    pub(crate) fn needs_handoff_transport(&self) -> bool {
+        self.pending
+            .is_some_and(|pending| pending.handoff || (!pending.cancelled && self.staged.is_some()))
+    }
+
     pub(super) fn abort_cancelled(&mut self) {
         if self.pending.is_some_and(|pending| pending.cancelled) && self.staged.is_some() {
             self.abort_staged()
@@ -334,6 +375,7 @@ impl ControlSlot {
             generation,
             candidate: previous.is_none(),
             cancelled: false,
+            error: None,
             handoff: false,
         };
         self.pending = Some(pending);
@@ -407,6 +449,7 @@ impl ControlSlot {
             .as_mut()
             .filter(|p| p.id == id)
             .ok_or(BpfError::NotLoaded)?;
+        pending.error.get_or_insert(kernel_abi::ECANCELED);
         pending.cancelled = true;
         Ok(())
     }
@@ -414,8 +457,24 @@ impl ControlSlot {
     pub(crate) fn stop(&mut self) {
         self.inhibited = true;
         if let Some(pending) = &mut self.pending {
+            pending.error.get_or_insert(kernel_abi::ECANCELED);
             pending.cancelled = true;
         }
+    }
+
+    /// Preserve the first operation outcome; stale transport identities still
+    /// stop motion but cannot rewrite another operation's receipt.
+    pub(crate) fn fail_handoff(&mut self, id: u64, error: HandoffError) {
+        use kernel_abi::*;
+        if let Some(pending) = self.pending.as_mut().filter(|pending| pending.id == id) {
+            pending.error.get_or_insert(match error {
+                HandoffError::TimedOut => ETIMEDEOUT,
+                HandoffError::NotEstablished => ENOLINK,
+                HandoffError::Exhausted => EOVERFLOW,
+                _ => EPROTO,
+            });
+        }
+        self.stop();
     }
 
     /// Internal entry into trusted safe mode, after the old invocation returns.
@@ -494,6 +553,11 @@ impl ControlSlot {
         tx: &mut TxState,
         motor_sequence: &mut u8,
     ) -> Result<Option<u64>, HandoffError> {
+        // A cancelled transaction can outlive worker cleanup in the transport
+        // mailbox. Never relabel its failure with a subsequently accepted ID.
+        let failure_id = handoff
+            .operation()
+            .or_else(|| self.pending.map(|pending| pending.id));
         let result = (|| {
             if release.sequence <= self.last_control_release
                 || release.scheduled > release.actual
@@ -541,8 +605,12 @@ impl ControlSlot {
             }
             Ok(None)
         })();
-        if result.is_err() {
-            self.stop();
+        if let Err(error) = result {
+            if let Some(id) = failure_id {
+                self.fail_handoff(id, error);
+            } else {
+                self.stop();
+            }
             handoff.disarm();
             tx.clear_motor();
             tx.cancel_unsent();

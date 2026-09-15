@@ -4,10 +4,11 @@ use core::mem::size_of;
 use kernel_abi::*;
 use zerocopy::{FromBytes, IntoBytes};
 
-use crate::bpf::BpfManager;
+use crate::bpf::preparation::LifecycleTarget;
+use crate::bpf::{installation, BpfManager};
 
 pub(super) fn is_command(cmd: u32) -> bool {
-    (BPF_MANAGED_UPLOAD_BEGIN..=BPF_MANAGED_CANCEL).contains(&cmd)
+    (BPF_MANAGED_UPLOAD_BEGIN..=BPF_MANAGED_INSTALLATION_CANCEL).contains(&cmd)
 }
 
 fn request_size(cmd: u32) -> Result<usize, Errno> {
@@ -18,16 +19,16 @@ fn request_size(cmd: u32) -> Result<usize, Errno> {
             Ok(size_of::<ManagedOperationRequestV1>())
         }
         BPF_MANAGED_OPERATION_QUERY => Ok(size_of::<ManagedOperationV1>()),
+        BPF_MANAGED_ACTIVATE | BPF_MANAGED_ROLLBACK => {
+            Ok(size_of::<ManagedInstallationRequestV1>())
+        }
+        BPF_MANAGED_SLOT_QUERY => Ok(size_of::<ManagedSlotV1>()),
+        BPF_MANAGED_INSTALLATION_CANCEL => Ok(size_of::<ManagedInstallationCancelV1>()),
         _ => Err(ENOTSUP),
     }
 }
 
-fn handle(
-    manager: &mut BpfManager,
-    owner: u64,
-    cmd: u32,
-    bytes: &[u8],
-) -> Result<(usize, Option<ManagedOperationV1>), Errno> {
+fn validate_header(cmd: u32, bytes: &[u8]) -> Result<(), Errno> {
     if bytes.len() != request_size(cmd)? {
         return Err(EINVAL);
     }
@@ -39,6 +40,84 @@ fn handle(
     if size as usize != bytes.len() {
         return Err(EINVAL);
     }
+    Ok(())
+}
+
+/// Decode the exact lifecycle identity before calling a slot-locking wrapper.
+fn lifecycle_request(cmd: u32, bytes: &[u8]) -> Result<(u64, u64, LifecycleTarget), Errno> {
+    validate_header(cmd, bytes)?;
+    match cmd {
+        BPF_MANAGED_ACTIVATE | BPF_MANAGED_ROLLBACK => {
+            let request =
+                ManagedInstallationRequestV1::read_from_bytes(bytes).map_err(|_| EINVAL)?;
+            if request.reserved != 0 {
+                return Err(EINVAL);
+            }
+            let target = if cmd == BPF_MANAGED_ACTIVATE {
+                LifecycleTarget::Candidate(request.artifact_handle)
+            } else {
+                LifecycleTarget::Previous(request.artifact_handle)
+            };
+            Ok((
+                request.expected_last_id,
+                request.expected_generation,
+                target,
+            ))
+        }
+        BPF_MANAGED_INSTALLATION_CANCEL => {
+            let request =
+                ManagedInstallationCancelV1::read_from_bytes(bytes).map_err(|_| EINVAL)?;
+            if request.reserved != 0 || request.id == 0 {
+                return Err(EINVAL);
+            }
+            let target = match request.target_kind {
+                MANAGED_TARGET_CANDIDATE => LifecycleTarget::Candidate(request.artifact_handle),
+                MANAGED_TARGET_PREVIOUS => LifecycleTarget::Previous(request.artifact_handle),
+                _ => return Err(EINVAL),
+            };
+            Ok((request.id, request.expected_generation, target))
+        }
+        _ => Err(ENOTSUP),
+    }
+}
+
+fn operation_query_id(bytes: &[u8]) -> Result<u64, Errno> {
+    validate_header(BPF_MANAGED_OPERATION_QUERY, bytes)?;
+    let request = ManagedOperationV1::read_from_bytes(bytes).map_err(|_| EINVAL)?;
+    let expected = ManagedOperationV1 {
+        version: MANAGED_ADMIN_VERSION,
+        size: size_of::<ManagedOperationV1>() as u32,
+        id: request.id,
+        ..Default::default()
+    };
+    if request != expected {
+        return Err(EINVAL);
+    }
+    Ok(request.id)
+}
+
+fn validate_slot_query(bytes: &[u8]) -> Result<(), Errno> {
+    validate_header(BPF_MANAGED_SLOT_QUERY, bytes)?;
+    let request = ManagedSlotV1::read_from_bytes(bytes).map_err(|_| EINVAL)?;
+    if request
+        != (ManagedSlotV1 {
+            version: MANAGED_ADMIN_VERSION,
+            size: size_of::<ManagedSlotV1>() as u32,
+            ..Default::default()
+        })
+    {
+        return Err(EINVAL);
+    }
+    Ok(())
+}
+
+fn handle(
+    manager: &mut BpfManager,
+    owner: u64,
+    cmd: u32,
+    bytes: &[u8],
+) -> Result<(usize, Option<ManagedOperationV1>), Errno> {
+    validate_header(cmd, bytes)?;
     let value = match cmd {
         BPF_MANAGED_UPLOAD_BEGIN => {
             let request = ManagedUploadBeginV1::read_from_bytes(bytes).map_err(|_| EINVAL)?;
@@ -72,17 +151,10 @@ fn handle(
             }
         }
         BPF_MANAGED_OPERATION_QUERY => {
-            let request = ManagedOperationV1::read_from_bytes(bytes).map_err(|_| EINVAL)?;
-            let expected = ManagedOperationV1 {
-                version,
-                size,
-                id: request.id,
-                ..Default::default()
-            };
-            if request != expected {
-                return Err(EINVAL);
-            }
-            return Ok((0, Some(manager.managed_operation_query(request.id)?)));
+            return Ok((
+                0,
+                Some(manager.managed_operation_query(operation_query_id(bytes)?)?),
+            ));
         }
         _ => return Err(ENOTSUP),
     };
@@ -99,9 +171,36 @@ pub(super) fn dispatch(owner: u64, cmd: u32, ptr: usize, size: usize) -> isize {
         }
         let mut bytes = [0u8; size_of::<ManagedUploadChunkV1>()];
         super::validation::copy_from_userspace_into(ptr, &mut bytes[..size])?;
+        let bytes = &bytes[..size];
+        // These wrappers take slot then manager, with IRQs masked. Never enter
+        // them from the manager-only upload critical section below.
+        match cmd {
+            BPF_MANAGED_ACTIVATE | BPF_MANAGED_ROLLBACK => {
+                let (last_id, generation, target) = lifecycle_request(cmd, bytes)?;
+                return installation::request_installation(last_id, generation, target)
+                    .map(|id| id as usize);
+            }
+            BPF_MANAGED_INSTALLATION_CANCEL => {
+                let (id, generation, target) = lifecycle_request(cmd, bytes)?;
+                installation::cancel_installation(id, generation, target)?;
+                return Ok(0);
+            }
+            BPF_MANAGED_SLOT_QUERY => {
+                validate_slot_query(bytes)?;
+                let reply = installation::query_slot()?;
+                super::validation::copy_to_userspace_bounded(ptr, reply.as_bytes())?;
+                return Ok(0);
+            }
+            BPF_MANAGED_OPERATION_QUERY => {
+                let reply = installation::query_installation(operation_query_id(bytes)?)?;
+                super::validation::copy_to_userspace_bounded(ptr, reply.as_bytes())?;
+                return Ok(0);
+            }
+            _ => {}
+        }
         let (value, reply) = {
             let manager = crate::BPF_MANAGER.get().ok_or(ENODEV)?;
-            handle(&mut manager.lock(), owner, cmd, &bytes[..size])?
+            handle(&mut manager.lock(), owner, cmd, bytes)?
         };
         // Wake after releasing the producer's condition lock. A finalize with
         // a lost reply remains committed and discoverable by its original ID.
@@ -122,6 +221,154 @@ pub(super) fn dispatch(owner: u64, cmd: u32, ptr: usize, size: usize) -> isize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lifecycle_layouts_validate_before_resolving_exact_targets() {
+        let install = ManagedInstallationRequestV1 {
+            version: MANAGED_ADMIN_VERSION,
+            size: size_of::<ManagedInstallationRequestV1>() as u32,
+            expected_last_id: 1 << 40,
+            expected_generation: 1 << 41,
+            artifact_handle: 0,
+            reserved: 0,
+        };
+        let mut cancel = ManagedInstallationCancelV1 {
+            version: MANAGED_ADMIN_VERSION,
+            size: size_of::<ManagedInstallationCancelV1>() as u32,
+            id: 1 << 40,
+            expected_generation: 1 << 41,
+            artifact_handle: 0,
+            target_kind: MANAGED_TARGET_CANDIDATE,
+            reserved: 0,
+        };
+        for (cmd, bytes, reserved, target) in [
+            (
+                BPF_MANAGED_ACTIVATE,
+                install.as_bytes(),
+                28,
+                LifecycleTarget::Candidate(0),
+            ),
+            (
+                BPF_MANAGED_ROLLBACK,
+                install.as_bytes(),
+                28,
+                LifecycleTarget::Previous(0),
+            ),
+            (
+                BPF_MANAGED_INSTALLATION_CANCEL,
+                cancel.as_bytes(),
+                32,
+                LifecycleTarget::Candidate(0),
+            ),
+        ] {
+            assert_eq!(
+                lifecycle_request(cmd, bytes),
+                Ok((1 << 40, 1 << 41, target))
+            );
+            assert!(request_size(cmd).unwrap() <= size_of::<ManagedUploadChunkV1>());
+            for len in 0..bytes.len() {
+                assert_eq!(lifecycle_request(cmd, &bytes[..len]), Err(EINVAL));
+            }
+            let mut invalid = bytes.to_vec();
+            invalid.push(0);
+            assert_eq!(lifecycle_request(cmd, &invalid), Err(EINVAL));
+            invalid = bytes.to_vec();
+            invalid[..4].copy_from_slice(&(MANAGED_ADMIN_VERSION + 1).to_ne_bytes());
+            assert_eq!(lifecycle_request(cmd, &invalid), Err(ENOTSUP));
+            invalid = bytes.to_vec();
+            invalid[4..8].copy_from_slice(&0u32.to_ne_bytes());
+            assert_eq!(lifecycle_request(cmd, &invalid), Err(EINVAL));
+            for byte in reserved..bytes.len() {
+                invalid = bytes.to_vec();
+                invalid[byte] = 1;
+                assert_eq!(lifecycle_request(cmd, &invalid), Err(EINVAL));
+            }
+        }
+        cancel.target_kind = MANAGED_TARGET_PREVIOUS;
+        assert_eq!(
+            lifecycle_request(BPF_MANAGED_INSTALLATION_CANCEL, cancel.as_bytes()),
+            Ok((1 << 40, 1 << 41, LifecycleTarget::Previous(0)))
+        );
+        for kind in [0, MANAGED_TARGET_PREVIOUS + 1, u32::MAX] {
+            cancel.target_kind = kind;
+            assert_eq!(
+                lifecycle_request(BPF_MANAGED_INSTALLATION_CANCEL, cancel.as_bytes()),
+                Err(EINVAL)
+            );
+        }
+        cancel.target_kind = MANAGED_TARGET_CANDIDATE;
+        cancel.id = 0;
+        assert_eq!(
+            lifecycle_request(BPF_MANAGED_INSTALLATION_CANCEL, cancel.as_bytes()),
+            Err(EINVAL)
+        );
+        assert_eq!(request_size(BPF_MANAGED_CANCEL), Ok(24));
+        assert_eq!(request_size(BPF_MANAGED_INSTALLATION_CANCEL), Ok(40));
+        // A lifecycle cancellation cannot be smuggled into the old upload shape.
+        assert_eq!(
+            validate_header(BPF_MANAGED_CANCEL, cancel.as_bytes()),
+            Err(EINVAL)
+        );
+    }
+
+    #[test]
+    fn query_inputs_reject_every_nonzero_output_byte() {
+        let slot = ManagedSlotV1 {
+            version: MANAGED_ADMIN_VERSION,
+            size: size_of::<ManagedSlotV1>() as u32,
+            ..Default::default()
+        };
+        assert_eq!(validate_slot_query(slot.as_bytes()), Ok(()));
+        for byte in 8..size_of::<ManagedSlotV1>() {
+            let mut invalid = slot.as_bytes().to_vec();
+            invalid[byte] = 1;
+            assert_eq!(validate_slot_query(&invalid), Err(EINVAL));
+        }
+        for len in 0..size_of::<ManagedSlotV1>() {
+            assert_eq!(validate_slot_query(&slot.as_bytes()[..len]), Err(EINVAL));
+        }
+        let mut invalid_slot = slot;
+        invalid_slot.version += 1;
+        assert_eq!(validate_slot_query(invalid_slot.as_bytes()), Err(ENOTSUP));
+        invalid_slot = slot;
+        invalid_slot.size -= 1;
+        assert_eq!(validate_slot_query(invalid_slot.as_bytes()), Err(EINVAL));
+        let mut oversized = slot.as_bytes().to_vec();
+        oversized.push(0);
+        assert_eq!(validate_slot_query(&oversized), Err(EINVAL));
+
+        let mut operation = ManagedOperationV1 {
+            version: MANAGED_ADMIN_VERSION,
+            size: size_of::<ManagedOperationV1>() as u32,
+            ..Default::default()
+        };
+        assert_eq!(operation_query_id(operation.as_bytes()), Ok(0));
+        operation.id = 1 << 40;
+        assert_eq!(operation_query_id(operation.as_bytes()), Ok(1 << 40));
+        for byte in 16..size_of::<ManagedOperationV1>() {
+            let mut invalid = operation.as_bytes().to_vec();
+            invalid[byte] = 1;
+            assert_eq!(operation_query_id(&invalid), Err(EINVAL));
+        }
+    }
+
+    #[test]
+    fn lifecycle_commands_reject_wrong_syscall_size_before_user_copy() {
+        for cmd in BPF_MANAGED_ACTIVATE..=BPF_MANAGED_INSTALLATION_CANCEL {
+            assert!(is_command(cmd));
+            for size in [0, request_size(cmd).unwrap() - 1, usize::MAX] {
+                let error = if cfg!(feature = "managed-runtime") {
+                    EINVAL
+                } else {
+                    ENOTSUP
+                };
+                assert_eq!(dispatch(7, cmd, usize::MAX, size), -isize::from(error));
+            }
+        }
+        assert!(!is_command(BPF_MANAGED_UPLOAD_BEGIN - 1));
+        assert!(!is_command(BPF_MANAGED_INSTALLATION_CANCEL + 1));
+    }
+
     #[test]
     fn managed_abi_validates_its_own_shape_before_mutation() {
         let mut manager = BpfManager::new();

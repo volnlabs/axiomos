@@ -16,6 +16,15 @@ use super::{managed_allocation as charge, BpfManager};
 
 const WORKSPACE_BYTES: usize = 512 * 1024;
 
+fn retain_identity(operation: &mut ManagedOperationV1, identity: ArtifactIdentity) {
+    operation.behavior_id = identity.behavior_id;
+    operation.revision = identity.revision;
+    operation.bundle_digest = *identity.bundle_digest.as_bytes();
+    operation.payload_digest = *identity.payload_digest.as_bytes();
+    operation.signer_fingerprint = *identity.signer_fingerprint.as_bytes();
+    operation.signer_public_key = identity.signer_public_key;
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Idle,
@@ -383,6 +392,10 @@ impl BpfManager {
             LifecycleTarget::Candidate(_) => None,
             LifecycleTarget::Previous(handle) => Some(handle),
         };
+        let identity = self
+            .managed_artifact(target.handle())
+            .map_err(resource_error)?
+            .identity();
         let preparation = slot
             .begin(self, expected_generation, previous)
             .map_err(resource_error)?;
@@ -400,6 +413,7 @@ impl BpfManager {
             artifact_handle: target.handle(),
             ..Default::default()
         };
+        retain_identity(&mut state.active, identity);
         state.last_id = id;
         state.owner = 0;
         state.cancelled = false;
@@ -431,11 +445,52 @@ impl BpfManager {
             {
                 operation.phase = phase;
                 if phase == MANAGED_OPERATION_CLEANUP {
-                    operation.error = i32::from(ECANCELED) as u32;
+                    operation.error = i32::from(
+                        slot.operation_error(lifecycle.instance_id)
+                            .unwrap_or(ECANCELED),
+                    ) as u32;
                 }
             }
         }
         Ok(operation)
+    }
+
+    pub(crate) fn managed_slot_query(&self, slot: &ControlSlot) -> ManagedSlotV1 {
+        let snapshot = slot.snapshot();
+        let lifecycle = self.preparation.lifecycle;
+        let mut flags = 0;
+        for (present, flag) in [
+            (snapshot.active.is_some(), MANAGED_SLOT_HAS_ACTIVE),
+            (snapshot.previous.is_some(), MANAGED_SLOT_HAS_PREVIOUS),
+            (
+                self.preparation.candidate.is_some(),
+                MANAGED_SLOT_HAS_CANDIDATE,
+            ),
+            (lifecycle.is_some(), MANAGED_SLOT_HAS_PENDING),
+            (snapshot.inhibited, MANAGED_SLOT_INHIBITED),
+            (snapshot.retiring, MANAGED_SLOT_RETIRING),
+        ] {
+            if present {
+                flags |= flag;
+            }
+        }
+        ManagedSlotV1 {
+            version: MANAGED_ADMIN_VERSION,
+            size: core::mem::size_of::<ManagedSlotV1>() as u32,
+            last_id: self.preparation.last_id,
+            generation: snapshot.generation,
+            pending_id: lifecycle.map_or(0, |_| self.preparation.active.id),
+            active_charge_ns_per_s: snapshot.active_charge_ns_per_s.unwrap_or(0),
+            active_artifact: snapshot.active.unwrap_or(0),
+            previous_artifact: snapshot.previous.unwrap_or(0),
+            candidate_artifact: self.preparation.candidate.unwrap_or(0),
+            flags,
+            pending_target_kind: lifecycle.map_or(0, |operation| match operation.target {
+                LifecycleTarget::Candidate(_) => MANAGED_TARGET_CANDIDATE,
+                LifecycleTarget::Previous(_) => MANAGED_TARGET_PREVIOUS,
+            }),
+            reserved: 0,
+        }
     }
 
     pub(crate) fn cancel_installation(
@@ -459,9 +514,12 @@ impl BpfManager {
             return Ok(());
         }
         slot.cancel(lifecycle.instance_id).map_err(resource_error)?;
-        self.preparation.cancelled = true;
+        let error = slot
+            .operation_error(lifecycle.instance_id)
+            .unwrap_or(ECANCELED);
+        self.preparation.cancelled = error == ECANCELED;
         self.preparation.active.phase = MANAGED_OPERATION_CLEANUP;
-        self.preparation.active.error = i32::from(ECANCELED) as u32;
+        self.preparation.active.error = i32::from(error) as u32;
         Ok(())
     }
 
@@ -551,12 +609,7 @@ impl BpfManager {
         state.phase = Phase::Finishing;
         state.active.workspace_peak = work.peak as u64;
         if let Some(identity) = work.identity {
-            state.active.behavior_id = identity.behavior_id;
-            state.active.revision = identity.revision;
-            state.active.bundle_digest = *identity.bundle_digest.as_bytes();
-            state.active.payload_digest = *identity.payload_digest.as_bytes();
-            state.active.signer_fingerprint = *identity.signer_fingerprint.as_bytes();
-            state.active.signer_public_key = identity.signer_public_key;
+            retain_identity(&mut state.active, identity);
         }
         match result {
             Ok(handle) => {
@@ -616,16 +669,20 @@ impl WorkerState {
         }
         if let Some(lifecycle) = manager.preparation.lifecycle {
             if slot.operation_phase(lifecycle.instance_id) == Some(MANAGED_OPERATION_CLEANUP) {
-                manager.preparation.cancelled = true;
+                let error = slot
+                    .operation_error(lifecycle.instance_id)
+                    .unwrap_or(ECANCELED);
+                manager.preparation.cancelled = error == ECANCELED;
                 manager.preparation.active.phase = MANAGED_OPERATION_CLEANUP;
-                manager.preparation.active.error = i32::from(ECANCELED) as u32;
+                manager.preparation.active.error = i32::from(error) as u32;
             }
         }
         if let Some(preparation) = manager.preparation.installation.take() {
-            if !manager.preparation.cancelled {
+            let abandon = slot.operation_error(preparation.instance_id()).is_some();
+            if !abandon {
                 manager.preparation.active.phase = MANAGED_OPERATION_PREPARING;
             }
-            return WorkerAction::Install(preparation, manager.preparation.cancelled);
+            return WorkerAction::Install(preparation, abandon);
         }
         if manager.preparation.lifecycle.is_some() {
             slot.abort_cancelled();
@@ -700,10 +757,11 @@ impl WorkerState {
                 with_interrupts_masked(|| {
                     let mut slot = slot.lock();
                     let mut manager = manager.lock();
-                    if slot.operation_phase(manager.preparation.lifecycle.unwrap().instance_id)
-                        == Some(MANAGED_OPERATION_CLEANUP)
+                    if let Some(error) =
+                        slot.operation_error(manager.preparation.lifecycle.unwrap().instance_id)
                     {
-                        manager.preparation.cancelled = true;
+                        manager.preparation.cancelled = error == ECANCELED;
+                        manager.preparation.active.error = i32::from(error) as u32;
                     }
                     let result = slot.finish_build(&mut manager, built);
                     manager.preparation.active.phase = if result.is_ok() {
@@ -712,12 +770,14 @@ impl WorkerState {
                         MANAGED_OPERATION_CLEANUP
                     };
                     if let Err(error) = result {
-                        manager.preparation.active.error =
-                            i32::from(if manager.preparation.cancelled {
-                                ECANCELED
-                            } else {
-                                resource_error(error)
-                            }) as u32;
+                        if manager.preparation.active.error == 0 {
+                            manager.preparation.active.error =
+                                i32::from(if manager.preparation.cancelled {
+                                    ECANCELED
+                                } else {
+                                    resource_error(error)
+                                }) as u32;
+                        }
                     }
                 });
             }

@@ -992,7 +992,9 @@ mod tests {
 
     #[test]
     fn managed_commands_require_behavior_admin_independently() {
-        for cmd in kernel_abi::BPF_MANAGED_UPLOAD_BEGIN..=kernel_abi::BPF_MANAGED_CANCEL {
+        for cmd in
+            kernel_abi::BPF_MANAGED_UPLOAD_BEGIN..=kernel_abi::BPF_MANAGED_INSTALLATION_CANCEL
+        {
             assert!(has_bpf_command_capability(
                 cmd,
                 BpfCapabilities::BEHAVIOR_ADMIN

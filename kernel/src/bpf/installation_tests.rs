@@ -233,14 +233,14 @@ fn stop_cancel_timeout_and_reset_cannot_publish_even_with_matching_ack() {
 fn trusted_stop_notification_cancels_prepublication_and_inhibits_committed_code() {
     let mut manager = BpfManager::new();
     let mut slot = ControlSlot::new();
-    let requested = AtomicBool::new(false);
+    let requested = spin::Mutex::new(None);
     candidate(&mut manager, 1);
     let id = stage(&mut slot, &mut manager, None);
     commit(&mut slot, id);
     drain(&mut slot, &mut manager);
     let active = slot.snapshot().active;
     let generation = slot.snapshot().generation;
-    requested.store(true, Ordering::Release);
+    latch_stop(&requested, StopNotice::Stop);
     apply_requested_stop(&mut slot, &requested);
     assert!(slot.snapshot().inhibited);
     assert_eq!(slot.snapshot().active, active);
@@ -254,11 +254,82 @@ fn trusted_stop_notification_cancels_prepublication_and_inhibits_committed_code(
     candidate(&mut manager, 2);
     let id = stage(&mut slot, &mut manager, None);
     slot.enter_handoff(id).unwrap();
-    requested.store(true, Ordering::Release);
+    latch_stop(&requested, StopNotice::Stop);
     apply_requested_stop(&mut slot, &requested);
     assert_eq!(slot.commit_test_handoff(id), Err(BpfError::ObjectBusy));
     assert_eq!(slot.snapshot().active, active);
     assert_eq!(slot.snapshot().generation, generation);
+}
+
+#[test]
+fn stop_mailbox_preserves_order_and_cannot_attach_a_failure_to_another_operation() {
+    for first_stop in [false, true] {
+        let mut manager = BpfManager::new();
+        let mut slot = ControlSlot::new();
+        candidate(&mut manager, 1);
+        let instance = stage(&mut slot, &mut manager, None);
+        slot.enter_handoff(instance).unwrap();
+        let notice = spin::Mutex::new(None);
+        let failed = StopNotice::Handoff {
+            instance_id: instance,
+            error: HandoffError::TimedOut,
+        };
+        latch_stop(&notice, if first_stop { StopNotice::Stop } else { failed });
+        latch_stop(&notice, if first_stop { failed } else { StopNotice::Stop });
+        apply_requested_stop(&mut slot, &notice);
+        assert_eq!(
+            slot.operation_error(instance),
+            Some(if first_stop {
+                kernel_abi::ECANCELED
+            } else {
+                kernel_abi::ETIMEDEOUT
+            })
+        );
+        assert!(notice.lock().is_none());
+        apply_requested_stop(&mut slot, &notice);
+        assert_eq!(slot.snapshot().generation, 0);
+        assert!(slot.snapshot().inhibited);
+    }
+    let mut manager = BpfManager::new();
+    let mut slot = ControlSlot::new();
+    candidate(&mut manager, 1);
+    let instance = stage(&mut slot, &mut manager, None);
+    let notice = spin::Mutex::new(None);
+    latch_stop(
+        &notice,
+        StopNotice::Handoff {
+            instance_id: instance + 1,
+            error: HandoffError::TimedOut,
+        },
+    );
+    apply_requested_stop(&mut slot, &notice);
+    assert_eq!(slot.operation_error(instance), Some(kernel_abi::ECANCELED));
+}
+
+#[test]
+fn cancelled_transport_cannot_assign_its_failure_to_a_new_preparation() {
+    let mut manager = BpfManager::new();
+    let mut slot = ControlSlot::new();
+    candidate(&mut manager, 1);
+    let old = stage(&mut slot, &mut manager, None);
+    let mut handoff = peer_ready();
+    let mut tx = TxState::new();
+    let mut seq = 0;
+    slot.handoff_boundary(release(1, 100, 100), 1000, &mut handoff, &mut tx, &mut seq)
+        .unwrap();
+    assert_eq!(handoff.operation(), Some(old));
+    slot.cancel(old).unwrap();
+    slot.abort_cancelled();
+    drain(&mut slot, &mut manager);
+    let new = stage(&mut slot, &mut manager, None);
+    assert_ne!(new, old);
+    assert_eq!(
+        slot.handoff_boundary(release(2, 110, 110), 1000, &mut handoff, &mut tx, &mut seq),
+        Err(HandoffError::Stale)
+    );
+    assert_eq!(slot.operation_error(new), Some(kernel_abi::ECANCELED));
+    assert!(slot.snapshot().inhibited);
+    assert_eq!(slot.snapshot().generation, 0);
 }
 
 fn costlier_artifact(revision: u64) -> BehaviorArtifact {
@@ -922,7 +993,7 @@ fn installation_global_entries_reject_unqualified_host_without_cpu_mmio() {
         request_installation(0, 0, LifecycleTarget::Candidate(1)),
         Err(kernel_abi::ENOTSUP)
     );
-    assert_eq!(query_installation(0), Err(kernel_abi::ENOTSUP));
+    assert_eq!(query_installation(0), Err(kernel_abi::ENODEV));
     assert_eq!(
         cancel_installation(1, 0, LifecycleTarget::Candidate(1)),
         Err(kernel_abi::ENOTSUP)

@@ -172,10 +172,11 @@ discards captured requests on invocation or pre-enqueue deadline failure and
 inhibits control on policy/queue failure. A later failure preserves any actual
 queue outcome and invokes trusted stop. The internal installation
 boundary tests cover fresh generations, ownership moves, cancellation, stop and
-100,000 transitions with bounded retained resources. No production caller can
-activate this slot yet; authority checks, physical eligibility and UART handoff
-remain unresolved. Absolute timer scheduling is connected. Helper costs remain uncalibrated
-model values.
+100,000 transitions with bounded retained resources. Public activation/rollback
+now require BEHAVIOR_ADMIN and use this same worker and the correlated UART
+handoff boundary. Physical session drain/rearm remains closed pending adapter
+integration; live hardware activation is not qualified. Absolute timer scheduling
+is connected. Helper costs remain uncalibrated model values.
 
 See [managed verification](../../kernel/crates/kernel_bpf/src/verifier/managed.rs)
 and [managed execution](../../kernel/crates/kernel_bpf/src/execution/interpreter.rs),
@@ -207,7 +208,7 @@ zeroing/copying and verifier work are outside that scope. This does not establis
 a timing bound for the linked-list allocator's fragmentation-dependent traversal;
 the qualified workload still needs IRQ-off and deadline measurements.
 
-Five commands use independently versioned, padding-free native ABI structures
+Nine commands use independently versioned, padding-free native ABI structures
 through `SYS_BPF`, dispatched before the legacy `BpfAttr` size check. All require
 `BEHAVIOR_ADMIN`, exact version 1 and structure length, and zero reserved fields.
 Ordinary init children have no administration capability. Dedicated installer
@@ -219,7 +220,37 @@ provisioning and debug-UART transport remain integration work.
 | Upload chunk | 257 | `ManagedUploadChunkV1` / 288 | Total bytes received |
 | Upload finalize | 258 | `ManagedOperationRequestV1` / 24 | Accepted operation ID |
 | Operation query | 259 | `ManagedOperationV1` / 200 | Fixed status written to the same address |
-| Cancel | 260 | `ManagedOperationRequestV1` / 24 | Cancellation requested |
+| Cancel upload | 260 | `ManagedOperationRequestV1` / 24 | Upload cancellation requested |
+| Activate | 261 | `ManagedInstallationRequestV1` / 32 | Accepted operation ID |
+| Rollback | 262 | `ManagedInstallationRequestV1` / 32 | Accepted operation ID |
+| Slot query | 263 | `ManagedSlotV1` / 64 | Consistent slot/candidate/operation status |
+| Cancel installation | 264 | `ManagedInstallationCancelV1` / 40 | Lifecycle cancellation requested |
+
+Activate and rollback compare both the last issued operation ID and current
+installation generation. Their artifact handle must exactly identify the resident
+candidate or retained previous artifact, respectively. Both prepare fresh private
+state through the existing worker; neither grants physical rearm or bypasses
+SafeAck. Query the original/latest operation after a lost response; repeating
+an accepted activation with its old expected ID returns `ESTALE`.
+
+Lifecycle cancellation specifies the operation ID, expected current generation,
+artifact handle and target kind (1 candidate, 2 previous). It cannot undo a
+committed installation. The original 24-byte upload cancellation remains unchanged.
+Slot queries return the latest public operation ID, generation, active charge,
+artifact handles and presence/inhibited/retiring flags. A present artifact may
+have handle zero; use the presence flags. The pending ID is the public lifecycle
+operation ID, never the private instance cleanup ID, and remains present through
+worker retirement. Output fields and reserved fields must be zero on query input.
+
+Operation queries immediately reflect handoff and cleanup status under the same
+slot-before-manager lock order. Activation/rollback receipts retain the selected
+artifact's complete signed identity. Failed handoff preserves its first positive
+errno through cleanup into a `FAILED` receipt; generic stop or a later cancel
+cannot replace it with `ECANCELED`. Timeout uses the existing kernel errno number
+74 (`ETIMEDEOUT`); missing link uses `ENOLINK`, protocol/clock failures `EPROTO`,
+and exhausted counters `EOVERFLOW`. An earlier explicit stop/cancel remains a
+cancellation. Stale transport operation IDs cannot assign errors to a newer
+operation. Deactivation/retirement administration remains integration work.
 
 Begin compares `expected_last_id` with the latest issued ID. IDs increase without
 wrapping or entering the syscall error range. Query ID 0 returns the latest ID;

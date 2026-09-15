@@ -181,13 +181,15 @@ impl ControlLink {
             }
             if let Some(Ok(msg)) = decoded {
                 #[cfg(feature = "managed-runtime")]
-                if self
-                    .handoff
-                    .on_reply(msg, crate::arch::aarch64::interrupts::physical_counter())
-                    .is_err()
                 {
-                    self.queue_estop(true);
-                    out.estop = true;
+                    let operation = self.handoff.operation();
+                    if let Err(error) = self
+                        .handoff
+                        .on_reply(msg, crate::arch::aarch64::interrupts::physical_counter())
+                    {
+                        self.handoff_failed(operation, error);
+                        out.estop = true;
+                    }
                 }
                 self.session.on_inbound(now);
                 self.link_loss_reported = false;
@@ -239,18 +241,28 @@ impl ControlLink {
                     out.link_loss = true;
                     self.link_loss_reported = true;
                 }
+                #[cfg(feature = "managed-runtime")]
+                if let Some(operation) = self.handoff.operation() {
+                    crate::bpf::installation::request_handoff_failure(
+                        operation,
+                        HandoffError::NotEstablished,
+                    );
+                }
                 self.queue_estop(true);
                 None
             }
             LinkAction::Idle => None,
         };
         #[cfg(feature = "managed-runtime")]
-        if self
-            .handoff
-            .check(crate::arch::aarch64::interrupts::physical_counter())
-            .is_err()
         {
-            out.estop = true;
+            let operation = self.handoff.operation();
+            if let Err(error) = self
+                .handoff
+                .check(crate::arch::aarch64::interrupts::physical_counter())
+            {
+                self.handoff_failed(operation, error);
+                out.estop = true;
+            }
         }
         #[cfg(feature = "managed-runtime")]
         if out.estop || out.link_loss || out.overflow_count != 0 {
@@ -268,9 +280,11 @@ impl ControlLink {
             self.session.estop_sent();
         }
         #[cfg(feature = "managed-runtime")]
-        if estop_queue_empty && self.handoff.enqueue(&mut self.tx, now).is_err() {
-            self.queue_estop(true);
-            out.estop = true;
+        if estop_queue_empty {
+            if let Err(error) = self.handoff.enqueue(&mut self.tx, now) {
+                self.handoff_failed(self.handoff.operation(), error);
+                out.estop = true;
+            }
         }
         if estop_queue_empty && self.tx.is_idle() {
             self.flush_pending_motor(now);
@@ -291,15 +305,15 @@ impl ControlLink {
             sent += 1;
         }
         #[cfg(feature = "managed-runtime")]
-        if self.tx.is_idle()
-            && self.handoff.has_started_frame()
-            && self
+        if self.tx.is_idle() && self.handoff.has_started_frame() {
+            let operation = self.handoff.operation();
+            if let Err(error) = self
                 .handoff
                 .sent(crate::arch::aarch64::interrupts::physical_counter())
-                .is_err()
-        {
-            self.queue_estop(true);
-            out.estop = true;
+            {
+                self.handoff_failed(operation, error);
+                out.estop = true;
+            }
         }
         out
     }
@@ -308,6 +322,16 @@ impl ControlLink {
     /// false if it doesn't fit.
     fn enqueue(&mut self, msg: &Msg, now: u64) -> bool {
         self.tx.start(msg, now)
+    }
+
+    #[cfg(feature = "managed-runtime")]
+    fn handoff_failed(&mut self, operation: Option<u64>, error: HandoffError) {
+        if let Some(id) = operation {
+            crate::bpf::installation::request_handoff_failure(id, error);
+        } else {
+            crate::bpf::installation::request_stop();
+        }
+        self.queue_estop(true);
     }
 
     fn request_estop(&mut self, assert: bool, now: u64) -> bool {
@@ -665,7 +689,10 @@ pub(crate) fn handoff_boundary(
         )
     });
     result.unwrap_or_else(|| {
-        if slot.snapshot().pending.is_some() {
+        if slot.needs_handoff_transport() {
+            if let Some(id) = slot.snapshot().pending {
+                slot.fail_handoff(id, HandoffError::NotEstablished);
+            }
             Err(HandoffError::NotEstablished)
         } else {
             Ok(None)

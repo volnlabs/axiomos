@@ -603,6 +603,124 @@ fn host_commit(slot: &spin::Mutex<ControlSlot>) {
 }
 
 #[test]
+fn handoff_failure_retains_its_errno_through_query_worker_cleanup_and_receipt() {
+    use shrike_link::handoff::HandoffError;
+    for (fault, expected) in [
+        (HandoffError::TimedOut, ETIMEDEOUT),
+        (HandoffError::NotEstablished, ENOLINK),
+        (HandoffError::ClockReversed, EPROTO),
+    ] {
+        for phase in 0..3 {
+            let (mut worker, slot, manager) = fixture_worker();
+            let (uploaded, target) = resident_via_worker(&mut worker, &slot, &manager, 0, 1);
+            let operation = manager
+                .lock()
+                .request_installation(&mut slot.lock(), uploaded, 0, target)
+                .unwrap();
+            let held = if phase == 1 {
+                Some(worker.take(&mut slot.lock(), &mut manager.lock()))
+            } else {
+                None
+            };
+            if phase == 2 {
+                assert!(service_worker(&mut worker, &slot, &manager));
+            }
+            let instance = slot.lock().snapshot().pending.unwrap();
+            if phase == 2 {
+                slot.lock().enter_handoff(instance).unwrap();
+            }
+            slot.lock().fail_handoff(instance, fault);
+            // Generic stop consequences and later cancellation cannot rewrite the
+            // first cause after this operation has already failed.
+            slot.lock().stop();
+            manager
+                .lock()
+                .cancel_installation(&mut slot.lock(), operation, 0, target)
+                .unwrap();
+            let query = manager
+                .lock()
+                .query_installation(&slot.lock(), operation)
+                .unwrap();
+            assert_eq!(query.phase, MANAGED_OPERATION_CLEANUP);
+            assert_eq!(query.error, i32::from(expected) as u32);
+            if let Some(action) = held {
+                worker.perform(action, &slot, &manager);
+            }
+            assert!(service_worker(&mut worker, &slot, &manager));
+            let receipt = manager.lock().managed_operation_query(operation).unwrap();
+            assert_eq!(receipt.phase, MANAGED_OPERATION_FAILED);
+            assert_eq!(receipt.error, i32::from(expected) as u32);
+            assert!(!manager.lock().managed_slot_busy);
+            assert_eq!(slot.lock().snapshot().generation, 0);
+            assert!(slot.lock().snapshot().inhibited);
+        }
+    }
+}
+
+#[test]
+fn slot_query_exposes_public_operation_identity_and_presence_through_retirement() {
+    let (mut worker, slot, manager) = fixture_worker();
+    let empty = manager.lock().managed_slot_query(&slot.lock());
+    assert_eq!(empty.flags, MANAGED_SLOT_INHIBITED);
+    assert_eq!(
+        (empty.last_id, empty.generation, empty.pending_id),
+        (0, 0, 0)
+    );
+    let (uploaded, target) = resident_via_worker(&mut worker, &slot, &manager, 0, 1);
+    let resident = manager.lock().managed_slot_query(&slot.lock());
+    assert_eq!(resident.last_id, uploaded);
+    assert_eq!(
+        resident.flags,
+        MANAGED_SLOT_INHIBITED | MANAGED_SLOT_HAS_CANDIDATE
+    );
+    assert_eq!(resident.candidate_artifact, target.handle());
+    let identity = manager.lock().managed_operation_query(uploaded).unwrap();
+    let operation = manager
+        .lock()
+        .request_installation(&mut slot.lock(), uploaded, 0, target)
+        .unwrap();
+    let preparing = manager.lock().managed_slot_query(&slot.lock());
+    let activation = manager
+        .lock()
+        .query_installation(&slot.lock(), operation)
+        .unwrap();
+    assert_eq!(activation.behavior_id, identity.behavior_id);
+    assert_eq!(activation.revision, identity.revision);
+    assert_eq!(activation.bundle_digest, identity.bundle_digest);
+    assert_eq!(activation.payload_digest, identity.payload_digest);
+    assert_eq!(activation.signer_fingerprint, identity.signer_fingerprint);
+    assert_eq!(activation.signer_public_key, identity.signer_public_key);
+    assert_eq!(preparing.pending_id, operation);
+    assert_ne!(
+        preparing.pending_id,
+        slot.lock().snapshot().pending.unwrap()
+    );
+    assert_eq!(preparing.pending_target_kind, MANAGED_TARGET_CANDIDATE);
+    assert_ne!(preparing.flags & MANAGED_SLOT_HAS_PENDING, 0);
+    assert!(service_worker(&mut worker, &slot, &manager));
+    host_commit(&slot);
+    let committed = manager.lock().managed_slot_query(&slot.lock());
+    assert_eq!(committed.generation, 1);
+    assert_eq!(committed.active_artifact, target.handle());
+    assert_ne!(committed.flags & MANAGED_SLOT_HAS_ACTIVE, 0);
+    assert_eq!(committed.flags & MANAGED_SLOT_INHIBITED, 0);
+    assert_ne!(committed.flags & MANAGED_SLOT_RETIRING, 0);
+    assert_eq!(
+        committed.pending_id, operation,
+        "accepted cleanup still owns this public operation"
+    );
+    assert!(service_worker(&mut worker, &slot, &manager));
+    let retired = manager.lock().managed_slot_query(&slot.lock());
+    assert_eq!(retired.flags, MANAGED_SLOT_HAS_ACTIVE);
+    assert_eq!((retired.pending_id, retired.pending_target_kind), (0, 0));
+    assert_eq!(retired.last_id, operation);
+    assert_eq!(
+        retired.active_charge_ns_per_s,
+        slot.lock().snapshot().active_charge_ns_per_s.unwrap()
+    );
+}
+
+#[test]
 fn worker_signed_upload_install_commit_cleanup_and_next_operation_share_ids_and_custody() {
     let (mut worker, slot, manager) = fixture_worker();
     let (upload_id, target) = resident_via_worker(&mut worker, &slot, &manager, 0, 1);
