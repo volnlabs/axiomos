@@ -985,8 +985,8 @@ impl DecodeState {
                 "repeated or post-retirement lifecycle event"
             );
             ensure!(
-                !matches!(p.event, 4 | 5) || *seen & (1 << 6) == 0,
-                "cancelled operation cannot hand off or commit"
+                !matches!(p.event, 4 | 5) || *seen & ((1 << 6) | (1 << 14)) == 0,
+                "cancelled or failed operation cannot hand off or commit"
             );
             let prerequisite = match p.event {
                 3 => Some(2),
@@ -1784,6 +1784,11 @@ mod tests {
         assert!(decode(export(&records).as_bytes()).is_err());
         records.truncate(ack + 1);
         assert!(decode(export(&records).as_bytes()).is_ok());
+        // Even without any handoff LINK observations, the lifecycle commit
+        // itself must reject a known fault; a missing receipt cannot hide it.
+        let mut lifecycle_only = identity_and_lifecycle();
+        lifecycle_only.insert(9, fault);
+        assert!(decode(export(&lifecycle_only).as_bytes()).is_err());
         let mut uncorrelated = fault;
         uncorrelated.correlation = 0;
         uncorrelated.payload[28..32].copy_from_slice(&0u32.to_le_bytes());
