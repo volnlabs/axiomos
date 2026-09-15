@@ -12,6 +12,12 @@ use crate::bytecode::registers::Register;
 pub enum VerifyError {
     /// Byte allowance, checked allocation size, or heap reservation exhausted.
     ResourceExhausted,
+    /// Unsupported managed effect or private-array declaration.
+    UnsupportedManagedContract,
+    /// Helper violates the fixed managed/ordinary execution boundary.
+    HelperModeMismatch { insn_idx: usize, helper_id: i32 },
+    /// The signed/trusted/slot intersection does not permit motor requests.
+    ManagedEffectRequired { insn_idx: usize },
     // ========================================
     // Core safety violations (both profiles)
     // ========================================
@@ -257,8 +263,7 @@ pub enum VerifyError {
         insn_idx: usize,
     },
 
-    /// Unbounded loop detected (embedded only)
-    #[cfg(feature = "embedded-profile")]
+    /// Loop rejected by the embedded or managed fragment.
     UnboundedLoop {
         /// Instruction index where loop starts
         insn_idx: usize,
@@ -280,6 +285,20 @@ pub enum VerifyError {
 impl fmt::Display for VerifyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnsupportedManagedContract => write!(f, "unsupported managed contract"),
+            Self::HelperModeMismatch {
+                insn_idx,
+                helper_id,
+            } => write!(
+                f,
+                "helper {} forbidden in this execution mode at instruction {}",
+                helper_id, insn_idx
+            ),
+            Self::ManagedEffectRequired { insn_idx } => write!(
+                f,
+                "managed motor effect required at instruction {}",
+                insn_idx
+            ),
             Self::ResourceExhausted => write!(f, "verifier storage exhausted"),
             Self::InvalidOpcode { insn_idx, opcode } => {
                 write!(
@@ -485,7 +504,6 @@ impl fmt::Display for VerifyError {
                     insn_idx
                 )
             }
-            #[cfg(feature = "embedded-profile")]
             Self::UnboundedLoop { insn_idx } => {
                 write!(f, "unbounded loop detected at instruction {}", insn_idx)
             }

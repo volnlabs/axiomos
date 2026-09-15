@@ -124,6 +124,7 @@ pub const SUPPORTED_BPF_HELPERS: &[AbiEntry] = &[
     entry!(BPF_HELPER_GPIO_GET, "Raspberry Pi 5"),
     entry!(BPF_HELPER_PWM_WRITE, "Raspberry Pi 5"),
     entry!(BPF_HELPER_MOTOR_PAIR_V1, "Raspberry Pi 5 (experimental v1)"),
+    entry!(BPF_HELPER_MANAGED_MOTOR_PAIR_V1, "managed interpreter only"),
 ];
 
 #[cfg(test)]

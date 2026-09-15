@@ -71,3 +71,48 @@ hashing likewise run in the worker, never in a bounded upload syscall or timer.
 
 The implementation and executable negative cases are in
 [managed.rs](../../kernel/crates/kernel_bpf/src/signing/managed.rs).
+
+## Managed verification and invocation
+
+`ManagedContract` retains the binding declarations and the intersection of the
+signed, signer-policy and control-slot effect ceilings. Bounded verification
+returns a `ManagedProgram`; ordinary hook and JIT APIs cannot accept this type.
+Authentication, timing admission and installation remain separate steps.
+
+Only map lookup, private-array update and `ManagedMotorPairV1` (1009) are
+permitted. Map handles must be proven constants: exactly 0 or 1 with local
+generation zero. The existing envelope entry size and read-only permission are
+used for handle 0; handle 1 uses the declared array value size. Both maps use
+four-byte keys. Undeclared/global/stale handles, unsupported instruction modes,
+pseudo bindings, non-normalized calls, malformed wide immediates and loops reject.
+Key/update-value buffers must fit their exact declared extent and contain
+initialized scalar bytes. Nullable map values require refinement. Managed
+pointer spills and pointer-to-scalar conversion reject because the existing
+stack model cannot restore typed pointer spills.
+
+Helper 1009 takes two canonical sign-extended 64-bit signed per-mille values,
+each in [-1000, 1000]. Success records one invocation-local request. A second or
+malformed request aborts the invocation even if bytecode ignores the helper
+result. Execution and map failures return no captured request. Successful
+completion preserves `None` versus an explicit `(0, 0)` request for audit;
+`motor_pair()` maps `None` to the defined zero result. The interpreter does not
+submit wheel commands. Legacy `MotorPairV1` retains its separate semantics.
+
+The managed payload uses the existing context wrapper and a new sealed,
+padding-free `ManagedControlContextV1`: version/size (u32), cycle ID,
+scheduled/actual/sensor nanoseconds (u64), sensor value (i64), validity/reserved
+(u32). It is 56 bytes; version is 1, size is 56, validity is 0 or 1, reserved is
+zero. Existing IIO/context layouts are unchanged. The managed sensor producer
+and timestamp provenance remain integration work. The current Pi adapter emits
+raw sonar echo microseconds; selecting and documenting the managed source is
+required before its reference image is qualified.
+
+The worker must construct fresh ARRAY storage and install exact local runtime
+bindings with the existing map leases before connecting this library entry to
+kernel dispatch. It must also account retained output buffers, apply admission,
+and discard requests on later deadline/policy/queue failure. No timer slot,
+publication, UART handoff or physical qualification is established by these
+library tests. Helper costs remain uncalibrated model values.
+
+See [managed verification](../../kernel/crates/kernel_bpf/src/verifier/managed.rs)
+and [managed execution](../../kernel/crates/kernel_bpf/src/execution/interpreter.rs).

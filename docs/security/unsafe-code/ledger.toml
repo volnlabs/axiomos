@@ -1,6 +1,6 @@
 version = 1
-baseline_sites = 694
-baseline_fingerprint = "sha256:52d7273c75c4295ca7566a526d9f75553535a58a52ca279999fc586147b66141"
+baseline_sites = 696
+baseline_fingerprint = "sha256:481384a0178af46a7c58619a7aa5dc0837f2ffce33d338155d91a5c10a4b78e7"
 
 # 2026-09-09: reviewed prerequisite delta: seven motor-pair no_mangle
 # attributes (production helper and isolated test/fuzz stubs), minus one
@@ -18,6 +18,11 @@ baseline_fingerprint = "sha256:52d7273c75c4295ca7566a526d9f75553535a58a52ca27999
 
 # Rules are evaluated in order. Keep narrow, high-risk obligations before broad
 # subsystem rules. The first matching rule supplies every site-level field.
+
+# 2026-09-15: managed invocation adds two map-helper call blocks. Exact
+# verifier-proven input extents and live matching binding leases are required;
+# stack pointers are reconstructed from the live borrow. Managed dispatch is
+# not yet connected to the kernel. Focused managed Miri13 passes.
 
 [[obligation]]
 id = "TEST-HARNESS"
@@ -189,11 +194,11 @@ id = "BPF-EXECUTION-JIT"
 paths = ["kernel/crates/kernel_bpf/src/execution/*", "kernel/src/bpf/jit_memory.rs"]
 scope = "production"
 owner = "BPF runtime/JIT maintainers"
-invariant = "Only VerifiedProgram reaches execution; context lifetime covers execution; generated code obeys ABI, branch, bounds, cache, and W^X requirements."
+invariant = "Only VerifiedProgram or the private ManagedProgram wrapper reaches execution; context lifetime covers execution; managed map-helper input extents and exact local binding leases cover each synchronous call; generated code obeys ABI, branch, bounds, cache, and W^X requirements."
 callers = "BpfExecutor, kernel hook dispatch, AArch64 JIT"
-tests = "cloud/embedded execution and verifier suites plus fuzzing; Miri copied-stack-pointer load/store and actual helper-payload regressions. JIT differential tests and enforced RW-to-RX lifecycle remain incomplete."
+tests = "cloud/embedded execution and verifier suites plus fuzzing; Miri copied-stack-pointer load/store, actual helper-payload and managed capture/map-failure regressions. JIT differential tests and enforced RW-to-RX lifecycle remain incomplete."
 priority = "P0"
-reviewed = "2026-07-12"
+reviewed = "2026-09-15"
 
 [[obligation]]
 id = "BPF-MAPS"

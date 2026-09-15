@@ -130,6 +130,30 @@ pub const BPF_HELPER_IIO_READ: i32 = 1006;
 pub const BPF_HELPER_CAN_SEND: i32 = 1007;
 /// Experimental signed rover pair helper; versioned until its ABI is proven.
 pub const BPF_HELPER_MOTOR_PAIR_V1: i32 = 1008;
+/// Capture one managed controller wheel-pair request; never actuates hardware.
+pub const BPF_HELPER_MANAGED_MOTOR_PAIR_V1: i32 = 1009;
+
+/// Width of the slot portion of encoded BPF handles.
+pub const BPF_HANDLE_SLOT_BITS: u8 = 10;
+
+pub const MANAGED_CONTROL_CONTEXT_V1_VERSION: u32 = 1;
+pub const MANAGED_CONTROL_CONTEXT_V1_SIZE: u32 = 56;
+
+/// Frozen input for one managed 100 Hz controller invocation.
+/// `sensor_value` retains the source adapter's native units.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, KnownLayout, Immutable)]
+pub struct ManagedControlContextV1 {
+    pub version: u32,
+    pub size: u32,
+    pub cycle_id: u64,
+    pub scheduled_ns: u64,
+    pub actual_ns: u64,
+    pub sensor_ns: u64,
+    pub sensor_value: i64,
+    pub sensor_valid: u32,
+    pub reserved: u32,
+}
 
 /// Requested/offered access rights in [`BpfAttr::file_flags`] for object pin/open.
 /// Zero is accepted as a backwards-compatible read-only request.
@@ -258,5 +282,19 @@ mod tests {
                     .all(|other| capability & other == 0)
             );
         }
+    }
+
+    #[test]
+    fn managed_control_context_v1_layout_is_frozen() {
+        assert_eq!(core::mem::size_of::<ManagedControlContextV1>(), 56);
+        assert_eq!(core::mem::align_of::<ManagedControlContextV1>(), 8);
+        let value = ManagedControlContextV1::default();
+        let base = core::ptr::from_ref(&value).addr();
+        assert_eq!(core::ptr::from_ref(&value.version).addr() - base, 0);
+        assert_eq!(core::ptr::from_ref(&value.size).addr() - base, 4);
+        assert_eq!(core::ptr::from_ref(&value.cycle_id).addr() - base, 8);
+        assert_eq!(core::ptr::from_ref(&value.sensor_value).addr() - base, 40);
+        assert_eq!(core::ptr::from_ref(&value.sensor_valid).addr() - base, 48);
+        assert_eq!(core::ptr::from_ref(&value.reserved).addr() - base, 52);
     }
 }

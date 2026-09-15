@@ -16,6 +16,7 @@ use super::cfg::BudgetControlFlowGraph as ControlFlowGraph;
 use super::error::{VerifyError, VerifyResult};
 use super::helpers::{ArgType, HelperValidation, ReturnType, validate_helper_call};
 use super::liveness::{BudgetLiveness as Liveness, RegSet};
+use super::managed::ManagedContract;
 use super::map_policy::{
     check_map_write_writability, map_lookup_value_size, map_lookup_writability,
     mutating_helper_map_arg, referenced_map_helper_arg,
@@ -157,6 +158,7 @@ pub struct Verifier<'a, P: PhysicalProfile = ActiveProfile> {
     /// Map handles proven constant at helper call sites during path exploration.
     referenced_map_handles: BudgetVec<'a, u32>,
     budget: Option<&'a VerificationBudget>,
+    managed: Option<ManagedContract>,
 
     /// Profile marker
     _profile: PhantomData<P>,
@@ -173,6 +175,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
             config: VerifyConfig::default(),
             referenced_map_handles: BudgetVec::new(None),
             budget: None,
+            managed: None,
             _profile: PhantomData,
         }
     }
@@ -218,7 +221,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
         insns: &[BpfInsn],
         config: VerifyConfig<'a>,
     ) -> VerifyResult<(BpfProgram<P>, VerifyStats)> {
-        Self::verify_inner(prog_type, insns, config, None)
+        Self::verify_inner(prog_type, insns, config, None, None)
     }
 
     /// Verify with a checked live buffer storage allowance. Scratch is refunded
@@ -230,27 +233,38 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
         config: VerifyConfig<'a>,
         budget: &'a VerificationBudget,
     ) -> VerifyResult<(BpfProgram<P>, VerifyStats)> {
-        Self::verify_inner(prog_type, insns, config, Some(budget))
+        Self::verify_inner(prog_type, insns, config, Some(budget), None)
     }
 
-    fn verify_inner(
+    pub(super) fn verify_inner(
         prog_type: BpfProgType,
         insns: &[BpfInsn],
         config: VerifyConfig<'a>,
         budget: Option<&'a VerificationBudget>,
+        managed: Option<ManagedContract>,
     ) -> VerifyResult<(BpfProgram<P>, VerifyStats)> {
         let mut verifier = Self::new();
         verifier.config = config;
         verifier.budget = budget;
+        verifier.managed = managed;
         verifier.pruner = StatePruner::new().with_budget(budget);
         verifier.referenced_map_handles = BudgetVec::new(budget);
 
         // Phase 1: Basic checks
         verifier.check_basic(insns)?;
+        if managed.is_some() {
+            super::managed::check_normalized(insns)?;
+        }
 
         // Phase 2: Build CFG
         let cfg = ControlFlowGraph::try_build(insns, budget)?;
         verifier.cfg = Some(cfg);
+        // The qualified managed fragment is loop-free in every host profile.
+        if managed.is_some()
+            && let Some(&(from, _)) = verifier.cfg.as_ref().unwrap().back_edges().first()
+        {
+            return Err(VerifyError::UnboundedLoop { insn_idx: from });
+        }
 
         // Phase 3: Profile-specific constraints. These are purely structural
         // (loop-freedom, forbidden helpers, the WCET budget — all computed
@@ -462,7 +476,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                 }
 
                 let insn = &insns[idx];
-                match self.verify_insn(insn, &mut state, idx)? {
+                match self.verify_insn(insn, insns.get(idx + 1), &mut state, idx)? {
                     InsnResult::Continue => {
                         state.insn_idx += if insn.is_wide() { 2 } else { 1 };
                         state.insn_processed += 1;
@@ -512,6 +526,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
     fn verify_insn(
         &mut self,
         insn: &BpfInsn,
+        next_insn: Option<&BpfInsn>,
         state: &mut VerifierState,
         idx: usize,
     ) -> VerifyResult<InsnResult> {
@@ -551,7 +566,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
 
         // Wide loads also match is_memory(); validate them before generic memory instructions.
         if insn.is_wide() {
-            self.verify_wide_load(insn, state, idx)?;
+            self.verify_wide_load(insn, next_insn, state, idx)?;
             return Ok(InsnResult::Continue);
         }
 
@@ -675,6 +690,40 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                 }
                 _ => {}
             }
+        }
+
+        if self.managed.is_some() {
+            let reads_dst = alu_op != AluOp::Mov;
+            let reads_pointer_src = !alu_op.is_unary()
+                && matches!(insn.source_type(), crate::bytecode::opcode::SourceType::Reg)
+                && state
+                    .reg(insn.src().expect("source validated"))
+                    .reg_type
+                    .is_pointer();
+            if (reads_dst && state.reg(dst).reg_type.is_pointer()) || reads_pointer_src {
+                return Err(VerifyError::InvalidMemoryAccess {
+                    insn_idx: idx,
+                    reason: "managed pointer cannot be converted to a scalar",
+                });
+            }
+        }
+
+        // END is encoded in ALU32, but its immediate selects 16/32/64-bit
+        // conversion and the source bit selects byte order, not a register.
+        // In particular END64 must never acquire a false upper-32-zero proof.
+        if alu_op == AluOp::End {
+            let value = match insn.imm {
+                16 | 32 => super::alu::zero_extend_32(ScalarValue::unknown()),
+                64 => ScalarValue::unknown(),
+                _ => {
+                    return Err(VerifyError::InvalidOpcode {
+                        insn_idx: idx,
+                        opcode: insn.opcode,
+                    });
+                }
+            };
+            state.set_scalar(dst, Some(value));
+            return Ok(());
         }
 
         // Compute the rhs ScalarValue from either the source register or
@@ -844,6 +893,61 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
         idx: usize,
     ) -> VerifyResult<()> {
         let helper_id = insn.imm;
+        let helper = super::HelperId::from_raw(helper_id);
+        match self.managed {
+            Some(contract) => {
+                use super::HelperId;
+                match helper {
+                    Some(HelperId::ManagedMotorPairV1) => {
+                        if contract.effects() & crate::signing::managed::EFFECT_MOTOR_PAIR == 0 {
+                            return Err(VerifyError::ManagedEffectRequired { insn_idx: idx });
+                        }
+                    }
+                    Some(HelperId::MapLookupElem | HelperId::MapUpdateElem) => {
+                        let handle = state.reg(Register::R1).scalar_value.and_then(|v| v.value);
+                        let valid = match handle {
+                            Some(0) => contract.envelope(),
+                            Some(1) => contract.private_array().is_some(),
+                            _ => false,
+                        };
+                        if !valid {
+                            return Err(VerifyError::InvalidMapId {
+                                insn_idx: idx,
+                                map_id: handle.unwrap_or(u64::MAX),
+                            });
+                        }
+                        check_managed_read(state, Register::R2, 4, idx)?;
+                        if helper == Some(HelperId::MapUpdateElem) {
+                            if handle != Some(1) {
+                                return Err(VerifyError::WriteToReadOnlyMap {
+                                    insn_idx: idx,
+                                    map_id: 0,
+                                });
+                            }
+                            check_managed_read(
+                                state,
+                                Register::R3,
+                                contract.private_array().unwrap().value_size as usize,
+                                idx,
+                            )?;
+                        }
+                    }
+                    _ => {
+                        return Err(VerifyError::HelperModeMismatch {
+                            insn_idx: idx,
+                            helper_id,
+                        });
+                    }
+                }
+            }
+            None if helper == Some(super::HelperId::ManagedMotorPairV1) => {
+                return Err(VerifyError::HelperModeMismatch {
+                    insn_idx: idx,
+                    helper_id,
+                });
+            }
+            None => {}
+        }
 
         // Collect argument register types
         let arg_types = [
@@ -1006,6 +1110,16 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                 // plain `r1 = *(u64*)(r10 - 8)` — the canonical clang stack
                 // read — was rejected while the matching store was accepted.
                 let src_state = state.reg(src);
+                if self.managed.is_some()
+                    && src_state.reg_type == RegType::PtrToCtx
+                    && !(size.size_bytes() == 8
+                        && src_state.ptr_offset.checked_add(insn.offset as i64) == Some(0))
+                {
+                    return Err(VerifyError::InvalidMemoryAccess {
+                        insn_idx: idx,
+                        reason: "managed context wrapper exposes only its complete payload pointer",
+                    });
+                }
                 if !src_state.reg_type.can_read() && src_state.reg_type != RegType::PtrToFp {
                     return Err(VerifyError::InvalidMemoryAccess {
                         insn_idx: idx,
@@ -1027,6 +1141,9 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                             offset,
                             size: size.size_bytes(),
                         });
+                    }
+                    if self.managed.is_some() {
+                        check_managed_stack_read(state, offset, size.size_bytes(), idx)?;
                     }
                 } else {
                     check_ranged_deref(src_state, insn.offset as i64, size.size_bytes(), idx)?;
@@ -1066,6 +1183,12 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                 }
 
                 let dst_state = state.reg(dst);
+                if self.managed.is_some() && state.reg(src).reg_type.is_pointer() {
+                    return Err(VerifyError::InvalidMemoryAccess {
+                        insn_idx: idx,
+                        reason: "managed state cannot retain pointer bytes",
+                    });
+                }
                 if !dst_state.reg_type.can_write() && dst_state.reg_type != RegType::PtrToFp {
                     return Err(VerifyError::InvalidMemoryAccess {
                         insn_idx: idx,
@@ -1172,6 +1295,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
     fn verify_wide_load(
         &self,
         insn: &BpfInsn,
+        next_insn: Option<&BpfInsn>,
         state: &mut VerifierState,
         idx: usize,
     ) -> VerifyResult<()> {
@@ -1184,8 +1308,13 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
             return Err(VerifyError::WriteToReadOnly { insn_idx: idx });
         }
 
-        // Result is scalar with known lower 32 bits
-        state.set_scalar(dst, Some(ScalarValue::unknown()));
+        let value = if self.managed.is_some() {
+            let high = next_insn.expect("managed wide shape validated").imm as u32;
+            ScalarValue::constant((u64::from(high) << 32) | u64::from(insn.imm as u32))
+        } else {
+            ScalarValue::unknown()
+        };
+        state.set_scalar(dst, Some(value));
 
         Ok(())
     }
@@ -1380,6 +1509,55 @@ fn helper_mem_size(state: &VerifierState, reg: Register, idx: usize) -> VerifyRe
     })
 }
 
+fn check_managed_stack_read(
+    state: &VerifierState,
+    offset: i64,
+    size: usize,
+    idx: usize,
+) -> VerifyResult<()> {
+    if !state.stack.is_valid_access(offset, size) {
+        return Err(VerifyError::OutOfBoundsAccess {
+            insn_idx: idx,
+            offset,
+            size,
+        });
+    }
+    if (0..size).any(|byte| {
+        !matches!(
+            state.stack.get(offset + byte as i64),
+            Some(StackSlot::Scalar | StackSlot::Zero)
+        )
+    }) {
+        return Err(VerifyError::InvalidMemoryAccess {
+            insn_idx: idx,
+            reason: "managed input contains uninitialized or pointer stack bytes",
+        });
+    }
+    Ok(())
+}
+
+/// Map helper signatures omit their implicit key/value lengths. The fixed
+/// binding contract supplies them; reject unreadable or partly initialized
+/// buffers before the runtime helper can construct a slice.
+fn check_managed_read(
+    state: &VerifierState,
+    reg: Register,
+    size: usize,
+    idx: usize,
+) -> VerifyResult<()> {
+    let ptr = state.reg(reg);
+    match ptr.reg_type {
+        RegType::PtrToStack | RegType::PtrToFp => {
+            check_managed_stack_read(state, ptr.ptr_offset, size, idx)
+        }
+        RegType::PtrToCtxData | RegType::PtrToMapValue => check_ranged_deref(ptr, 0, size, idx),
+        _ => Err(VerifyError::InvalidMemoryAccess {
+            insn_idx: idx,
+            reason: "managed map input must reference readable scalar bytes",
+        }),
+    }
+}
+
 fn check_helper_mem_bounds(
     args: &[ArgType],
     state: &VerifierState,
@@ -1477,6 +1655,29 @@ fn check_ranged_deref(
 mod tests {
     use super::*;
     use crate::verifier::{HelperId, LoadCaller, MapPerm};
+
+    #[test]
+    fn endian_conversion_tracks_its_immediate_width() {
+        let verifier = Verifier::<ActiveProfile>::new();
+        for opcode in [0xd4, 0xdc] {
+            for width in [16, 32, 64] {
+                let mut state = VerifierState::new_entry(ActiveProfile::MAX_STACK_SIZE);
+                state.set_scalar(Register::R2, Some(ScalarValue::constant(u64::MAX)));
+                verifier
+                    .verify_alu(&BpfInsn::new(opcode, 2, 0, 0, width), &mut state, 0)
+                    .unwrap();
+                let value = state.reg(Register::R2).scalar_value.unwrap();
+                assert_eq!(
+                    value.max,
+                    if width == 64 {
+                        u64::MAX
+                    } else {
+                        u32::MAX as u64
+                    }
+                );
+            }
+        }
+    }
 
     #[test]
     fn ctx_payload_scalar_at_zero_cannot_be_dereferenced() {

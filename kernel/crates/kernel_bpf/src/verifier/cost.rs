@@ -92,6 +92,8 @@ pub fn helper_cost(helper_id: i32) -> u32 {
         | HelperId::GpioGet
         | HelperId::PwmWrite
         | HelperId::MotorPairV1
+        // Uncalibrated capture-only bookkeeping; use the conservative copy class.
+        | HelperId::ManagedMotorPairV1
         | HelperId::IioRead
         | HelperId::CanSend => COST_HELPER_COPY,
 

@@ -99,6 +99,8 @@ pub enum HelperId {
     CanSend = abi::BPF_HELPER_CAN_SEND,
     /// Experimental complete signed rover command, left/right per-mille.
     MotorPairV1 = abi::BPF_HELPER_MOTOR_PAIR_V1,
+    /// Capture-only managed wheel pair; never dispatched to hardware.
+    ManagedMotorPairV1 = abi::BPF_HELPER_MANAGED_MOTOR_PAIR_V1,
 }
 
 impl HelperId {
@@ -132,6 +134,7 @@ impl HelperId {
             abi::BPF_HELPER_IIO_READ => Some(Self::IioRead),
             abi::BPF_HELPER_CAN_SEND => Some(Self::CanSend),
             abi::BPF_HELPER_MOTOR_PAIR_V1 => Some(Self::MotorPairV1),
+            abi::BPF_HELPER_MANAGED_MOTOR_PAIR_V1 => Some(Self::ManagedMotorPairV1),
             _ => None,
         }
     }
@@ -166,6 +169,7 @@ impl HelperId {
             Self::IioRead => "bpf_iio_read",
             Self::CanSend => "bpf_can_send",
             Self::MotorPairV1 => "bpf_motor_pair_v1",
+            Self::ManagedMotorPairV1 => "bpf_managed_motor_pair_v1",
         }
     }
 
@@ -215,6 +219,7 @@ impl HelperId {
             Self::IioRead => true,
             Self::CanSend => true,
             Self::MotorPairV1 => true,
+            Self::ManagedMotorPairV1 => true,
         }
     }
 
@@ -440,6 +445,7 @@ pub(crate) enum RuntimeHelper {
     GpioGet,
     PwmWrite,
     MotorPairV1,
+    ManagedMotorPairV1,
 }
 
 /// Shared verifier/runtime contract for one helper.
@@ -489,6 +495,7 @@ const fn runtime_helper(id: HelperId) -> Option<RuntimeHelper> {
         HelperId::GpioGet => Some(RuntimeHelper::GpioGet),
         HelperId::PwmWrite => Some(RuntimeHelper::PwmWrite),
         HelperId::MotorPairV1 => Some(RuntimeHelper::MotorPairV1),
+        HelperId::ManagedMotorPairV1 => Some(RuntimeHelper::ManagedMotorPairV1),
         _ => None,
     }
 }
@@ -627,6 +634,9 @@ const fn helper_signature(id: HelperId) -> HelperSignature {
             HelperSignature::new(id, &[ArgType::Scalar, ArgType::Scalar], ReturnType::Integer)
                 .requiring_actuation()
         }
+        HelperId::ManagedMotorPairV1 => {
+            HelperSignature::new(id, &[ArgType::Scalar, ArgType::Scalar], ReturnType::Integer)
+        }
 
         HelperId::IioRead => HelperSignature::new(
             id,
@@ -744,6 +754,7 @@ mod tests {
         assert_eq!(HelperId::from_raw(1004), Some(HelperId::GpioGet));
         assert_eq!(HelperId::from_raw(1005), Some(HelperId::PwmWrite));
         assert_eq!(HelperId::from_raw(1008), Some(HelperId::MotorPairV1));
+        assert_eq!(HelperId::from_raw(1009), Some(HelperId::ManagedMotorPairV1));
     }
 
     #[test]
@@ -785,6 +796,7 @@ mod tests {
             HelperId::IioRead,
             HelperId::CanSend,
             HelperId::MotorPairV1,
+            HelperId::ManagedMotorPairV1,
         ];
         let runtime_count = all
             .iter()

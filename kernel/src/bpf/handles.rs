@@ -2,7 +2,7 @@ use alloc::vec::Vec;
 
 use kernel_bpf::execution::BpfError;
 
-pub(super) const SLOT_BITS: u32 = 10;
+pub(super) const SLOT_BITS: u32 = kernel_abi::BPF_HANDLE_SLOT_BITS as u32;
 pub(super) const SLOT_MASK: u32 = (1 << SLOT_BITS) - 1;
 // Keep the top bit clear because userspace transports handles through c_int.
 const MAX_GENERATION: u32 = (i32::MAX as u32) >> SLOT_BITS;

@@ -32,6 +32,17 @@ pub mod helpers_stub {
     std::thread_local! {
         // Each test's synchronous execution owns its map, including raw value pointers.
         static TEST_MAP_VALUE: Cell<u64> = const { Cell::new(0) };
+        static TEST_MAP_LOOKUP_FAIL: Cell<bool> = const { Cell::new(false) };
+        static TEST_MAP_UPDATE_FAIL: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub fn with_map_failure<R>(lookup: bool, update: bool, f: impl FnOnce() -> R) -> R {
+        TEST_MAP_LOOKUP_FAIL.with(|fail| fail.set(lookup));
+        TEST_MAP_UPDATE_FAIL.with(|fail| fail.set(update));
+        let result = f();
+        TEST_MAP_LOOKUP_FAIL.with(|fail| fail.set(false));
+        TEST_MAP_UPDATE_FAIL.with(|fail| fail.set(false));
+        result
     }
 
     // PWM-call recorder for behavior semantic tests. Sessions are serialized by
@@ -105,6 +116,9 @@ pub mod helpers_stub {
 
     #[unsafe(no_mangle)]
     pub extern "C" fn bpf_map_lookup_elem(_map_id: u32, _key: *const u8) -> *mut u8 {
+        if TEST_MAP_LOOKUP_FAIL.with(Cell::get) {
+            return core::ptr::null_mut();
+        }
         TEST_MAP_VALUE.with(|value| value.as_ptr().cast::<u8>())
     }
 
@@ -115,6 +129,9 @@ pub mod helpers_stub {
         value: *const u8,
         _flags: u64,
     ) -> i32 {
+        if TEST_MAP_UPDATE_FAIL.with(Cell::get) {
+            return -1;
+        }
         if !value.is_null() {
             // SAFETY: The test supplies an initialized eight-byte value through
             // the interpreter's helper ABI. Read the payload so Miri checks that
@@ -336,7 +353,34 @@ impl_bpf_pod!(
     crate::attach::GpioEvent,
     crate::attach::IioEvent,
     crate::attach::PwmEvent,
+    kernel_abi::ManagedControlContextV1,
 );
+
+/// One validated capture-only managed motor request, in signed per-mille.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManagedMotorPair {
+    pub left: i16,
+    pub right: i16,
+}
+
+/// Capture result for one managed invocation.
+///
+/// `None` records that the program made no motor request. Consumers that need
+/// the safe effective output can use [`Self::motor_pair`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManagedInvocationResult {
+    pub request: Option<ManagedMotorPair>,
+}
+
+impl ManagedInvocationResult {
+    /// Return the requested pair, or the safe zero pair when none was made.
+    pub const fn motor_pair(self) -> ManagedMotorPair {
+        match self.request {
+            Some(pair) => pair,
+            None => ManagedMotorPair { left: 0, right: 0 },
+        }
+    }
+}
 
 impl BpfContext<'static> {
     /// Create an empty context.
@@ -491,6 +535,18 @@ pub enum BpfError {
 
     /// A map mutation targeted a kernel-marked read-only map.
     ReadOnlyMap,
+
+    /// The frozen managed invocation context was malformed or unsupported.
+    ManagedContextInvalid,
+
+    /// A managed controller emitted more than one motor request.
+    ManagedRequestDuplicate,
+
+    /// A managed motor request was not canonically encoded or was out of range.
+    ManagedRequestInvalid,
+
+    /// A declared managed map binding failed during invocation.
+    ManagedMapFailure,
 }
 
 impl core::fmt::Display for BpfError {
@@ -513,6 +569,10 @@ impl core::fmt::Display for BpfError {
             Self::AdmissionRejected => write!(f, "attach exceeds hook WCET admission capacity"),
             Self::GpioFanoutExceeded => write!(f, "GPIO attach exceeds IRQ fan-out capacity"),
             Self::ReadOnlyMap => write!(f, "map is read-only"),
+            Self::ManagedContextInvalid => write!(f, "managed invocation context is invalid"),
+            Self::ManagedRequestDuplicate => write!(f, "managed motor request is duplicated"),
+            Self::ManagedRequestInvalid => write!(f, "managed motor request is invalid"),
+            Self::ManagedMapFailure => write!(f, "managed map operation failed"),
         }
     }
 }

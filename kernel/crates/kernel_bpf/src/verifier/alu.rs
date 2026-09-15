@@ -60,8 +60,8 @@ pub fn compute_alu_result_width(
     // right shifts depend on the high operand bits, so e.g. ALU32 `(2^32) / 2`
     // must be `0 / 2 == 0`, not `2^31`. For add/sub/mul/and/or/xor/lsh the low
     // 32 result bits depend only on the low 32 operand bits, so pre-truncating
-    // is a harmless normalization there. This matches the interpreter, which
-    // operates on registers already zero-extended by prior 32-bit ops.
+    // is a harmless normalization there. This matches the interpreter's
+    // explicit operand truncation.
     let (dst, rhs) = if is_64bit {
         (dst, rhs)
     } else {
@@ -78,23 +78,31 @@ pub fn compute_alu_result_width(
         AluOp::And => bitwise_and(dst, rhs),
         AluOp::Or => bitwise_or(dst, rhs),
         AluOp::Xor => bitwise_xor(dst, rhs),
-        AluOp::Lsh => lshift(dst, rhs),
-        AluOp::Rsh => rshift(dst, rhs),
+        AluOp::Lsh => lshift(
+            dst,
+            if is_64bit {
+                rhs
+            } else {
+                bitwise_and(rhs, ScalarValue::constant(0x1f))
+            },
+        ),
+        AluOp::Rsh => rshift(
+            dst,
+            if is_64bit {
+                rhs
+            } else {
+                bitwise_and(rhs, ScalarValue::constant(0x1f))
+            },
+        ),
         AluOp::Arsh => {
             if is_64bit {
                 arshift(dst, rhs)
             } else {
                 // ALU32 ARSH: the sign comes from bit 31, but `arshift` shifts
                 // a (zero-extended) 64-bit value whose bit 63 is 0, so it fills
-                // zeros instead of replicating bit 31. Worse, the two executors
-                // disagree: the interpreter logical-shifts the zero-extended
-                // value (fills 0), while the AArch64 JIT (`emit_asr32_reg`)
-                // does a true signed-32 shift (fills 1) — so for an input with
-                // bit 31 set, `w0 s>>= 31` is `0x0000_0001` on the interpreter
-                // and `0xFFFF_FFFF` on the JIT. No single value is sound for
-                // both, so conservatively widen the low 32 bits to unknown
-                // (high 32 known zero). Precise modeling needs the interpreter
-                // and JIT to agree on ALU32 ARSH first (separate issue).
+                // zeros instead of replicating bit 31. The interpreter and the
+                // experimental AArch64 JIT implement signed-32 ARSH; retain the
+                // conservative unknown model here until it is made precise.
                 zero_extend_32(ScalarValue::unknown())
             }
         }
@@ -707,5 +715,18 @@ mod tests {
         // High 32 bits stay known-zero.
         assert_eq!(r.tnum.mask & 0xFFFF_FFFF_0000_0000, 0);
         assert_eq!(r.tnum.value & 0xFFFF_FFFF_0000_0000, 0);
+    }
+
+    #[test]
+    fn alu32_shift_counts_are_masked_to_five_bits() {
+        let one = ScalarValue::constant(1);
+        let by_32 = compute_alu_result_width(one, AluOp::Lsh, ScalarValue::constant(32), false);
+        let by_63 = compute_alu_result_width(one, AluOp::Lsh, ScalarValue::constant(63), false);
+        assert_eq!(by_32.value, Some(1));
+        assert_eq!(by_63.value, Some(0x8000_0000));
+
+        let high = ScalarValue::constant(0x8000_0000);
+        let right = compute_alu_result_width(high, AluOp::Rsh, ScalarValue::constant(63), false);
+        assert_eq!(right.value, Some(1));
     }
 }

@@ -16,14 +16,16 @@ extern crate alloc;
 use alloc::vec;
 use core::marker::PhantomData;
 
-use super::{BpfContext, BpfError, BpfExecutor, BpfResult};
+use super::{
+    BpfContext, BpfError, BpfExecutor, BpfResult, ManagedInvocationResult, ManagedMotorPair,
+};
 use crate::bytecode::insn::BpfInsn;
 use crate::bytecode::opcode::{AluOp, JmpOp, MemSize, OpcodeClass, SourceType};
 use crate::bytecode::program::BpfProgram;
 use crate::bytecode::registers::{Register, RegisterFile};
 use crate::profile::{ActiveProfile, PhysicalProfile};
-use crate::verifier::HelperId;
 use crate::verifier::helpers::{RuntimeHelper, get_helper_descriptor};
+use crate::verifier::{HelperId, ManagedProgram};
 
 // SAFETY: These functions are defined in the kernel and linked into the final binary.
 // They follow the C calling convention which matches the interpreter's expectations.
@@ -55,6 +57,13 @@ pub struct Interpreter<P: PhysicalProfile = ActiveProfile> {
     _profile: PhantomData<P>,
 }
 
+struct ManagedInvocation {
+    effects: u32,
+    envelope: bool,
+    private_array: bool,
+    pair: Option<ManagedMotorPair>,
+}
+
 impl<P: PhysicalProfile> Interpreter<P> {
     /// Create a new interpreter.
     pub fn new() -> Self {
@@ -70,6 +79,7 @@ impl<P: PhysicalProfile> Interpreter<P> {
         regs: &mut RegisterFile,
         stack: &mut [u8],
         ctx: &BpfContext<'_>,
+        managed: Option<&mut ManagedInvocation>,
     ) -> Result<InsnResult, BpfError> {
         // Exit instruction
         if insn.is_exit() {
@@ -85,7 +95,14 @@ impl<P: PhysicalProfile> Interpreter<P> {
             }
 
             OpcodeClass::Jmp | OpcodeClass::Jmp32 => {
-                return self.execute_jmp(insn, regs, class == OpcodeClass::Jmp, ctx, stack);
+                return self.execute_jmp(
+                    insn,
+                    regs,
+                    class == OpcodeClass::Jmp,
+                    ctx,
+                    stack,
+                    managed,
+                );
             }
 
             OpcodeClass::Ldx => {
@@ -125,6 +142,41 @@ impl<P: PhysicalProfile> Interpreter<P> {
 
         let alu_op = AluOp::from_opcode(insn.opcode).ok_or(BpfError::InvalidInstruction)?;
 
+        // END is encoded in the ALU32 class even for a 64-bit conversion. Its
+        // source bit selects conversion to little (0) or big (1) endian.
+        if alu_op == AluOp::End {
+            let to_big = insn.opcode & 0x08 != 0;
+            let swap = to_big == cfg!(target_endian = "little");
+            let result = match insn.imm {
+                16 => {
+                    let value = dst_val as u16;
+                    u64::from(if swap { value.swap_bytes() } else { value })
+                }
+                32 => {
+                    let value = dst_val as u32;
+                    u64::from(if swap { value.swap_bytes() } else { value })
+                }
+                64 => {
+                    if swap {
+                        dst_val.swap_bytes()
+                    } else {
+                        dst_val
+                    }
+                }
+                _ => return Err(BpfError::InvalidInstruction),
+            };
+            regs.set(dst, result);
+            return Ok(());
+        }
+
+        // ALU32 truncates both inputs before computing and zero-extends the
+        // result. This matters for division, modulo and right shifts.
+        let (dst_val, src_val, shift_mask) = if is_64bit {
+            (dst_val, src_val, 0x3f)
+        } else {
+            (u64::from(dst_val as u32), u64::from(src_val as u32), 0x1f)
+        };
+
         let result = match alu_op {
             AluOp::Add => dst_val.wrapping_add(src_val),
             AluOp::Sub => dst_val.wrapping_sub(src_val),
@@ -137,9 +189,9 @@ impl<P: PhysicalProfile> Interpreter<P> {
             }
             AluOp::Or => dst_val | src_val,
             AluOp::And => dst_val & src_val,
-            AluOp::Lsh => dst_val << (src_val & 0x3f),
-            AluOp::Rsh => dst_val >> (src_val & 0x3f),
-            AluOp::Neg => (-(dst_val as i64)) as u64,
+            AluOp::Lsh => dst_val << (src_val & shift_mask),
+            AluOp::Rsh => dst_val >> (src_val & shift_mask),
+            AluOp::Neg => (dst_val as i64).wrapping_neg() as u64,
             AluOp::Mod => {
                 if src_val == 0 {
                     return Err(BpfError::DivisionByZero);
@@ -148,16 +200,9 @@ impl<P: PhysicalProfile> Interpreter<P> {
             }
             AluOp::Xor => dst_val ^ src_val,
             AluOp::Mov => src_val,
-            AluOp::Arsh => ((dst_val as i64) >> (src_val & 0x3f)) as u64,
-            AluOp::End => {
-                // Byte swap
-                match insn.imm {
-                    16 => (dst_val as u16).swap_bytes() as u64,
-                    32 => (dst_val as u32).swap_bytes() as u64,
-                    64 => dst_val.swap_bytes(),
-                    _ => return Err(BpfError::InvalidInstruction),
-                }
-            }
+            AluOp::Arsh if is_64bit => ((dst_val as i64) >> (src_val & shift_mask)) as u64,
+            AluOp::Arsh => u64::from(((dst_val as u32 as i32) >> (src_val & shift_mask)) as u32),
+            AluOp::End => unreachable!(),
         };
 
         // Truncate to 32 bits for 32-bit ALU
@@ -179,12 +224,13 @@ impl<P: PhysicalProfile> Interpreter<P> {
         is_64bit: bool,
         ctx: &BpfContext<'_>,
         stack: &[u8],
+        managed: Option<&mut ManagedInvocation>,
     ) -> Result<InsnResult, BpfError> {
         let jmp_op = JmpOp::from_opcode(insn.opcode).ok_or(BpfError::InvalidInstruction)?;
 
         // Handle call and exit
         if matches!(jmp_op, JmpOp::Call) {
-            return self.execute_call(insn, regs, ctx, stack);
+            return self.execute_call(insn, regs, ctx, stack, managed);
         }
 
         if matches!(jmp_op, JmpOp::Exit) {
@@ -243,6 +289,7 @@ impl<P: PhysicalProfile> Interpreter<P> {
         regs: &mut RegisterFile,
         ctx: &BpfContext<'_>,
         stack: &[u8],
+        managed: Option<&mut ManagedInvocation>,
     ) -> Result<InsnResult, BpfError> {
         let helper_id = insn.imm;
 
@@ -256,7 +303,7 @@ impl<P: PhysicalProfile> Interpreter<P> {
         ];
 
         // Execute helper
-        let result = self.call_helper(helper_id, args, ctx, stack)?;
+        let result = self.call_helper(helper_id, args, ctx, stack, managed)?;
 
         // Store result in R0
         regs.set(Register::R0, result);
@@ -271,6 +318,7 @@ impl<P: PhysicalProfile> Interpreter<P> {
         args: [u64; 5],
         ctx: &BpfContext<'_>,
         stack: &[u8],
+        managed: Option<&mut ManagedInvocation>,
     ) -> Result<u64, BpfError> {
         let Some(id) = HelperId::from_raw(helper_id) else {
             return Err(BpfError::InvalidHelper(helper_id));
@@ -279,10 +327,7 @@ impl<P: PhysicalProfile> Interpreter<P> {
             return Err(BpfError::InvalidHelper(helper_id));
         };
 
-        // Integer registers retain addresses, not the live stack borrow's
-        // provenance. Reconstruct stack-backed input pointers from this borrow
-        // for the duration of the helper call. Other pointers retain the
-        // existing verifier/map/context lifetime contract.
+        // Reconstruct stack-backed pointers from the live borrow.
         let input_ptr = |addr: u64| {
             let start = stack.as_ptr().addr() as u64;
             match addr.checked_sub(start) {
@@ -293,6 +338,64 @@ impl<P: PhysicalProfile> Interpreter<P> {
             }
         };
 
+        if let Some(managed) = managed {
+            return match runtime {
+                RuntimeHelper::MapLookupElem => {
+                    if args[0] > 1
+                        || (args[0] == 0 && !managed.envelope)
+                        || (args[0] == 1 && !managed.private_array)
+                    {
+                        return Err(BpfError::PermissionDenied);
+                    }
+                    // SAFETY: managed verification proves the exact key extent;
+                    // the invocation-local binding lease keeps the map alive.
+                    let value = unsafe { bpf_map_lookup_elem(args[0] as u32, input_ptr(args[1])) };
+                    if value.is_null() {
+                        Err(BpfError::ManagedMapFailure)
+                    } else {
+                        Ok(value as u64)
+                    }
+                }
+                RuntimeHelper::MapUpdateElem => {
+                    if args[0] != 1 || !managed.private_array {
+                        return Err(BpfError::PermissionDenied);
+                    }
+                    // SAFETY: managed verification proves exact key/value extents.
+                    let result = unsafe {
+                        bpf_map_update_elem(1, input_ptr(args[1]), input_ptr(args[2]), args[3])
+                    };
+                    if result == 0 {
+                        Ok(0)
+                    } else {
+                        Err(BpfError::ManagedMapFailure)
+                    }
+                }
+                RuntimeHelper::ManagedMotorPairV1 => {
+                    if managed.effects & crate::signing::managed::EFFECT_MOTOR_PAIR == 0 {
+                        return Err(BpfError::PermissionDenied);
+                    }
+                    let left = args[0] as i64;
+                    let right = args[1] as i64;
+                    if !(-1000..=1000).contains(&left) || !(-1000..=1000).contains(&right) {
+                        return Err(BpfError::ManagedRequestInvalid);
+                    }
+                    if managed.pair.is_some() {
+                        return Err(BpfError::ManagedRequestDuplicate);
+                    }
+                    managed.pair = Some(ManagedMotorPair {
+                        left: left as i16,
+                        right: right as i16,
+                    });
+                    Ok(0)
+                }
+                _ => Err(BpfError::InvalidHelper(helper_id)),
+            };
+        }
+
+        // Integer registers retain addresses, not the live stack borrow's
+        // provenance. Reconstruct stack-backed input pointers from this borrow
+        // for the duration of the helper call. Other pointers retain the
+        // existing verifier/map/context lifetime contract.
         // SAFETY: The helper contract requires live, in-bounds input buffers.
         // The reconstruction above restores stack provenance, not bounds or
         // initialization proofs for implicit map-key/value lengths; those remain
@@ -363,6 +466,7 @@ impl<P: PhysicalProfile> Interpreter<P> {
                 RuntimeHelper::MotorPairV1 => {
                     Ok(bpf_motor_pair_v1(args[0] as i32, args[1] as i32) as u64)
                 }
+                RuntimeHelper::ManagedMotorPairV1 => Err(BpfError::InvalidHelper(helper_id)),
             }
         }
     }
@@ -599,6 +703,16 @@ impl<P: PhysicalProfile> Interpreter<P> {
         ctx: &BpfContext<'_>,
         stack: &mut [u8],
     ) -> BpfResult {
+        self.execute_loop(program, ctx, stack, None)
+    }
+
+    fn execute_loop(
+        &self,
+        program: &BpfProgram<P>,
+        ctx: &BpfContext<'_>,
+        stack: &mut [u8],
+        mut managed: Option<&mut ManagedInvocation>,
+    ) -> BpfResult {
         let insns = program.instructions();
 
         if insns.is_empty() {
@@ -661,7 +775,7 @@ impl<P: PhysicalProfile> Interpreter<P> {
             }
 
             // Execute instruction
-            match self.execute_insn(insn, &mut regs, stack, ctx)? {
+            match self.execute_insn(insn, &mut regs, stack, ctx, managed.as_deref_mut())? {
                 InsnResult::Continue => {
                     pc += 1;
                 }
@@ -677,6 +791,36 @@ impl<P: PhysicalProfile> Interpreter<P> {
                 }
             }
         }
+    }
+
+    /// Execute a managed controller with frozen input, declared map access and
+    /// at most one captured wheel-pair request. This path allocates nothing and
+    /// never dispatches requests to hardware.
+    pub fn execute_managed_with_stack(
+        &self,
+        program: &ManagedProgram<P>,
+        payload: &kernel_abi::ManagedControlContextV1,
+        stack: &mut [u8],
+    ) -> Result<ManagedInvocationResult, BpfError> {
+        if payload.version != kernel_abi::MANAGED_CONTROL_CONTEXT_V1_VERSION
+            || payload.size != kernel_abi::MANAGED_CONTROL_CONTEXT_V1_SIZE
+            || payload.sensor_valid > 1
+            || payload.reserved != 0
+        {
+            return Err(BpfError::ManagedContextInvalid);
+        }
+        let contract = program.contract();
+        let mut invocation = ManagedInvocation {
+            effects: contract.effects(),
+            envelope: contract.envelope(),
+            private_array: contract.private_array().is_some(),
+            pair: None,
+        };
+        let ctx = BpfContext::from_struct(payload);
+        self.execute_loop(program.program(), &ctx, stack, Some(&mut invocation))?;
+        Ok(ManagedInvocationResult {
+            request: invocation.pair,
+        })
     }
 }
 
@@ -709,6 +853,436 @@ mod tests {
     use super::*;
     use crate::bytecode::program::{BpfProgType, ProgramBuilder};
     use crate::execution::helpers_stub;
+
+    fn managed_contract(effects: u32) -> crate::verifier::ManagedContract {
+        managed_contract_with(effects, false, None)
+    }
+
+    fn managed_contract_with(
+        effects: u32,
+        envelope: bool,
+        private_array: Option<crate::signing::managed::PrivateArray>,
+    ) -> crate::verifier::ManagedContract {
+        crate::verifier::ManagedContract::new(
+            crate::signing::managed::Manifest {
+                behavior_id: *b"managed-control!",
+                revision: 1,
+                envelope,
+                effects,
+                private_array,
+            },
+            effects,
+            effects,
+        )
+        .unwrap()
+    }
+
+    fn verify_managed(
+        insns: &[BpfInsn],
+        contract: crate::verifier::ManagedContract,
+    ) -> crate::verifier::ManagedProgram<ActiveProfile> {
+        let budget = crate::verifier::VerificationBudget::new(512 * 1024);
+        crate::verifier::Verifier::<ActiveProfile>::verify_managed_with_stats_bounded(
+            insns, contract, &budget,
+        )
+        .unwrap()
+        .0
+    }
+
+    #[test]
+    fn managed_capture_preserves_request_presence_and_safe_zero() {
+        let pair = [
+            BpfInsn::mov64_imm(1, -1000),
+            BpfInsn::mov64_imm(2, 1000),
+            BpfInsn::call(kernel_abi::BPF_HELPER_MANAGED_MOTOR_PAIR_V1),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ];
+        let none = [BpfInsn::mov64_imm(0, 0), BpfInsn::exit()];
+        let zero = [
+            BpfInsn::mov64_imm(1, 0),
+            BpfInsn::mov64_imm(2, 0),
+            BpfInsn::call(kernel_abi::BPF_HELPER_MANAGED_MOTOR_PAIR_V1),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ];
+        let budget = crate::verifier::VerificationBudget::new(512 * 1024);
+        let (pair, _) =
+            crate::verifier::Verifier::<ActiveProfile>::verify_managed_with_stats_bounded(
+                &pair,
+                managed_contract(crate::signing::managed::EFFECT_MOTOR_PAIR),
+                &budget,
+            )
+            .unwrap();
+        let (none, _) =
+            crate::verifier::Verifier::<ActiveProfile>::verify_managed_with_stats_bounded(
+                &none,
+                managed_contract(0),
+                &budget,
+            )
+            .unwrap();
+        let (zero, _) =
+            crate::verifier::Verifier::<ActiveProfile>::verify_managed_with_stats_bounded(
+                &zero,
+                managed_contract(crate::signing::managed::EFFECT_MOTOR_PAIR),
+                &budget,
+            )
+            .unwrap();
+        let payload = kernel_abi::ManagedControlContextV1 {
+            version: kernel_abi::MANAGED_CONTROL_CONTEXT_V1_VERSION,
+            size: kernel_abi::MANAGED_CONTROL_CONTEXT_V1_SIZE,
+            sensor_valid: 1,
+            ..Default::default()
+        };
+        let mut stack = alloc::vec![0; ActiveProfile::MAX_STACK_SIZE];
+        let interpreter = Interpreter::<ActiveProfile>::new();
+        assert_eq!(
+            interpreter.execute_managed_with_stack(&pair, &payload, &mut stack),
+            Ok(ManagedInvocationResult {
+                request: Some(ManagedMotorPair {
+                    left: -1000,
+                    right: 1000
+                })
+            })
+        );
+        assert_eq!(
+            interpreter.execute_managed_with_stack(&none, &payload, &mut stack),
+            Ok(ManagedInvocationResult { request: None })
+        );
+        assert_eq!(
+            interpreter.execute_managed_with_stack(&zero, &payload, &mut stack),
+            Ok(ManagedInvocationResult {
+                request: Some(ManagedMotorPair { left: 0, right: 0 })
+            })
+        );
+        assert_eq!(
+            ManagedInvocationResult { request: None }.motor_pair(),
+            ManagedMotorPair { left: 0, right: 0 }
+        );
+
+        let invalid_payload = kernel_abi::ManagedControlContextV1 {
+            reserved: 1,
+            ..payload
+        };
+        assert_eq!(
+            interpreter.execute_managed_with_stack(&none, &invalid_payload, &mut stack),
+            Err(BpfError::ManagedContextInvalid)
+        );
+    }
+
+    #[test]
+    fn managed_runtime_defenses_fail_closed() {
+        let interpreter = Interpreter::<ActiveProfile>::new();
+        let ctx = BpfContext::empty();
+        let mut stack = [0u8; 16];
+        let mut invocation = ManagedInvocation {
+            effects: crate::signing::managed::EFFECT_MOTOR_PAIR,
+            envelope: true,
+            private_array: true,
+            pair: None,
+        };
+
+        assert_eq!(
+            interpreter.call_helper(
+                kernel_abi::BPF_HELPER_MANAGED_MOTOR_PAIR_V1,
+                [(-1000i64) as u64, 1000, 0, 0, 0],
+                &ctx,
+                &stack,
+                Some(&mut invocation),
+            ),
+            Ok(0)
+        );
+        assert_eq!(
+            interpreter.call_helper(
+                kernel_abi::BPF_HELPER_MANAGED_MOTOR_PAIR_V1,
+                [(-1001i64) as u64, 0, 0, 0, 0],
+                &ctx,
+                &stack,
+                Some(&mut invocation),
+            ),
+            Err(BpfError::ManagedRequestInvalid)
+        );
+        assert_eq!(
+            interpreter.call_helper(
+                kernel_abi::BPF_HELPER_MANAGED_MOTOR_PAIR_V1,
+                [0, 0, 0, 0, 0],
+                &ctx,
+                &stack,
+                Some(&mut invocation),
+            ),
+            Err(BpfError::ManagedRequestDuplicate)
+        );
+        assert_eq!(
+            interpreter.call_helper(
+                kernel_abi::BPF_HELPER_MOTOR_PAIR_V1,
+                [0; 5],
+                &ctx,
+                &stack,
+                Some(&mut invocation),
+            ),
+            Err(BpfError::InvalidHelper(
+                kernel_abi::BPF_HELPER_MOTOR_PAIR_V1
+            ))
+        );
+
+        assert_eq!(
+            helpers_stub::with_map_failure(true, false, || interpreter.call_helper(
+                kernel_abi::BPF_HELPER_MAP_LOOKUP_ELEM,
+                [0, 0, 0, 0, 0],
+                &ctx,
+                &stack,
+                Some(&mut invocation),
+            )),
+            Err(BpfError::ManagedMapFailure)
+        );
+        assert_eq!(
+            helpers_stub::with_map_failure(false, true, || interpreter.call_helper(
+                kernel_abi::BPF_HELPER_MAP_UPDATE_ELEM,
+                [1, 0, 0, 0, 0],
+                &ctx,
+                &stack,
+                Some(&mut invocation),
+            )),
+            Err(BpfError::ManagedMapFailure)
+        );
+
+        let mut regs = RegisterFile::new();
+        assert!(matches!(
+            interpreter.execute_insn(
+                &BpfInsn::new(0xff, 0, 0, 0, 0),
+                &mut regs,
+                &mut stack,
+                &ctx,
+                Some(&mut invocation),
+            ),
+            Err(BpfError::InvalidInstruction)
+        ));
+    }
+
+    #[test]
+    fn managed_verified_failures_never_publish_an_earlier_capture() {
+        let capture = BpfInsn::call(kernel_abi::BPF_HELPER_MANAGED_MOTOR_PAIR_V1);
+        let duplicate = verify_managed(
+            &[
+                BpfInsn::mov64_imm(1, 10),
+                BpfInsn::mov64_imm(2, 20),
+                capture,
+                BpfInsn::mov64_imm(1, 30),
+                BpfInsn::mov64_imm(2, 40),
+                capture,
+                BpfInsn::mov64_imm(0, 0),
+                BpfInsn::exit(),
+            ],
+            managed_contract(crate::signing::managed::EFFECT_MOTOR_PAIR),
+        );
+        // Preserve the frozen payload pointer across the first helper call.
+        let invalid_from_context = |zero_extend: bool| {
+            let mut insns = alloc::vec![
+                BpfInsn::new(0x79, 6, 1, 0, 0),
+                BpfInsn::mov64_imm(1, 10),
+                BpfInsn::mov64_imm(2, 20),
+                capture,
+                BpfInsn::new(0x79, 1, 6, 40, 0),
+            ];
+            if zero_extend {
+                insns.push(BpfInsn::new(0xbc, 1, 1, 0, 0));
+            }
+            insns.extend([
+                BpfInsn::mov64_imm(2, 0),
+                capture,
+                BpfInsn::mov64_imm(0, 0),
+                BpfInsn::exit(),
+            ]);
+            verify_managed(
+                &insns,
+                managed_contract(crate::signing::managed::EFFECT_MOTOR_PAIR),
+            )
+        };
+        let invalid_high = invalid_from_context(false);
+        let zero_extended_negative = invalid_from_context(true);
+        let payload = |sensor_value| kernel_abi::ManagedControlContextV1 {
+            version: kernel_abi::MANAGED_CONTROL_CONTEXT_V1_VERSION,
+            size: kernel_abi::MANAGED_CONTROL_CONTEXT_V1_SIZE,
+            sensor_value,
+            sensor_valid: 1,
+            ..Default::default()
+        };
+        let interpreter = Interpreter::<ActiveProfile>::new();
+        let mut stack = alloc::vec![0; ActiveProfile::MAX_STACK_SIZE];
+        assert_eq!(
+            interpreter.execute_managed_with_stack(&duplicate, &payload(0), &mut stack),
+            Err(BpfError::ManagedRequestDuplicate)
+        );
+        assert_eq!(
+            interpreter.execute_managed_with_stack(&invalid_high, &payload(1001), &mut stack),
+            Err(BpfError::ManagedRequestInvalid)
+        );
+        assert_eq!(
+            interpreter.execute_managed_with_stack(
+                &zero_extended_negative,
+                &payload(-1),
+                &mut stack,
+            ),
+            Err(BpfError::ManagedRequestInvalid)
+        );
+    }
+
+    #[test]
+    fn managed_verified_map_failures_discard_capture() {
+        let prefix = [
+            BpfInsn::mov64_imm(1, 100),
+            BpfInsn::mov64_imm(2, -100),
+            BpfInsn::call(kernel_abi::BPF_HELPER_MANAGED_MOTOR_PAIR_V1),
+        ];
+        let lookup = verify_managed(
+            &prefix
+                .into_iter()
+                .chain([
+                    BpfInsn::new(0x62, 10, 0, -4, 0),
+                    BpfInsn::mov64_imm(1, 0),
+                    BpfInsn::mov64_reg(2, 10),
+                    BpfInsn::add64_imm(2, -4),
+                    BpfInsn::call(kernel_abi::BPF_HELPER_MAP_LOOKUP_ELEM),
+                    BpfInsn::mov64_imm(0, 0),
+                    BpfInsn::exit(),
+                ])
+                .collect::<alloc::vec::Vec<_>>(),
+            managed_contract_with(crate::signing::managed::EFFECT_MOTOR_PAIR, true, None),
+        );
+        let update = verify_managed(
+            &prefix
+                .into_iter()
+                .chain([
+                    BpfInsn::new(0x7a, 10, 0, -16, 0),
+                    BpfInsn::new(0x7a, 10, 0, -8, 0),
+                    BpfInsn::mov64_imm(1, 1),
+                    BpfInsn::mov64_reg(2, 10),
+                    BpfInsn::add64_imm(2, -4),
+                    BpfInsn::mov64_reg(3, 10),
+                    BpfInsn::add64_imm(3, -16),
+                    BpfInsn::mov64_imm(4, 0),
+                    BpfInsn::call(kernel_abi::BPF_HELPER_MAP_UPDATE_ELEM),
+                    BpfInsn::mov64_imm(0, 0),
+                    BpfInsn::exit(),
+                ])
+                .collect::<alloc::vec::Vec<_>>(),
+            managed_contract_with(
+                crate::signing::managed::EFFECT_MOTOR_PAIR,
+                false,
+                Some(crate::signing::managed::PrivateArray {
+                    value_size: 8,
+                    max_entries: 1,
+                }),
+            ),
+        );
+        let payload = kernel_abi::ManagedControlContextV1 {
+            version: kernel_abi::MANAGED_CONTROL_CONTEXT_V1_VERSION,
+            size: kernel_abi::MANAGED_CONTROL_CONTEXT_V1_SIZE,
+            ..Default::default()
+        };
+        let interpreter = Interpreter::<ActiveProfile>::new();
+        let mut stack = alloc::vec![0; ActiveProfile::MAX_STACK_SIZE];
+        assert_eq!(
+            helpers_stub::with_map_failure(true, false, || interpreter
+                .execute_managed_with_stack(&lookup, &payload, &mut stack)),
+            Err(BpfError::ManagedMapFailure)
+        );
+        assert_eq!(
+            helpers_stub::with_map_failure(false, true, || interpreter
+                .execute_managed_with_stack(&update, &payload, &mut stack)),
+            Err(BpfError::ManagedMapFailure)
+        );
+    }
+
+    #[test]
+    fn managed_verified_context_read_and_signed_boundaries() {
+        let program = verify_managed(
+            &[
+                BpfInsn::new(0x79, 0, 1, 0, 0),
+                BpfInsn::new(0x79, 1, 0, 40, 0),
+                BpfInsn::mov64_reg(2, 1),
+                BpfInsn::call(kernel_abi::BPF_HELPER_MANAGED_MOTOR_PAIR_V1),
+                BpfInsn::mov64_imm(0, 0),
+                BpfInsn::exit(),
+            ],
+            managed_contract(crate::signing::managed::EFFECT_MOTOR_PAIR),
+        );
+        let interpreter = Interpreter::<ActiveProfile>::new();
+        let mut stack = alloc::vec![0; ActiveProfile::MAX_STACK_SIZE];
+        for value in [-1000, -1, 0, 1, 1000] {
+            let payload = kernel_abi::ManagedControlContextV1 {
+                version: kernel_abi::MANAGED_CONTROL_CONTEXT_V1_VERSION,
+                size: kernel_abi::MANAGED_CONTROL_CONTEXT_V1_SIZE,
+                sensor_value: value,
+                sensor_valid: 1,
+                ..Default::default()
+            };
+            assert_eq!(
+                interpreter.execute_managed_with_stack(&program, &payload, &mut stack),
+                Ok(ManagedInvocationResult {
+                    request: Some(ManagedMotorPair {
+                        left: value as i16,
+                        right: value as i16,
+                    })
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn interpreter_alu_width_and_endian_semantics_match_ebpf() {
+        let interpreter = Interpreter::<ActiveProfile>::new();
+        let mut regs = RegisterFile::new();
+        let mut run = |opcode, input, imm| {
+            regs.set(Register::R0, input);
+            interpreter
+                .execute_alu(&BpfInsn::new(opcode, 0, 0, 0, imm), &mut regs, false)
+                .unwrap();
+            regs.get(Register::R0)
+        };
+
+        assert_eq!(run(0x34, 0x1_0000_0004, 2), 2); // ALU32 DIV
+        assert_eq!(run(0x94, 0x1_0000_0005, 4), 1); // ALU32 MOD
+        assert_eq!(run(0x74, 0x1_8000_0000, 31), 1); // ALU32 RSH
+        assert_eq!(run(0xc4, 0x8000_0000, 31), 0xffff_ffff); // ALU32 ARSH
+        assert_eq!(run(0x64, 1, 32), 1); // shift count masked by 0x1f
+        assert_eq!(run(0x64, 1, 63), 0x8000_0000);
+
+        let value = 0x0123_4567_89ab_cdef;
+        regs.set(Register::R0, value);
+        interpreter
+            .execute_alu(&BpfInsn::new(0xd4, 0, 0, 0, 64), &mut regs, false)
+            .unwrap();
+        assert_eq!(regs.get(Register::R0), value.to_le());
+        regs.set(Register::R0, value);
+        interpreter
+            .execute_alu(&BpfInsn::new(0xdc, 0, 0, 0, 64), &mut regs, false)
+            .unwrap();
+        assert_eq!(regs.get(Register::R0), value.to_be());
+
+        for width in [16, 32] {
+            regs.set(Register::R0, value);
+            interpreter
+                .execute_alu(&BpfInsn::new(0xd4, 0, 0, 0, width), &mut regs, false)
+                .unwrap();
+            let expected = match width {
+                16 => u64::from((value as u16).to_le()),
+                32 => u64::from((value as u32).to_le()),
+                _ => unreachable!(),
+            };
+            assert_eq!(regs.get(Register::R0), expected);
+            regs.set(Register::R0, value);
+            interpreter
+                .execute_alu(&BpfInsn::new(0xdc, 0, 0, 0, width), &mut regs, false)
+                .unwrap();
+            let expected = match width {
+                16 => u64::from((value as u16).to_be()),
+                32 => u64::from((value as u32).to_be()),
+                _ => unreachable!(),
+            };
+            assert_eq!(regs.get(Register::R0), expected);
+        }
+    }
 
     #[test]
     fn ensure_stubs_linked() {
@@ -808,7 +1382,7 @@ mod tests {
             .unwrap();
         assert_eq!(regs.get(Register::R0), 42);
         assert_eq!(
-            interpreter.call_helper(6, [0, stack.as_ptr() as u64, addr, 0, 0], &ctx, stack),
+            interpreter.call_helper(6, [0, stack.as_ptr() as u64, addr, 0, 0], &ctx, stack, None,),
             Ok(0)
         );
         assert_eq!(helpers_stub::get_test_map_value(), 42);
