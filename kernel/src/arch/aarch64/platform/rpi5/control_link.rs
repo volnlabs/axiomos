@@ -318,7 +318,13 @@ impl ControlLink {
             if !self.uart.try_write_byte(byte) {
                 break;
             }
-            self.tx.next_byte();
+            let accepted = self.tx.next_byte_with_motor_completion();
+            #[cfg(feature = "managed-runtime")]
+            if let Some((_, Some(frame))) = accepted {
+                crate::bpf::recorder::events::motor_tx(frame, true);
+            }
+            #[cfg(not(feature = "managed-runtime"))]
+            let _ = accepted;
             sent += 1;
         }
         #[cfg(feature = "managed-runtime")]
@@ -453,10 +459,14 @@ impl ControlLink {
             return true;
         }
         let seq = self.motor_seq.wrapping_add(1);
-        if self.tx.start_pending_motor(seq).is_none() {
+        let Some(frame) = self.tx.start_pending_motor(seq) else {
             return false;
-        }
+        };
         self.motor_seq = seq;
+        #[cfg(feature = "managed-runtime")]
+        crate::bpf::recorder::events::motor_tx(frame, false);
+        #[cfg(not(feature = "managed-runtime"))]
+        let _ = frame;
         true
     }
 }

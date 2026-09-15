@@ -322,6 +322,40 @@ pub(crate) fn lifecycle(public_id: u64, payload: ManagedAuditLifecycleV1) {
     });
 }
 
+/// Only a successfully framed command or its final locally accepted byte.
+pub(crate) fn motor_tx(frame: shrike_link::tx::MotorFrame, completed: bool) {
+    observe(|state, ticks| {
+        let origin = frame.request.origin;
+        let payload = ManagedAuditMotorTxV1 {
+            link_kind: MANAGED_AUDIT_MOTOR_TX,
+            event: if completed {
+                MANAGED_AUDIT_MOTOR_LOCAL_COMPLETE
+            } else {
+                MANAGED_AUDIT_MOTOR_FRAMED
+            },
+            cycle_id: origin.map_or(0, |v| v.cycle),
+            queued_at_ns: frame.request.queued_at,
+            artifact_handle: origin.map_or(0, |v| v.artifact_handle),
+            flags: (u32::from(origin.is_some()) * MANAGED_AUDIT_MOTOR_HAS_ORIGIN)
+                | (u32::from(frame.intermediate_zero) * MANAGED_AUDIT_MOTOR_INTERMEDIATE_ZERO),
+            left: frame.request.left,
+            right: frame.request.right,
+            command_sequence: u32::from(frame.sequence),
+            ..Default::default()
+        };
+        let _ = state.window.append(Record {
+            ticks,
+            correlation: origin.map_or(0, |v| v.generation),
+            kind: MANAGED_AUDIT_LINK,
+            payload: payload
+                .as_bytes()
+                .try_into()
+                .expect("64-byte motor TX payload"),
+            ..Record::EMPTY
+        });
+    });
+}
+
 pub(crate) fn trusted_stop(source: AuditSource) {
     observe(|state, ticks| state.trusted_stop(source, ticks));
 }
@@ -399,6 +433,95 @@ pub(crate) mod tests {
             records.extend_from_slice(&batch.records[..batch.count]);
         }
         records
+    }
+
+    #[test]
+    fn motor_tx_records_exact_frame_origin_and_only_local_completion() {
+        use shrike_link::tx::{MotorOrigin, MotorRequest, TxState};
+        let origin = MotorOrigin {
+            cycle: 1 << 40,
+            generation: 1 << 41,
+            artifact_handle: 0,
+        };
+        let mut tx = TxState::new();
+        let mut expected = Vec::new();
+        let records = capture_records(|| {
+            for (sequence, pair, tagged) in [
+                (255, (200, 200), true),
+                (0, (-200, -200), true),
+                (1, (0, 0), false),
+            ] {
+                tx.replace_motor_request(MotorRequest {
+                    left: pair.0,
+                    right: pair.1,
+                    queued_at: u64::MAX - 10,
+                    origin: tagged.then_some(origin),
+                });
+                let frame = tx.start_pending_motor(sequence).unwrap();
+                expected.push(frame);
+                motor_tx(frame, false);
+                // Busy attempts emit nothing; peeking a backpressured byte does
+                // not complete a frame. A newer pending owner cannot relabel it.
+                tx.replace_motor_request(MotorRequest {
+                    left: 100,
+                    right: 100,
+                    queued_at: 3,
+                    origin: Some(MotorOrigin {
+                        generation: 99,
+                        ..origin
+                    }),
+                });
+                assert_eq!(tx.start_pending_motor(7), None);
+                while let Some(byte) = tx.peek_byte() {
+                    assert_eq!(tx.peek_byte(), Some(byte));
+                    let (accepted, complete) = tx.next_byte_with_motor_completion().unwrap();
+                    assert_eq!(accepted, byte);
+                    if let Some(complete) = complete {
+                        motor_tx(complete, true);
+                    }
+                }
+            }
+        });
+        assert_eq!(records.len(), 6);
+        for (i, frame) in expected.iter().enumerate() {
+            let framed = ManagedAuditMotorTxV1::read_from_bytes(&records[2 * i].payload).unwrap();
+            let completed =
+                ManagedAuditMotorTxV1::read_from_bytes(&records[2 * i + 1].payload).unwrap();
+            assert_eq!(records[2 * i].kind, MANAGED_AUDIT_LINK);
+            assert_eq!(
+                records[2 * i].correlation,
+                frame.request.origin.map_or(0, |v| v.generation)
+            );
+            assert_eq!(records[2 * i + 1].correlation, records[2 * i].correlation);
+            assert_eq!(framed.link_kind, MANAGED_AUDIT_MOTOR_TX);
+            assert_eq!(framed.event, MANAGED_AUDIT_MOTOR_FRAMED);
+            assert_eq!(
+                completed,
+                ManagedAuditMotorTxV1 {
+                    event: MANAGED_AUDIT_MOTOR_LOCAL_COMPLETE,
+                    ..framed
+                }
+            );
+            assert_eq!(framed.cycle_id, frame.request.origin.map_or(0, |v| v.cycle));
+            assert_eq!(framed.artifact_handle, 0);
+            assert_eq!(
+                framed.flags,
+                u32::from(frame.request.origin.is_some())
+                    | (u32::from(frame.intermediate_zero) << 1)
+            );
+            assert_eq!(
+                (framed.left, framed.right),
+                (frame.request.left, frame.request.right)
+            );
+            assert_eq!(framed.command_sequence, u32::from(frame.sequence));
+            assert_eq!(framed.queued_at_ns, u64::MAX - 10);
+            assert_eq!(framed.reserved, [0; 24]);
+        }
+        assert!(expected[1].intermediate_zero);
+        assert_eq!(
+            (expected[1].request.left, expected[1].request.right),
+            (0, 0)
+        );
     }
 
     #[test]

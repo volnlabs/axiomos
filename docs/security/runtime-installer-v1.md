@@ -297,6 +297,40 @@ at byte 8 (u64); other payload bytes are zero. LINK subtype 2 stores a local
 monitor release and its u32 source at byte 4. It establishes neither physical
 rearm nor execution permission, and it does not erase latest-stop custody.
 
+LINK subtype 3 is `ManagedAuditMotorTxV1`. The Pi records event 1 only after
+framing a motor command and event 2 only after its last byte is accepted by the
+local UART. Repeated byte attempts under backpressure and failed framing
+attempts emit no additional events.
+
+| Byte | Field / type | Meaning |
+|---|---|---|
+| 0 | link_kind / u32 | 3, motor transmission |
+| 4 | event / u32 | 1 framed, 2 local UART complete |
+| 8 | cycle_id / u64 | Originating scheduled release, when origin is present |
+| 16 | queued_at_ns / u64 | Sender CNTVCT-derived queue time in nanoseconds |
+| 24 | artifact_handle / u32 | Originating artifact, when origin is present |
+| 28 | flags / u32 | Bit 0 origin present; bit 1 intermediate reversal zero |
+| 32 | left, right / i16 each | Actual framed pair |
+| 36 | command_sequence / u32 | Wrapping u8 wire sequence widened to u32 |
+| 40 | reserved / 24 bytes | Zero |
+
+With origin present, envelope correlation is the captured installation generation.
+Without it, correlation, cycle and artifact fields are zero and decoded identity
+is unknown; artifact handle zero alone never signals absence. Origin travels with
+the pending request and frame, so a later activation or queued request cannot
+relabel a partial frame. An intermediate reversal frame is `(0,0)` and retains
+its requesting origin; it is distinct from the policy-decided target pair.
+
+The decoder emits `motor_frame_created` and `motor_frame_local_uart_complete`,
+retains sequence/pair/origin/queue time and resolves any retained artifact context.
+It rejects unsupported events/flags, nonzero reserved bytes, out-of-range wire
+sequences, contradictory origin fields and nonzero intermediate pairs. Missing
+retained identity is a semantic gap. `sink_acceptance` remains null: these events
+do not establish MCU receipt, FPGA acceptance or movement. Queue nanoseconds
+must not be compared directly with recording CNTPCT ticks. A wire sequence alone
+is not a unique command identity, and current decoding does not prove complete
+frame/discard/sink ordering; that belongs to the acceptance reducer.
+
 CYCLE correlation is the installation generation captured with the artifact
 handle under the control-slot lock, after the handoff boundary and before the
 invocation. The payload is `ManagedAuditCycleV1`:
@@ -365,6 +399,6 @@ reversed clock and invalid release; their details are zero.
 STOP category 1 reason/detail are zero. Category 3 reasons 1 through 8 are timer
 busy, not started, already started, invalid period, reversed clock, exhaustion,
 stopped and managed-control boundary failure. Category 4 reason is 5 (deadline).
-These timer details are zero. Lifecycle events, complete signed identity,
-command sequences, correlated sink acknowledgements and dedicated link/reset
-events remain required before the trace can satisfy the release acceptance gate.
+These timer details are zero. Transport discard outcomes, correlated sink
+acknowledgements, dedicated link/reset events and measured acceptance reduction
+remain required before the trace can satisfy the release acceptance gate.

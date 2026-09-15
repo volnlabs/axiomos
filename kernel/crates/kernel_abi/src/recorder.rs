@@ -19,6 +19,36 @@ pub const MANAGED_AUDIT_CYCLE: u32 = 3;
 pub const MANAGED_AUDIT_STOP: u32 = 4;
 pub const MANAGED_AUDIT_LINK: u32 = 5;
 
+pub const MANAGED_AUDIT_MOTOR_TX: u32 = 3;
+pub const MANAGED_AUDIT_MOTOR_FRAMED: u32 = 1;
+pub const MANAGED_AUDIT_MOTOR_LOCAL_COMPLETE: u32 = 2;
+pub const MANAGED_AUDIT_MOTOR_HAS_ORIGIN: u32 = 1;
+pub const MANAGED_AUDIT_MOTOR_INTERMEDIATE_ZERO: u32 = 2;
+
+/// LINK subtype 3. Correlation is the originating installation generation only
+/// with HAS_ORIGIN. The pair is the actual framed command, including reversal
+/// zero crossings. Local completion is UART acceptance, never sink acceptance.
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable,
+)]
+pub struct ManagedAuditMotorTxV1 {
+    pub link_kind: u32,
+    pub event: u32,
+    pub cycle_id: u64,
+    /// Pi sender CNTVCT-derived nanoseconds; not the recorder's CNTPCT ticks.
+    pub queued_at_ns: u64,
+    pub artifact_handle: u32,
+    pub flags: u32,
+    pub left: i16,
+    pub right: i16,
+    /// Wrapping u8 wire sequence, widened for the fixed payload layout.
+    pub command_sequence: u32,
+    pub reserved: [u8; 24],
+}
+
+const _: () = assert!(core::mem::size_of::<ManagedAuditMotorTxV1>() == 64);
+
 pub const MANAGED_AUDIT_UPLOAD: u32 = 1;
 pub const MANAGED_AUDIT_UPLOAD_HAS_IDENTITY: u32 = 1;
 pub const MANAGED_AUDIT_UPLOAD_HAS_ARTIFACT: u32 = 2;

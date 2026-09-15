@@ -622,8 +622,11 @@ impl DecodeState {
                 )
             }
             MANAGED_AUDIT_LINK => {
-                ensure!(r.correlation == 0, "unexpected global link correlation");
                 let subtype = u32::from_le_bytes(r.payload[..4].try_into().unwrap());
+                ensure!(
+                    subtype == MANAGED_AUDIT_MOTOR_TX || r.correlation == 0,
+                    "unexpected global link correlation"
+                );
                 let source = u32::from_le_bytes(r.payload[4..8].try_into().unwrap());
                 match subtype {
                     1 => {
@@ -644,6 +647,48 @@ impl DecodeState {
                         Ok(
                             json!({"event":"local_stop_release","source":self::source(source),"source_code":source,"physical_rearm":false}),
                         )
+                    }
+                    MANAGED_AUDIT_MOTOR_TX => {
+                        let p = ManagedAuditMotorTxV1::read_from_bytes(&r.payload).unwrap();
+                        let origin = p.flags & MANAGED_AUDIT_MOTOR_HAS_ORIGIN != 0;
+                        let intermediate = p.flags & MANAGED_AUDIT_MOTOR_INTERMEDIATE_ZERO != 0;
+                        ensure!(
+                            matches!(
+                                p.event,
+                                MANAGED_AUDIT_MOTOR_FRAMED | MANAGED_AUDIT_MOTOR_LOCAL_COMPLETE
+                            ) && p.flags
+                                & !(MANAGED_AUDIT_MOTOR_HAS_ORIGIN
+                                    | MANAGED_AUDIT_MOTOR_INTERMEDIATE_ZERO)
+                                == 0
+                                && p.command_sequence <= u8::MAX as u32
+                                && p.reserved == [0; 24]
+                                && (!intermediate || (p.left, p.right) == (0, 0))
+                                && if origin {
+                                    r.correlation != 0
+                                } else {
+                                    r.correlation == 0 && p.cycle_id == 0 && p.artifact_handle == 0
+                                },
+                            "invalid motor TX record"
+                        );
+                        let identity = if origin {
+                            self.identity(p.artifact_handle, r.sequence)
+                        } else {
+                            Value::Null
+                        };
+                        Ok(json!({
+                            "event": if p.event == MANAGED_AUDIT_MOTOR_FRAMED { "motor_frame_created" } else { "motor_frame_local_uart_complete" },
+                            "origin_known": origin,
+                            "cycle_id": origin.then_some(p.cycle_id),
+                            "generation": origin.then_some(r.correlation),
+                            "artifact_handle": origin.then_some(p.artifact_handle),
+                            "command_sequence": p.command_sequence,
+                            "framed_pair": [p.left, p.right],
+                            "intermediate_zero": intermediate,
+                            "queued_at_ns": p.queued_at_ns,
+                            "queued_clock": "pi_cntvct_ns",
+                            "identity": identity,
+                            "sink_acceptance": null
+                        }))
                     }
                     _ => bail!("unsupported link payload"),
                 }
@@ -1041,6 +1086,102 @@ mod tests {
             ..Default::default()
         });
         records
+    }
+
+    #[test]
+    fn motor_tx_decode_preserves_origin_and_never_claims_sink_acceptance() {
+        let mut records = identity_and_lifecycle();
+        let p = ManagedAuditMotorTxV1 {
+            link_kind: MANAGED_AUDIT_MOTOR_TX,
+            event: MANAGED_AUDIT_MOTOR_FRAMED,
+            cycle_id: 1 << 40,
+            queued_at_ns: u64::MAX - 10,
+            artifact_handle: 17,
+            flags: MANAGED_AUDIT_MOTOR_HAS_ORIGIN | MANAGED_AUDIT_MOTOR_INTERMEDIATE_ZERO,
+            command_sequence: 255,
+            ..Default::default()
+        };
+        let record = |p: ManagedAuditMotorTxV1, generation| ManagedAuditRecordV1 {
+            ticks: 11,
+            correlation: generation,
+            kind: MANAGED_AUDIT_LINK,
+            payload: p.as_bytes().try_into().unwrap(),
+            ..Default::default()
+        };
+        records.push(record(p, 1 << 41));
+        records.push(record(
+            ManagedAuditMotorTxV1 {
+                event: MANAGED_AUDIT_MOTOR_LOCAL_COMPLETE,
+                ..p
+            },
+            1 << 41,
+        ));
+        let result = decode(export(&records).as_bytes()).unwrap();
+        assert_eq!(
+            result["events"][13]["decoded"]["event"],
+            "motor_frame_created"
+        );
+        let complete = &result["events"][14]["decoded"];
+        assert_eq!(complete["event"], "motor_frame_local_uart_complete");
+        assert_eq!(complete["generation"], 1u64 << 41);
+        assert_eq!(complete["cycle_id"], 1u64 << 40);
+        assert_eq!(complete["command_sequence"], 255);
+        assert_eq!(complete["framed_pair"], json!([0, 0]));
+        assert_eq!(complete["intermediate_zero"], true);
+        assert_eq!(complete["queued_at_ns"], u64::MAX - 10);
+        assert_eq!(complete["identity"]["artifact_handle"], 17);
+        assert_eq!(complete["sink_acceptance"], Value::Null);
+        assert_eq!(result["qualification_evaluated"], false);
+        assert!(result["semantic_gaps"].as_array().unwrap().is_empty());
+
+        // Wire sequence zero is valid. Unknown origin and unknown retained
+        // identity remain explicit; neither is inferred from an artifact zero.
+        let untagged = ManagedAuditMotorTxV1 {
+            cycle_id: 0,
+            artifact_handle: 0,
+            flags: 0,
+            command_sequence: 0,
+            ..p
+        };
+        let decoded = decode(export(&[record(untagged, 0)]).as_bytes()).unwrap();
+        assert!(decoded["events"][0]["decoded"]["generation"].is_null());
+        assert!(decoded["events"][0]["decoded"]["identity"].is_null());
+        assert!(decoded["semantic_gaps"].as_array().unwrap().is_empty());
+        let missing = decode(
+            export(&[record(
+                ManagedAuditMotorTxV1 {
+                    artifact_handle: 0,
+                    ..p
+                },
+                1,
+            )])
+            .as_bytes(),
+        )
+        .unwrap();
+        assert!(missing["events"][0]["decoded"]["identity"].is_null());
+        assert_eq!(missing["semantic_gaps"].as_array().unwrap().len(), 1);
+        for bad in [
+            ManagedAuditMotorTxV1 { event: 0, ..p },
+            ManagedAuditMotorTxV1 { event: 3, ..p },
+            ManagedAuditMotorTxV1 { flags: 4, ..p },
+            ManagedAuditMotorTxV1 { flags: 0, ..p },
+            ManagedAuditMotorTxV1 {
+                command_sequence: 256,
+                ..p
+            },
+            ManagedAuditMotorTxV1 { left: 1, ..p },
+            ManagedAuditMotorTxV1 {
+                reserved: [1; 24],
+                ..p
+            },
+        ] {
+            assert!(
+                decode(export(&[record(bad, 1)]).as_bytes()).is_err(),
+                "{bad:?}"
+            );
+        }
+        assert!(decode(export(&[record(p, 0)]).as_bytes()).is_err());
+        assert!(decode(export(&[record(untagged, 1)]).as_bytes()).is_err());
     }
 
     #[test]
