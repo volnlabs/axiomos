@@ -1,13 +1,16 @@
 //! Fixed managed-controller verification contract. Authentication and admission
 //! are separate worker responsibilities; this module proves bytecode/bindings.
 
+use super::budget::BudgetVec;
 use super::core::{MapPerm, Verifier, VerifyConfig, VerifyStats};
 use super::error::{VerifyError, VerifyResult};
 use super::{LoadCaller, VerificationBudget};
 use crate::actuation::EnvelopeEntry;
 use crate::bytecode::{BpfInsn, BpfProgType, BpfProgram};
 use crate::profile::{ActiveProfile, PhysicalProfile};
-use crate::signing::managed::{EFFECT_MOTOR_PAIR, Manifest, PrivateArray};
+use crate::signing::managed::{
+    ArtifactIdentity, AuthenticatedBundle, EFFECT_MOTOR_PAIR, Manifest, PrivateArray,
+};
 
 /// Retained declaration used for both verification and every fresh instance.
 /// Administration privilege cannot widen the signed/trusted/slot intersection.
@@ -79,6 +82,99 @@ impl<P: PhysicalProfile> ManagedProgram<P> {
     }
     pub(crate) fn program(&self) -> &BpfProgram<P> {
         &self.program
+    }
+}
+
+/// Immutable authenticated and verified managed behavior.
+///
+/// Admission, installation, mutable state and actuation are separate manager
+/// responsibilities. `code_bytes` is the retained verifier-output allocation
+/// charge that the eventual owner must release after the artifact is dropped.
+#[derive(Debug)]
+pub struct BehaviorArtifact<P: PhysicalProfile = ActiveProfile> {
+    identity: ArtifactIdentity,
+    program: ManagedProgram<P>,
+    wcet_cycles: u64,
+    states_explored: usize,
+    code_bytes: usize,
+}
+
+impl<P: PhysicalProfile> BehaviorArtifact<P> {
+    pub fn prepare(
+        bundle: &AuthenticatedBundle<'_>,
+        signer_effects: u32,
+        slot_effects: u32,
+        budget: &mut VerificationBudget,
+    ) -> VerifyResult<Self> {
+        let baseline = budget.used();
+        let contract = ManagedContract::new(bundle.manifest(), signer_effects, slot_effects)?;
+        let mut decoded = BudgetVec::new(Some(&*budget));
+        let instructions = bundle.instructions();
+        decoded.reserve(instructions.len())?;
+        for insn in instructions {
+            decoded.push(insn)?;
+        }
+        let (program, stats) =
+            Verifier::<P>::verify_managed_with_stats_bounded(&decoded, contract, budget)?;
+        drop(decoded);
+
+        let VerifyStats {
+            states_explored,
+            wcet_cycles,
+            referenced_map_handles,
+        } = stats;
+        let outputs = budget
+            .used()
+            .checked_sub(baseline)
+            .ok_or(VerifyError::ResourceExhausted)?;
+        let Some(handle_bytes) = referenced_map_handles
+            .capacity()
+            .checked_mul(core::mem::size_of::<u32>())
+            .filter(|bytes| *bytes <= outputs)
+        else {
+            drop((program, referenced_map_handles));
+            budget.release_output(outputs)?;
+            return Err(VerifyError::ResourceExhausted);
+        };
+        drop(referenced_map_handles);
+        if budget.release_output(handle_bytes).is_err() {
+            drop(program);
+            budget.release_output(outputs)?;
+            return Err(VerifyError::ResourceExhausted);
+        }
+        let code_bytes = outputs - handle_bytes;
+
+        Ok(Self {
+            identity: bundle.identity(),
+            program,
+            wcet_cycles,
+            states_explored,
+            code_bytes,
+        })
+    }
+
+    pub const fn identity(&self) -> ArtifactIdentity {
+        self.identity
+    }
+
+    pub const fn contract(&self) -> ManagedContract {
+        self.program.contract()
+    }
+
+    pub const fn program(&self) -> &ManagedProgram<P> {
+        &self.program
+    }
+
+    pub const fn wcet_cycles(&self) -> u64 {
+        self.wcet_cycles
+    }
+
+    pub const fn states_explored(&self) -> usize {
+        self.states_explored
+    }
+
+    pub const fn code_bytes(&self) -> usize {
+        self.code_bytes
     }
 }
 
@@ -221,10 +317,14 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
+    use ed25519_dalek::{Signer, SigningKey};
+
     use super::super::HelperId;
     use super::*;
     use crate::actuation::EnvelopeMap;
     use crate::maps::BpfMap;
+    use crate::signing::managed::{HEADER_SIZE, MANIFEST_SIZE, signing_hash};
+    use crate::signing::{ProgramHash, SignatureVerifier, TrustedKey};
 
     fn manifest() -> Manifest {
         Manifest {
@@ -240,6 +340,30 @@ mod tests {
     }
     fn contract() -> ManagedContract {
         ManagedContract::new(manifest(), 1, 1).unwrap()
+    }
+
+    fn signed_bundle(manifest: Manifest, insns: &[BpfInsn]) -> (Vec<u8>, SignatureVerifier) {
+        let mut payload = Vec::new();
+        payload
+            .try_reserve_exact(insns.len() * BpfInsn::SIZE)
+            .unwrap();
+        for insn in insns {
+            payload.push(insn.opcode);
+            payload.push(insn.regs);
+            payload.extend_from_slice(&insn.offset.to_le_bytes());
+            payload.extend_from_slice(&insn.imm.to_le_bytes());
+        }
+        let key = SigningKey::from_bytes(&[91; 32]);
+        let public_key = key.verifying_key().to_bytes();
+        let mut header = manifest.unsigned_header(&payload, &public_key).unwrap();
+        let signature = key.sign(signing_hash(&header).as_bytes()).to_bytes();
+        header[MANIFEST_SIZE..HEADER_SIZE].copy_from_slice(&signature);
+        let mut bytes = header.to_vec();
+        bytes.extend_from_slice(&payload);
+        let verifier =
+            SignatureVerifier::from_trusted_keys(&[TrustedKey::from_bytes(&public_key).unwrap()])
+                .unwrap();
+        (bytes, verifier)
     }
     fn verify(
         insns: &[BpfInsn],
@@ -328,6 +452,65 @@ mod tests {
                 Err(VerifyError::UnsupportedManagedContract)
             );
         }
+    }
+
+    #[test]
+    fn behavior_artifact_preserves_authenticated_identity_contract_and_cost() {
+        let insns = update();
+        let (bytes, verifier) = signed_bundle(manifest(), &insns);
+        let bundle = verifier.authenticate_managed(&bytes).unwrap();
+        let identity = bundle.identity();
+        let mut budget = VerificationBudget::new(512 * 1024);
+        let baseline = budget.used();
+        let artifact = BehaviorArtifact::<ActiveProfile>::prepare(&bundle, 1, 1, &mut budget)
+            .expect("authenticated managed artifact");
+
+        assert_eq!(artifact.identity(), identity);
+        assert_eq!(identity.bundle_digest, ProgramHash::compute(&bytes));
+        assert_eq!(artifact.contract(), contract());
+        assert_eq!(artifact.program().program().instructions(), insns);
+        assert!(artifact.wcet_cycles() > 0);
+        assert!(artifact.states_explored() > 0);
+        assert_eq!(artifact.code_bytes(), insns.len() * BpfInsn::SIZE);
+        assert_eq!(budget.used() - baseline, artifact.code_bytes());
+
+        let charge = artifact.code_bytes();
+        drop(artifact);
+        budget.release_output(charge).unwrap();
+        assert_eq!(budget.used(), baseline);
+    }
+
+    #[test]
+    fn behavior_artifact_failures_refund_without_touching_existing_output() {
+        let good = [BpfInsn::mov64_imm(0, 0), BpfInsn::exit()];
+        let (good_bytes, verifier) = signed_bundle(manifest(), &good);
+        let good_bundle = verifier.authenticate_managed(&good_bytes).unwrap();
+        let mut budget = VerificationBudget::new(512 * 1024);
+        let retained =
+            BehaviorArtifact::<ActiveProfile>::prepare(&good_bundle, 1, 1, &mut budget).unwrap();
+        let existing = budget.used();
+
+        let invalid = [BpfInsn::mov64_imm(0, 0)];
+        let (invalid_bytes, invalid_verifier) = signed_bundle(manifest(), &invalid);
+        let invalid_bundle = invalid_verifier
+            .authenticate_managed(&invalid_bytes)
+            .unwrap();
+        assert!(
+            BehaviorArtifact::<ActiveProfile>::prepare(&invalid_bundle, 1, 1, &mut budget).is_err()
+        );
+        assert_eq!(budget.used(), existing);
+
+        let mut empty_budget = VerificationBudget::new(0);
+        assert!(matches!(
+            BehaviorArtifact::<ActiveProfile>::prepare(&good_bundle, 1, 1, &mut empty_budget),
+            Err(VerifyError::ResourceExhausted)
+        ));
+        assert_eq!(empty_budget.used(), 0);
+
+        let charge = retained.code_bytes();
+        drop(retained);
+        budget.release_output(charge).unwrap();
+        assert_eq!(budget.used(), 0);
     }
 
     #[test]

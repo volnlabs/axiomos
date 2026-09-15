@@ -61,7 +61,7 @@ pub use cfg::ControlFlowGraph;
 pub use error::VerifyError;
 pub use helpers::{ArgType, HelperId, HelperSignature, get_helper_signature, validate_helper_call};
 pub use liveness::{Liveness, RegSet};
-pub use managed::{ManagedContract, ManagedProgram};
+pub use managed::{BehaviorArtifact, ManagedContract, ManagedProgram};
 pub use pruner::{PruneDecision, StatePruner, StateSubsumes};
 pub use refine::{RefinedScalar, refine_scalar};
 pub use state::{MapWritability, RegState, RegType, StackSlot, VerifierState};
