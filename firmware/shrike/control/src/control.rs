@@ -19,8 +19,9 @@ const RX_BYTES_PER_ITERATION: usize = 64;
 pub trait ByteIo {
     type Error;
 
-    /// Next received byte, or `None` if none ready.
-    fn read(&mut self) -> Option<u8>;
+    /// Next byte, or `Ok(None)` only when idle with no receive fault. Sticky
+    /// receive errors must remain visible even when the hardware FIFO is empty.
+    fn read(&mut self) -> Result<Option<u8>, Self::Error>;
     /// Try to transmit a prefix. `Ok(0)` is backpressure.
     fn try_write(&mut self, bytes: &[u8]) -> Result<usize, Self::Error>;
     /// Clear software and hardware receive/transmit state.
@@ -211,7 +212,19 @@ where
         }
 
         for _ in 0..RX_BYTES_PER_ITERATION {
-            let Some(b) = io.read() else { break };
+            let b = match io.read() {
+                Ok(Some(byte)) => byte,
+                Ok(None) => break,
+                Err(_) => {
+                    return terminate(
+                        io,
+                        motors,
+                        summary,
+                        RunTermination::Fault(FaultReason::Io),
+                        &tx,
+                    );
+                }
+            };
             let Some(decoded) = dec.push(b) else {
                 continue;
             };
@@ -565,10 +578,10 @@ mod tests {
     impl ByteIo for TestIo<'_> {
         type Error = ();
 
-        fn read(&mut self) -> Option<u8> {
+        fn read(&mut self) -> Result<Option<u8>, ()> {
             let byte = self.input.get(self.next).copied();
             self.next = self.next.saturating_add(1);
-            byte
+            Ok(byte)
         }
 
         fn try_write(&mut self, bytes: &[u8]) -> Result<usize, ()> {
@@ -591,10 +604,10 @@ mod tests {
     impl<'a> ByteIo for ContinuousIo<'a> {
         type Error = ();
 
-        fn read(&mut self) -> Option<u8> {
+        fn read(&mut self) -> Result<Option<u8>, ()> {
             let byte = self.input.get(self.next).copied().unwrap_or(0);
             self.next = self.next.saturating_add(1);
-            Some(byte)
+            Ok(Some(byte))
         }
 
         fn try_write(&mut self, bytes: &[u8]) -> Result<usize, ()> {

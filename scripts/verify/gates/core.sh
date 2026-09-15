@@ -23,6 +23,10 @@ run_step tooling-integration-tests python3 -B tests/scripts/test_xtask_cli.py
 run_step quality-provenance-tests python3 -B tests/scripts/test_quality.py
 run_step gpio23-probe-prompt-tests python3 -B tests/scripts/test_gpio23_probe.py
 run_step shrike-gpio23-probe-tests python3 -B tests/scripts/test_shrike_gpio23_probe.py
+run_step rpi5-peripheral-register-tests python3 -B tests/scripts/test_rpi5_peripheral_output.py
+run_step rp2040-uart-test-build rustc --edition 2021 -D warnings --test \
+    firmware/shrike/rp2040/host-tests/uart_adapter.rs -o "$OUTPUT_DIR/rp2040-uart-tests"
+run_step rp2040-uart-tests "$OUTPUT_DIR/rp2040-uart-tests"
 run_step kernel-host-tests env EMBEDDED_DISK_PATH=/dev/null cargo test --locked -p kernel --lib --features embedded-profile,managed-runtime
 run_step quality-boundary-static python3 -B scripts/verify/quality.py --check
 run_step artifact-provenance-static python3 scripts/verify/artifact-provenance.py
@@ -129,7 +133,7 @@ run_step process-sleep-state-tests "$OUTPUT_DIR/process-sleep-state-tests"
 run_cargo_step focused-host-tests test \
     -p kernel_abi -p kernel_elfloader -p kernel_physical_memory -p kernel_syscall \
     -p kernel_time -p kernel_usermem -p kernel_vfs -p kernel_map_transaction \
-    -p kernel_virtual_memory -p shrike_link
+    -p kernel_virtual_memory -p shrike_link -p shrike_control -p shrike_rp2040_host_sim
 
 # End-to-end exec-rollback coverage. Exercises the kernel_elfloader's
 # rollback contract under deterministic allocation failures: a

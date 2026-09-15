@@ -3,7 +3,7 @@
 //! Distinct from the debug console (`uart.rs`, UART10): this drives a DEDICATED
 //! header UART (`RP1_UART0`, GPIO14/15) and does its OWN baud/line init — the
 //! console `init()` is a firmware-preserved no-op, so reusing it would give the
-//! wrong baud. Only the transport task uses `write_byte`/`read_byte`; the ARM-A
+//! wrong baud. Only the transport task uses `try_write_byte`/`read_byte`; the ARM-A
 //! actuation seam must never block on this (it enqueues into a TX ring instead).
 //!
 //! Pinmux: GPIO14/15 must be in UART alt-function (firmware / `config.txt`).
@@ -28,6 +28,7 @@ mod reg {
 }
 
 mod fr {
+    pub const TXFE: u32 = 1 << 7; // TX FIFO empty (not shift-register empty)
     pub const TXFF: u32 = 1 << 5; // TX FIFO full
     pub const RXFE: u32 = 1 << 4; // RX FIFO empty
     pub const BUSY: u32 = 1 << 3; // transmitting
@@ -50,6 +51,10 @@ const IMSC_RXIM: u32 = 1 << 4;
 const ICR_ALL: u32 = 0x7FF;
 /// DR error bits [11:8]: framing / parity / break / overrun.
 const DR_ERR_MASK: u32 = 0xF00;
+
+/// Framing/parity/break/overrun flags in the low four bits, matching UARTRSR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReceiveError(pub u8);
 
 /// A PL011 UART instance at a fixed MMIO base.
 pub struct Pl011 {
@@ -94,34 +99,43 @@ impl Pl011 {
         self.r(reg::CR).write(cr::UARTEN | cr::TXE | cr::RXE);
     }
 
-    /// Nonblocking RX of one byte, `None` if the RX FIFO is empty OR the byte
-    /// carried a framing/parity/break/overrun error (a corrupt byte is dropped,
-    /// never returned — the decoder must not see garbage; CRC is the last line).
-    pub fn read_byte(&self) -> Option<u8> {
-        if self.r(reg::FR).read() & fr::RXFE != 0 {
-            return None;
+    /// Nonblocking RX. Only an error-free empty FIFO returns `Ok(None)`;
+    /// receive faults must invalidate decoder/session and quiescence state.
+    pub fn read_byte(&self) -> Result<Option<u8>, ReceiveError> {
+        let flags = self.r(reg::FR).read();
+        // Overrun is latched immediately, even before a data-register read.
+        // Sample it after flags so an error at the empty observation is not idle.
+        let status = self.r(reg::RSRECR).read() & 0xF;
+        if status != 0 {
+            self.r(reg::RSRECR).write(0);
+            return Err(ReceiveError(status as u8));
+        }
+        if flags & fr::RXFE != 0 {
+            return Ok(None);
         }
         let dr = self.r(reg::DR).read();
         if dr & DR_ERR_MASK != 0 {
             // Clear the sticky error latch and drop the byte.
             self.r(reg::RSRECR).write(0);
-            return None;
+            return Err(ReceiveError(((dr & DR_ERR_MASK) >> 8) as u8));
         }
-        Some((dr & 0xFF) as u8)
+        Ok(Some((dr & 0xFF) as u8))
     }
 
-    /// True if the TX FIFO is full (a `write_byte` would spin). Callers in IRQ
-    /// context check this to bound their drain and never block.
-    pub fn tx_full(&self) -> bool {
-        self.r(reg::FR).read() & fr::TXFF != 0
+    /// Both FIFO and the last transmitted stop bit have drained. This is a
+    /// local UART observation, never a peer acknowledgement or safe-output proof.
+    pub fn tx_idle(&self) -> bool {
+        self.r(reg::FR).read() & (fr::TXFE | fr::BUSY) == fr::TXFE
     }
 
-    /// Blocking TX of one byte (spins on TX-FIFO-full). Transport task only —
-    /// never call from the actuation path while holding APPLY_LOCK. In the IRQ
-    /// poll, gate with `tx_full()` first so this never actually spins.
-    pub fn write_byte(&self, b: u8) {
-        while self.r(reg::FR).read() & fr::TXFF != 0 {}
+    /// One nonblocking acceptance attempt. The caller advances its frame only
+    /// after `true`; FIFO backpressure leaves that same byte pending.
+    pub fn try_write_byte(&self, b: u8) -> bool {
+        if self.r(reg::FR).read() & fr::TXFF != 0 {
+            return false;
+        }
         self.r(reg::DR).write(b as u32);
+        true
     }
 
     /// Enable RX interrupts (for the future IRQ-driven path, once RP1 IRQ

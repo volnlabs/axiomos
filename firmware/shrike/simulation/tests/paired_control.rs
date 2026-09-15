@@ -48,6 +48,72 @@ fn decoded(bytes: &[u8]) -> Vec<Msg> {
 }
 
 #[test]
+fn rx_error_discards_queued_safe_replies_and_partial_motion_and_preserves_reset_failure() {
+    let safe = frames(&[
+        Msg::SessionOffer { session: 7 },
+        Msg::SafeBarrier {
+            session: 7,
+            correlation: 1,
+            sequence: 1,
+        },
+    ]);
+    for reset_fails in [false, true] {
+        let mut input = safe.clone();
+        input.extend(frames(&[Msg::MotorSetpoint {
+            seq: 2,
+            left: 200,
+            right: 200,
+        }]));
+        let mut io = MockByteIo::new(input);
+        io.fail_read_at = Some(safe.len() + 3);
+        io.fail_reset = reset_fails;
+        let mut motors = MockMotorPair::new();
+        let summary = run(
+            &mut io,
+            &MockClock::new(0),
+            &mut MockUltrasonic::new(vec![]),
+            &mut MockEstop::new(false),
+            &mut motors,
+            managed_config(100),
+            Some(2),
+        )
+        .unwrap();
+        assert_eq!(summary.termination, RunTermination::Fault(FaultReason::Io));
+        assert_eq!(summary.iterations, 1);
+        assert_eq!(summary.motor_pairs_accepted, 2);
+        assert_eq!(summary.safe_barriers_accepted, 1);
+        assert_eq!(summary.motor_inhibit_calls, 1);
+        assert_eq!(summary.telemetry_frames_dropped, 2);
+        assert_eq!(summary.bytes_written, 0);
+        assert_eq!(summary.io_reset_failed, reset_fails);
+        assert_eq!((io.reads, io.resets), (safe.len() + 4, 1));
+        assert!(
+            io.output.is_empty(),
+            "neither pending acknowledgement may escape"
+        );
+        assert_eq!(
+            motors.calls,
+            [
+                MotorPairCall::Apply {
+                    seq: 0,
+                    left: 0,
+                    right: 0
+                },
+                MotorPairCall::Apply {
+                    seq: 1,
+                    left: 0,
+                    right: 0
+                },
+                MotorPairCall::Inhibit,
+            ]
+        );
+        if !reset_fails {
+            assert_eq!(shrike_control::ByteIo::read(&mut io), Ok(None));
+        }
+    }
+}
+
+#[test]
 fn managed_peer_is_silent_and_rejects_motion_before_session_offer() {
     let mut silent_io = MockByteIo::new(vec![]);
     let mut silent_ultra = MockUltrasonic::new(vec![77]);
@@ -790,9 +856,9 @@ struct BackpressuredIo {
 }
 impl shrike_control::ByteIo for BackpressuredIo {
     type Error = ();
-    fn read(&mut self) -> Option<u8> {
+    fn read(&mut self) -> Result<Option<u8>, ()> {
         self.budget = self.per_iteration;
-        None
+        Ok(None)
     }
     fn try_write(&mut self, bytes: &[u8]) -> Result<usize, ()> {
         if self.fail_after.is_some_and(|n| self.wire.len() >= n) {

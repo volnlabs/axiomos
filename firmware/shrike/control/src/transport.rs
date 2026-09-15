@@ -173,7 +173,8 @@ const fn is_telemetry(msg: Msg) -> bool {
 /// The target must qualify ByteIo::reset against its real queues/FIFOs; these
 /// host checks cannot prove that a remote peer or UART has become quiescent.
 pub struct LinkQuiescence {
-    quiet_since: Option<u64>,
+    /// A fault poisons this drain attempt until a fresh successful `begin`.
+    quiet_since: Result<u64, TransportError>,
     last_poll: u64,
 }
 
@@ -193,31 +194,36 @@ impl LinkQuiescence {
         io.reset().map_err(|_| TransportError::Io)?;
         let now = clock.now_us();
         Ok(Self {
-            quiet_since: Some(now),
+            quiet_since: Ok(now),
             last_poll: now,
         })
     }
 
     /// Drain at most 64 received bytes; every observed byte restarts the full
-    /// quiet interval. Clock regression requires another explicit begin.
+    /// quiet interval. RX or clock faults retain their first cause and require
+    /// another explicit begin; neither is an idle observation.
     pub fn poll(
         &mut self,
         io: &mut impl ByteIo,
         clock: &impl MicrosClock,
     ) -> Result<bool, TransportError> {
-        let Some(mut quiet_since) = self.quiet_since else {
-            return Err(TransportError::ClockRegression);
-        };
+        let mut quiet_since = self.quiet_since?;
         for _ in 0..64 {
             let before_read = clock.now_us();
             if before_read < self.last_poll {
-                self.quiet_since = None;
+                self.quiet_since = Err(TransportError::ClockRegression);
                 return Err(TransportError::ClockRegression);
             }
-            let received = io.read().is_some();
+            let received = match io.read() {
+                Ok(byte) => byte.is_some(),
+                Err(_) => {
+                    self.quiet_since = Err(TransportError::Io);
+                    return Err(TransportError::Io);
+                }
+            };
             let after_read = clock.now_us();
             if after_read < before_read {
-                self.quiet_since = None;
+                self.quiet_since = Err(TransportError::ClockRegression);
                 return Err(TransportError::ClockRegression);
             }
             self.last_poll = after_read;
@@ -225,7 +231,7 @@ impl LinkQuiescence {
                 return Ok(before_read - quiet_since >= Self::QUIET_US);
             }
             quiet_since = after_read;
-            self.quiet_since = Some(after_read);
+            self.quiet_since = Ok(after_read);
         }
         Ok(false)
     }
@@ -247,21 +253,27 @@ mod tests {
         wire: Vec<u8>,
         quota: usize,
         fail_write: bool,
+        fail_read: bool,
         fail_reset: bool,
         over_report: bool,
         resets: usize,
+        reads: usize,
         clock: Option<Rc<Cell<u64>>>,
         reset_elapsed_us: u64,
         read_elapsed_us: VecDeque<u64>,
     }
     impl ByteIo for Io {
         type Error = ();
-        fn read(&mut self) -> Option<u8> {
+        fn read(&mut self) -> Result<Option<u8>, ()> {
+            self.reads += 1;
+            if self.fail_read {
+                return Err(());
+            }
             let received = self.rx.pop_front();
             if let (Some(clock), Some(elapsed)) = (&self.clock, self.read_elapsed_us.pop_front()) {
                 clock.set(clock.get().saturating_add(elapsed));
             }
-            received
+            Ok(received)
         }
         fn try_write(&mut self, bytes: &[u8]) -> Result<usize, ()> {
             if self.fail_write {
@@ -569,6 +581,62 @@ mod tests {
         io.fail_reset = true;
         assert!(LinkQuiescence::begin(&mut io, &mut sink, &mut decoder, &mut tx, &clock).is_err());
         assert!(sink.stopped);
+    }
+
+    #[test]
+    fn rx_error_at_quiet_boundary_stays_invalid_until_a_fresh_successful_begin() {
+        let mut io = Io::default();
+        let mut sink = Sink::default();
+        let mut decoder = Decoder::new();
+        let mut tx = TelemetryTx::new();
+        let clock = Clock::new(0);
+        let mut drain =
+            LinkQuiescence::begin(&mut io, &mut sink, &mut decoder, &mut tx, &clock).unwrap();
+        assert!(io.rx.is_empty());
+        clock.set(LinkQuiescence::QUIET_US);
+        io.fail_read = true; // A sticky hardware overrun can accompany an empty FIFO.
+        assert_eq!(drain.poll(&mut io, &clock), Err(TransportError::Io));
+        let reads = io.reads;
+        io.fail_read = false;
+        for now in [400_000, 0, 800_000] {
+            clock.set(now);
+            assert_eq!(drain.poll(&mut io, &clock), Err(TransportError::Io));
+            assert_eq!(io.reads, reads, "a faulted drain must not resume I/O");
+        }
+        io.fail_reset = true;
+        assert!(LinkQuiescence::begin(&mut io, &mut sink, &mut decoder, &mut tx, &clock).is_err());
+        assert_eq!(drain.poll(&mut io, &clock), Err(TransportError::Io));
+        io.fail_reset = false;
+        let mut fresh =
+            LinkQuiescence::begin(&mut io, &mut sink, &mut decoder, &mut tx, &clock).unwrap();
+        clock.set(999_999);
+        assert_eq!(fresh.poll(&mut io, &clock), Ok(false));
+        clock.set(1_000_000);
+        assert_eq!(fresh.poll(&mut io, &clock), Ok(true));
+        assert!(sink.stopped);
+    }
+
+    #[test]
+    fn rx_error_cannot_replace_an_earlier_clock_fault() {
+        let mut io = Io::default();
+        let mut sink = Sink::default();
+        let mut decoder = Decoder::new();
+        let mut tx = TelemetryTx::new();
+        let clock = Clock::new(10);
+        let mut drain =
+            LinkQuiescence::begin(&mut io, &mut sink, &mut decoder, &mut tx, &clock).unwrap();
+        clock.set(9);
+        assert_eq!(
+            drain.poll(&mut io, &clock),
+            Err(TransportError::ClockRegression)
+        );
+        io.fail_read = true;
+        clock.set(300_000);
+        assert_eq!(
+            drain.poll(&mut io, &clock),
+            Err(TransportError::ClockRegression)
+        );
+        assert_eq!(io.reads, 0);
     }
 
     #[test]

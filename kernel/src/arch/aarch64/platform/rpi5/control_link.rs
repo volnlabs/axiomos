@@ -160,13 +160,27 @@ impl ControlLink {
         let mut got = 0;
         while got < RX_PER_POLL {
             match self.uart.read_byte() {
-                Some(b) => {
+                Ok(Some(b)) => {
                     if !self.rx.push(b) {
                         self.rx_overflows = self.rx_overflows.wrapping_add(1);
                     }
                     got += 1;
                 }
-                None => break,
+                Ok(None) => break,
+                Err(_) => {
+                    // A lost/corrupt byte breaks framing and link eligibility.
+                    // Discard even earlier bytes from this pull before decode;
+                    // no buffered reply may authorize a handoff after the fault.
+                    self.rx = RingBuf::new();
+                    self.dec = Decoder::new();
+                    out.link_loss = true;
+                    out.estop = true;
+                    #[cfg(feature = "managed-runtime")]
+                    self.handoff_failed(self.handoff.operation(), HandoffError::NotEstablished);
+                    #[cfg(not(feature = "managed-runtime"))]
+                    self.queue_estop(true);
+                    break;
+                }
             }
         }
         out.overflow_count = self.rx_overflows.wrapping_sub(overflow_before) as usize;
@@ -295,13 +309,16 @@ impl ControlLink {
             }
         }
 
-        // TX: bounded drain. Stop when the FIFO is full (write_byte won't spin).
+        // TX: bounded nonblocking attempts; preserve the same byte on pressure.
         let mut sent = 0;
-        while sent < TX_PER_POLL && !self.uart.tx_full() {
-            let Some(byte) = self.tx.next_byte() else {
+        while sent < TX_PER_POLL {
+            let Some(byte) = self.tx.peek_byte() else {
                 break;
             };
-            self.uart.write_byte(byte);
+            if !self.uart.try_write_byte(byte) {
+                break;
+            }
+            self.tx.next_byte();
             sent += 1;
         }
         #[cfg(feature = "managed-runtime")]

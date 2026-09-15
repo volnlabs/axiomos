@@ -220,6 +220,11 @@ jobs:
           /tmp/r04-board-profile-test
       - name: Test Shrike-lite R0.4 flash contract
         run: python3 firmware/shrike/rp2040/host-tests/test_flash_contract.py
+      - name: Test UART register adapters
+        run: |
+          python3 tests/scripts/test_rpi5_peripheral_output.py
+          rustc --edition=2021 -D warnings --test firmware/shrike/rp2040/host-tests/uart_adapter.rs -o /tmp/rp2040-uart-test
+          /tmp/rp2040-uart-test
       - name: Test RP2040 firmware (debug)
         run: cargo test --manifest-path firmware/shrike/rp2040/Cargo.toml --target thumbv6m-none-eabi --no-run
       - name: Test RP2040 firmware (release)

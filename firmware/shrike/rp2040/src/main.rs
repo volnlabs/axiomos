@@ -13,14 +13,19 @@ compile_error!(
 
 #[allow(dead_code)]
 mod board;
+mod uart;
 
 use cortex_m_rt::entry;
 use embedded_hal::digital::{OutputPin, PinState};
 use embedded_hal::pwm::SetDutyCycle;
+use hal::clocks::Clock;
 use hal::pac;
 use panic_halt as _;
 use rp2040_hal as hal;
 use shrike_control::fpga::{BitstreamManifest, FpgaLifecycle, FpgaPlatform};
+use shrike_control::transport::{LinkQuiescence, TelemetryTx};
+use shrike_link::Decoder;
+use uart::{TimerClock, UartByteIo};
 
 #[link_section = ".boot2"]
 #[used]
@@ -111,7 +116,7 @@ where
 fn main() -> ! {
     let mut pac = pac::Peripherals::take().unwrap();
     let mut watchdog = hal::Watchdog::new(pac.WATCHDOG);
-    let _clocks = hal::clocks::init_clocks_and_plls(
+    let clocks = hal::clocks::init_clocks_and_plls(
         XTAL_HZ,
         pac.XOSC,
         pac.CLOCKS,
@@ -168,6 +173,34 @@ fn main() -> ! {
     let _ = VALIDATED_FPGA_ARTIFACT;
     lifecycle.fail_safe("FPGA runtime integration/artifact unavailable");
 
+    let clock = TimerClock::new(pac.TIMER, &mut pac.RESETS).unwrap_or_else(|_| stopped());
+    // board::PI_UART: UART0 TX/RX on GPIO16/17, owned only by this adapter.
+    let uart_pins = (
+        pins.gpio16.into_function::<hal::gpio::FunctionUart>(),
+        pins.gpio17.into_function::<hal::gpio::FunctionUart>(),
+    );
+    let mut io = UartByteIo::new(
+        pac.UART0,
+        uart_pins,
+        &mut pac.RESETS,
+        clocks.peripheral_clock.freq().to_Hz(),
+    )
+    .unwrap_or_else(|_| stopped());
+    let mut decoder = Decoder::new();
+    let mut tx = TelemetryTx::new();
+    let mut drain = LinkQuiescence::begin(&mut io, &mut lifecycle, &mut decoder, &mut tx, &clock)
+        .unwrap_or_else(|_| stopped());
+
+    // One bounded local drain pass per iteration. Both success and failure
+    // remain inhibited: local quiet is neither peer qualification nor rearm.
+    while let Ok(false) = drain.poll(&mut io, &clock) {
+        cortex_m::asm::nop();
+    }
+    lifecycle.fail_safe("local drain ended; runtime remains unavailable");
+    stopped()
+}
+
+fn stopped() -> ! {
     loop {
         cortex_m::asm::wfi();
     }

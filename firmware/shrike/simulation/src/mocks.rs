@@ -19,6 +19,10 @@ use shrike_control::{ByteIo, EstopLine, MicrosClock, MotorPairSink, Ultrasonic};
 pub struct MockByteIo {
     input: VecDeque<u8>,
     pub output: Vec<u8>,
+    pub fail_read_at: Option<usize>,
+    pub fail_reset: bool,
+    pub reads: usize,
+    pub resets: usize,
 }
 
 impl MockByteIo {
@@ -26,6 +30,10 @@ impl MockByteIo {
         Self {
             input: input.into(),
             output: Vec::new(),
+            fail_read_at: None,
+            fail_reset: false,
+            reads: 0,
+            resets: 0,
         }
     }
 }
@@ -33,14 +41,23 @@ impl MockByteIo {
 impl ByteIo for MockByteIo {
     type Error = ();
 
-    fn read(&mut self) -> Option<u8> {
-        self.input.pop_front()
+    fn read(&mut self) -> Result<Option<u8>, ()> {
+        let attempt = self.reads;
+        self.reads += 1;
+        if self.fail_read_at == Some(attempt) {
+            return Err(());
+        }
+        Ok(self.input.pop_front())
     }
     fn try_write(&mut self, bytes: &[u8]) -> Result<usize, ()> {
         self.output.extend_from_slice(bytes);
         Ok(bytes.len())
     }
     fn reset(&mut self) -> Result<(), ()> {
+        self.resets += 1;
+        if self.fail_reset {
+            return Err(());
+        }
         self.input.clear();
         // Captured transmission history is not a pending UART FIFO.
         // Reset discards queued RX; already-observed output cannot be undone.
