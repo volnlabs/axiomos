@@ -8,6 +8,7 @@ use shrike_rp2040_host_sim::mocks::{
 fn default_config() -> Config {
     Config {
         expected_session: None,
+        offer_deadline_us: 0,
         link_timeout_us: 100_000,
         ping_period_us: 50_000,
         peer_heartbeat_period_us: 20_000,

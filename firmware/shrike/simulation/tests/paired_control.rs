@@ -13,6 +13,7 @@ use shrike_rp2040_host_sim::mocks::{
 fn config(timeout: u64) -> Config {
     Config {
         expected_session: None,
+        offer_deadline_us: 0,
         link_timeout_us: timeout,
         ping_period_us: u64::MAX,
         peer_heartbeat_period_us: 0,
@@ -22,6 +23,7 @@ fn config(timeout: u64) -> Config {
 fn managed_config(timeout: u64, session: u32) -> Config {
     Config {
         expected_session: Some(core::num::NonZeroU32::new(session).unwrap()),
+        offer_deadline_us: 1_000_000,
         link_timeout_us: timeout,
         ping_period_us: 1,
         peer_heartbeat_period_us: 1,
@@ -45,6 +47,68 @@ fn decoded(bytes: &[u8]) -> Vec<Msg> {
         .filter_map(|&byte| decoder.push(byte))
         .map(Result::unwrap)
         .collect()
+}
+
+#[test]
+fn frozen_clock_without_offer_exits_with_bounded_work_and_no_output() {
+    use shrike_control::requalification::MAX_POLLS;
+    use shrike_control::transport::TransportError;
+    let mut io = MockByteIo::new(vec![]);
+    let mut motors = MockMotorPair::new();
+    let summary = run(
+        &mut io,
+        &MockClock::new(0),
+        &mut MockUltrasonic::new(vec![]),
+        &mut MockEstop::new(false),
+        &mut motors,
+        managed_config(100, 7),
+        // A test guard lets the old unbounded implementation fail promptly.
+        // Production must return its own PollLimit before this guard fires.
+        Some(MAX_POLLS + 2),
+    )
+    .unwrap();
+    assert_eq!(
+        summary.termination,
+        RunTermination::Fault(FaultReason::Transport(TransportError::PollLimit))
+    );
+    assert!(io.reads <= MAX_POLLS as usize);
+    assert!(io.output.is_empty());
+    assert_eq!(io.resets, 1);
+    assert_eq!(motors.calls, [MotorPairCall::Inhibit]);
+}
+
+#[test]
+fn session_offer_deadline_includes_decode_and_zero_sink_completion() {
+    use shrike_control::transport::TransportError;
+    for (times, applied, fault) in [
+        (vec![100], 0, TransportError::TimedOut),
+        (vec![0, 100], 0, TransportError::TimedOut),
+        (vec![0, 0, 100], 0, TransportError::TimedOut),
+        (vec![0, 0, 0, 100], 1, TransportError::TimedOut),
+        (vec![5, 4], 0, TransportError::ClockRegression),
+    ] {
+        let mut io = MockByteIo::new(frames(&[Msg::SessionOffer { session: 7 }]));
+        let mut motors = MockMotorPair::new();
+        let mut cfg = managed_config(100, 7);
+        cfg.offer_deadline_us = 100;
+        let result = run(
+            &mut io,
+            &SequenceClock::new(times),
+            &mut MockUltrasonic::new(vec![]),
+            &mut MockEstop::new(false),
+            &mut motors,
+            cfg,
+            Some(1),
+        )
+        .unwrap();
+        assert_eq!(
+            result.termination,
+            RunTermination::Fault(FaultReason::Transport(fault))
+        );
+        assert_eq!(result.motor_pairs_accepted, applied);
+        assert!(io.output.is_empty());
+        assert_eq!(motors.calls.last(), Some(&MotorPairCall::Inhibit));
+    }
 }
 
 #[test]
@@ -1346,13 +1410,15 @@ fn requalify_exit_rejects_deadline_overflow_and_expired_old_command() {
     use shrike_control::transport::TransportError;
     let mut io = MockByteIo::new(frames(&[Msg::Requalify { session: 8 }]));
     let mut motors = MockMotorPair::new();
+    let mut cfg = managed_config(100, 7);
+    cfg.offer_deadline_us = u64::MAX; // Reach the exit deadline addition, not offer expiry.
     let summary = run(
         &mut io,
         &ExitClock(Cell::new(u64::MAX - 999_999)),
         &mut MockUltrasonic::new(vec![]),
         &mut MockEstop::new(false),
         &mut motors,
-        managed_config(100, 7),
+        cfg,
         Some(1),
     )
     .unwrap();

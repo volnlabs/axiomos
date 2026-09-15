@@ -105,6 +105,7 @@ pub enum LifecycleError<E> {
     InvalidCommand,
     HashMismatch,
     ReadyTimeout,
+    ReadyPollLimit,
     ClockRegression,
     BadStatus,
     NotReady,
@@ -168,7 +169,9 @@ impl<P: FpgaPlatform> FpgaLifecycle<P> {
             Some(deadline) => deadline,
             None => return self.abort(LifecycleError::InvalidReadyBound),
         };
-        loop {
+        // The real adapter's polls are bounded; also terminate if a broken
+        // clock prevents its deadline from advancing while READY stays low.
+        for _ in 0..65_536 {
             last_seen = self.check_ready_clock(last_seen, ready_deadline)?;
             let status = match self.platform.ready_status() {
                 Ok(status) => status,
@@ -190,6 +193,7 @@ impl<P: FpgaPlatform> FpgaLifecycle<P> {
             self.runtime_ready = true;
             return Ok(());
         }
+        self.abort(LifecycleError::ReadyPollLimit)
     }
 
     fn check_ready_clock(

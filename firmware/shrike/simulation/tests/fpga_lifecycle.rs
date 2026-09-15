@@ -131,6 +131,28 @@ impl FpgaPlatform for MockFpga {
 }
 
 #[test]
+fn frozen_clock_and_absent_ready_have_a_finite_fail_safe_exit() {
+    let mut platform = MockFpga::healthy();
+    platform.statuses.clear();
+    let mut lifecycle = FpgaLifecycle::new(platform);
+    assert_eq!(
+        lifecycle.configure(manifest(), 1_000_000),
+        Err(LifecycleError::ReadyPollLimit)
+    );
+    assert_eq!(
+        lifecycle
+            .platform()
+            .events
+            .iter()
+            .filter(|e| **e == Event::Ready)
+            .count(),
+        65_536
+    );
+    lifecycle.platform().assert_safe();
+    assert!(!lifecycle.runtime_ready());
+}
+
+#[test]
 fn first_command_does_not_need_same_transfer_acceptance() {
     let mut fpga = MockFpga::healthy();
     fpga.runtime = Ok(STATUS_READY); // Previous state: no command yet.

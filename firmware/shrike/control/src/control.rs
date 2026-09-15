@@ -81,6 +81,9 @@ pub struct Config {
     /// Managed mode waits silently and rejects every other offer. None selects
     /// the legacy path; the expected identity is not itself proof of a drain.
     pub expected_session: Option<core::num::NonZeroU32>,
+    /// Absolute microsecond deadline for accepting the initial session zero,
+    /// including sink status. Ignored in legacy mode; no default renews it.
+    pub offer_deadline_us: u64,
     /// Watchdog: max gap between fresh Pi5 frames before motors fail safe.
     pub link_timeout_us: u64,
     /// How often to fire the ultrasonic + report a Sensor frame.
@@ -268,9 +271,30 @@ fn finish_requalification<IO: ByteIo, CK: MicrosClock, ES: EstopLine, S: MotorPa
     Some(finished)
 }
 
+fn pending_offer_failure(
+    cfg: &Config,
+    peer_session: Option<u32>,
+    previous: &mut Option<u64>,
+    now: u64,
+) -> Option<RunTermination> {
+    if cfg.expected_session.is_none() || peer_session.is_some() {
+        return None;
+    }
+    let error = if previous.is_some_and(|last| now < last) {
+        Some(TransportError::ClockRegression)
+    } else if now >= cfg.offer_deadline_us {
+        Some(TransportError::TimedOut)
+    } else {
+        None
+    };
+    *previous = Some(now);
+    error.map(|error| RunTermination::Fault(FaultReason::Transport(error)))
+}
+
 /// Run until the iteration bound or a terminal stop/fault. Motor commands are
 /// submitted once, in decode order; cached watchdog output is never replayed.
-/// The caller supplies a freshly qualified sink already holding zero output.
+/// The caller supplies a freshly qualified sink in reset state with no command.
+/// Managed mode submits its first atomic zero only after the exact session offer.
 /// After any return, drain/requalify explicitly before starting a new run; this
 /// function never rearms a stopped FPGA. Managed mode accepts a fresh session
 /// offer and barriers only after the caller's drain/requalification procedure.
@@ -299,6 +323,8 @@ where
     let mut summary = RunSummary::default();
     let mut command_applied = false;
     let mut peer_session = None;
+    let mut offer_clock = None;
+    let mut offer_polls_remaining = crate::requalification::MAX_POLLS;
     let mut last_barrier = 0;
 
     if max_iterations == Some(0) {
@@ -322,6 +348,24 @@ where
                 RunTermination::Stop(StopReason::HardwareEstop),
                 &tx,
             );
+        }
+        if let Some(termination) = pending_offer_failure(&cfg, peer_session, &mut offer_clock, now)
+        {
+            return terminate(io, motors, summary, termination, &tx);
+        }
+        // Reuse the preparation work ceiling for the subsequent offer wait.
+        // This also terminates a missing offer when the clock stays frozen.
+        if cfg.expected_session.is_some() && peer_session.is_none() {
+            let Some(remaining) = offer_polls_remaining.checked_sub(1) else {
+                return terminate(
+                    io,
+                    motors,
+                    summary,
+                    RunTermination::Fault(FaultReason::Transport(TransportError::PollLimit)),
+                    &tx,
+                );
+            };
+            offer_polls_remaining = remaining;
         }
         if command_applied && wd.output(now) == Output::SafeStop {
             return terminate(
@@ -375,6 +419,12 @@ where
                     RunTermination::Stop(StopReason::HardwareEstop),
                     &tx,
                 );
+            }
+
+            if let Some(termination) =
+                pending_offer_failure(&cfg, peer_session, &mut offer_clock, now)
+            {
+                return terminate(io, motors, summary, termination, &tx);
             }
 
             // Reuse the same checked pair path for handshake/barrier zero.
@@ -512,6 +562,11 @@ where
                         );
                     }
                     let before_apply = clock.now_us();
+                    if let Some(termination) =
+                        pending_offer_failure(&cfg, peer_session, &mut offer_clock, before_apply)
+                    {
+                        return terminate(io, motors, summary, termination, &tx);
+                    }
                     if wd.output(before_apply) == Output::SafeStop {
                         return terminate(
                             io,
@@ -534,6 +589,11 @@ where
                     summary.motor_pairs_accepted = summary.motor_pairs_accepted.wrapping_add(1);
 
                     let after_apply = clock.now_us();
+                    if let Some(termination) =
+                        pending_offer_failure(&cfg, peer_session, &mut offer_clock, after_apply)
+                    {
+                        return terminate(io, motors, summary, termination, &tx);
+                    }
                     hw_estop = estop.asserted();
                     if hw_estop {
                         summary.estop_asserts = summary.estop_asserts.wrapping_add(1);
@@ -629,6 +689,10 @@ where
                 RunTermination::Stop(StopReason::HardwareEstop),
                 &tx,
             );
+        }
+        if let Some(termination) = pending_offer_failure(&cfg, peer_session, &mut offer_clock, now)
+        {
+            return terminate(io, motors, summary, termination, &tx);
         }
         if command_applied && wd.output(now) == Output::SafeStop {
             return terminate(
@@ -926,6 +990,7 @@ mod tests {
     fn config(link_timeout_us: u64, ping_period_us: u64, heartbeat_us: u64) -> Config {
         Config {
             expected_session: None,
+            offer_deadline_us: 0,
             link_timeout_us,
             ping_period_us,
             peer_heartbeat_period_us: heartbeat_us,

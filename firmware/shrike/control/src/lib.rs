@@ -14,6 +14,7 @@
 mod control;
 pub mod fpga;
 mod motor;
+pub mod requalification;
 pub mod transport;
 
 pub use control::{
