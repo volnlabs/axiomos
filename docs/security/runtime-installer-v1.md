@@ -141,12 +141,94 @@ unaccounted cursor movement fail export. Interrupted transport leaves an
 incomplete file without the end marker; write/flush errors are reported. The
 export is not crash-persistent or an atomic file transaction.
 
-Current coverage is deliberately explicit: the kernel emits the physical-clock
-initialization event only. Its LINK payload has little-endian subtype 1 at bytes
-0..4 and the frequency at bytes 8..16, with all other payload bytes zero. Ticks
-use CNTPCT, the same domain as managed releases. Session remains zero and
+Ticks use CNTPCT, the same domain as managed releases. Session remains zero and
 `session_established` false until bilateral control-link integration lands; the
-clock value is never presented as a persistent boot identity. Lifecycle, cycle,
-actual stop and sink-ack producers remain to be connected. Payload bytes are
+clock value is never presented as a persistent boot identity. Payload bytes are
 exported losslessly as `payload_hex`, with `payloads_decoded: false`; this envelope
 export is not yet the semantic acceptance decoder or a qualified runtime trace.
+
+### Current record payloads
+
+All fields below are little-endian on the shipped Pi5/x86 platforms. The envelope
+contains sequence, recording ticks, correlation, kind and 64 payload bytes. An
+artifact handle is a generational manager handle, not the signed artifact digest;
+full retained identity events and strict identity resolution still need integration.
+Global events have correlation zero and no cycle/artifact flags, so consumers
+must not infer an installation identity from those zero fields.
+
+LINK subtype 1 has its u32 subtype at byte 0 and the physical counter frequency
+at byte 8 (u64); other payload bytes are zero. LINK subtype 2 stores a local
+monitor release and its u32 source at byte 4. It establishes neither physical
+rearm nor execution permission, and it does not erase latest-stop custody.
+
+CYCLE correlation is the installation generation captured with the artifact
+handle under the control-slot lock, after the handoff boundary and before the
+invocation. The payload is `ManagedAuditCycleV1`:
+
+| Byte | Field | Meaning |
+|---|---|---|
+| 0 | cycle_id / u64 | Scheduled release sequence |
+| 8 | scheduled_ticks / u64 | Absolute release deadline origin |
+| 16 | actual_ticks / u64 | Timer's observed release time |
+| 24 | missed_releases / u64 | Scheduled releases missed before this invocation |
+| 32 | artifact_handle / u32 | Valid only with flag 1, including handle zero |
+| 36 | flags / u32 | 1 artifact present, 2 safe mode, 4 handoff, 8 request present, 16 request known |
+| 40, 42 | requested pair / i16 each | Signed per-mille request, valid with flag 8 |
+| 44, 46 | decided pair / i16 each | Policy's signed per-mille pair, valid with nonzero decision |
+| 48 | decision / u32 | 0 absent, 1 allow, 2 clamp, 3 safe |
+| 52 | queue_outcome / u32 | 0 absent, 1 queued, 2 ownership rejected, 3 expired deadline, 4 reversed clock, 5 queue failure |
+| 56, 60 | failure, detail / u32 each | Fault code and associated detail |
+
+Flag 16 means the interpreter returned successfully: no request then means the
+defined zero-output result. Without it, a failed invocation's discarded request
+is unknown. An interpreter fault cannot be reported as a controller that chose
+not to request output. A queued outcome remains queued if a later fault occurs;
+recording cannot undo physical actions. No queue outcome implies sink acceptance.
+
+The cycle event precedes the timer's final deadline check. Failure zero means no
+fault detected at this observation point, not successful completion of all timer
+work. A later deadline miss produces a separate STOP event with the same captured
+cycle and installation identity and the actual observed completion ticks. The
+final timer check includes the earlier cycle-recording overhead.
+
+Ordinary unchanged inhibited cycles increment `suppressed` without consuming
+records or replacing the latest stop. Scheduled handoff cycles, controller
+failures and missed releases still produce records. Repeated identical trusted
+stops are suppressed; real controller execution resets that suppression.
+The counter includes both kinds of deliberate suppression, separate from loss.
+
+STOP payload is `ManagedAuditStopV1`. Its fields are cycle_id (u64, byte 0),
+observed_ticks (u64, 8), deadline_ticks (u64, 16), artifact_handle (u32, 24),
+flags (u32, 28), category (u32, 32), source (u32, 36), reason (u32, 40),
+detail (u32, 44) and 16 reserved-zero bytes. Flags 1 and 2 indicate cycle and
+artifact validity. Categories are 1 trusted e-stop assertion, 2 cycle fault,
+3 timer fault and 4 final timer completion miss. Only category 4 sets
+observed_ticks; recording ticks always come from the append point.
+
+Sources are 0 unspecified, 1 operator, 2 watchdog, 3 GPIO hook, 4 learned behavior,
+5 mission, 6 PWM syscall and 7 managed control. Trusted assertion records prove
+that the kernel entered its stop path; they do not acknowledge remote zero output.
+Cycle/completion stops correlate their captured generation. Global trusted stops
+and timer faults intentionally make no generation claim. The independent latest
+stop survives ring overwrite, unchanged stopped cycles and sequence exhaustion.
+Managed images use these producers instead of synchronous V04_ESTOP formatting;
+legacy images retain their existing messages.
+
+Cycle fault codes (also STOP category 2 reasons) are 0 none, 1 invalid release,
+2 missed release, 3 invalid clock, 4 reversed clock, 5 deadline, 6 submission and
+7 policy stop. Code 6 detail is the queue-outcome code. Interpreter codes 1001
+through 1021, in order, are division by zero, bounds, stack overflow, invalid
+helper, timeout, invalid instruction, not loaded, out of memory, resource limit,
+busy, permission, reentrant execution, verification, signature, admission,
+GPIO fanout, read-only map, managed context, duplicate request, invalid request
+and managed map failure. Code 1004 detail preserves the helper's complete i32 bit
+pattern; other interpreter details are zero. Handoff codes 2001 through 2009 are
+not established, busy, bad identity, invalid timeout, exhaustion, stale, timeout,
+reversed clock and invalid release; their details are zero.
+
+STOP category 1 reason/detail are zero. Category 3 reasons 1 through 8 are timer
+busy, not started, already started, invalid period, reversed clock, exhaustion,
+stopped and managed-control boundary failure. Category 4 reason is 5 (deadline).
+These timer details are zero. Lifecycle events, complete signed identity,
+command sequences, correlated sink acknowledgements and dedicated link/reset
+events remain required before the trace can satisfy the release acceptance gate.

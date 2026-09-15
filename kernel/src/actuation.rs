@@ -4,6 +4,7 @@
 //! decision logic lives in `kernel_bpf::actuation` (pure, host-tested); this file
 //! owns the global monitor, managed wheel ownership and local application.
 
+#[cfg(not(feature = "managed-runtime"))]
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use kernel_bpf::actuation::{
@@ -18,6 +19,7 @@ use spin::Mutex;
 pub static ACTUATION_MONITOR: Mutex<Monitor<ActiveProfile>> = Mutex::new(Monitor::new());
 // The one managed wheel owner shares the existing decision/application lock.
 static APPLY_LOCK: Mutex<bool> = Mutex::new(false);
+#[cfg(not(feature = "managed-runtime"))]
 static NEXT_V04_ESTOP_EVENT: AtomicU64 = AtomicU64::new(1);
 
 /// Whether the reviewed PWM channel is owned by the signed motor link.
@@ -35,6 +37,7 @@ pub fn is_motor_channel(chip: u8, channel: u8) -> bool {
     }
 }
 
+#[cfg(not(feature = "managed-runtime"))]
 pub(crate) fn next_v04_estop_event_id() -> u64 {
     NEXT_V04_ESTOP_EVENT.fetch_add(1, Ordering::Relaxed)
 }
@@ -519,7 +522,7 @@ pub fn trigger_estop(source: AuditSource) -> i64 {
 }
 
 fn trigger_estop_with_clock(source: AuditSource, read_ns: impl FnOnce() -> u64) -> i64 {
-    let (transition, now) = with_apply_lock(|_| {
+    let (_transition, _now) = with_apply_lock(|_| {
         crate::bpf::installation::request_stop();
         let now = read_ns();
         let mut monitor = ACTUATION_MONITOR.lock();
@@ -530,9 +533,11 @@ fn trigger_estop_with_clock(source: AuditSource, read_ns: impl FnOnce() -> u64) 
             apply_safe_drive(drive);
         }
         notify_link_estop(true);
+        crate::bpf::recorder::events::trusted_stop(source);
         (transition, now)
     });
-    if transition && matches!(source, AuditSource::Operator | AuditSource::Watchdog) {
+    #[cfg(not(feature = "managed-runtime"))]
+    if _transition && matches!(source, AuditSource::Operator | AuditSource::Watchdog) {
         crate::serial_println!(
             "V04_ESTOP event_id={} source={} stage=assert ts_ns={}",
             next_v04_estop_event_id(),
@@ -541,7 +546,7 @@ fn trigger_estop_with_clock(source: AuditSource, read_ns: impl FnOnce() -> u64) 
                 AuditSource::Watchdog => "watchdog",
                 _ => unreachable!(),
             },
-            now
+            _now
         );
     }
     0
@@ -563,7 +568,7 @@ pub(crate) fn operator_estop_timed(action: EstopAction) -> (i64, Option<u64>) {
 }
 
 fn operator_estop_with_local_safe(action: EstopAction, local_safe: impl FnOnce()) -> i64 {
-    let (code, stage, now) = with_apply_lock(|_| {
+    let (code, _stage, _now) = with_apply_lock(|_| {
         let now = crate::time::get_kernel_time_ns();
         let mut monitor = ACTUATION_MONITOR.lock();
         let was_latched = monitor.is_latched();
@@ -577,28 +582,33 @@ fn operator_estop_with_local_safe(action: EstopAction, local_safe: impl FnOnce()
                 }
                 local_safe();
                 notify_link_estop(true);
+                crate::bpf::recorder::events::trusted_stop(AuditSource::Operator);
                 (0, (!was_latched).then_some("assert"), now)
             }
             EstopCommandResult::Released => {
                 notify_link_estop(false);
+                if was_latched {
+                    crate::bpf::recorder::events::released(AuditSource::Operator);
+                }
                 (0, was_latched.then_some("release"), now)
             }
             EstopCommandResult::Denied => (-1, None, now),
         }
     });
-    if let Some(stage) = stage {
+    #[cfg(not(feature = "managed-runtime"))]
+    if let Some(stage) = _stage {
         crate::serial_println!(
             "V04_ESTOP event_id={} source=operator stage={} ts_ns={}",
             next_v04_estop_event_id(),
             stage,
-            now
+            _now
         );
     }
     code
 }
 
 pub fn watchdog_estop_trigger() -> i64 {
-    let (transition, now) = with_apply_lock(|_| {
+    let (_transition, _now) = with_apply_lock(|_| {
         crate::bpf::installation::request_stop();
         let now = crate::time::get_kernel_time_ns();
         let mut monitor = ACTUATION_MONITOR.lock();
@@ -609,20 +619,22 @@ pub fn watchdog_estop_trigger() -> i64 {
             apply_safe_drive(drive);
         }
         notify_link_estop(true);
+        crate::bpf::recorder::events::trusted_stop(AuditSource::Watchdog);
         (transition, now)
     });
-    if transition {
+    #[cfg(not(feature = "managed-runtime"))]
+    if _transition {
         crate::serial_println!(
             "V04_ESTOP event_id={} source=watchdog stage=assert ts_ns={}",
             next_v04_estop_event_id(),
-            now
+            _now
         );
     }
     0
 }
 
 pub fn release_estop(authority: Authority, source: AuditSource) -> i64 {
-    let (code, log_release, now) = with_apply_lock(|_| {
+    let (code, _log_release, _now) = with_apply_lock(|_| {
         let now = crate::time::get_kernel_time_ns();
         let mut monitor = ACTUATION_MONITOR.lock();
         let was_latched = monitor.is_latched();
@@ -631,16 +643,20 @@ pub fn release_estop(authority: Authority, source: AuditSource) -> i64 {
         match result {
             ReleaseResult::Released => {
                 notify_link_estop(false);
+                if was_latched {
+                    crate::bpf::recorder::events::released(source);
+                }
                 (0, was_latched, now)
             }
             ReleaseResult::Denied => (-1, false, now),
         }
     });
-    if log_release {
+    #[cfg(not(feature = "managed-runtime"))]
+    if _log_release {
         crate::serial_println!(
             "V04_ESTOP event_id={} source=operator stage=release ts_ns={}",
             next_v04_estop_event_id(),
-            now
+            _now
         );
     }
     code

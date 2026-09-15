@@ -1,6 +1,11 @@
 version = 1
 baseline_sites = 718
-baseline_fingerprint = "sha256:63d27ac3353079e8ff26aea7843fb524e79370685961feb5ac2a3466302d7f36"
+baseline_fingerprint = "sha256:dfe0c19da8e60d98f929ba1df729627a29347b580e063bcbe141bb009d5d864a"
+
+# 2026-09-15: cycle/stop producers reuse the recorder owner and physical clock.
+# No new unsafe syntax or obligations; existing actuation/timer source moves.
+# 718 sites remain classified. Actual interpreter fixture Miri passes with its
+# existing integer-to-pointer warning; this is not strict-provenance evidence.
 
 # 2026-09-15: recorder ABI/owner/export add no unsafe syntax. Existing module,
 # timer and minilib source locations move; all 718 classified sites retain

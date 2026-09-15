@@ -10,7 +10,7 @@ use crate::actuation::{MotorPairSubmission, MotorPairSubmissionOutcome};
 use crate::bpf::managed::tests::{artifact_from_program, stateful_managed_program};
 use crate::bpf::BpfManager;
 
-fn installed(program: &[BpfInsn]) -> (BpfManager, ControlSlot) {
+pub(in crate::bpf) fn installed(program: &[BpfInsn]) -> (BpfManager, ControlSlot) {
     let mut manager = BpfManager::new();
     let artifact = artifact_from_program(
         1,
@@ -246,6 +246,7 @@ fn missing_request_submits_zero_and_failed_invocation_discards_its_capture() {
         );
         assert_eq!(submitted, !fails);
         assert_eq!(report.failure.is_some(), fails);
+        assert_eq!(report.invocation_completed, !fails);
         assert_eq!(slot.snapshot().inhibited, fails);
         assert_eq!(report.requested, None);
     }

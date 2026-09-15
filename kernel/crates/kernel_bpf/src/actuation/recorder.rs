@@ -85,6 +85,15 @@ impl<const N: usize> Recorder<N> {
         self.stopped = false;
     }
 
+    /// Account for an unchanged inhibited cycle without overwriting the audit
+    /// window or replacing the authoritative stop cause with passive state.
+    pub fn suppress_unchanged(&mut self) {
+        count(
+            &mut self.status.suppressed,
+            &mut self.status.counters_saturated,
+        );
+    }
+
     /// None denotes a repeated, unchanged stop. Callers must not make control
     /// or activation success depend on this result.
     pub fn append(&mut self, mut record: Record) -> Result<Option<u64>, Error> {
@@ -101,10 +110,7 @@ impl<const N: usize> Recorder<N> {
                     previous.correlation == record.correlation && previous.payload == record.payload
                 })
             {
-                count(
-                    &mut self.status.suppressed,
-                    &mut self.status.counters_saturated,
-                );
+                self.suppress_unchanged();
                 return Ok(None);
             }
             // Authoritative even if sequence exhaustion prevents ring insertion.
@@ -327,6 +333,12 @@ mod tests {
         );
         assert_eq!(recorder.status().dropped, u64::MAX);
         assert!(recorder.status().counters_saturated);
+        let mut suppressed = Recorder::<1>::new();
+        suppressed.status.suppressed = u64::MAX;
+        suppressed.suppress_unchanged();
+        assert_eq!(suppressed.status().suppressed, u64::MAX);
+        assert!(suppressed.status().counters_saturated);
+        assert_eq!(suppressed.status().next, 0);
     }
 
     #[test]

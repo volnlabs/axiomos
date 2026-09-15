@@ -353,9 +353,15 @@ fn handle_timer_interrupt(_ctx: &ExceptionContext) -> bool {
             return false;
         };
         state.completion_misses = misses;
+        #[cfg(all(feature = "rpi5", feature = "managed-runtime"))]
+        let report = state.last_control;
         drop(timer);
         #[cfg(feature = "managed-runtime")]
         crate::actuation::trigger_estop(kernel_bpf::actuation::AuditSource::ManagedControl);
+        #[cfg(all(feature = "rpi5", feature = "managed-runtime"))]
+        if let Some(report) = report {
+            crate::bpf::recorder::events::completion_miss(release, report, completed);
+        }
     }
     true
 }
@@ -410,6 +416,8 @@ fn timer_failed(error: TimerFault) {
     // Bounded trusted stop; local enqueue is not remote sink acknowledgement.
     if first {
         crate::actuation::trigger_estop(kernel_bpf::actuation::AuditSource::ManagedControl);
+        #[cfg(all(feature = "rpi5", feature = "managed-runtime"))]
+        crate::bpf::recorder::events::timer_fault(error as u32);
     }
 }
 

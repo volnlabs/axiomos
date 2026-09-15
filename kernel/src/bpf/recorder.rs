@@ -1,4 +1,5 @@
 //! One kernel-owned audit window. Queries never take the program manager lock.
+pub(crate) mod events;
 use core::mem::size_of;
 
 use kernel_abi::*;

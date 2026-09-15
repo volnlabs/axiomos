@@ -100,8 +100,11 @@ pub(crate) enum CycleFailure {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CycleReport {
     pub generation: u64,
+    pub artifact: Option<u32>,
+    pub handoff: bool,
     pub safe_mode: bool,
     pub context: Option<ManagedControlContextV1>,
+    pub invocation_completed: bool,
     pub requested: Option<ManagedMotorPair>,
     pub submission: Option<MotorPairSubmission>,
     pub failure: Option<CycleFailure>,
@@ -130,8 +133,13 @@ impl ControlSlot {
         let slot = self.snapshot();
         let mut report = CycleReport {
             generation: slot.generation,
+            artifact: slot.active,
+            handoff: slot.pending.is_some_and(|id| {
+                self.operation_phase(id) == Some(kernel_abi::MANAGED_OPERATION_HANDOFF)
+            }),
             safe_mode: slot.inhibited || slot.active.is_none(),
             context: None,
+            invocation_completed: false,
             requested: None,
             submission: None,
             failure: None,
@@ -155,6 +163,7 @@ impl ControlSlot {
             let started = read_ticks();
             check_time(started, release.actual, release.deadline)?;
             let invocation = self.execute(&context).map_err(CycleFailure::Invocation)?;
+            report.invocation_completed = true;
             report.requested = invocation.request;
             let finished = read_ticks();
             check_time(finished, started, release.deadline)?;
@@ -225,9 +234,10 @@ pub(crate) fn on_release(
     if report.failure.is_some() {
         crate::actuation::trigger_estop(kernel_bpf::actuation::AuditSource::ManagedControl);
     }
+    super::recorder::events::cycle(release, report);
     Ok(report)
 }
 
 #[cfg(test)]
 #[path = "control_tests.rs"]
-mod tests;
+pub(super) mod tests;
