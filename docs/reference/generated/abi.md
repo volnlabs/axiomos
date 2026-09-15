@@ -72,6 +72,7 @@ This catalog contains only interfaces dispatched by shipped kernels. Reserved sy
 | 266 | `BPF_MANAGED_RETIRE` | managed-runtime feature |
 | 267 | `BPF_MANAGED_RECORDER_STATUS` | managed-runtime feature |
 | 268 | `BPF_MANAGED_RECORDER_READ` | managed-runtime feature |
+| 269 | `BPF_MANAGED_REARM` | managed-runtime feature |
 
 ## BPF map types
 

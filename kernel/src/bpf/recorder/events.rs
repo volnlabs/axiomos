@@ -478,6 +478,8 @@ pub(crate) fn handoff(
     let (message_kind, session, wire_correlation, command_sequence) = match message {
         Msg::SessionOffer { session } => (1, session, 0, 0),
         Msg::SessionReady { session } => (2, session, 0, 0),
+        Msg::Requalify { session } => (5, session, 0, 0),
+        Msg::Prepared { session } => (6, session, 0, 0),
         Msg::SafeBarrier {
             session,
             correlation,
@@ -526,7 +528,9 @@ pub(crate) fn handoff_reply(
 ) {
     if !matches!(
         message,
-        shrike_link::Msg::SessionReady { .. } | shrike_link::Msg::SafeAck { .. }
+        shrike_link::Msg::SessionReady { .. }
+            | shrike_link::Msg::SafeAck { .. }
+            | shrike_link::Msg::Prepared { .. }
     ) {
         return;
     }

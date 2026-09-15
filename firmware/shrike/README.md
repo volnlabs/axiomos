@@ -35,8 +35,11 @@ itself. The new runtime profile remains `None`, so this path is not enabled.
 The UART register algorithms have host tests; they do not qualify physical FIFO
 reset, baud, peer inhibition or delayed acknowledgements. Pi receive faults now
 invalidate framing and handoff eligibility, and its nonblocking writer retains
-the current frame byte under backpressure. Bilateral reset/session coordination
-and the Pi rearm coordinator still need integration. The actual GPIO adapters
+the current frame byte under backpressure. The Pi rearm coordinator now connects
+explicit administration to two fresh UART drains and the correlated
+Requalify/Prepared/Offer/Ready exchange. Host tests cover the actual PL011
+register path; physical bilateral reset/session qualification remains open.
+The actual GPIO adapters
 use active-low GPIO5 with pull-down (low/open/read error means stopped) and polled
 GPIO10 trigger/GPIO11 echo. Acquisition timings have no enabled defaults; missed
 sampling bounds, pin errors, clock faults and incomplete echoes discard the sample.

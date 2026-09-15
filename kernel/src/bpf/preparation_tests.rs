@@ -10,6 +10,435 @@ use zerocopy::{FromBytes, IntoBytes};
 use super::*;
 
 #[test]
+fn rearm_shares_operation_capacity_and_preserves_installation_resources() {
+    let (mut worker, slot, manager) = fixture_worker();
+    let (upload, target) = resident_via_worker(&mut worker, &slot, &manager, 0, 1);
+    let installed = manager
+        .lock()
+        .request_installation(&mut slot.lock(), upload, 0, target)
+        .unwrap();
+    service_worker(&mut worker, &slot, &manager);
+    host_commit(&slot);
+    // Publication still owns retirement; rearm cannot bypass that capacity.
+    assert_eq!(
+        manager
+            .lock()
+            .request_rearm(&mut slot.lock(), installed, 1, 7),
+        Err(EBUSY)
+    );
+    service_worker(&mut worker, &slot, &manager);
+    assert_eq!(
+        manager
+            .lock()
+            .request_rearm(&mut slot.lock(), installed, 1, 7),
+        Err(EBUSY)
+    );
+    slot.lock().stop();
+    let private = manager
+        .lock()
+        .maps
+        .iter()
+        .flatten()
+        .find(|map| map.owner == super::super::ObjectOwner::KernelManaged)
+        .unwrap()
+        .runtime
+        .clone();
+    {
+        let _lease = private.try_lease().unwrap();
+        private
+            .map
+            .update(&0u32.to_ne_bytes(), &42u64.to_ne_bytes(), 0)
+            .unwrap();
+    }
+    let before = slot.lock().snapshot();
+    let usage = manager.lock().resource_usage();
+    let counters = {
+        let manager = manager.lock();
+        (
+            manager.next_managed_preparation,
+            manager.next_managed_reclamation,
+        )
+    };
+    let id = manager
+        .lock()
+        .request_rearm(&mut slot.lock(), installed, 1, 7)
+        .unwrap();
+    assert_eq!(id, installed + 1);
+    assert_eq!(
+        manager
+            .lock()
+            .request_rearm(&mut slot.lock(), installed, 1, 7),
+        Err(ESTALE)
+    );
+    assert_eq!(
+        manager.lock().request_rearm(&mut slot.lock(), id, 1, 7),
+        Err(EBUSY)
+    );
+    assert_eq!(manager.lock().managed_upload_begin(7, id, 256), Err(EBUSY));
+    let query = manager.lock().managed_slot_query(&slot.lock());
+    assert_eq!(query.pending_id, id);
+    assert_eq!(query.pending_target_kind, MANAGED_TARGET_REARM);
+    assert!(query.flags & MANAGED_SLOT_INHIBITED != 0);
+    assert_eq!(
+        manager
+            .lock()
+            .query_installation(&slot.lock(), id)
+            .unwrap()
+            .phase,
+        MANAGED_OPERATION_QUEUED
+    );
+    assert_eq!(manager.lock().managed_upload_finalize(7, id), Err(ENOTSUP));
+    assert!(manager.lock().reclaim_owner(7));
+    assert!(manager.lock().validate_rearm(&slot.lock(), id, 7).is_ok());
+    manager
+        .lock()
+        .finish_rearm(&mut slot.lock(), id, Ok(()))
+        .unwrap();
+    assert_eq!(slot.lock().snapshot(), before);
+    assert_eq!(
+        private.map.lookup(&0u32.to_ne_bytes()).unwrap(),
+        42u64.to_ne_bytes()
+    );
+    assert!(slot
+        .lock()
+        .execute(&ManagedControlContextV1::default())
+        .is_err());
+    assert_eq!(manager.lock().resource_usage(), usage);
+    {
+        let manager = manager.lock();
+        assert_eq!(
+            (
+                manager.next_managed_preparation,
+                manager.next_managed_reclamation
+            ),
+            counters
+        );
+    }
+    assert_eq!(
+        manager.lock().managed_operation_query(id).unwrap().phase,
+        MANAGED_OPERATION_COMMITTED
+    );
+    assert_eq!(
+        manager.lock().managed_slot_query(&slot.lock()).pending_id,
+        0
+    );
+}
+
+#[test]
+fn rearm_rejects_stale_ids_generations_and_exhaustion_without_side_effects() {
+    let (_, slot, manager) = fixture_worker();
+    let usage = manager.lock().resource_usage();
+    for (last, generation, epoch, error) in [
+        (1, 0, 3, ESTALE),
+        (0, 1, 3, ESTALE),
+        (0, 0, u64::MAX, EOVERFLOW),
+    ] {
+        assert_eq!(
+            manager
+                .lock()
+                .request_rearm(&mut slot.lock(), last, generation, epoch),
+            Err(error)
+        );
+        assert_eq!(manager.lock().managed_operation_query(0).unwrap().id, 0);
+    }
+    manager.lock().preparation.last_id = isize::MAX as u64;
+    assert_eq!(
+        manager
+            .lock()
+            .request_rearm(&mut slot.lock(), isize::MAX as u64, 0, 3),
+        Err(EOVERFLOW)
+    );
+    assert_eq!(manager.lock().resource_usage(), usage);
+    assert_eq!(slot.lock().snapshot().generation, 0);
+}
+
+#[test]
+fn rearm_cancellation_and_consumed_stop_notice_cannot_release_readiness() {
+    for cause in 0..3 {
+        let (_, slot, manager) = fixture_worker();
+        let id = manager
+            .lock()
+            .request_rearm(&mut slot.lock(), 0, 0, 4)
+            .unwrap();
+        match cause {
+            0 => {
+                manager.lock().managed_operation_cancel(99, id).unwrap();
+                manager.lock().managed_operation_cancel(99, id).unwrap();
+            }
+            1 => {
+                let notices = spin::Mutex::new(Some(super::super::installation::StopNotice::Stop));
+                super::super::installation::apply_requested_stop(&mut slot.lock(), &notices);
+                assert!(notices.lock().is_none());
+            }
+            _ => {}
+        }
+        assert_eq!(
+            manager
+                .lock()
+                .validate_rearm(&slot.lock(), id, if cause == 2 { 5 } else { 4 }),
+            Err(ECANCELED)
+        );
+        manager
+            .lock()
+            .finish_rearm(&mut slot.lock(), id, Err(ECANCELED))
+            .unwrap();
+        assert!(slot.lock().snapshot().inhibited);
+        assert_eq!(
+            manager.lock().managed_operation_query(id).unwrap().phase,
+            MANAGED_OPERATION_CANCELLED
+        );
+        assert_eq!(
+            manager.lock().managed_operation_cancel(99, id),
+            Err(EALREADY)
+        );
+    }
+}
+
+#[test]
+fn rearm_consumed_poller_failure_preserves_first_error_in_the_terminal_receipt() {
+    use shrike_link::handoff::HandoffError;
+
+    use super::super::installation::{apply_requested_stop, StopNotice};
+    for (stop_first, stale, expected) in [
+        (false, false, ETIMEDEOUT),
+        (true, false, ECANCELED),
+        (false, true, ECANCELED),
+    ] {
+        let (_, slot, manager) = fixture_worker();
+        let id = manager
+            .lock()
+            .request_rearm(&mut slot.lock(), 0, 0, 4)
+            .unwrap();
+        let failure = StopNotice::Handoff {
+            instance_id: id + u64::from(stale),
+            error: HandoffError::TimedOut,
+        };
+        let notices = spin::Mutex::new(Some(if stop_first {
+            StopNotice::Stop
+        } else {
+            failure
+        }));
+        apply_requested_stop(&mut slot.lock(), &notices);
+        assert!(notices.lock().is_none());
+        *notices.lock() = Some(if stop_first {
+            failure
+        } else {
+            StopNotice::Stop
+        });
+        apply_requested_stop(&mut slot.lock(), &notices);
+        let result = manager.lock().validate_rearm(&slot.lock(), id, 5);
+        assert_eq!(result, Err(expected));
+        manager
+            .lock()
+            .finish_rearm(&mut slot.lock(), id, result)
+            .unwrap();
+        let receipt = manager.lock().managed_operation_query(id).unwrap();
+        assert_eq!(receipt.error, i32::from(expected) as u32);
+        assert_eq!(
+            receipt.phase,
+            if expected == ECANCELED {
+                MANAGED_OPERATION_CANCELLED
+            } else {
+                MANAGED_OPERATION_FAILED
+            }
+        );
+    }
+}
+
+#[test]
+fn rearm_explicit_cancel_and_transport_failure_preserve_the_first_outcome() {
+    use shrike_link::handoff::HandoffError;
+    for cancel_first in [true, false] {
+        let (_, slot, manager) = fixture_worker();
+        let id = manager
+            .lock()
+            .request_rearm(&mut slot.lock(), 0, 0, 4)
+            .unwrap();
+        assert_eq!(
+            manager
+                .lock()
+                .cancel_managed_operation(&mut slot.lock(), 99, id + 1),
+            Err(ESTALE)
+        );
+        assert!(manager.lock().validate_rearm(&slot.lock(), id, 4).is_ok());
+        if !cancel_first {
+            slot.lock().fail_handoff(id, HandoffError::TimedOut);
+        }
+        manager
+            .lock()
+            .cancel_managed_operation(&mut slot.lock(), 99, id)
+            .unwrap();
+        manager
+            .lock()
+            .cancel_managed_operation(&mut slot.lock(), 99, id)
+            .unwrap();
+        if cancel_first {
+            slot.lock().fail_handoff(id, HandoffError::TimedOut);
+        }
+        assert_eq!(
+            manager.lock().validate_rearm(&slot.lock(), id, 4),
+            Err(if cancel_first { ECANCELED } else { ETIMEDEOUT })
+        );
+    }
+}
+
+#[test]
+fn rearm_receipts_wrap_in_the_shared_four_entry_window() {
+    let (_, slot, manager) = fixture_worker();
+    for expected in 0..6 {
+        let id = manager
+            .lock()
+            .request_rearm(&mut slot.lock(), expected, 0, 0)
+            .unwrap();
+        manager
+            .lock()
+            .finish_rearm(&mut slot.lock(), id, Err(ENOLINK))
+            .unwrap();
+    }
+    for id in 1..=2 {
+        assert_eq!(manager.lock().managed_operation_query(id), Err(ESTALE));
+    }
+    for id in 3..=6 {
+        let receipt = manager.lock().managed_operation_query(id).unwrap();
+        assert_eq!(receipt.phase, MANAGED_OPERATION_FAILED);
+        assert_eq!(receipt.error, i32::from(ENOLINK) as u32);
+    }
+    assert_eq!(manager.lock().managed_operation_query(0).unwrap().id, 6);
+}
+
+#[test]
+fn rearm_audit_distinguishes_link_readiness_from_installation_publication() {
+    let (_, slot, manager) = fixture_worker();
+    let records = crate::bpf::recorder::events::tests::capture_records(|| {
+        let id = manager
+            .lock()
+            .request_rearm(&mut slot.lock(), 0, 0, 0)
+            .unwrap();
+        manager
+            .lock()
+            .finish_rearm(&mut slot.lock(), id, Ok(()))
+            .unwrap();
+    });
+    let records: Vec<_> = records
+        .iter()
+        .filter(|r| r.kind == MANAGED_AUDIT_OPERATION)
+        .map(|r| {
+            (
+                r.correlation,
+                ManagedAuditLifecycleV1::read_from_bytes(&r.payload).unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].1.event, MANAGED_AUDIT_ACCEPTED);
+    assert_eq!(records[1].1.event, MANAGED_AUDIT_COMMITTED);
+    for (id, record) in records {
+        assert_eq!(id, 1);
+        assert_eq!(record.action, MANAGED_TARGET_REARM);
+        assert_eq!((record.instance_id, record.artifact_handle), (0, 0));
+        assert_eq!(
+            (
+                record.expected_generation,
+                record.target_generation,
+                record.observed_generation
+            ),
+            (0, 0, 0)
+        );
+        assert_eq!(
+            record.flags,
+            MANAGED_AUDIT_LIFECYCLE_HAS_PUBLIC_ID | MANAGED_AUDIT_LIFECYCLE_INHIBITED
+        );
+    }
+}
+
+#[test]
+fn rearm_worker_retries_bounded_polling_without_restarting_the_operation() {
+    let (mut worker, slot, manager) = fixture_worker();
+    let id = manager
+        .lock()
+        .request_rearm(&mut slot.lock(), 0, 0, 0)
+        .unwrap();
+    for iteration in 0..4 {
+        let action = worker.take(&mut slot.lock(), &mut manager.lock());
+        let WorkerAction::Rearm(work) = action else {
+            panic!("rearm pass");
+        };
+        assert_eq!(work.id, id);
+        assert_eq!(work.started, iteration != 0);
+        assert!(matches!(
+            worker.take(&mut slot.lock(), &mut manager.lock()),
+            WorkerAction::Retry
+        ));
+    }
+    manager
+        .lock()
+        .finish_rearm(&mut slot.lock(), id, Err(ENOLINK))
+        .unwrap();
+    assert!(matches!(
+        worker.take(&mut slot.lock(), &mut manager.lock()),
+        WorkerAction::Wait
+    ));
+}
+
+fn rearm_ready_fixture() -> (
+    shrike_link::handoff::Handoff,
+    shrike_link::handoff::RearmReceipt,
+) {
+    use shrike_link::handoff::Handoff;
+    use shrike_link::tx::TxState;
+    use shrike_link::Msg;
+    let mut handoff = Handoff::new();
+    let mut tx = TxState::new();
+    handoff.rearm_on_transport(41, 0, 1000, &mut tx).unwrap();
+    handoff.enqueue(&mut tx, 0).unwrap();
+    while tx.next_byte().is_some() {}
+    handoff.sent(1).unwrap();
+    handoff.on_reply(Msg::Prepared { session: 1 }, 2).unwrap();
+    handoff.offer_after_requalification_drain(203, 80).unwrap();
+    handoff.enqueue(&mut tx, 203).unwrap();
+    while tx.next_byte().is_some() {}
+    handoff.sent(204).unwrap();
+    handoff
+        .on_reply(Msg::SessionReady { session: 1 }, 205)
+        .unwrap();
+    let receipt = handoff.take_rearm_ready(206).unwrap().unwrap();
+    (handoff, receipt)
+}
+
+#[test]
+fn rearm_busy_commit_retains_one_shot_receipt_until_same_operation_finishes() {
+    use shrike_link::handoff::HandoffError;
+    for outcome in 0..3 {
+        let (mut handoff, receipt) = rearm_ready_fixture();
+        let mut retained = Some(receipt);
+        assert_eq!(
+            commit_rearm_receipt(&mut retained, |_| Err(HandoffError::Busy)),
+            Ok(false)
+        );
+        assert_eq!(retained.as_ref().unwrap().operation(), 41);
+        assert_eq!(retained.as_ref().unwrap().session(), 1);
+        assert!(handoff.take_rearm_ready(207).unwrap().is_none());
+        assert!(!handoff.motion_permitted());
+        if outcome == 2 {
+            handoff.disarm();
+        }
+        let result = commit_rearm_receipt(&mut retained, |receipt| {
+            handoff.commit_rearm(receipt, if outcome == 1 { 283 } else { 208 })
+        });
+        assert_eq!(
+            result,
+            match outcome {
+                0 => Ok(true),
+                1 => Err(ETIMEDEOUT),
+                _ => Err(EPROTO),
+            }
+        );
+        assert!(retained.is_none());
+        assert_eq!(handoff.motion_permitted(), outcome == 0);
+    }
+}
+
+#[test]
 fn lifecycle_audit_observes_real_commit_rollback_cancel_and_retirement_boundaries() {
     let (mut worker, slot, manager) = fixture_worker();
     let mut expected = 0;

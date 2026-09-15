@@ -23,7 +23,9 @@ The script builds the matching managed init and installer into the rootfs before
 building the Pi kernel. The managed bootstrap receives only `BEHAVIOR_ADMIN`,
 delegates it to one installer, and permanently drops its own capabilities.
 Ordinary spawned children receive none. Legacy image provisioning is unchanged.
-Administration grants no direct GPIO, PWM, motor or e-stop release permission.
+Administration grants no direct GPIO, PWM or motor permission. Explicit rearm
+can release the local monitor only after correlated peer/FPGA requalification;
+it never sends the legacy e-stop-release frame or resumes a retained controller.
 
 The kernel gives the installer exclusive raw fd0/fd1 ownership after checking
 its capability and open descriptor. Each call copies at most 16 stack bytes,
@@ -44,6 +46,8 @@ Replace the example port with the connected debug-UART device. The host configur
 rk runtime --port /dev/ttyUSB0 query
 rk runtime --port /dev/ttyUSB0 upload controller.axmb
 rk runtime --port /dev/ttyUSB0 query --operation 0
+rk runtime --port /dev/ttyUSB0 rearm --expected-generation 0
+rk runtime --port /dev/ttyUSB0 query --operation 0
 rk runtime --port /dev/ttyUSB0 activate --expected-generation 0 --artifact 0
 rk runtime --port /dev/ttyUSB0 stop
 ```
@@ -55,7 +59,16 @@ and `retire` take the same two required options. Rollback selects the exact
 retained previous artifact. Deactivate selects the active artifact; retire
 selects an inactive artifact. Stop inhibits without unloading or releasing e-stop.
 
-`cancel ID` cancels an upload/preparation. To cancel a lifecycle operation, also
+`rearm` requires the observed installation generation and an inhibited slot.
+The CLI also supplies the observed last operation ID. Its returned operation ID
+uses the existing query/receipt window: queued/preparing, then committed or
+failed/cancelled. A successful rearm retains the installation generation and
+its inhibition; activation remains a separate fresh-instance operation.
+The Pi allows two seconds for the complete requalification, including both fresh
+200 ms quiet intervals, with an 80 ms final offer limit inside that deadline.
+These are software limits awaiting physical qualification.
+
+`cancel ID` cancels an upload/preparation/rearm. To cancel a lifecycle operation, also
 supply `--expected-generation`, `--artifact` and `--target-kind` (1 candidate,
 2 previous, 3 deactivate, 4 retire). Queries return JSON, including the retained
 operation's full signer fingerprint, public key and signed artifact digests.

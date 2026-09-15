@@ -96,6 +96,40 @@ pub(crate) fn request_installation(
     result
 }
 
+/// Rearm uses the existing operation worker; no link I/O runs in this syscall.
+pub(crate) fn request_rearm(expected_last_id: u64, expected_generation: u64) -> Result<u64, Errno> {
+    let result = crate::mcore::context::with_interrupts_masked(|| {
+        if !qualified_topology() {
+            return Err(ENOTSUP);
+        }
+        let mut slot = CONTROL_SLOT.lock();
+        apply_requested_stop(&mut slot, &STOP_REQUESTED);
+        let mut manager = crate::BPF_MANAGER.get().ok_or(ENODEV)?.lock();
+        manager.check_rearm_request(&slot, expected_last_id, expected_generation)?;
+        let epoch = crate::actuation::begin_managed_rearm()?;
+        manager.request_rearm(&mut slot, expected_last_id, expected_generation, epoch)
+    });
+    if result.is_ok() {
+        super::preparation::wake();
+    }
+    result
+}
+
+/// Preserve stop ordering for rearm; uploads keep their existing cancellation
+/// semantics under the same bounded slot-before-manager scope.
+pub(crate) fn cancel_operation(owner: u64, id: u64) -> Result<(), Errno> {
+    let result = crate::mcore::context::with_interrupts_masked(|| {
+        let mut slot = CONTROL_SLOT.lock();
+        apply_requested_stop(&mut slot, &STOP_REQUESTED);
+        let mut manager = crate::BPF_MANAGER.get().ok_or(ENODEV)?.lock();
+        manager.cancel_managed_operation(&mut slot, owner, id)
+    });
+    if result.is_ok() {
+        super::preparation::wake();
+    }
+    result
+}
+
 pub(crate) fn query_installation(
     id: u64,
 ) -> Result<kernel_abi::ManagedOperationV1, kernel_abi::Errno> {
@@ -257,6 +291,9 @@ pub(crate) struct ControlSlot {
     retiring: Option<u64>,
     generation: u64,
     inhibited: bool,
+    // A stop remains visible after STOP_REQUESTED was consumed by any slot reader.
+    pub(super) rearm_pending: Option<u64>,
+    pub(super) rearm_error: Option<Errno>,
     pub(super) last_control_release: u64,
 }
 
@@ -320,6 +357,8 @@ impl ControlSlot {
             retiring: None,
             generation: 0,
             inhibited: true,
+            rearm_pending: None,
+            rearm_error: None,
             last_control_release: 0,
         }
     }
@@ -696,6 +735,9 @@ impl ControlSlot {
 
     pub(crate) fn stop(&mut self) {
         self.inhibited = true;
+        if self.rearm_pending.is_some() {
+            self.rearm_error.get_or_insert(ECANCELED);
+        }
         if let Some(pending) = &mut self.pending {
             let changed = !pending.cancelled;
             pending.error.get_or_insert(kernel_abi::ECANCELED);
@@ -715,13 +757,17 @@ impl ControlSlot {
     /// stop motion but cannot rewrite another operation's receipt.
     pub(crate) fn fail_handoff(&mut self, id: u64, error: HandoffError) {
         use kernel_abi::*;
+        let error = match error {
+            HandoffError::TimedOut => ETIMEDEOUT,
+            HandoffError::NotEstablished => ENOLINK,
+            HandoffError::Exhausted => EOVERFLOW,
+            _ => EPROTO,
+        };
+        if self.rearm_pending == Some(id) {
+            self.rearm_error.get_or_insert(error);
+        }
         if let Some(pending) = self.pending.as_mut().filter(|pending| pending.id == id) {
-            pending.error.get_or_insert(match error {
-                HandoffError::TimedOut => ETIMEDEOUT,
-                HandoffError::NotEstablished => ENOLINK,
-                HandoffError::Exhausted => EOVERFLOW,
-                _ => EPROTO,
-            });
+            pending.error.get_or_insert(error);
         }
         self.stop();
     }

@@ -304,6 +304,22 @@ fn managed_installation(
     managed_bpf(cmd, &mut request).map(|id| id as u64)
 }
 
+/// Requalify the inhibited link; query or cancel the returned operation ID.
+/// A successful rearm does not activate or resume the retained controller.
+pub fn managed_rearm(
+    expected_last_id: u64,
+    expected_generation: u64,
+) -> Result<u64, kernel_abi::Errno> {
+    let mut request = kernel_abi::ManagedRearmRequestV1 {
+        version: kernel_abi::MANAGED_ADMIN_VERSION,
+        size: core::mem::size_of::<kernel_abi::ManagedRearmRequestV1>() as u32,
+        expected_last_id,
+        expected_generation,
+        reserved: 0,
+    };
+    managed_bpf(kernel_abi::BPF_MANAGED_REARM, &mut request).map(|id| id as u64)
+}
+
 pub fn managed_activate(
     expected_last_id: u64,
     expected_generation: u64,

@@ -8,7 +8,7 @@ use crate::bpf::preparation::LifecycleTarget;
 use crate::bpf::{installation, BpfManager};
 
 pub(super) fn is_command(cmd: u32) -> bool {
-    (BPF_MANAGED_UPLOAD_BEGIN..=BPF_MANAGED_RECORDER_READ).contains(&cmd)
+    (BPF_MANAGED_UPLOAD_BEGIN..=BPF_MANAGED_REARM).contains(&cmd)
 }
 
 fn request_size(cmd: u32) -> Result<usize, Errno> {
@@ -27,6 +27,7 @@ fn request_size(cmd: u32) -> Result<usize, Errno> {
         BPF_MANAGED_INSTALLATION_CANCEL => Ok(size_of::<ManagedInstallationCancelV1>()),
         BPF_MANAGED_RECORDER_STATUS => Ok(size_of::<ManagedAuditStatusV1>()),
         BPF_MANAGED_RECORDER_READ => Ok(size_of::<ManagedAuditReadV1>()),
+        BPF_MANAGED_REARM => Ok(size_of::<ManagedRearmRequestV1>()),
         _ => Err(ENOTSUP),
     }
 }
@@ -112,6 +113,15 @@ fn operation_query_id(bytes: &[u8]) -> Result<u64, Errno> {
         return Err(EINVAL);
     }
     Ok(request.id)
+}
+
+fn rearm_request(bytes: &[u8]) -> Result<ManagedRearmRequestV1, Errno> {
+    validate_header(BPF_MANAGED_REARM, bytes)?;
+    let request = ManagedRearmRequestV1::read_from_bytes(bytes).map_err(|_| EINVAL)?;
+    if request.reserved != 0 {
+        return Err(EINVAL);
+    }
+    Ok(request)
 }
 
 fn validate_slot_query(bytes: &[u8]) -> Result<(), Errno> {
@@ -214,6 +224,24 @@ pub(super) fn dispatch(owner: u64, cmd: u32, ptr: usize, size: usize) -> isize {
         // Recorder queries own only the recorder. Lifecycle wrappers take slot
         // then manager with IRQs masked; keep both outside the upload lock below.
         match cmd {
+            BPF_MANAGED_CANCEL => {
+                validate_header(cmd, bytes)?;
+                let request =
+                    ManagedOperationRequestV1::read_from_bytes(bytes).map_err(|_| EINVAL)?;
+                if request.reserved != 0 {
+                    return Err(EINVAL);
+                }
+                installation::cancel_operation(owner, request.id)?;
+                return Ok(0);
+            }
+            BPF_MANAGED_REARM => {
+                let request = rearm_request(bytes)?;
+                return installation::request_rearm(
+                    request.expected_last_id,
+                    request.expected_generation,
+                )
+                .map(|id| id as usize);
+            }
             BPF_MANAGED_RECORDER_STATUS => {
                 validate_header(cmd, bytes)?;
                 let request = ManagedAuditStatusV1::read_from_bytes(bytes).map_err(|_| EINVAL)?;
@@ -284,6 +312,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rearm_has_its_own_bounded_admin_command() {
+        assert!(is_command(269));
+        assert_eq!(request_size(269), Ok(32));
+        let request = ManagedRearmRequestV1 {
+            version: 1,
+            size: 32,
+            expected_last_id: 1 << 40,
+            expected_generation: 1 << 41,
+            reserved: 0,
+        };
+        assert_eq!(rearm_request(request.as_bytes()), Ok(request));
+        for length in 0..32 {
+            assert!(rearm_request(&request.as_bytes()[..length]).is_err());
+        }
+        let mut oversized = request.as_bytes().to_vec();
+        oversized.push(0);
+        assert_eq!(rearm_request(&oversized), Err(EINVAL));
+        for byte in 24..32 {
+            let mut bad = request.as_bytes().to_vec();
+            bad[byte] = 1;
+            assert_eq!(rearm_request(&bad), Err(EINVAL));
+        }
+        let mut bad = request;
+        bad.version = 2;
+        assert_eq!(rearm_request(bad.as_bytes()), Err(ENOTSUP));
+        bad = request;
+        bad.size = 31;
+        assert_eq!(rearm_request(bad.as_bytes()), Err(EINVAL));
+    }
+
+    #[test]
     fn artifact_query_keeps_v1_and_rejects_every_nonzero_output_byte() {
         let request = ManagedSlotArtifactV2 {
             version: MANAGED_SLOT_ARTIFACT_VERSION,
@@ -345,7 +404,7 @@ mod tests {
             bytes[4..8].fill(0);
             assert_eq!(validate_header(cmd, &bytes), Err(EINVAL));
         }
-        assert!(!is_command(BPF_MANAGED_RECORDER_READ + 1));
+        assert!(!is_command(BPF_MANAGED_REARM + 1));
     }
 
     #[test]
@@ -506,7 +565,7 @@ mod tests {
 
     #[test]
     fn managed_commands_reject_wrong_syscall_size_before_user_copy() {
-        for cmd in BPF_MANAGED_UPLOAD_BEGIN..=BPF_MANAGED_RECORDER_READ {
+        for cmd in BPF_MANAGED_UPLOAD_BEGIN..=BPF_MANAGED_REARM {
             assert!(is_command(cmd));
             for size in [0, request_size(cmd).unwrap() - 1, usize::MAX] {
                 let error = if cfg!(feature = "managed-runtime") {
@@ -518,7 +577,7 @@ mod tests {
             }
         }
         assert!(!is_command(BPF_MANAGED_UPLOAD_BEGIN - 1));
-        assert!(!is_command(BPF_MANAGED_RECORDER_READ + 1));
+        assert!(!is_command(BPF_MANAGED_REARM + 1));
     }
 
     #[test]

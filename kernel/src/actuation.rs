@@ -84,6 +84,57 @@ pub(crate) fn managed_motor_pair_owned() -> bool {
     with_apply_lock(|managed_owned| *managed_owned)
 }
 
+/// Local inhibition/ownership for an already validated explicit rearm request.
+/// No UART message is sent: the worker owns the subsequent requalification.
+pub(crate) fn begin_managed_rearm() -> Result<u64, kernel_abi::Errno> {
+    with_apply_lock(|owned| {
+        let mut monitor = ACTUATION_MONITOR.lock();
+        let epoch = monitor.latch_epoch();
+        if epoch == u64::MAX || (!monitor.is_latched() && epoch == u64::MAX - 1) {
+            return Err(kernel_abi::EOVERFLOW);
+        }
+        let drives = if monitor.is_latched() {
+            None
+        } else {
+            Some(monitor.estop_trigger(AuditSource::Operator, crate::time::get_kernel_time_ns()))
+        };
+        let epoch = monitor.latch_epoch();
+        drop(monitor);
+        *owned = true;
+        if let Some(drives) = drives {
+            for drive in drives.iter() {
+                apply_safe_drive(drive);
+            }
+            crate::bpf::recorder::events::trusted_stop(AuditSource::Operator);
+        }
+        Ok(epoch)
+    })
+}
+
+pub(crate) fn managed_stop_epoch() -> u64 {
+    with_apply_lock(|_| ACTUATION_MONITOR.lock().latch_epoch())
+}
+
+/// Only the rearm worker calls this after committing its exact link receipt.
+/// Deliberately omits notify_link_estop(false): that legacy frame is not a
+/// qualified managed rearm and terminates the MCU's managed control loop.
+pub(crate) fn finish_managed_rearm(epoch: u64) -> Result<(), kernel_abi::Errno> {
+    with_apply_lock(|owned| {
+        if !*owned {
+            return Err(kernel_abi::ECANCELED);
+        }
+        let mut monitor = ACTUATION_MONITOR.lock();
+        let released =
+            monitor.operator_rearm_if_unchanged(epoch, crate::time::get_kernel_time_ns());
+        drop(monitor);
+        if !released {
+            return Err(kernel_abi::ECANCELED);
+        }
+        crate::bpf::recorder::events::released(AuditSource::Operator);
+        Ok(())
+    })
+}
+
 fn apply_pwm_value(chip: u8, channel: u8, value: u32) {
     #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
     {

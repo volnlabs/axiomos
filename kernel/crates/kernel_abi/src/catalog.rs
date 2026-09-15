@@ -96,6 +96,7 @@ pub const SUPPORTED_BPF_COMMANDS: &[AbiEntry] = &[
     entry!(BPF_MANAGED_RETIRE, "managed-runtime feature"),
     entry!(BPF_MANAGED_RECORDER_STATUS, "managed-runtime feature"),
     entry!(BPF_MANAGED_RECORDER_READ, "managed-runtime feature"),
+    entry!(BPF_MANAGED_REARM, "managed-runtime feature"),
 ];
 
 /// Map types accepted by `BPF_MAP_CREATE`.

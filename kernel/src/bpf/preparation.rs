@@ -9,6 +9,7 @@ use kernel_bpf::signing::managed::{
 };
 use kernel_bpf::signing::SignatureVerifier;
 use kernel_bpf::verifier::{BehaviorArtifact, VerificationBudget, VerifyError};
+use shrike_link::handoff::RearmReceipt;
 
 use super::installation::{
     ControlSlot, InstallationPreparation, RetireBatch, Retirement, SlotSnapshot,
@@ -35,6 +36,7 @@ enum Phase {
     Preparing,
     Finishing,
     Lifecycle,
+    Rearm,
 }
 
 pub(super) struct PreparationState {
@@ -50,6 +52,20 @@ pub(super) struct PreparationState {
     pub(super) candidate: Option<u32>,
     installation: Option<InstallationPreparation>,
     lifecycle: Option<Lifecycle>,
+    rearm: Option<RearmOperation>,
+}
+
+#[derive(Clone, Copy)]
+struct RearmOperation {
+    generation: u64,
+    stop_epoch: u64,
+    started: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct RearmWork {
+    id: u64,
+    started: bool,
 }
 
 impl PreparationState {
@@ -98,6 +114,7 @@ impl PreparationState {
             candidate: None,
             installation: None,
             lifecycle: None,
+            rearm: None,
         }
     }
 
@@ -106,6 +123,7 @@ impl PreparationState {
         self.receipt_next = (self.receipt_next + 1) % MANAGED_TERMINAL_RECEIPTS;
         self.phase = Phase::Idle;
         self.lifecycle = None;
+        self.rearm = None;
     }
 
     pub(super) fn cancel_upload_owner(&mut self, owner: u64) {
@@ -242,6 +260,147 @@ impl Work {
 }
 
 impl BpfManager {
+    pub(super) fn check_rearm_request(
+        &self,
+        slot: &ControlSlot,
+        last: u64,
+        generation: u64,
+    ) -> Result<u64, Errno> {
+        let snapshot = slot.snapshot();
+        if last != self.preparation.last_id || generation != snapshot.generation {
+            return Err(ESTALE);
+        }
+        if self.preparation.phase != Phase::Idle
+            || self.managed_slot_busy
+            || self.managed_reclamation.is_some()
+            || !snapshot.inhibited
+            || snapshot.pending.is_some()
+            || snapshot.retiring
+            || slot.rearm_pending.is_some()
+        {
+            return Err(EBUSY);
+        }
+        if self.preparation.buffer.is_none() {
+            return Err(ENODEV);
+        }
+        last.checked_add(1)
+            .filter(|id| *id <= isize::MAX as u64)
+            .ok_or(EOVERFLOW)
+    }
+
+    /// One scalar accepted operation; no artifact, instance, admission or
+    /// retirement resources are acquired. Kernel custody survives loader exit.
+    pub(crate) fn request_rearm(
+        &mut self,
+        slot: &mut ControlSlot,
+        last: u64,
+        generation: u64,
+        stop_epoch: u64,
+    ) -> Result<u64, Errno> {
+        let id = self.check_rearm_request(slot, last, generation)?;
+        if stop_epoch == u64::MAX {
+            return Err(EOVERFLOW);
+        }
+        slot.rearm_pending = Some(id);
+        slot.rearm_error = None;
+        let state = &mut self.preparation;
+        state.rearm = Some(RearmOperation {
+            generation,
+            stop_epoch,
+            started: false,
+        });
+        state.phase = Phase::Rearm;
+        state.last_id = id;
+        state.owner = 0;
+        state.cancelled = false;
+        state.active = ManagedOperationV1 {
+            version: MANAGED_ADMIN_VERSION,
+            size: core::mem::size_of::<ManagedOperationV1>() as u32,
+            id,
+            phase: MANAGED_OPERATION_QUEUED,
+            ..Default::default()
+        };
+        self.audit_rearm(slot, MANAGED_AUDIT_ACCEPTED);
+        Ok(id)
+    }
+
+    fn audit_rearm(&self, slot: &ControlSlot, event: u32) {
+        if let Some(rearm) = self.preparation.rearm {
+            super::recorder::events::lifecycle(
+                self.preparation.active.id,
+                ManagedAuditLifecycleV1 {
+                    operation_kind: MANAGED_AUDIT_LIFECYCLE,
+                    event,
+                    expected_generation: rearm.generation,
+                    target_generation: rearm.generation,
+                    observed_generation: slot.snapshot().generation,
+                    action: MANAGED_TARGET_REARM,
+                    phase: self.preparation.active.phase,
+                    error: self.preparation.active.error,
+                    flags: MANAGED_AUDIT_LIFECYCLE_HAS_PUBLIC_ID
+                        | MANAGED_AUDIT_LIFECYCLE_INHIBITED,
+                    ..Default::default()
+                },
+            );
+        }
+    }
+
+    fn validate_rearm(&self, slot: &ControlSlot, id: u64, stop_epoch: u64) -> Result<(), Errno> {
+        let state = &self.preparation;
+        if state.phase != Phase::Rearm || state.active.id != id || id == 0 {
+            return Err(ESTALE);
+        }
+        let rearm = state.rearm.ok_or(ESTALE)?;
+        if slot.snapshot().generation != rearm.generation {
+            return Err(ESTALE);
+        }
+        if let Some(error) = slot.rearm_error {
+            return Err(error);
+        }
+        if stop_epoch == u64::MAX {
+            return Err(EOVERFLOW);
+        }
+        if state.cancelled
+            || slot.rearm_pending != Some(id)
+            || !slot.snapshot().inhibited
+            || rearm.stop_epoch != stop_epoch
+        {
+            return Err(ECANCELED);
+        }
+        Ok(())
+    }
+
+    /// Called only after transport commit/local release, or fail-closed revoke.
+    /// Success does not publish an installation or clear slot inhibition.
+    fn finish_rearm(
+        &mut self,
+        slot: &mut ControlSlot,
+        id: u64,
+        result: Result<(), Errno>,
+    ) -> Result<(), Errno> {
+        if self.preparation.phase != Phase::Rearm || self.preparation.active.id != id {
+            return Err(ESTALE);
+        }
+        self.preparation.active.phase = match result {
+            Ok(()) => MANAGED_OPERATION_COMMITTED,
+            Err(ECANCELED) => MANAGED_OPERATION_CANCELLED,
+            Err(_) => MANAGED_OPERATION_FAILED,
+        };
+        self.preparation.active.error = result.err().map_or(0, |error| i32::from(error) as u32);
+        self.audit_rearm(
+            slot,
+            if result.is_ok() {
+                MANAGED_AUDIT_COMMITTED
+            } else {
+                MANAGED_AUDIT_CANCELLED
+            },
+        );
+        slot.rearm_pending = None;
+        slot.rearm_error = None;
+        self.preparation.complete();
+        Ok(())
+    }
+
     /// Boot-only before starting the permanent worker. The fixed upload backing
     /// stays charged even when idle; chunks never allocate or resize it.
     pub fn enable_managed_preparation(&mut self) -> Result<(), BpfError> {
@@ -360,7 +519,7 @@ impl BpfManager {
         if state.active.id != id || id == 0 {
             return Err(ESTALE);
         }
-        if state.phase == Phase::Lifecycle {
+        if matches!(state.phase, Phase::Lifecycle | Phase::Rearm) {
             return Err(ENOTSUP);
         }
         if state.phase != Phase::Uploading {
@@ -602,7 +761,10 @@ impl BpfManager {
                 self.preparation.candidate.is_some(),
                 MANAGED_SLOT_HAS_CANDIDATE,
             ),
-            (lifecycle.is_some(), MANAGED_SLOT_HAS_PENDING),
+            (
+                lifecycle.is_some() || self.preparation.rearm.is_some(),
+                MANAGED_SLOT_HAS_PENDING,
+            ),
             (snapshot.inhibited, MANAGED_SLOT_INHIBITED),
             (snapshot.retiring, MANAGED_SLOT_RETIRING),
         ] {
@@ -615,18 +777,29 @@ impl BpfManager {
             size: core::mem::size_of::<ManagedSlotV1>() as u32,
             last_id: self.preparation.last_id,
             generation: snapshot.generation,
-            pending_id: lifecycle.map_or(0, |_| self.preparation.active.id),
+            pending_id: if lifecycle.is_some() || self.preparation.rearm.is_some() {
+                self.preparation.active.id
+            } else {
+                0
+            },
             active_charge_ns_per_s: snapshot.active_charge_ns_per_s.unwrap_or(0),
             active_artifact: snapshot.active.unwrap_or(0),
             previous_artifact: snapshot.previous.unwrap_or(0),
             candidate_artifact: self.preparation.candidate.unwrap_or(0),
             flags,
-            pending_target_kind: lifecycle.map_or(0, |operation| match operation.target {
-                LifecycleTarget::Candidate(_) => MANAGED_TARGET_CANDIDATE,
-                LifecycleTarget::Previous(_) => MANAGED_TARGET_PREVIOUS,
-                LifecycleTarget::Deactivate(_) => MANAGED_TARGET_DEACTIVATE,
-                LifecycleTarget::Retire(_) => MANAGED_TARGET_RETIRE,
-            }),
+            pending_target_kind: lifecycle.map_or(
+                if self.preparation.rearm.is_some() {
+                    MANAGED_TARGET_REARM
+                } else {
+                    0
+                },
+                |operation| match operation.target {
+                    LifecycleTarget::Candidate(_) => MANAGED_TARGET_CANDIDATE,
+                    LifecycleTarget::Previous(_) => MANAGED_TARGET_PREVIOUS,
+                    LifecycleTarget::Deactivate(_) => MANAGED_TARGET_DEACTIVATE,
+                    LifecycleTarget::Retire(_) => MANAGED_TARGET_RETIRE,
+                },
+            ),
             reserved: 0,
         }
     }
@@ -688,6 +861,21 @@ impl BpfManager {
             .ok_or(ESTALE)
     }
 
+    /// Production cancellation holds slot-before-manager and first consumes the
+    /// stop mailbox, preserving whichever stop/failure/cancel arrived first.
+    pub(super) fn cancel_managed_operation(
+        &mut self,
+        slot: &mut ControlSlot,
+        owner: u64,
+        id: u64,
+    ) -> Result<(), Errno> {
+        self.managed_operation_cancel(owner, id)?;
+        if slot.rearm_pending == Some(id) {
+            slot.rearm_error.get_or_insert(ECANCELED);
+        }
+        Ok(())
+    }
+
     pub fn managed_operation_cancel(&mut self, owner: u64, id: u64) -> Result<(), Errno> {
         let state = &mut self.preparation;
         if id == 0 || state.active.id != id {
@@ -700,7 +888,7 @@ impl BpfManager {
                 }
                 state.cancel_upload_owner(owner);
             }
-            Phase::Queued | Phase::Preparing => state.cancelled = true,
+            Phase::Queued | Phase::Preparing | Phase::Rearm => state.cancelled = true,
             // Lifecycle cancellation also needs the slot lock and exact target.
             Phase::Lifecycle => return Err(ENOTSUP),
             Phase::Idle | Phase::Finishing => return Err(EALREADY),
@@ -804,6 +992,8 @@ impl BpfManager {
 #[derive(Default)]
 pub(super) struct WorkerState {
     retirement: Option<Retirement>,
+    rearm_retry: bool,
+    rearm_receipt: Option<RearmReceipt>,
 }
 
 pub(super) enum WorkerAction {
@@ -811,8 +1001,103 @@ pub(super) enum WorkerAction {
     Install(InstallationPreparation, bool),
     Retire(RetireBatch),
     Release(ManagedReclamation),
+    Rearm(RearmWork),
     Wait,
     Retry,
+}
+
+/// Each pass is bounded; the task sleeps through WorkerAction::Retry between
+/// passes. Transport calls never overlap manager or actuator lock ownership.
+fn perform_rearm(
+    work: RearmWork,
+    slot: &spin::Mutex<ControlSlot>,
+    manager: &spin::Mutex<BpfManager>,
+    retained: &mut Option<RearmReceipt>,
+) {
+    #[cfg(all(target_arch = "aarch64", feature = "rpi5", feature = "managed-runtime"))]
+    crate::mcore::context::with_interrupts_masked(|| {
+        use super::installation::{apply_requested_stop, STOP_REQUESTED};
+        use crate::arch::aarch64::platform::rpi5::control_link;
+        let validate = || -> Result<u64, Errno> {
+            let epoch = crate::actuation::managed_stop_epoch();
+            let mut slot = slot.lock();
+            apply_requested_stop(&mut slot, &STOP_REQUESTED);
+            manager.lock().validate_rearm(&slot, work.id, epoch)?;
+            Ok(epoch)
+        };
+        let result: Result<bool, Errno> = (|| {
+            validate()?;
+            if !work.started {
+                control_link::request_rearm(work.id).map_err(rearm_link_error)?;
+            }
+            if retained.is_none() {
+                *retained = control_link::poll_rearm_result(work.id).map_err(rearm_link_error)?;
+            }
+            let Some(receipt) = retained.as_ref() else {
+                return Ok(false);
+            };
+            if receipt.operation() != work.id {
+                return Err(ESTALE);
+            }
+            let epoch = validate()?;
+            // Qualified CPU0 stays IRQ-masked from final validation through
+            // link commit, local policy release and terminal receipt publication.
+            if !commit_rearm_receipt(retained, control_link::commit_rearm)? {
+                return Ok(false);
+            }
+            crate::actuation::finish_managed_rearm(epoch)?;
+            Ok(true)
+        })();
+        if matches!(result, Ok(false)) {
+            return;
+        }
+        *retained = None;
+        if result.is_err() {
+            let _ = control_link::cancel_rearm(work.id);
+            // A cancel error must not retain provisional link or policy eligibility.
+            crate::actuation::trigger_estop(kernel_bpf::actuation::AuditSource::ManagedControl);
+        }
+        let mut slot = slot.lock();
+        apply_requested_stop(&mut slot, &STOP_REQUESTED);
+        let _ = manager
+            .lock()
+            .finish_rearm(&mut slot, work.id, result.map(|_| ()));
+    });
+    #[cfg(not(all(target_arch = "aarch64", feature = "rpi5", feature = "managed-runtime")))]
+    crate::mcore::context::with_interrupts_masked(|| {
+        *retained = None;
+        let mut slot = slot.lock();
+        let _ = manager
+            .lock()
+            .finish_rearm(&mut slot, work.id, Err(ENOTSUP));
+    });
+}
+
+fn rearm_link_error(error: shrike_link::handoff::HandoffError) -> Errno {
+    use shrike_link::handoff::HandoffError;
+    match error {
+        HandoffError::TimedOut => ETIMEDEOUT,
+        HandoffError::NotEstablished => ENOLINK,
+        HandoffError::Exhausted => EOVERFLOW,
+        _ => EPROTO,
+    }
+}
+
+/// A busy RX boundary leaves the same non-cloneable readiness receipt in worker
+/// custody. Never repeat issuance or establishment; Handoff checks the original
+/// absolute deadline and cancellation on every subsequent commit attempt.
+fn commit_rearm_receipt(
+    retained: &mut Option<RearmReceipt>,
+    commit: impl FnOnce(&RearmReceipt) -> Result<(), shrike_link::handoff::HandoffError>,
+) -> Result<bool, Errno> {
+    let receipt = retained.as_ref().ok_or(ESTALE)?;
+    match commit(receipt) {
+        Err(shrike_link::handoff::HandoffError::Busy) => Ok(false),
+        result => {
+            *retained = None;
+            result.map(|()| true).map_err(rearm_link_error)
+        }
+    }
 }
 
 impl WorkerState {
@@ -833,6 +1118,23 @@ impl WorkerState {
         slot: &mut ControlSlot,
         manager: &mut BpfManager,
     ) -> WorkerAction {
+        if let Some(rearm) = manager.preparation.rearm.as_mut() {
+            if core::mem::take(&mut self.rearm_retry) {
+                return WorkerAction::Retry;
+            }
+            self.rearm_retry = true;
+            let work = RearmWork {
+                id: manager.preparation.active.id,
+                started: rearm.started,
+            };
+            rearm.started = true;
+            if !work.started {
+                manager.preparation.active.phase = MANAGED_OPERATION_PREPARING;
+                manager.audit_rearm(slot, MANAGED_AUDIT_PREPARING);
+            }
+            return WorkerAction::Rearm(work);
+        }
+        self.rearm_retry = false;
         if let Some(work) = manager.take_managed_work() {
             return WorkerAction::Upload(work);
         }
@@ -921,6 +1223,9 @@ impl WorkerState {
     ) {
         use crate::mcore::context::with_interrupts_masked;
         match action {
+            WorkerAction::Rearm(work) => {
+                perform_rearm(work, slot, manager, &mut self.rearm_receipt)
+            }
             WorkerAction::Upload(work) => {
                 let mut prepared = work.prepare();
                 with_interrupts_masked(|| manager.lock().commit_managed_work(&prepared))

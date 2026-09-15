@@ -34,6 +34,11 @@ pub enum RuntimeCommand {
         #[arg(long)]
         artifact: Option<u32>,
     },
+    /// Requalify the stopped link; leaves the controller inhibited until activation
+    Rearm {
+        #[arg(long)]
+        expected_generation: u64,
+    },
     /// Activate an exact staged artifact against the observed slot generation
     Activate {
         #[arg(long)]
@@ -62,7 +67,7 @@ pub enum RuntimeCommand {
         #[arg(long)]
         artifact: u32,
     },
-    /// Cancel an upload/preparation, or an exact lifecycle request
+    /// Cancel an upload/preparation/rearm by ID, or an exact lifecycle request
     Cancel {
         id: u64,
         #[arg(long, requires_all = ["artifact", "target_kind"])]
@@ -228,6 +233,17 @@ impl<T: Read + Write> Client<T> {
         let (result, output) = self.request(command as u16, body.as_bytes())?;
         ensure!(output.is_empty(), "unexpected output from mutation");
         Ok(result as u64)
+    }
+
+    fn rearm(&mut self, expected_generation: u64) -> Result<u64> {
+        let request = ManagedRearmRequestV1 {
+            version: MANAGED_ADMIN_VERSION,
+            size: std::mem::size_of::<ManagedRearmRequestV1>() as u32,
+            expected_last_id: self.slot()?.last_id,
+            expected_generation,
+            reserved: 0,
+        };
+        self.call(BPF_MANAGED_REARM, &request)
     }
 
     fn slot(&mut self) -> Result<ManagedSlotV1> {
@@ -449,6 +465,12 @@ pub fn run(port: &Path, command: RuntimeCommand) -> Result<()> {
                 serde_json::json!({"operation_id":operation,"accepted":true})
             );
         }
+        RuntimeCommand::Rearm {
+            expected_generation,
+        } => {
+            let id = client.rearm(expected_generation)?;
+            println!("{}", serde_json::json!({"operation_id":id,"accepted":true}));
+        }
         RuntimeCommand::Stop => {
             let (_, bytes) = client.request(u16::MAX, &[])?;
             ensure!(bytes.is_empty(), "invalid stop response");
@@ -535,6 +557,7 @@ mod tests {
         syscall: fn(u32, &mut [u8]) -> isize,
         stops: usize,
         drop_reply: bool,
+        drop_after_command: Option<u16>,
     }
     impl Peer {
         fn new() -> Self {
@@ -544,6 +567,7 @@ mod tests {
                 syscall: |_, _| 123456789012,
                 stops: 0,
                 drop_reply: false,
+                drop_after_command: None,
             }
         }
     }
@@ -564,6 +588,15 @@ mod tests {
                     0
                 })
             });
+            if let Some(command) = self.drop_after_command {
+                if self
+                    .calls
+                    .last()
+                    .is_some_and(|call| call[..2] == command.to_le_bytes())
+                {
+                    self.drop_reply = true;
+                }
+            }
             if self.drop_reply {
                 self.transport.written(FRAME_BYTES);
             }
@@ -644,6 +677,103 @@ mod tests {
         assert_eq!(slot.active_artifact, 0);
         assert_eq!(client.io.calls.len(), 2);
         assert_eq!(client.io.stops, 0);
+    }
+
+    #[test]
+    fn rearm_preserves_observed_id_and_requested_generation_then_queries_receipt() {
+        let mut peer = Peer::new();
+        peer.syscall = |command, body| match command {
+            BPF_MANAGED_SLOT_QUERY => {
+                let mut slot = ManagedSlotV1::read_from_bytes(body).unwrap();
+                slot.last_id = 1 << 40;
+                slot.generation = 1 << 41;
+                slot.flags = MANAGED_SLOT_INHIBITED;
+                body.copy_from_slice(slot.as_bytes());
+                0
+            }
+            BPF_MANAGED_REARM => {
+                let request = ManagedRearmRequestV1::read_from_bytes(body).unwrap();
+                assert_eq!(request.version, MANAGED_ADMIN_VERSION);
+                assert_eq!(request.size, 32);
+                assert_eq!(request.expected_last_id, 1 << 40);
+                assert_eq!(request.expected_generation, 1 << 41);
+                assert_eq!(request.reserved, 0);
+                (1 << 40) + 1
+            }
+            BPF_MANAGED_OPERATION_QUERY => {
+                let mut op = ManagedOperationV1::read_from_bytes(body).unwrap();
+                assert_eq!(op.id, (1 << 40) + 1);
+                op.phase = MANAGED_OPERATION_COMMITTED;
+                body.copy_from_slice(op.as_bytes());
+                0
+            }
+            _ => panic!("unexpected command"),
+        };
+        let mut client = Client::connect(peer, 17, [0xa5; 8], Duration::from_secs(1)).unwrap();
+        let id = client.rearm(1 << 41).unwrap();
+        assert_eq!(id, (1 << 40) + 1);
+        assert_eq!(
+            client.operation(id).unwrap().phase,
+            MANAGED_OPERATION_COMMITTED
+        );
+        assert_eq!(client.io.calls.len(), 3);
+        assert_eq!(client.io.stops, 0);
+    }
+
+    #[test]
+    fn lost_rearm_ack_requires_query_and_does_not_reexecute() {
+        let mut peer = Peer::new();
+        peer.syscall = |command, _| {
+            assert_eq!(command, BPF_MANAGED_REARM);
+            44
+        };
+        peer.drop_after_command = Some(BPF_MANAGED_REARM as u16);
+        let mut client = Client::connect(peer, 17, [0xa5; 8], Duration::from_secs(1)).unwrap();
+        client.timeout = Duration::from_millis(100);
+        let request = ManagedRearmRequestV1 {
+            version: MANAGED_ADMIN_VERSION,
+            size: std::mem::size_of::<ManagedRearmRequestV1>() as u32,
+            expected_last_id: 43,
+            expected_generation: 9,
+            reserved: 0,
+        };
+        assert!(client
+            .call(BPF_MANAGED_REARM, &request)
+            .unwrap_err()
+            .to_string()
+            .contains("query"));
+        assert_eq!(client.io.calls.len(), 1);
+        assert_eq!(client.io.stops, 0);
+    }
+
+    #[test]
+    fn rearm_requires_generation_and_cancel_uses_only_operation_id() {
+        #[derive(clap::Parser)]
+        struct Args {
+            #[command(subcommand)]
+            command: RuntimeCommand,
+        }
+        use clap::Parser;
+        assert!(Args::try_parse_from(["runtime", "rearm"]).is_err());
+        assert!(matches!(
+            Args::try_parse_from(["runtime", "rearm", "--expected-generation", "0"])
+                .unwrap()
+                .command,
+            RuntimeCommand::Rearm {
+                expected_generation: 0
+            }
+        ));
+        assert!(matches!(
+            Args::try_parse_from(["runtime", "cancel", "44"])
+                .unwrap()
+                .command,
+            RuntimeCommand::Cancel {
+                id: 44,
+                expected_generation: None,
+                artifact: None,
+                target_kind: None
+            }
+        ));
     }
 
     fn audit_reply(command: u32, body: &mut [u8]) -> isize {

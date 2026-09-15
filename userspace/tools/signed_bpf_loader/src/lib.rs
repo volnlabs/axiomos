@@ -122,6 +122,9 @@ mod managed {
             BPF_MANAGED_UPLOAD_FINALIZE | BPF_MANAGED_CANCEL => {
                 forward::<ManagedOperationRequestV1>(command, body, response, false, &mut bpf)
             }
+            BPF_MANAGED_REARM => {
+                forward::<ManagedRearmRequestV1>(command, body, response, false, &mut bpf)
+            }
             BPF_MANAGED_OPERATION_QUERY => {
                 forward::<ManagedOperationV1>(command, body, response, true, &mut bpf)
             }
@@ -341,6 +344,10 @@ mod managed {
                     core::mem::size_of::<ManagedInstallationRequestV1>(),
                 ),
                 (
+                    BPF_MANAGED_REARM,
+                    core::mem::size_of::<ManagedRearmRequestV1>(),
+                ),
+                (
                     BPF_MANAGED_RECORDER_STATUS,
                     core::mem::size_of::<ManagedAuditStatusV1>(),
                 ),
@@ -380,6 +387,25 @@ mod managed {
                         8
                     }
                 );
+            }
+        }
+
+        #[test]
+        fn rearm_rejects_every_inexact_body_length_without_a_syscall() {
+            let mut response = [0; shrike_link::installer::MAX_MESSAGE_BYTES];
+            let request = message(BPF_MANAGED_REARM as u16, &[0; 288]);
+            for body_len in 0..=288 {
+                if body_len == core::mem::size_of::<ManagedRearmRequestV1>() {
+                    continue;
+                }
+                let len = dispatch(
+                    &request[..2 + body_len],
+                    &mut response,
+                    |_, _| panic!("malformed rearm dispatched"),
+                    || panic!("rearm called stop"),
+                );
+                assert_eq!(len, 8);
+                assert_eq!(result(&response), -(isize::from(EINVAL) as i64));
             }
         }
 

@@ -38,6 +38,29 @@ impl SafeReceipt {
     }
 }
 
+/// A consumed matching rearm, eligible for one local policy commit. No public
+/// constructor or Clone: operation data alone cannot recreate eligibility.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RearmReceipt {
+    operation: u64,
+    session: u32,
+    received_at: u64,
+}
+
+impl RearmReceipt {
+    pub const fn operation(&self) -> u64 {
+        self.operation
+    }
+
+    pub const fn session(&self) -> u32 {
+        self.session
+    }
+
+    pub const fn received_at(&self) -> u64 {
+        self.received_at
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HandoffError {
     NotEstablished,
@@ -70,9 +93,20 @@ struct Barrier {
 
 #[derive(Clone, Copy)]
 struct Offer {
+    operation: Option<u64>,
     deadline: u64,
     last_seen: u64,
     tx: Transmission,
+}
+
+#[derive(Clone, Copy)]
+struct PendingRearm {
+    operation: u64,
+    session: u32,
+    received_at: u64,
+    deadline: u64,
+    last_seen: u64,
+    issued: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -81,6 +115,7 @@ enum Phase {
     Requalifying(Offer),
     Draining(Offer),
     Offering(Offer),
+    PendingRearm(PendingRearm),
     Ready,
     Barrier(Barrier),
 }
@@ -113,14 +148,19 @@ impl Handoff {
     /// IDs are unique only in this object's lifetime, never claimed across boot.
     /// `now` and `timeout` use the caller's monotonic physical-counter ticks.
     pub fn offer_after_drain(&mut self, now: u64, timeout: u64) -> Result<Msg, HandoffError> {
-        let offer = self.reserve_session(now, timeout)?;
+        let offer = self.reserve_session(None, now, timeout)?;
         self.phase = Phase::Offering(offer);
         Ok(Msg::SessionOffer {
             session: self.last_session,
         })
     }
 
-    fn reserve_session(&mut self, now: u64, timeout: u64) -> Result<Offer, HandoffError> {
+    fn reserve_session(
+        &mut self,
+        operation: Option<u64>,
+        now: u64,
+        timeout: u64,
+    ) -> Result<Offer, HandoffError> {
         if !matches!(self.phase, Phase::Disarmed) {
             return Err(HandoffError::Busy);
         }
@@ -134,6 +174,7 @@ impl Handoff {
             .ok_or(HandoffError::Exhausted)?;
         self.last_session = session;
         Ok(Offer {
+            operation,
             deadline,
             last_seen: now,
             tx: Transmission::Pending,
@@ -150,7 +191,32 @@ impl Handoff {
         timeout: u64,
         tx: &mut TxState,
     ) -> Result<(u32, MotorDiscards), HandoffError> {
-        let request = self.reserve_session(now, timeout)?;
+        self.requalify_with_operation(None, now, timeout, tx)
+    }
+
+    /// Start an operation-bound rearm. The operation stays local metadata; the
+    /// wire messages remain correlated by the reserved session alone.
+    pub fn rearm_on_transport(
+        &mut self,
+        operation: u64,
+        now: u64,
+        timeout: u64,
+        tx: &mut TxState,
+    ) -> Result<(u32, MotorDiscards), HandoffError> {
+        if operation == 0 {
+            return Err(HandoffError::BadIdentity);
+        }
+        self.requalify_with_operation(Some(operation), now, timeout, tx)
+    }
+
+    fn requalify_with_operation(
+        &mut self,
+        operation: Option<u64>,
+        now: u64,
+        timeout: u64,
+        tx: &mut TxState,
+    ) -> Result<(u32, MotorDiscards), HandoffError> {
+        let request = self.reserve_session(operation, now, timeout)?;
         self.phase = Phase::Requalifying(request);
         let mut discarded = tx.clear_motor();
         discarded.frame = tx.cancel_unsent().frame;
@@ -180,6 +246,7 @@ impl Handoff {
         }
         let deadline = now.checked_add(timeout).ok_or(HandoffError::Exhausted)?;
         self.phase = Phase::Offering(Offer {
+            operation: request.operation,
             deadline: deadline.min(request.deadline),
             last_seen: now,
             tx: Transmission::Pending,
@@ -201,6 +268,10 @@ impl Handoff {
 
     pub const fn operation(&self) -> Option<u64> {
         match self.phase {
+            Phase::Requalifying(offer) | Phase::Draining(offer) | Phase::Offering(offer) => {
+                offer.operation
+            }
+            Phase::PendingRearm(pending) => Some(pending.operation),
             Phase::Barrier(barrier) => Some(barrier.operation),
             _ => None,
         }
@@ -252,7 +323,11 @@ impl Handoff {
         timeout: u64,
     ) -> Result<BarrierIdentity, HandoffError> {
         match self.phase {
-            Phase::Disarmed | Phase::Requalifying(_) | Phase::Draining(_) | Phase::Offering(_) => {
+            Phase::Disarmed
+            | Phase::Requalifying(_)
+            | Phase::Draining(_)
+            | Phase::Offering(_)
+            | Phase::PendingRearm(_) => {
                 return Err(HandoffError::NotEstablished);
             }
             Phase::Barrier(_) => return Err(HandoffError::Busy),
@@ -382,13 +457,25 @@ impl Handoff {
                 Ok(true)
             }
             (
-                Phase::Offering(Offer {
-                    tx: Transmission::Sent,
-                    ..
-                }),
+                Phase::Offering(
+                    offer @ Offer {
+                        tx: Transmission::Sent,
+                        ..
+                    },
+                ),
                 Msg::SessionReady { session },
             ) if session == self.last_session => {
-                self.phase = Phase::Ready;
+                self.phase = match offer.operation {
+                    Some(operation) => Phase::PendingRearm(PendingRearm {
+                        operation,
+                        session,
+                        received_at,
+                        deadline: offer.deadline,
+                        last_seen: offer.last_seen,
+                        issued: false,
+                    }),
+                    None => Phase::Ready,
+                };
                 Ok(true)
             }
             (
@@ -421,6 +508,7 @@ impl Handoff {
             Phase::Requalifying(offer) | Phase::Draining(offer) | Phase::Offering(offer) => {
                 Some((offer.deadline, &mut offer.last_seen))
             }
+            Phase::PendingRearm(pending) => Some((pending.deadline, &mut pending.last_seen)),
             Phase::Barrier(barrier) => Some((barrier.deadline, &mut barrier.last_seen)),
             Phase::Disarmed | Phase::Ready => None,
         };
@@ -439,6 +527,47 @@ impl Handoff {
             return Err(error);
         }
         *last_seen = now;
+        Ok(())
+    }
+
+    /// Issue evidence for an operation-bound SessionReady exactly once. The
+    /// handoff stays inhibited and deadline-bound until that receipt commits.
+    pub fn take_rearm_ready(&mut self, now: u64) -> Result<Option<RearmReceipt>, HandoffError> {
+        self.check(now)?;
+        if let Phase::PendingRearm(pending) = &mut self.phase {
+            if pending.issued {
+                return Ok(None);
+            }
+            pending.issued = true;
+            return Ok(Some(RearmReceipt {
+                operation: pending.operation,
+                session: pending.session,
+                received_at: pending.received_at,
+            }));
+        }
+        Ok(None)
+    }
+
+    /// Commit a still-current issued receipt after the caller's local policy
+    /// checks. Stop, expiry, reversal, mismatches and replay cannot enter Ready.
+    pub fn commit_rearm(&mut self, receipt: &RearmReceipt, now: u64) -> Result<(), HandoffError> {
+        self.check(now)?;
+        let exact = matches!(
+            self.phase,
+            Phase::PendingRearm(PendingRearm {
+                operation,
+                session,
+                received_at,
+                issued: true,
+                ..
+            }) if operation == receipt.operation
+                && session == receipt.session
+                && received_at == receipt.received_at
+        );
+        if !exact {
+            return Err(HandoffError::Stale);
+        }
+        self.phase = Phase::Ready;
         Ok(())
     }
 
@@ -490,6 +619,225 @@ mod tests {
             correlation: key.correlation,
             sequence: key.sequence,
         }
+    }
+
+    fn advance_rearm_to_pending(
+        handoff: &mut Handoff,
+        tx: &mut TxState,
+        operation: u64,
+        started_at: u64,
+        overall_timeout: u64,
+    ) -> u32 {
+        let (session, discarded) = handoff
+            .rearm_on_transport(operation, started_at, overall_timeout, tx)
+            .unwrap();
+        assert_eq!(discarded, MotorDiscards::default());
+        assert_eq!(handoff.operation(), Some(operation));
+
+        let requalify = handoff.enqueue(tx, started_at + 1).unwrap().unwrap();
+        assert_eq!(requalify.message, Msg::Requalify { session });
+        assert_eq!(requalify.operation, Some(operation));
+        while tx.next_byte().is_some() {}
+        handoff.sent(started_at + 2).unwrap();
+        assert!(handoff
+            .on_reply(Msg::Prepared { session }, started_at + 3)
+            .unwrap());
+
+        let offer = handoff
+            .offer_after_requalification_drain(started_at + 203, 80)
+            .unwrap();
+        assert_eq!(offer, Msg::SessionOffer { session });
+        let offer_frame = handoff.enqueue(tx, started_at + 204).unwrap().unwrap();
+        assert_eq!(offer_frame.message, offer);
+        assert_eq!(offer_frame.operation, Some(operation));
+        while tx.next_byte().is_some() {}
+        handoff.sent(started_at + 205).unwrap();
+        assert!(handoff
+            .on_reply(Msg::SessionReady { session }, started_at + 206)
+            .unwrap());
+        session
+    }
+
+    #[test]
+    fn rearm_rejects_zero_or_conflicting_operation_before_mutation() {
+        let mut handoff = Handoff::new();
+        let mut tx = TxState::new();
+        tx.replace_motor(100, 200, 0);
+        assert_eq!(
+            handoff.rearm_on_transport(0, 0, 1_000, &mut tx),
+            Err(HandoffError::BadIdentity)
+        );
+        assert_eq!(handoff.last_session, 0);
+        assert_eq!(handoff.operation(), None);
+        assert!(tx.pending_motor().is_some());
+
+        assert_eq!(
+            handoff.rearm_on_transport(41, 0, 1_000, &mut tx).unwrap().0,
+            1
+        );
+        assert_eq!(handoff.operation(), Some(41));
+        tx.replace_motor(300, 400, 1);
+        assert_eq!(
+            handoff.rearm_on_transport(42, 1, 1_000, &mut tx),
+            Err(HandoffError::Busy)
+        );
+        assert_eq!(handoff.operation(), Some(41));
+        assert!(tx.pending_motor().is_some());
+    }
+
+    #[test]
+    fn rearm_receipt_requires_full_exchange_and_explicit_one_shot_consumption() {
+        let mut handoff = Handoff::new();
+        let mut tx = TxState::new();
+        let (session, _) = handoff.rearm_on_transport(42, 100, 1_000, &mut tx).unwrap();
+        assert!(!handoff.on_reply(Msg::Prepared { session }, 101).unwrap());
+        assert!(handoff.take_rearm_ready(101).unwrap().is_none());
+
+        let request = handoff.enqueue(&mut tx, 102).unwrap().unwrap();
+        assert_eq!(request.operation, Some(42));
+        tx.next_byte();
+        assert!(!handoff.on_reply(Msg::Prepared { session }, 103).unwrap());
+        while tx.next_byte().is_some() {}
+        handoff.sent(104).unwrap();
+        assert!(handoff.on_reply(Msg::Prepared { session }, 105).unwrap());
+
+        let offer = handoff.offer_after_requalification_drain(305, 80).unwrap();
+        assert!(!handoff
+            .on_reply(Msg::SessionReady { session }, 306)
+            .unwrap());
+        let frame = handoff.enqueue(&mut tx, 307).unwrap().unwrap();
+        assert_eq!(frame.message, offer);
+        assert_eq!(frame.operation, Some(42));
+        tx.next_byte();
+        assert!(!handoff
+            .on_reply(Msg::SessionReady { session }, 308)
+            .unwrap());
+        while tx.next_byte().is_some() {}
+        handoff.sent(309).unwrap();
+        assert!(!handoff.motion_permitted());
+        assert!(handoff
+            .on_reply(Msg::SessionReady { session }, 310)
+            .unwrap());
+        assert_eq!(handoff.operation(), Some(42));
+        assert!(!handoff.motion_permitted());
+        assert_eq!(
+            handoff.begin(43, 1, 311, 80),
+            Err(HandoffError::NotEstablished)
+        );
+
+        let receipt = handoff.take_rearm_ready(312).unwrap().unwrap();
+        assert_eq!(receipt.operation(), 42);
+        assert_eq!(receipt.session(), session);
+        assert_eq!(receipt.received_at(), 310);
+        assert!(!handoff.motion_permitted());
+        assert_eq!(handoff.operation(), Some(42));
+        assert!(handoff.take_rearm_ready(313).unwrap().is_none());
+        assert_eq!(
+            handoff.begin(43, 1, 313, 80),
+            Err(HandoffError::NotEstablished)
+        );
+        handoff.commit_rearm(&receipt, 314).unwrap();
+        assert!(handoff.motion_permitted());
+        assert_eq!(handoff.operation(), None);
+        assert_eq!(
+            handoff.commit_rearm(&receipt, 315),
+            Err(HandoffError::Stale)
+        );
+    }
+
+    #[test]
+    fn rearm_deadline_includes_pending_commit_delay_and_reversal() {
+        for (commit_at, expected) in [
+            (480, HandoffError::TimedOut),
+            (470, HandoffError::ClockReversed),
+        ] {
+            let mut handoff = Handoff::new();
+            let mut tx = TxState::new();
+            // Narrow the offer deadline to 480 while retaining the overall
+            // operation bound. The matching reply is not the local commit.
+            let (session, _) = handoff.rearm_on_transport(42, 200, 280, &mut tx).unwrap();
+            let request = handoff.enqueue(&mut tx, 201).unwrap().unwrap();
+            while tx.next_byte().is_some() {}
+            handoff.sent(202).unwrap();
+            assert_eq!(request.message, Msg::Requalify { session });
+            assert!(handoff.on_reply(Msg::Prepared { session }, 203).unwrap());
+            handoff.offer_after_requalification_drain(400, 80).unwrap();
+            handoff.enqueue(&mut tx, 401).unwrap().unwrap();
+            while tx.next_byte().is_some() {}
+            handoff.sent(402).unwrap();
+            assert!(handoff
+                .on_reply(Msg::SessionReady { session }, 470)
+                .unwrap());
+            let receipt = handoff.take_rearm_ready(471).unwrap().unwrap();
+            assert!(!handoff.motion_permitted());
+            assert_eq!(handoff.commit_rearm(&receipt, commit_at), Err(expected));
+            assert!(!handoff.motion_permitted());
+            assert_eq!(handoff.operation(), None);
+        }
+    }
+
+    #[test]
+    fn cancelled_rearms_revoke_receipts_across_reused_operation_ids() {
+        let mut handoff = Handoff::new();
+        let mut tx = TxState::new();
+
+        let old_a = advance_rearm_to_pending(&mut handoff, &mut tx, 7, 0, 1_000);
+        assert_eq!(old_a, 1);
+        let stale_a = handoff.take_rearm_ready(207).unwrap().unwrap();
+        handoff.disarm();
+        assert_eq!(
+            handoff.commit_rearm(&stale_a, 208),
+            Err(HandoffError::Stale)
+        );
+
+        let old_b = advance_rearm_to_pending(&mut handoff, &mut tx, 8, 300, 1_000);
+        assert_eq!(old_b, 2);
+        handoff.disarm();
+        assert!(handoff.take_rearm_ready(507).unwrap().is_none());
+
+        let (new_a, _) = handoff.rearm_on_transport(7, 600, 1_000, &mut tx).unwrap();
+        assert_eq!(new_a, 3);
+        assert!(!handoff
+            .on_reply(Msg::Prepared { session: old_a }, 601)
+            .unwrap());
+        let request = handoff.enqueue(&mut tx, 602).unwrap().unwrap();
+        while tx.next_byte().is_some() {}
+        handoff.sent(603).unwrap();
+        assert!(!handoff
+            .on_reply(Msg::Prepared { session: old_b }, 604)
+            .unwrap());
+        assert!(handoff
+            .on_reply(Msg::Prepared { session: new_a }, 605)
+            .unwrap());
+        handoff.offer_after_requalification_drain(805, 80).unwrap();
+        handoff.enqueue(&mut tx, 806).unwrap().unwrap();
+        while tx.next_byte().is_some() {}
+        handoff.sent(807).unwrap();
+        for stale in [old_a, old_b] {
+            assert!(!handoff
+                .on_reply(Msg::SessionReady { session: stale }, 808)
+                .unwrap());
+        }
+        assert!(handoff
+            .on_reply(Msg::SessionReady { session: new_a }, 809)
+            .unwrap());
+        let receipt = handoff.take_rearm_ready(810).unwrap().unwrap();
+        assert_eq!(receipt.operation(), 7);
+        assert_eq!(receipt.session(), new_a);
+        assert_eq!(stale_a.operation(), receipt.operation());
+        assert_ne!(stale_a.session(), receipt.session());
+        assert_eq!(
+            handoff.commit_rearm(&stale_a, 811),
+            Err(HandoffError::Stale)
+        );
+        assert!(!handoff.motion_permitted());
+        handoff.commit_rearm(&receipt, 812).unwrap();
+        assert!(handoff.motion_permitted());
+        assert_eq!(
+            handoff.commit_rearm(&receipt, 813),
+            Err(HandoffError::Stale)
+        );
+        assert_eq!(request.operation, Some(7));
     }
 
     #[test]

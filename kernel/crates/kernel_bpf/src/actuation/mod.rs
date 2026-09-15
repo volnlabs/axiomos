@@ -977,7 +977,9 @@ impl<P: PhysicalProfile> Monitor<P> {
             last_update_ns: now_ns,
             ..MotorPairState::STOPPED
         };
-        self.latch_epoch = self.latch_epoch.wrapping_add(1);
+        // MAX is permanently inadmissible to managed rearm; a stop can never
+        // recreate a previously accepted epoch, even after counter exhaustion.
+        self.latch_epoch = self.latch_epoch.saturating_add(1);
         let drive = self.known_channels();
         self.audit.emit(AuditRecord {
             seq: 0,
@@ -1051,6 +1053,16 @@ impl<P: PhysicalProfile> Monitor<P> {
         self.latch_epoch
     }
 
+    /// The kernel must first confirm its exact requalification receipt. This
+    /// local operator release refuses every intervening stop and exhausted epoch.
+    pub fn operator_rearm_if_unchanged(&mut self, epoch: u64, now_ns: u64) -> bool {
+        if epoch == u64::MAX || epoch != self.latch_epoch || !self.latched {
+            return false;
+        }
+        self.estop_release(Authority::Operator, AuditSource::Operator, now_ns)
+            == ReleaseResult::Released
+    }
+
     /// Latch a channel into safe-hold; subsequent `decide` calls return
     /// `Safe(min)`. A no-op on an unknown channel. (Spec 2 wires the production
     /// callers: the kernel e-stop latch and authority veto.)
@@ -1079,6 +1091,32 @@ mod tests {
     use super::*;
     use crate::maps::{BpfMap, MapError};
     use crate::profile::{CloudProfile, EmbeddedProfile};
+
+    #[test]
+    fn stop_epoch_exhaustion_never_reuses_an_earlier_epoch() {
+        let mut monitor = Monitor::<EmbeddedProfile>::new();
+        monitor.latch_epoch = u64::MAX - 1;
+        monitor.estop_trigger(AuditSource::Operator, 1);
+        assert_eq!(monitor.latch_epoch(), u64::MAX);
+        monitor.estop_trigger(AuditSource::Watchdog, 2);
+        assert_eq!(monitor.latch_epoch(), u64::MAX);
+        assert!(monitor.is_latched());
+        assert!(!monitor.operator_rearm_if_unchanged(u64::MAX, 3));
+    }
+
+    #[test]
+    fn managed_local_rearm_requires_latched_exact_epoch_and_cannot_be_replayed() {
+        let mut monitor = Monitor::<EmbeddedProfile>::new();
+        assert!(!monitor.operator_rearm_if_unchanged(0, 1));
+        monitor.estop_trigger(AuditSource::Operator, 2);
+        let epoch = monitor.latch_epoch();
+        monitor.estop_trigger(AuditSource::Watchdog, 3);
+        assert!(!monitor.operator_rearm_if_unchanged(epoch, 4));
+        assert!(monitor.is_latched());
+        assert!(monitor.operator_rearm_if_unchanged(monitor.latch_epoch(), 5));
+        assert!(!monitor.is_latched());
+        assert!(!monitor.operator_rearm_if_unchanged(monitor.latch_epoch(), 6));
+    }
 
     #[test]
     fn pwm_envelope_from_embedded_profile() {

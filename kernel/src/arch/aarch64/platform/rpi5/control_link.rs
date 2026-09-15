@@ -29,7 +29,9 @@ use kernel_abi::{
 #[cfg(feature = "managed-runtime")]
 use kernel_abi::{MANAGED_AUDIT_HANDOFF_FRAMED, MANAGED_AUDIT_HANDOFF_LOCAL_COMPLETE};
 #[cfg(feature = "managed-runtime")]
-use shrike_link::handoff::{Handoff, HandoffError};
+use shrike_link::handoff::{Handoff, HandoffError, RearmReceipt};
+#[cfg(feature = "managed-runtime")]
+mod rearm;
 use shrike_link::motor::MotorSide;
 use shrike_link::ring::RingBuf;
 use shrike_link::session::{LinkAction, LinkSession};
@@ -169,13 +171,67 @@ pub struct ControlLink {
     handoff: Handoff,
     #[cfg(feature = "managed-runtime")]
     local_quiescence: bool,
+    #[cfg(feature = "managed-runtime")]
+    rearm: Option<rearm::Rearm>,
+    #[cfg(feature = "managed-runtime")]
+    rearm_failure: Option<(u64, HandoffError)>,
+    #[cfg(feature = "managed-runtime")]
+    safe_idle: bool,
 }
 
 impl ControlLink {
+    #[cfg(feature = "managed-runtime")]
+    fn poll_rearm(&mut self) -> Result<bool, HandoffError> {
+        let pending = self.rearm.as_mut().ok_or(HandoffError::Stale)?;
+        let operation = pending.operation();
+        let result = pending.poll(
+            &mut self.uart,
+            &mut self.handoff,
+            &mut self.tx,
+            &mut crate::arch::aarch64::interrupts::physical_counter,
+            &mut |event| match event {
+                rearm::Event::Framed(frame) => events::handoff(
+                    MANAGED_AUDIT_HANDOFF_FRAMED,
+                    frame.operation,
+                    frame.message,
+                    None,
+                    None,
+                    None,
+                ),
+                rearm::Event::Completed(completion, observed, result) => match completion {
+                    shrike_link::tx::FrameCompletion::Motor(frame) => events::motor_tx(frame, true),
+                    shrike_link::tx::FrameCompletion::Handoff(frame) => events::handoff(
+                        MANAGED_AUDIT_HANDOFF_LOCAL_COMPLETE,
+                        frame.operation,
+                        frame.message,
+                        Some(observed),
+                        None,
+                        result.err(),
+                    ),
+                },
+                rearm::Event::Reply(message, observed, result) => {
+                    events::handoff_reply(Some(operation), message, observed, result);
+                }
+            },
+        );
+        if let Err(error) = result {
+            self.handoff_failed(Some(operation), error);
+            self.rearm_failure = Some((operation, error));
+        }
+        result
+    }
+
     /// Drain UART -> decode -> liveness/heartbeat/fail-safe -> TX. Returns the
     /// inbound side-effects to run after the lock is dropped. No BPF/estop here.
     fn poll_decode(&mut self, now: u64) -> PollOutcome {
         let mut out = PollOutcome::default();
+        #[cfg(feature = "managed-runtime")]
+        if self.rearm.is_some() {
+            if self.poll_rearm().is_err() {
+                out.estop = true;
+            }
+            return out;
+        }
         #[cfg(feature = "managed-runtime")]
         if self.local_quiescence {
             // Reset-era bytes never reach either decoder or liveness tracker.
@@ -357,6 +413,10 @@ impl ControlLink {
                 }
             }
         }
+        #[cfg(feature = "managed-runtime")]
+        if estop_queue_empty && self.safe_idle && self.handoff.motion_permitted() {
+            self.set_safe_motor_pair(now, None);
+        }
         if estop_queue_empty && self.tx.is_idle() {
             self.flush_pending_motor(now);
         }
@@ -448,6 +508,11 @@ impl ControlLink {
 
     fn queue_estop(&mut self, assert: bool) {
         if assert {
+            #[cfg(feature = "managed-runtime")]
+            if let Some(rearm) = self.rearm.take() {
+                self.rearm_failure = Some((rearm.operation(), HandoffError::NotEstablished));
+                self.local_quiescence = false;
+            }
             let discarded = self.tx.clear_motor();
             motor_discard(discarded, MANAGED_AUDIT_DISCARD_STOP);
             #[cfg(feature = "managed-runtime")]
@@ -714,6 +779,12 @@ fn init() -> Result<(), InitError> {
                 handoff: Handoff::new(),
                 #[cfg(feature = "managed-runtime")]
                 local_quiescence: true,
+                #[cfg(feature = "managed-runtime")]
+                rearm: None,
+                #[cfg(feature = "managed-runtime")]
+                rearm_failure: None,
+                #[cfg(feature = "managed-runtime")]
+                safe_idle: true,
             };
             #[cfg(feature = "managed-runtime")]
             let quantum_ns = match counter_sample().1 {
@@ -826,6 +897,117 @@ pub fn command_estop(assert: bool) -> bool {
     with_link(|l| l.request_estop(assert, now)).unwrap_or(false)
 }
 
+/// Worker-only explicit rearm. The manager has already captured its stop epoch,
+/// inhibited the installation and claimed the managed motor pair. This does not
+/// release either peer's e-stop latch or run an ordinary installation.
+#[cfg(feature = "managed-runtime")]
+pub(crate) fn request_rearm(operation: u64) -> Result<(), HandoffError> {
+    with_link(|link| {
+        if link.rearm.is_some() {
+            return Err(HandoffError::Busy);
+        }
+        let frequency = counter_sample().1;
+        let (pending, discarded) = rearm::Rearm::begin(
+            operation,
+            crate::arch::aarch64::interrupts::physical_counter(),
+            frequency,
+            &mut link.handoff,
+            &mut link.tx,
+        )?;
+        motor_discard(discarded, MANAGED_AUDIT_DISCARD_INHIBITED);
+        link.pending_estop = None;
+        link.rx = RingBuf::new();
+        link.dec = Decoder::new();
+        link.rearm_failure = None;
+        link.rearm = Some(pending);
+        link.safe_idle = true;
+        // Rearm owns both fresh quiet intervals; the startup drain never counts
+        // as peer qualification and does not keep ordinary liveness running.
+        link.local_quiescence = true;
+        crate::bpf::control::invalidate_sensor();
+        Ok(())
+    })
+    .unwrap_or(Err(HandoffError::NotEstablished))
+}
+
+#[cfg(feature = "managed-runtime")]
+pub(crate) fn cancel_rearm(operation: u64) -> Result<(), HandoffError> {
+    with_link(|link| {
+        if link
+            .rearm
+            .as_ref()
+            .is_some_and(|pending| pending.operation() == operation)
+        {
+            link.queue_estop(true);
+            Ok(())
+        } else if link.rearm_failure.is_some_and(|(id, _)| id == operation) {
+            Ok(())
+        } else {
+            Err(HandoffError::Stale)
+        }
+    })
+    .unwrap_or(Err(HandoffError::NotEstablished))
+}
+
+#[cfg(feature = "managed-runtime")]
+pub(crate) fn poll_rearm_result(operation: u64) -> Result<Option<RearmReceipt>, HandoffError> {
+    with_link(|link| {
+        if let Some((id, error)) = link.rearm_failure {
+            if id == operation {
+                return Err(error);
+            }
+        }
+        if !link
+            .rearm
+            .as_ref()
+            .is_some_and(|pending| pending.operation() == operation)
+        {
+            return Err(HandoffError::Stale);
+        }
+        if !link.poll_rearm()? {
+            return Ok(None);
+        }
+        link.handoff
+            .take_rearm_ready(crate::arch::aarch64::interrupts::physical_counter())
+    })
+    .unwrap_or(Err(HandoffError::NotEstablished))
+}
+
+/// The owner commits with CPU0 IRQs masked, after rechecking the operation,
+/// generation and stop epoch, and before its local-only monitor release.
+#[cfg(feature = "managed-runtime")]
+pub(crate) fn commit_rearm(receipt: &RearmReceipt) -> Result<(), HandoffError> {
+    with_link(|link| {
+        if !link
+            .rearm
+            .as_ref()
+            .is_some_and(|pending| pending.operation() == receipt.operation())
+        {
+            return Err(HandoffError::Stale);
+        }
+        // An RX byte/stop arriving since the issued receipt must be processed;
+        // do not reset a decoder or silently erase it at this commit point.
+        if !link.poll_rearm()? {
+            return Err(HandoffError::Busy);
+        }
+        link.handoff.commit_rearm(
+            receipt,
+            crate::arch::aarch64::interrupts::physical_counter(),
+        )?;
+        link.rearm = None;
+        link.local_quiescence = false;
+        link.motor_seq = 0;
+        link.rx = RingBuf::new();
+        link.dec = Decoder::new();
+        link.session = LinkSession::new(LINK_TIMEOUT_NS, HEARTBEAT_PERIOD_NS);
+        link.session.on_inbound(now_ns());
+        link.link_loss_reported = false;
+        link.safe_idle = true;
+        Ok(())
+    })
+    .unwrap_or(Err(HandoffError::NotEstablished))
+}
+
 /// Enqueue a message for transmission after any pending e-stop command.
 /// False if link down, full, or an earlier e-stop command still cannot fit.
 pub fn send(msg: &Msg) -> bool {
@@ -853,10 +1035,16 @@ pub(crate) fn handoff_boundary(
     frequency: u64,
 ) -> Result<Option<u64>, HandoffError> {
     let result = with_link(|link| {
+        link.safe_idle = slot.snapshot().inhibited || slot.snapshot().active.is_none();
+        if link.rearm.is_some() {
+            // A rearm never resumes the retained installation. There is no
+            // installation handoff to run while this management op owns TX.
+            return Ok(None);
+        }
         if link.pending_estop.is_some() {
             link.handoff.disarm();
         }
-        slot.handoff_boundary(
+        let result = slot.handoff_boundary(
             kernel_time::periodic::PeriodicRelease {
                 actual: crate::arch::aarch64::interrupts::physical_counter(),
                 ..release
@@ -865,7 +1053,12 @@ pub(crate) fn handoff_boundary(
             &mut link.handoff,
             &mut link.tx,
             &mut link.motor_seq,
-        )
+        );
+        // Publication can clear inhibition in this very boundary. Idle zeros
+        // must not overwrite the new controller's first pending command.
+        let snapshot = slot.snapshot();
+        link.safe_idle = result.is_err() || snapshot.inhibited || snapshot.active.is_none();
+        result
     });
     result.unwrap_or_else(|| {
         if slot.needs_handoff_transport() {

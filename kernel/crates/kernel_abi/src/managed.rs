@@ -12,6 +12,7 @@ pub const BPF_MANAGED_SLOT_QUERY: u32 = 263;
 pub const BPF_MANAGED_INSTALLATION_CANCEL: u32 = 264;
 pub const BPF_MANAGED_DEACTIVATE: u32 = 265;
 pub const BPF_MANAGED_RETIRE: u32 = 266;
+pub const BPF_MANAGED_REARM: u32 = 269;
 pub const MANAGED_ADMIN_VERSION: u32 = 1;
 pub const MANAGED_UPLOAD_CHUNK_BYTES: usize = 256;
 pub const MANAGED_TERMINAL_RECEIPTS: usize = 4;
@@ -20,6 +21,8 @@ pub const MANAGED_TARGET_CANDIDATE: u32 = 1;
 pub const MANAGED_TARGET_PREVIOUS: u32 = 2;
 pub const MANAGED_TARGET_DEACTIVATE: u32 = 3;
 pub const MANAGED_TARGET_RETIRE: u32 = 4;
+/// Explicit link requalification; no artifact/instance identity is applicable.
+pub const MANAGED_TARGET_REARM: u32 = 5;
 pub const MANAGED_SLOT_HAS_ACTIVE: u32 = 1 << 0;
 pub const MANAGED_SLOT_HAS_PREVIOUS: u32 = 1 << 1;
 pub const MANAGED_SLOT_HAS_CANDIDATE: u32 = 1 << 2;
@@ -91,6 +94,25 @@ pub struct ManagedInstallationRequestV1 {
     pub artifact_handle: u32,
     pub reserved: u32,
 }
+
+/// Explicit operator rearm of the inhibited link. This creates an operation,
+/// not an installation: generation and private state remain unchanged. Success
+/// leaves the controller inhibited until a separate fresh activation. Cancel
+/// with BPF_MANAGED_CANCEL and the exact returned operation ID. Operation query
+/// uses its existing phases; upload/artifact fields are zero and inapplicable.
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable,
+)]
+pub struct ManagedRearmRequestV1 {
+    pub version: u32,
+    pub size: u32,
+    pub expected_last_id: u64,
+    pub expected_generation: u64,
+    pub reserved: u64,
+}
+
+const _: () = assert!(core::mem::size_of::<ManagedRearmRequestV1>() == 32);
 
 /// Cancel one exact lifecycle request. The original upload cancel ABI remains
 /// separate; target_kind is MANAGED_TARGET_CANDIDATE, MANAGED_TARGET_PREVIOUS,

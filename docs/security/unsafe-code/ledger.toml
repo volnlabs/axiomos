@@ -1,6 +1,6 @@
 version = 1
 baseline_sites = 720
-baseline_fingerprint = "sha256:7ee19bea18980cfa4add5a1e70a89d1dedd211610cff45c0bb5f840157e49f8b"
+baseline_fingerprint = "sha256:73363c4782cae8a95652fdc7f4d518a92da69aa022a145680a50fbe4c3d44518"
 
 # 2026-09-16: RP2040 TX-idle uses existing UART register accessors;
 # their unsafe PAC sites moved without adding raw access or ownership.

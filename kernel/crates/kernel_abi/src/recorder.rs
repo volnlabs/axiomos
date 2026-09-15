@@ -46,7 +46,7 @@ pub struct ManagedAuditHandoffV1 {
     /// Physical counter sampled for the state transition / reply processing.
     pub observed_ticks: u64,
     pub generation: u64,
-    /// 1 SessionOffer, 2 SessionReady, 3 SafeBarrier, 4 SafeAck.
+    /// 1 SessionOffer, 2 SessionReady, 3 SafeBarrier, 4 SafeAck, 5 Requalify, 6 Prepared.
     pub message_kind: u32,
     /// Zero or existing handoff failure code 2001..2009.
     pub error: u32,
