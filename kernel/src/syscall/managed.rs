@@ -31,13 +31,21 @@ fn request_size(cmd: u32) -> Result<usize, Errno> {
     }
 }
 
-fn validate_header(cmd: u32, bytes: &[u8]) -> Result<(), Errno> {
-    if bytes.len() != request_size(cmd)? {
-        return Err(EINVAL);
+fn request_version(cmd: u32, size: usize) -> Result<u32, Errno> {
+    if request_size(cmd)? == size {
+        Ok(MANAGED_ADMIN_VERSION)
+    } else if cmd == BPF_MANAGED_SLOT_QUERY && size == size_of::<ManagedSlotArtifactV2>() {
+        Ok(MANAGED_SLOT_ARTIFACT_VERSION)
+    } else {
+        Err(EINVAL)
     }
+}
+
+fn validate_header(cmd: u32, bytes: &[u8]) -> Result<(), Errno> {
+    let expected_version = request_version(cmd, bytes.len())?;
     let version = u32::from_ne_bytes(bytes[..4].try_into().map_err(|_| EINVAL)?);
     let size = u32::from_ne_bytes(bytes[4..8].try_into().map_err(|_| EINVAL)?);
-    if version != MANAGED_ADMIN_VERSION {
+    if version != expected_version {
         return Err(ENOTSUP);
     }
     if size as usize != bytes.len() {
@@ -121,6 +129,29 @@ fn validate_slot_query(bytes: &[u8]) -> Result<(), Errno> {
     Ok(())
 }
 
+fn slot_artifact_request(bytes: &[u8]) -> Result<ManagedSlotArtifactV2, Errno> {
+    validate_header(BPF_MANAGED_SLOT_QUERY, bytes)?;
+    let request = ManagedSlotArtifactV2::read_from_bytes(bytes).map_err(|_| EINVAL)?;
+    if request
+        != (ManagedSlotArtifactV2 {
+            version: MANAGED_SLOT_ARTIFACT_VERSION,
+            size: size_of::<ManagedSlotArtifactV2>() as u32,
+            expected_generation: request.expected_generation,
+            expected_last_id: request.expected_last_id,
+            artifact_handle: request.artifact_handle,
+            expected_roles: request.expected_roles,
+            ..Default::default()
+        })
+        || request.expected_roles == 0
+        || request.expected_roles
+            & !(MANAGED_SLOT_HAS_ACTIVE | MANAGED_SLOT_HAS_PREVIOUS | MANAGED_SLOT_HAS_CANDIDATE)
+            != 0
+    {
+        return Err(EINVAL);
+    }
+    Ok(request)
+}
+
 fn handle(
     manager: &mut BpfManager,
     owner: u64,
@@ -176,9 +207,7 @@ pub(super) fn dispatch(owner: u64, cmd: u32, ptr: usize, size: usize) -> isize {
         if !cfg!(feature = "managed-runtime") {
             return Err(ENOTSUP);
         }
-        if size != request_size(cmd)? {
-            return Err(EINVAL);
-        }
+        request_version(cmd, size)?;
         let mut bytes = [0u8; size_of::<ManagedUploadChunkV1>()];
         super::validation::copy_from_userspace_into(ptr, &mut bytes[..size])?;
         let bytes = &bytes[..size];
@@ -213,6 +242,11 @@ pub(super) fn dispatch(owner: u64, cmd: u32, ptr: usize, size: usize) -> isize {
                 return Ok(0);
             }
             BPF_MANAGED_SLOT_QUERY => {
+                if bytes.len() == size_of::<ManagedSlotArtifactV2>() {
+                    let reply = installation::query_slot_artifact(slot_artifact_request(bytes)?)?;
+                    super::validation::copy_to_userspace_bounded(ptr, reply.as_bytes())?;
+                    return Ok(0);
+                }
                 validate_slot_query(bytes)?;
                 let reply = installation::query_slot()?;
                 super::validation::copy_to_userspace_bounded(ptr, reply.as_bytes())?;
@@ -248,6 +282,46 @@ pub(super) fn dispatch(owner: u64, cmd: u32, ptr: usize, size: usize) -> isize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artifact_query_keeps_v1_and_rejects_every_nonzero_output_byte() {
+        let request = ManagedSlotArtifactV2 {
+            version: MANAGED_SLOT_ARTIFACT_VERSION,
+            size: size_of::<ManagedSlotArtifactV2>() as u32,
+            expected_generation: 1 << 40,
+            expected_last_id: 1 << 41,
+            expected_roles: MANAGED_SLOT_HAS_ACTIVE,
+            ..Default::default()
+        };
+        assert_eq!(slot_artifact_request(request.as_bytes()), Ok(request));
+        let v1 = ManagedSlotV1 {
+            version: MANAGED_ADMIN_VERSION,
+            size: size_of::<ManagedSlotV1>() as u32,
+            ..Default::default()
+        };
+        assert_eq!(validate_slot_query(v1.as_bytes()), Ok(()));
+        for offset in 32..size_of::<ManagedSlotArtifactV2>() {
+            let mut bytes = request.as_bytes().to_vec();
+            bytes[offset] = 1;
+            assert_eq!(slot_artifact_request(&bytes), Err(EINVAL));
+        }
+        for len in 0..size_of::<ManagedSlotArtifactV2>() {
+            assert!(slot_artifact_request(&request.as_bytes()[..len]).is_err());
+        }
+        let mut oversized = request.as_bytes().to_vec();
+        oversized.push(0);
+        assert_eq!(slot_artifact_request(&oversized), Err(EINVAL));
+        for version in [0, MANAGED_ADMIN_VERSION, MANAGED_SLOT_ARTIFACT_VERSION + 1] {
+            let mut bad = request;
+            bad.version = version;
+            assert_eq!(slot_artifact_request(bad.as_bytes()), Err(ENOTSUP));
+        }
+        for roles in [0, MANAGED_SLOT_INHIBITED, u32::MAX] {
+            let mut bad = request;
+            bad.expected_roles = roles;
+            assert_eq!(slot_artifact_request(bad.as_bytes()), Err(EINVAL));
+        }
+    }
 
     #[test]
     fn recorder_headers_reject_inexact_lengths_and_unknown_versions() {

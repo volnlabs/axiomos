@@ -132,6 +132,11 @@ mod managed {
                 forward::<ManagedInstallationRequestV1>(command, body, response, false, &mut bpf)
             }
             BPF_MANAGED_SLOT_QUERY => {
+                if body.len() == core::mem::size_of::<ManagedSlotArtifactV2>() {
+                    return forward::<ManagedSlotArtifactV2>(
+                        command, body, response, true, &mut bpf,
+                    );
+                }
                 forward::<ManagedSlotV1>(command, body, response, true, &mut bpf)
             }
             BPF_MANAGED_INSTALLATION_CANCEL => {
@@ -318,6 +323,10 @@ mod managed {
                 (
                     BPF_MANAGED_SLOT_QUERY,
                     core::mem::size_of::<ManagedSlotV1>(),
+                ),
+                (
+                    BPF_MANAGED_SLOT_QUERY,
+                    core::mem::size_of::<ManagedSlotArtifactV2>(),
                 ),
                 (
                     BPF_MANAGED_INSTALLATION_CANCEL,

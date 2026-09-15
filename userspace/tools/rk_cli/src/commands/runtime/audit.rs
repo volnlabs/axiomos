@@ -10,6 +10,44 @@ use zerocopy::{FromBytes, IntoBytes};
 use super::{hex, Client};
 
 impl<T: Read + Write> Client<T> {
+    pub(super) fn slot_artifact(
+        &mut self,
+        slot: &ManagedSlotV1,
+        handle: u32,
+    ) -> Result<ManagedSlotArtifactV2> {
+        let roles = slot.artifact_roles(handle);
+        ensure!(roles != 0, "artifact is not retained in this slot snapshot");
+        let request = ManagedSlotArtifactV2 {
+            version: MANAGED_SLOT_ARTIFACT_VERSION,
+            size: size_of::<ManagedSlotArtifactV2>() as u32,
+            expected_generation: slot.generation,
+            expected_last_id: slot.last_id,
+            artifact_handle: handle,
+            expected_roles: roles,
+            ..Default::default()
+        };
+        let (result, bytes) = self.request(BPF_MANAGED_SLOT_QUERY as u16, request.as_bytes())?;
+        ensure!(result == 0, "invalid artifact query return");
+        let reply = ManagedSlotArtifactV2::read_from_bytes(&bytes)
+            .map_err(|_| anyhow!("invalid artifact query size"))?;
+        validate_artifact(&request, &reply)?;
+        Ok(reply)
+    }
+
+    fn retained_artifacts(&mut self, slot: &ManagedSlotV1) -> Result<Vec<ManagedSlotArtifactV2>> {
+        let mut artifacts: Vec<ManagedSlotArtifactV2> = Vec::with_capacity(3);
+        for (handle, flag) in [
+            (slot.active_artifact, MANAGED_SLOT_HAS_ACTIVE),
+            (slot.previous_artifact, MANAGED_SLOT_HAS_PREVIOUS),
+            (slot.candidate_artifact, MANAGED_SLOT_HAS_CANDIDATE),
+        ] {
+            if slot.flags & flag != 0 && !artifacts.iter().any(|a| a.artifact_handle == handle) {
+                artifacts.push(self.slot_artifact(slot, handle)?);
+            }
+        }
+        Ok(artifacts)
+    }
+
     pub(super) fn audit_status(&mut self) -> Result<ManagedAuditStatusV1> {
         let request = ManagedAuditStatusV1 {
             version: MANAGED_ADMIN_VERSION,
@@ -97,7 +135,13 @@ impl<T: Read + Write> Client<T> {
             status.flags & MANAGED_AUDIT_CLOCK_READY != 0,
             "recorder clock is not initialized"
         );
-        line(out, &status_json(&status))?;
+        let slot = self.slot()?;
+        let artifacts = self.retained_artifacts(&slot)?;
+        let mut header = status_json(&status);
+        header["slot_generation"] = json!(slot.generation);
+        header["slot_last_id"] = json!(slot.last_id);
+        header["artifacts"] = Value::Array(artifacts.iter().map(artifact_json).collect());
+        line(out, &header)?;
         let mut cursor = status.oldest;
         let mut records = 0u64;
         let mut gaps = 0u64;
@@ -132,6 +176,55 @@ impl<T: Read + Write> Client<T> {
         out.flush()?;
         Ok(())
     }
+}
+
+fn validate_artifact(request: &ManagedSlotArtifactV2, reply: &ManagedSlotArtifactV2) -> Result<()> {
+    ensure!(
+        reply.version == request.version
+            && reply.size == request.size
+            && reply.expected_generation == request.expected_generation
+            && reply.expected_last_id == request.expected_last_id
+            && reply.artifact_handle == request.artifact_handle
+            && reply.expected_roles == request.expected_roles
+            && reply.reserved == 0,
+        "artifact query identity mismatch"
+    );
+    use kernel_bpf::signing::{managed, ProgramHash};
+    ensure!(
+        reply.helper_version == u32::from(managed::HELPER_VERSION)
+            && reply.context_version == u32::from(managed::CONTEXT_VERSION)
+            && reply.effective_effects & !managed::EFFECT_MOTOR_PAIR == 0
+            && reply.envelope <= 1,
+        "unsupported artifact binding contract"
+    );
+    ensure!(
+        (reply.private_value_size == 0 && reply.private_max_entries == 0)
+            || (managed::PrivateArray {
+                value_size: reply.private_value_size,
+                max_entries: reply.private_max_entries
+            })
+            .payload_bytes()
+            .is_ok(),
+        "invalid artifact private-array declaration"
+    );
+    ensure!(
+        ProgramHash::compute(&reply.signer_public_key).as_bytes() == &reply.signer_fingerprint,
+        "artifact signer fingerprint mismatch"
+    );
+    Ok(())
+}
+
+pub(super) fn artifact_json(artifact: &ManagedSlotArtifactV2) -> Value {
+    json!({"artifact_handle":artifact.artifact_handle,"roles":artifact.expected_roles,
+        "slot_generation":artifact.expected_generation,"slot_last_id":artifact.expected_last_id,
+        "behavior_id":hex(&artifact.behavior_id),"revision":artifact.revision,
+        "bundle_digest":hex(&artifact.bundle_digest),"payload_digest":hex(&artifact.payload_digest),
+        "signer_fingerprint":hex(&artifact.signer_fingerprint),"signer_public_key":hex(&artifact.signer_public_key),
+        "helper_version":artifact.helper_version,"context_version":artifact.context_version,
+        "effective_effects":artifact.effective_effects,"envelope":artifact.envelope != 0,
+        "private_array":(artifact.private_value_size != 0).then(|| json!({
+            "value_size":artifact.private_value_size,"max_entries":artifact.private_max_entries})),
+        "modeled_wcet_cycles":artifact.wcet_cycles})
 }
 
 fn line(out: &mut impl Write, value: &Value) -> Result<()> {
@@ -226,6 +319,83 @@ pub(super) fn status_json(status: &ManagedAuditStatusV1) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artifact_context_rejects_stale_identity_bad_bindings_and_fingerprint() {
+        let request = ManagedSlotArtifactV2 {
+            version: MANAGED_SLOT_ARTIFACT_VERSION,
+            size: size_of::<ManagedSlotArtifactV2>() as u32,
+            expected_generation: 1 << 40,
+            expected_last_id: 1 << 41,
+            expected_roles: MANAGED_SLOT_HAS_ACTIVE,
+            ..Default::default()
+        };
+        let reply = ManagedSlotArtifactV2 {
+            helper_version: 1,
+            context_version: 1,
+            signer_fingerprint: *kernel_bpf::signing::ProgramHash::compute(
+                &request.signer_public_key,
+            )
+            .as_bytes(),
+            ..request
+        };
+        validate_artifact(&request, &reply).unwrap();
+        for mutate in [
+            |a: &mut ManagedSlotArtifactV2| {
+                a.expected_generation += 1;
+            },
+            |a: &mut ManagedSlotArtifactV2| {
+                a.expected_last_id += 1;
+            },
+            |a: &mut ManagedSlotArtifactV2| {
+                a.artifact_handle += 1;
+            },
+            |a: &mut ManagedSlotArtifactV2| {
+                a.expected_roles |= MANAGED_SLOT_HAS_PREVIOUS;
+            },
+            |a: &mut ManagedSlotArtifactV2| {
+                a.version = 1;
+            },
+            |a: &mut ManagedSlotArtifactV2| {
+                a.size -= 1;
+            },
+            |a: &mut ManagedSlotArtifactV2| {
+                a.reserved = 1;
+            },
+            |a: &mut ManagedSlotArtifactV2| {
+                a.helper_version += 1;
+            },
+            |a: &mut ManagedSlotArtifactV2| {
+                a.context_version += 1;
+            },
+            |a: &mut ManagedSlotArtifactV2| {
+                a.effective_effects = u32::MAX;
+            },
+            |a: &mut ManagedSlotArtifactV2| {
+                a.envelope = 2;
+            },
+            |a: &mut ManagedSlotArtifactV2| {
+                a.private_value_size = 8;
+            },
+            |a: &mut ManagedSlotArtifactV2| {
+                a.private_max_entries = 1;
+            },
+            |a: &mut ManagedSlotArtifactV2| {
+                a.private_value_size = u32::MAX;
+                a.private_max_entries = u32::MAX;
+            },
+            |a: &mut ManagedSlotArtifactV2| {
+                a.signer_public_key[31] ^= 1;
+            },
+            |a: &mut ManagedSlotArtifactV2| {
+                a.signer_fingerprint[31] ^= 1;
+            },
+        ] {
+            let mut invalid = reply;
+            mutate(&mut invalid);
+            assert!(validate_artifact(&request, &invalid).is_err());
+        }
+    }
     #[test]
     fn malformed_pages_cannot_hide_missing_reordered_or_unused_records() {
         let request = ManagedAuditReadV1 {

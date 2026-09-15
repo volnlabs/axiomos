@@ -511,6 +511,47 @@ impl BpfManager {
         Ok(operation)
     }
 
+    pub(crate) fn managed_slot_artifact_query(
+        &self,
+        slot: &ControlSlot,
+        request: ManagedSlotArtifactV2,
+    ) -> Result<ManagedSlotArtifactV2, Errno> {
+        let snapshot = self.managed_slot_query(slot);
+        if request.expected_generation != snapshot.generation
+            || request.expected_last_id != snapshot.last_id
+        {
+            return Err(ESTALE);
+        }
+        let roles = snapshot.artifact_roles(request.artifact_handle);
+        if roles == 0 || roles != request.expected_roles {
+            return Err(ESTALE);
+        }
+        // Borrow the existing entry. Queries neither clone an Arc nor acquire
+        // controller state, and cannot extend an artifact's retirement lifetime.
+        let artifact = self
+            .managed_artifact(request.artifact_handle)
+            .map_err(|_| ESTALE)?;
+        let identity = artifact.identity();
+        let contract = artifact.contract();
+        let array = contract.private_array();
+        Ok(ManagedSlotArtifactV2 {
+            wcet_cycles: artifact.wcet_cycles(),
+            behavior_id: identity.behavior_id,
+            revision: identity.revision,
+            bundle_digest: *identity.bundle_digest.as_bytes(),
+            payload_digest: *identity.payload_digest.as_bytes(),
+            signer_fingerprint: *identity.signer_fingerprint.as_bytes(),
+            signer_public_key: identity.signer_public_key,
+            helper_version: u32::from(kernel_bpf::signing::managed::HELPER_VERSION),
+            context_version: u32::from(kernel_bpf::signing::managed::CONTEXT_VERSION),
+            effective_effects: contract.effects(),
+            envelope: u32::from(contract.envelope()),
+            private_value_size: array.map_or(0, |a| a.value_size),
+            private_max_entries: array.map_or(0, |a| a.max_entries),
+            ..request
+        })
+    }
+
     pub(crate) fn managed_slot_query(&self, slot: &ControlSlot) -> ManagedSlotV1 {
         let snapshot = slot.snapshot();
         let lifecycle = self.preparation.lifecycle;

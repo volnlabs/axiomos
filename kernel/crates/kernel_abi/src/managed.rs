@@ -130,6 +130,62 @@ pub struct ManagedSlotV1 {
     pub reserved: u32,
 }
 
+impl ManagedSlotV1 {
+    /// Complete retained-role mask; handle zero is valid only with presence bits.
+    pub fn artifact_roles(&self, handle: u32) -> u32 {
+        let mut roles = 0;
+        for (retained, flag) in [
+            (self.active_artifact, MANAGED_SLOT_HAS_ACTIVE),
+            (self.previous_artifact, MANAGED_SLOT_HAS_PREVIOUS),
+            (self.candidate_artifact, MANAGED_SLOT_HAS_CANDIDATE),
+        ] {
+            if self.flags & flag != 0 && retained == handle {
+                roles |= flag;
+            }
+        }
+        roles
+    }
+}
+
+/// Version 2 of SLOT_QUERY selects one exact retained artifact. Only the first
+/// 32 bytes are inputs; all output fields must be zero. Expected roles use the
+/// existing HAS_ACTIVE/HAS_PREVIOUS/HAS_CANDIDATE bits and must match exactly.
+/// Version-1 ManagedSlotV1 remains unchanged.
+pub const MANAGED_SLOT_ARTIFACT_VERSION: u32 = 2;
+
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable,
+)]
+pub struct ManagedSlotArtifactV2 {
+    pub version: u32,
+    pub size: u32,
+    pub expected_generation: u64,
+    pub expected_last_id: u64,
+    pub artifact_handle: u32,
+    pub expected_roles: u32,
+    /// Kernel-modeled interpreter cost, not a signed claim or hardware WCET.
+    pub wcet_cycles: u64,
+    pub behavior_id: [u8; 16],
+    pub revision: u64,
+    pub bundle_digest: [u8; 32],
+    pub payload_digest: [u8; 32],
+    pub signer_fingerprint: [u8; 32],
+    pub signer_public_key: [u8; 32],
+    pub helper_version: u32,
+    pub context_version: u32,
+    pub effective_effects: u32,
+    pub envelope: u32,
+    pub private_value_size: u32,
+    pub private_max_entries: u32,
+    pub reserved: u64,
+}
+
+const _: () = assert!(core::mem::size_of::<ManagedSlotArtifactV2>() == 224);
+const _: () = assert!(
+    core::mem::size_of::<ManagedSlotArtifactV2>() <= core::mem::size_of::<ManagedUploadChunkV1>()
+);
+
 /// Query overwrites the request address with this fixed result. Callers provide
 /// its complete size, including zeroed output fields on entry.
 #[repr(C)]

@@ -187,6 +187,25 @@ pub fn managed_recorder_status() -> Result<kernel_abi::ManagedAuditStatusV1, ker
     Ok(request)
 }
 
+pub fn managed_slot_artifact(
+    expected_generation: u64,
+    expected_last_id: u64,
+    artifact_handle: u32,
+    expected_roles: u32,
+) -> Result<kernel_abi::ManagedSlotArtifactV2, kernel_abi::Errno> {
+    let mut request = kernel_abi::ManagedSlotArtifactV2 {
+        version: kernel_abi::MANAGED_SLOT_ARTIFACT_VERSION,
+        size: core::mem::size_of::<kernel_abi::ManagedSlotArtifactV2>() as u32,
+        expected_generation,
+        expected_last_id,
+        artifact_handle,
+        expected_roles,
+        ..Default::default()
+    };
+    managed_bpf(kernel_abi::BPF_MANAGED_SLOT_QUERY, &mut request)?;
+    Ok(request)
+}
+
 pub fn managed_recorder_read(
     cursor: u64,
     end: u64,

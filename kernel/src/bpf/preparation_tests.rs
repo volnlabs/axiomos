@@ -9,6 +9,77 @@ use zerocopy::IntoBytes;
 
 use super::*;
 
+#[test]
+fn retained_identity_query_is_bounded_read_only_and_checks_exact_roles() {
+    let (manager, slot) = crate::bpf::control::tests::installed(
+        &crate::bpf::managed::tests::stateful_managed_program(),
+    );
+    let snapshot = manager.managed_slot_query(&slot);
+    let handle = snapshot.active_artifact;
+    let request = ManagedSlotArtifactV2 {
+        version: MANAGED_SLOT_ARTIFACT_VERSION,
+        size: core::mem::size_of::<ManagedSlotArtifactV2>() as u32,
+        expected_generation: snapshot.generation,
+        expected_last_id: snapshot.last_id,
+        artifact_handle: handle,
+        expected_roles: MANAGED_SLOT_HAS_ACTIVE | MANAGED_SLOT_HAS_CANDIDATE,
+        ..Default::default()
+    };
+    let artifact = manager.managed_artifact(handle).unwrap();
+    let references = Arc::strong_count(artifact);
+    let identity = artifact.identity();
+    let usage = manager.resource_usage();
+    let result = manager.managed_slot_artifact_query(&slot, request).unwrap();
+    assert_eq!(result.behavior_id, identity.behavior_id);
+    assert_eq!(result.revision, identity.revision);
+    assert_eq!(&result.bundle_digest, identity.bundle_digest.as_bytes());
+    assert_eq!(&result.payload_digest, identity.payload_digest.as_bytes());
+    assert_eq!(
+        &result.signer_fingerprint,
+        identity.signer_fingerprint.as_bytes()
+    );
+    assert_eq!(result.signer_public_key, identity.signer_public_key);
+    assert_eq!((result.helper_version, result.context_version), (1, 1));
+    assert_eq!(
+        (result.private_value_size, result.private_max_entries),
+        (8, 1)
+    );
+    assert_eq!(result.wcet_cycles, artifact.wcet_cycles());
+    for mutate in [
+        |r: &mut ManagedSlotArtifactV2| {
+            r.expected_generation += 1;
+        },
+        |r: &mut ManagedSlotArtifactV2| {
+            r.expected_last_id += 1;
+        },
+        |r: &mut ManagedSlotArtifactV2| {
+            r.artifact_handle = u32::MAX;
+        },
+        |r: &mut ManagedSlotArtifactV2| {
+            r.expected_roles = MANAGED_SLOT_HAS_ACTIVE;
+        },
+        |r: &mut ManagedSlotArtifactV2| {
+            r.expected_roles = MANAGED_SLOT_HAS_PREVIOUS;
+        },
+    ] {
+        let mut stale = request;
+        mutate(&mut stale);
+        assert_eq!(
+            manager.managed_slot_artifact_query(&slot, stale),
+            Err(ESTALE)
+        );
+    }
+    assert_eq!(manager.managed_slot_query(&slot), snapshot);
+    assert_eq!(manager.resource_usage(), usage);
+    assert_eq!(Arc::strong_count(artifact), references);
+    let mut slot = slot;
+    slot.stop();
+    assert_eq!(
+        manager.managed_slot_artifact_query(&slot, request),
+        Ok(result)
+    );
+}
+
 fn signed_bundle(revision: u64, program: &[BpfInsn]) -> (Vec<u8>, Arc<SignatureVerifier>) {
     let key = SigningKey::from_bytes(&[41; 32]);
     let payload = program.as_bytes();

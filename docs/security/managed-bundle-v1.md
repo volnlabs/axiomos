@@ -235,7 +235,8 @@ the qualified workload still needs IRQ-off and deadline measurements.
 
 Thirteen commands use independently versioned, padding-free native ABI structures
 through `SYS_BPF`, dispatched before the legacy `BpfAttr` size check. All require
-`BEHAVIOR_ADMIN`, exact version 1 and structure length, and zero reserved fields.
+`BEHAVIOR_ADMIN`, the exact documented version and structure length, and zero
+reserved fields. Requests use version 1 except the version-2 artifact slot query.
 Ordinary init children have no administration capability. The
 [dedicated installer](runtime-installer-v1.md) provides bounded debug-UART
 transport and receives only administration authority in the managed image.
@@ -249,7 +250,7 @@ transport and receives only administration authority in the managed image.
 | Cancel upload | 260 | `ManagedOperationRequestV1` / 24 | Upload cancellation requested |
 | Activate | 261 | `ManagedInstallationRequestV1` / 32 | Accepted operation ID |
 | Rollback | 262 | `ManagedInstallationRequestV1` / 32 | Accepted operation ID |
-| Slot query | 263 | `ManagedSlotV1` / 64 | Consistent slot/candidate/operation status |
+| Slot query | 263 | `ManagedSlotV1` / 64; `ManagedSlotArtifactV2` / 224 | Slot status (v1) or one retained artifact's identity/contract (v2) |
 | Cancel installation | 264 | `ManagedInstallationCancelV1` / 40 | Lifecycle cancellation requested |
 | Deactivate | 265 | `ManagedInstallationRequestV1` / 32 | Accepted operation ID |
 | Retire inactive artifact | 266 | `ManagedInstallationRequestV1` / 32 | Accepted operation ID |
@@ -263,6 +264,21 @@ session; a mismatched session or future end returns `ESTALE`. Cursor gaps do not
 fail the query: the exact overwritten count accompanies the retained records.
 See the [installer export format](runtime-installer-v1.md#bounded-audit-export)
 for current producer coverage and limitations.
+
+Version-2 slot queries provide `expected_generation`, `expected_last_id`, an exact
+`artifact_handle` and its complete `expected_roles` mask (the existing active,
+previous and candidate presence bits). The first 32 bytes are inputs; all later
+bytes must be zero. Missing/changed roles, generation, last operation ID or handle
+return `ESTALE`. Unknown roles and nonzero outputs reject as malformed. The
+version-1 slot query remains exactly 64 bytes and does not accept version 2.
+
+The result copies behavior ID/revision, both full digests, full signer fingerprint
+and public key, supported helper/context versions, effective effect ceiling,
+envelope/private-array declarations and kernel-modeled interpreter cost. It uses
+the existing slot-then-manager lock order and borrows the retained registry entry
+without cloning its reference or inspecting mutable private state. Queries do
+not reserve resources or extend retirement lifetime. This exposes current
+retained artifacts only; it is not an artifact history database.
 
 Activate and rollback compare both the last issued operation ID and current
 installation generation. Their artifact handle must exactly identify the resident

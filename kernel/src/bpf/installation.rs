@@ -116,6 +116,17 @@ pub(crate) fn query_slot() -> Result<kernel_abi::ManagedSlotV1, kernel_abi::Errn
     })
 }
 
+pub(crate) fn query_slot_artifact(
+    request: kernel_abi::ManagedSlotArtifactV2,
+) -> Result<kernel_abi::ManagedSlotArtifactV2, kernel_abi::Errno> {
+    crate::mcore::context::with_interrupts_masked(|| {
+        let mut slot = CONTROL_SLOT.lock();
+        apply_requested_stop(&mut slot, &STOP_REQUESTED);
+        let manager = crate::BPF_MANAGER.get().ok_or(kernel_abi::ENODEV)?.lock();
+        manager.managed_slot_artifact_query(&slot, request)
+    })
+}
+
 pub(crate) fn cancel_installation(
     id: u64,
     expected_generation: u64,

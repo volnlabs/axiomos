@@ -129,7 +129,7 @@ installer's existing `BEHAVIOR_ADMIN` authority and do not actuate or rearm.
 The native ABI contains 96-byte records and copies at most two per read. Status
 contains clock frequency, control-link session, exclusive retained interval,
 overwrite/drop/suppression counters and independent latest-stop custody. On the
-qualified single CPU, queries and append use a bounded IRQ-masked critical
+qualified single CPU, recorder status/read and append use a bounded IRQ-masked critical
 section; no program-manager lock, allocation or waiting occurs in that section.
 
 JSONL starts with a versioned `axiomos-managed-audit` header, followed by record
@@ -141,6 +141,20 @@ unaccounted cursor movement fail export. Interrupted transport leaves an
 incomplete file without the end marker; write/flush errors are reported. The
 export is not crash-persistent or an atomic file transaction.
 
+The export header also contains `slot_generation`, `slot_last_id` and at most
+three `artifacts`. These are copied through version-2 slot queries from the
+existing manager; active/previous/candidate aliases are queried once. Each query
+checks the exact generation, latest operation ID, handle and complete role mask
+from the slot snapshot. A concurrent change fails export with no completion
+marker; the CLI does not blindly retry. Identity queries hold the existing slot
+then manager locks only for a fixed-size read, and never inspect private state.
+
+`rk runtime --port /dev/ttyUSB0 query --artifact HANDLE` retrieves the same full
+identity and binding declaration independently. It conflicts with `--operation`.
+Signer fingerprints are checked against the complete public key using the
+existing SHA3-256 implementation. The returned `modeled_wcet_cycles` is the
+kernel's model estimate, not signed admission authority or measured hardware WCET.
+
 Ticks use CNTPCT, the same domain as managed releases. Session remains zero and
 `session_established` false until bilateral control-link integration lands; the
 clock value is never presented as a persistent boot identity. Payload bytes are
@@ -151,8 +165,11 @@ export is not yet the semantic acceptance decoder or a qualified runtime trace.
 
 All fields below are little-endian on the shipped Pi5/x86 platforms. The envelope
 contains sequence, recording ticks, correlation, kind and 64 payload bytes. An
-artifact handle is a generational manager handle, not the signed artifact digest;
-full retained identity events and strict identity resolution still need integration.
+artifact handle is a generational manager handle, not the signed artifact digest.
+The header supplies identity for currently retained artifacts even after their
+registration records are overwritten. Historical identity events and strict
+identity resolution still need integration: absent identity for an evicted
+artifact must become an explicit error/gap, never be inferred from another handle.
 Global events have correlation zero and no cycle/artifact flags, so consumers
 must not infer an installation identity from those zero fields.
 

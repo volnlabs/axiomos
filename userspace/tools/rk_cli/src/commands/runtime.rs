@@ -27,10 +27,12 @@ pub enum RuntimeCommand {
     },
     /// Upload a canonical signed managed bundle, then enqueue preparation
     Upload { bundle: PathBuf },
-    /// Query the consistent slot, or a retained operation (0 selects latest)
+    /// Query slot status, a retained operation (0 selects latest), or an artifact
     Query {
-        #[arg(long)]
+        #[arg(long, conflicts_with = "artifact")]
         operation: Option<u64>,
+        #[arg(long)]
+        artifact: Option<u32>,
     },
     /// Activate an exact staged artifact against the observed slot generation
     Activate {
@@ -239,7 +241,10 @@ impl<T: Read + Write> Client<T> {
         let slot = ManagedSlotV1::read_from_bytes(&output)
             .map_err(|_| anyhow!("invalid slot response size"))?;
         ensure!(
-            slot.version == request.version && slot.size == request.size && slot.reserved == 0,
+            slot.version == request.version
+                && slot.size == request.size
+                && slot.reserved == 0
+                && slot.flags & !63 == 0,
             "invalid slot response header"
         );
         Ok(slot)
@@ -353,7 +358,16 @@ pub fn run(port: &Path, command: RuntimeCommand) -> Result<()> {
             );
         }
         RuntimeCommand::Query {
+            artifact: Some(handle),
+            ..
+        } => {
+            let slot = client.slot()?;
+            let artifact = client.slot_artifact(&slot, handle)?;
+            println!("{}", audit::artifact_json(&artifact));
+        }
+        RuntimeCommand::Query {
             operation: Some(id),
+            artifact: None,
         } => {
             let op = client.operation(id)?;
             println!(
@@ -365,7 +379,10 @@ pub fn run(port: &Path, command: RuntimeCommand) -> Result<()> {
                 "signer_fingerprint":hex(&op.signer_fingerprint),"signer_public_key":hex(&op.signer_public_key),"workspace_peak":op.workspace_peak})
             );
         }
-        RuntimeCommand::Query { operation: None } => {
+        RuntimeCommand::Query {
+            operation: None,
+            artifact: None,
+        } => {
             let slot = client.slot()?;
             println!(
                 "{}",
@@ -631,6 +648,37 @@ mod tests {
 
     fn audit_reply(command: u32, body: &mut [u8]) -> isize {
         match command {
+            BPF_MANAGED_SLOT_QUERY if body.len() == std::mem::size_of::<ManagedSlotV1>() => {
+                let mut slot = ManagedSlotV1::read_from_bytes(body).unwrap();
+                slot.generation = 1 << 40;
+                slot.last_id = 1 << 41;
+                slot.flags = MANAGED_SLOT_HAS_ACTIVE | MANAGED_SLOT_HAS_CANDIDATE;
+                body.copy_from_slice(slot.as_bytes());
+            }
+            BPF_MANAGED_SLOT_QUERY => {
+                let mut artifact = ManagedSlotArtifactV2::read_from_bytes(body).unwrap();
+                assert_eq!(artifact.expected_generation, 1 << 40);
+                assert_eq!(artifact.expected_last_id, 1 << 41);
+                assert_eq!(
+                    artifact.expected_roles,
+                    MANAGED_SLOT_HAS_ACTIVE | MANAGED_SLOT_HAS_CANDIDATE
+                );
+                assert_eq!(artifact.artifact_handle, 0);
+                artifact.wcet_cycles = 123;
+                artifact.behavior_id = [0xfe; 16];
+                artifact.revision = 1 << 42;
+                artifact.bundle_digest = [0xfd; 32];
+                artifact.payload_digest = [0xff; 32];
+                artifact.signer_public_key = [0xa5; 32];
+                artifact.signer_fingerprint =
+                    *kernel_bpf::signing::ProgramHash::compute(&artifact.signer_public_key)
+                        .as_bytes();
+                artifact.helper_version = 1;
+                artifact.context_version = 1;
+                artifact.private_value_size = 8;
+                artifact.private_max_entries = 1;
+                body.copy_from_slice(artifact.as_bytes());
+            }
             BPF_MANAGED_RECORDER_STATUS => {
                 let mut status = ManagedAuditStatusV1::read_from_bytes(body).unwrap();
                 status.clock_frequency = 54_000_000;
@@ -690,6 +738,15 @@ mod tests {
         assert_eq!(lines[0]["clock_frequency"], 54_000_000);
         assert_eq!(lines[0]["session_established"], false);
         assert_eq!(lines[0]["payloads_decoded"], false);
+        let artifacts = lines[0]["artifacts"].as_array().unwrap();
+        assert_eq!(artifacts.len(), 1); // Active/candidate alias is queried once.
+        assert_eq!(
+            artifacts[0]["roles"],
+            MANAGED_SLOT_HAS_ACTIVE | MANAGED_SLOT_HAS_CANDIDATE
+        );
+        assert_eq!(artifacts[0]["revision"], 1u64 << 42);
+        assert_eq!(artifacts[0]["signer_public_key"], "a5".repeat(32));
+        assert_eq!(artifacts[0]["payload_digest"], "ff".repeat(32));
         assert_eq!(
             lines[1],
             serde_json::json!({"type":"gap", "start":4, "end":2049, "count":2045})
@@ -701,7 +758,7 @@ mod tests {
             lines[5],
             serde_json::json!({"type":"end", "cursor":2052, "records":3, "gaps":2045})
         );
-        assert_eq!(client.io.calls.len(), 3);
+        assert_eq!(client.io.calls.len(), 5);
         assert_eq!(client.io.stops, 0);
     }
 
@@ -721,7 +778,7 @@ mod tests {
         let lines: Vec<_> = std::str::from_utf8(&output).unwrap().lines().collect();
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("header"));
-        assert_eq!(client.io.calls.len(), 2);
+        assert_eq!(client.io.calls.len(), 4);
         assert_eq!(client.io.stops, 0);
 
         client.io.syscall = |command, body| {
@@ -732,6 +789,26 @@ mod tests {
             result
         };
         assert!(client.audit_status().is_err());
+    }
+
+    #[test]
+    fn stale_artifact_context_cannot_produce_a_complete_export_or_retry() {
+        let mut peer = Peer::new();
+        peer.syscall = |command, body| {
+            if command == BPF_MANAGED_SLOT_QUERY
+                && body.len() == std::mem::size_of::<ManagedSlotArtifactV2>()
+            {
+                -isize::from(ESTALE)
+            } else {
+                audit_reply(command, body)
+            }
+        };
+        let mut client = Client::connect(peer, 17, [0xa5; 8], Duration::from_secs(1)).unwrap();
+        let mut output = Vec::new();
+        assert!(client.export_audit(&mut output).is_err());
+        assert!(output.is_empty());
+        assert_eq!(client.io.calls.len(), 3);
+        assert_eq!(client.io.stops, 0);
     }
 
     #[test]
