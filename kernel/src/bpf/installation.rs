@@ -20,10 +20,10 @@ use super::BpfManager;
 /// One slot, separate from manager storage. Combined paths always lock this
 /// first, with local IRQs masked; the release boundary only uses try_lock.
 pub(super) static CONTROL_SLOT: spin::Mutex<ControlSlot> = spin::Mutex::new(ControlSlot::new());
-static STOP_REQUESTED: spin::Mutex<Option<StopNotice>> = spin::Mutex::new(None);
+pub(super) static STOP_REQUESTED: spin::Mutex<Option<StopNotice>> = spin::Mutex::new(None);
 
 #[derive(Clone, Copy)]
-enum StopNotice {
+pub(super) enum StopNotice {
     Stop,
     Handoff {
         instance_id: u64,
@@ -49,7 +49,10 @@ pub(crate) fn request_handoff_failure(instance_id: u64, error: HandoffError) {
     latch_stop(&STOP_REQUESTED, StopNotice::Handoff { instance_id, error });
 }
 
-fn apply_requested_stop(slot: &mut ControlSlot, requested: &spin::Mutex<Option<StopNotice>>) {
+pub(super) fn apply_requested_stop(
+    slot: &mut ControlSlot,
+    requested: &spin::Mutex<Option<StopNotice>>,
+) {
     let notice = requested.lock().take();
     match notice {
         Some(StopNotice::Stop) => slot.stop(),
@@ -305,6 +308,8 @@ impl ControlSlot {
         let pending = self.pending.filter(|pending| pending.id == id)?;
         Some(if pending.cancelled {
             MANAGED_OPERATION_CLEANUP
+        } else if matches!(pending.target, LifecycleTarget::Retire(_)) {
+            MANAGED_OPERATION_QUEUED
         } else if pending.handoff {
             MANAGED_OPERATION_HANDOFF
         } else if self.has_prepared_change() {
@@ -334,7 +339,12 @@ impl ControlSlot {
     }
 
     pub(super) fn abort_cancelled(&mut self) {
-        if self.pending.is_some_and(|pending| pending.cancelled) && self.has_prepared_change() {
+        if self.pending.is_some_and(|pending| pending.cancelled)
+            && (self.has_prepared_change()
+                || self
+                    .pending
+                    .is_some_and(|pending| matches!(pending.target, LifecycleTarget::Retire(_))))
+        {
             self.abort_staged()
                 .expect("cancelled staged installation retains retirement capacity");
         }
@@ -458,6 +468,118 @@ impl ControlSlot {
         Ok(id)
     }
 
+    /// Reserve worker-only retirement without changing a role or control state.
+    pub(crate) fn begin_artifact_retirement(
+        &mut self,
+        manager: &mut BpfManager,
+        expected: u64,
+        handle: u32,
+    ) -> Result<u64, BpfError> {
+        if self.generation != expected {
+            return Err(BpfError::NotLoaded);
+        }
+        if self.active.as_ref().map(|active| active.artifact.handle) == Some(handle) {
+            return Err(BpfError::ObjectBusy);
+        }
+        if self.previous.as_ref().map(|previous| previous.handle) != Some(handle)
+            && manager.preparation.candidate != Some(handle)
+        {
+            return Err(BpfError::NotLoaded);
+        }
+        if self.pending.is_some()
+            || self.retiring.is_some()
+            || manager.managed_slot_busy
+            || manager.managed_instance_preparation.is_some()
+            || manager.managed_reclamation.is_some()
+            || manager.preparation.upload_accepted()
+        {
+            return Err(BpfError::ObjectBusy);
+        }
+        let id = manager
+            .next_managed_preparation
+            .checked_add(1)
+            .ok_or(BpfError::ResourceLimit)?;
+        manager.next_managed_preparation = id;
+        manager.managed_slot_busy = true;
+        self.pending = Some(Pending {
+            id,
+            expected,
+            generation: expected,
+            target: LifecycleTarget::Retire(handle),
+            retained_candidate: manager.preparation.candidate,
+            cancelled: false,
+            error: None,
+            handoff: false,
+        });
+        Ok(id)
+    }
+
+    /// Worker commit: remove every inactive role naming this artifact. No
+    /// physical action, generation change, admission update or destruction.
+    pub(super) fn commit_artifact_retirement(
+        &mut self,
+        manager: &mut BpfManager,
+        id: u64,
+    ) -> Result<(), BpfError> {
+        let pending = self
+            .pending
+            .filter(|pending| pending.id == id)
+            .ok_or(BpfError::NotLoaded)?;
+        let LifecycleTarget::Retire(handle) = pending.target else {
+            return Err(BpfError::NotLoaded);
+        };
+        if pending.expected != self.generation {
+            return Err(BpfError::NotLoaded);
+        }
+        if pending.cancelled
+            || pending.handoff
+            || self.retiring.is_some()
+            || self.active.as_ref().map(|active| active.artifact.handle) == Some(handle)
+        {
+            return Err(BpfError::ObjectBusy);
+        }
+        let previous = self
+            .previous
+            .as_ref()
+            .is_some_and(|previous| previous.handle == handle);
+        let candidate = manager.preparation.candidate == Some(handle);
+        if !previous && !candidate {
+            return Err(BpfError::NotLoaded);
+        }
+        // Clone only when no Previous reference can be moved. The manager and
+        // batch keep this immutable code alive until worker-only extraction.
+        let candidate_ref = if previous {
+            None
+        } else {
+            Some(ArtifactRef {
+                handle,
+                code: manager.managed_artifact(handle)?.clone(),
+            })
+        };
+        // Every check and lookup precedes the first authoritative role removal.
+        let artifact = if previous {
+            self.previous.take()
+        } else {
+            candidate_ref
+        };
+        if candidate {
+            manager.preparation.candidate = None;
+        }
+        self.pending = None;
+        self.retiring = Some(id);
+        self.retire = Some(RetireBatch {
+            id,
+            admission: None,
+            committed: true,
+            instance: None,
+            artifact,
+            evict_artifact: true,
+            failed: None,
+            consumed_candidate: None,
+        });
+        Ok(())
+    }
+
     /// Manager registration may fail, but rejected ownership always moves into
     /// the reserved batch. Worker cleanup must run even when this returns Err.
     pub(crate) fn finish_build(
@@ -496,10 +618,11 @@ impl ControlSlot {
                 self.retiring = Some(built.pending.id);
                 self.retire = Some(RetireBatch {
                     id: built.pending.id,
-                    admission: self
-                        .admission
-                        .take()
-                        .expect("accepted build retains admission custody"),
+                    admission: Some(
+                        self.admission
+                            .take()
+                            .expect("accepted build retains admission custody"),
+                    ),
                     committed: false,
                     instance: None,
                     artifact: Some(built.artifact),
@@ -617,10 +740,11 @@ impl ControlSlot {
         self.retiring = Some(id);
         self.retire = Some(RetireBatch {
             id,
-            admission: self
-                .admission
-                .take()
-                .expect("accepted build retains admission custody"),
+            admission: Some(
+                self.admission
+                    .take()
+                    .expect("accepted build retains admission custody"),
+            ),
             committed: true,
             instance,
             artifact,
@@ -739,7 +863,10 @@ impl ControlSlot {
     /// Deactivation has no new instance, but still settles its reserved batch.
     pub(crate) fn abort_staged(&mut self) -> Result<(), BpfError> {
         let pending = self.pending.ok_or(BpfError::NotLoaded)?;
-        if self.retiring.is_some() || !self.has_prepared_change() {
+        if self.retiring.is_some()
+            || (!self.has_prepared_change()
+                && !matches!(pending.target, LifecycleTarget::Retire(_)))
+        {
             return Err(BpfError::ObjectBusy);
         }
         let (instance, artifact) = self.staged.take().map_or((None, None), |staged| {
@@ -752,10 +879,15 @@ impl ControlSlot {
         self.retiring = Some(pending.id);
         self.retire = Some(RetireBatch {
             id: pending.id,
-            admission: self
-                .admission
-                .take()
-                .expect("accepted build retains admission custody"),
+            admission: if matches!(pending.target, LifecycleTarget::Retire(_)) {
+                None
+            } else {
+                Some(
+                    self.admission
+                        .take()
+                        .expect("accepted build retains admission custody"),
+                )
+            },
             committed: false,
             instance,
             artifact,
@@ -798,10 +930,12 @@ impl ControlSlot {
                 return Err(BpfError::NotLoaded);
             }
         }
-        manager
-            .admission
-            .finish_managed(receipt.admission, receipt.committed)
-            .map_err(map_admission_error)?;
+        if let Some(admission) = receipt.admission {
+            manager
+                .admission
+                .finish_managed(admission, receipt.committed)
+                .map_err(map_admission_error)?;
+        }
         if receipt.consumed_candidate.is_some() {
             manager.preparation.candidate = None;
         }
@@ -815,7 +949,7 @@ impl ControlSlot {
 /// by the worker. Even an empty first-activation batch needs a completion receipt.
 pub(crate) struct RetireBatch {
     id: u64,
-    admission: ManagedAdmissionReservation,
+    admission: Option<ManagedAdmissionReservation>,
     committed: bool,
     instance: Option<(u64, Arc<BehaviorInstance>)>,
     artifact: Option<ArtifactRef>,
@@ -826,7 +960,7 @@ pub(crate) struct RetireBatch {
 
 pub(crate) struct Retirement {
     id: u64,
-    admission: ManagedAdmissionReservation,
+    admission: Option<ManagedAdmissionReservation>,
     committed: bool,
     instance: Option<u64>,
     artifact: Option<u32>,
@@ -837,7 +971,7 @@ pub(crate) struct Retirement {
 
 pub(crate) struct Retired {
     id: u64,
-    admission: ManagedAdmissionReservation,
+    admission: Option<ManagedAdmissionReservation>,
     committed: bool,
     consumed_candidate: Option<u32>,
 }

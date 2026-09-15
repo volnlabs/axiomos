@@ -99,17 +99,31 @@ struct Lifecycle {
     target: LifecycleTarget,
 }
 
+impl Lifecycle {
+    fn committed(self, slot: &ControlSlot, phase: u32) -> bool {
+        if matches!(self.target, LifecycleTarget::Retire(_)) {
+            phase == MANAGED_OPERATION_COMMITTED
+        } else {
+            slot.snapshot().generation == self.generation
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LifecycleTarget {
     Candidate(u32),
     Previous(u32),
     Deactivate(u32),
+    Retire(u32),
 }
 
 impl LifecycleTarget {
     fn handle(self) -> u32 {
         match self {
-            Self::Candidate(handle) | Self::Previous(handle) | Self::Deactivate(handle) => handle,
+            Self::Candidate(handle)
+            | Self::Previous(handle)
+            | Self::Deactivate(handle)
+            | Self::Retire(handle) => handle,
         }
     }
 }
@@ -377,6 +391,12 @@ impl BpfManager {
             LifecycleTarget::Candidate(handle) => self.preparation.candidate == Some(handle),
             LifecycleTarget::Previous(handle) => snapshot.previous == Some(handle),
             LifecycleTarget::Deactivate(handle) => snapshot.active == Some(handle),
+            LifecycleTarget::Retire(handle) => {
+                if snapshot.active == Some(handle) {
+                    return Err(EBUSY);
+                }
+                self.preparation.candidate == Some(handle) || snapshot.previous == Some(handle)
+            }
         };
         if !exact {
             return Err(ESTALE);
@@ -390,20 +410,31 @@ impl BpfManager {
             .checked_add(1)
             .filter(|id| *id <= isize::MAX as u64)
             .ok_or(EOVERFLOW)?;
-        let generation = expected_generation.checked_add(1).ok_or(EOVERFLOW)?;
+        let retire = matches!(target, LifecycleTarget::Retire(_));
+        let generation = if retire {
+            expected_generation
+        } else {
+            expected_generation.checked_add(1).ok_or(EOVERFLOW)?
+        };
         self.next_managed_preparation
             .checked_add(1)
             .ok_or(EOVERFLOW)?;
-        // The sole batch may release one instance and one evicted artifact.
+        // Inactive retirement releases only an artifact; replacement may also
+        // release an instance. No accepted batch can exhaust its cleanup IDs.
         // managed_slot_busy excludes unrelated reclamation until both settle.
         self.next_managed_reclamation
-            .checked_add(2)
+            .checked_add(if retire { 1 } else { 2 })
             .ok_or(EOVERFLOW)?;
         let identity = self
             .managed_artifact(target.handle())
             .map_err(resource_error)?
             .identity();
         let (instance_id, preparation) = match target {
+            LifecycleTarget::Retire(handle) => (
+                slot.begin_artifact_retirement(self, expected_generation, handle)
+                    .map_err(resource_error)?,
+                None,
+            ),
             LifecycleTarget::Deactivate(handle) => (
                 slot.begin_deactivation(self, expected_generation, handle)
                     .map_err(resource_error)?,
@@ -430,7 +461,7 @@ impl BpfManager {
             version: MANAGED_ADMIN_VERSION,
             size: core::mem::size_of::<ManagedOperationV1>() as u32,
             id,
-            phase: if preparation.is_some() {
+            phase: if preparation.is_some() || retire {
                 MANAGED_OPERATION_QUEUED
             } else {
                 MANAGED_OPERATION_STAGED
@@ -459,7 +490,7 @@ impl BpfManager {
             .lifecycle
             .filter(|_| operation.id == self.preparation.active.id)
         {
-            if slot.snapshot().generation == lifecycle.generation {
+            if lifecycle.committed(slot, operation.phase) {
                 operation.phase = MANAGED_OPERATION_COMMITTED;
             } else if let Some(phase) =
                 slot.operation_phase(lifecycle.instance_id).filter(|phase| {
@@ -514,6 +545,7 @@ impl BpfManager {
                 LifecycleTarget::Candidate(_) => MANAGED_TARGET_CANDIDATE,
                 LifecycleTarget::Previous(_) => MANAGED_TARGET_PREVIOUS,
                 LifecycleTarget::Deactivate(_) => MANAGED_TARGET_DEACTIVATE,
+                LifecycleTarget::Retire(_) => MANAGED_TARGET_RETIRE,
             }),
             reserved: 0,
         }
@@ -530,10 +562,15 @@ impl BpfManager {
             return Err(ESTALE);
         }
         let lifecycle = self.preparation.lifecycle.ok_or(EALREADY)?;
-        if lifecycle.target != target || lifecycle.generation - 1 != expected_generation {
+        let expected = if matches!(lifecycle.target, LifecycleTarget::Retire(_)) {
+            lifecycle.generation
+        } else {
+            lifecycle.generation - 1
+        };
+        if lifecycle.target != target || expected != expected_generation {
             return Err(ESTALE);
         }
-        if slot.snapshot().generation == lifecycle.generation {
+        if lifecycle.committed(slot, self.preparation.active.phase) {
             return Err(EALREADY);
         }
         if self.preparation.cancelled {
@@ -684,6 +721,17 @@ pub(super) enum WorkerAction {
 }
 
 impl WorkerState {
+    /// Production commit entry under slot/manager locks with local IRQs masked.
+    pub(super) fn take_requested(
+        &mut self,
+        slot: &mut ControlSlot,
+        manager: &mut BpfManager,
+        requested: &spin::Mutex<Option<super::installation::StopNotice>>,
+    ) -> WorkerAction {
+        super::installation::apply_requested_stop(slot, requested);
+        self.take(slot, manager)
+    }
+
     /// Called with slot-before-manager locks and IRQs masked. Only moves owners.
     pub(super) fn take(
         &mut self,
@@ -710,7 +758,16 @@ impl WorkerState {
             }
             return WorkerAction::Install(preparation, abandon);
         }
-        if manager.preparation.lifecycle.is_some() {
+        if let Some(lifecycle) = manager.preparation.lifecycle {
+            if matches!(lifecycle.target, LifecycleTarget::Retire(_))
+                && slot.operation_phase(lifecycle.instance_id) == Some(MANAGED_OPERATION_QUEUED)
+            {
+                slot.commit_artifact_retirement(manager, lifecycle.instance_id)
+                    .expect("accepted inactive artifact retains exact role and batch custody");
+                // Authoritative worker commit; retirement does not advance the
+                // control generation. Keep this phase through reader retries.
+                manager.preparation.active.phase = MANAGED_OPERATION_COMMITTED;
+            }
             slot.abort_cancelled();
             let operation = manager
                 .query_installation(slot, manager.preparation.active.id)
@@ -739,7 +796,7 @@ impl WorkerState {
                 .expect("worker settles reserved admission after actual release");
             let state = &mut manager.preparation;
             if let Some(lifecycle) = state.lifecycle {
-                state.active.phase = if slot.snapshot().generation == lifecycle.generation {
+                state.active.phase = if lifecycle.committed(slot, state.active.phase) {
                     MANAGED_OPERATION_COMMITTED
                 } else if state.cancelled {
                     MANAGED_OPERATION_CANCELLED
@@ -859,7 +916,7 @@ mod worker {
 
     extern "C" fn run(_: *mut core::ffi::c_void) {
         use super::{WorkerAction, WorkerState};
-        use crate::bpf::installation::CONTROL_SLOT;
+        use crate::bpf::installation::{CONTROL_SLOT, STOP_REQUESTED};
         use crate::mcore::context::ExecutionContext;
         let manager = BPF_MANAGER.get().expect("managed worker after BPF init");
         let channel = READY.get().expect("managed worker channel initialized");
@@ -868,7 +925,7 @@ mod worker {
             let action = with_interrupts_masked(|| {
                 let mut slot = CONTROL_SLOT.lock();
                 let mut manager = manager.lock();
-                let action = worker.take(&mut slot, &mut manager);
+                let action = worker.take_requested(&mut slot, &mut manager, &STOP_REQUESTED);
                 if matches!(action, WorkerAction::Wait) {
                     TaskWait::block_current(channel, || {
                         drop(manager);

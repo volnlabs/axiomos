@@ -208,7 +208,7 @@ zeroing/copying and verifier work are outside that scope. This does not establis
 a timing bound for the linked-list allocator's fragmentation-dependent traversal;
 the qualified workload still needs IRQ-off and deadline measurements.
 
-Ten commands use independently versioned, padding-free native ABI structures
+Eleven commands use independently versioned, padding-free native ABI structures
 through `SYS_BPF`, dispatched before the legacy `BpfAttr` size check. All require
 `BEHAVIOR_ADMIN`, exact version 1 and structure length, and zero reserved fields.
 Ordinary init children have no administration capability. Dedicated installer
@@ -226,6 +226,7 @@ provisioning and debug-UART transport remain integration work.
 | Slot query | 263 | `ManagedSlotV1` / 64 | Consistent slot/candidate/operation status |
 | Cancel installation | 264 | `ManagedInstallationCancelV1` / 40 | Lifecycle cancellation requested |
 | Deactivate | 265 | `ManagedInstallationRequestV1` / 32 | Accepted operation ID |
+| Retire inactive artifact | 266 | `ManagedInstallationRequestV1` / 32 | Accepted operation ID |
 
 Activate and rollback compare both the last issued operation ID and current
 installation generation. Their artifact handle must exactly identify the resident
@@ -254,9 +255,24 @@ acceptance: one displaced instance and one evicted artifact. Counter exhaustion
 returns `EOVERFLOW` before changing the slot, IDs or reservations. The accepted
 operation excludes unrelated reclamation until its batch finishes.
 
+Retire supplies the same expected last operation ID and slot generation with an
+exact inactive artifact handle. It removes all candidate/previous aliases of
+that artifact; any active alias returns `EBUSY`, and an absent inactive handle
+returns `ESTALE`. Acceptance reserves one cleanup ID and the existing worker
+batch, preserving roles and charges until the worker commits their removal. It
+constructs no instance, changes no generation or admission charge, and needs no
+physical session or handoff. It also works at the maximum slot generation.
+Before worker commitment, cancellation or an already-latched stop preserves
+the artifact. Afterward, query reports `COMMITTED` and cancellation returns
+`EALREADY`, even while readers keep cleanup busy. The public pending ID/kind and
+storage charge remain until actual worker release; the bounded terminal receipt
+retains the artifact's signed identity. Inactive retirement never releases shared
+wheel ownership or resumes a controller.
+
 Lifecycle cancellation specifies the operation ID, expected current generation,
-artifact handle and target kind (1 candidate, 2 previous, 3 deactivate). It cannot undo a
-committed installation. The original 24-byte upload cancellation remains unchanged.
+artifact handle and target kind (1 candidate, 2 previous, 3 deactivate, 4 retire).
+It cannot undo a committed installation or artifact retirement. The original
+24-byte upload cancellation remains unchanged.
 Slot queries return the latest public operation ID, generation, active charge,
 artifact handles and presence/inhibited/retiring flags. A present artifact may
 have handle zero; use the presence flags. The pending ID is the public lifecycle
@@ -271,7 +287,7 @@ cannot replace it with `ECANCELED`. Timeout uses the existing kernel errno numbe
 74 (`ETIMEDEOUT`); missing link uses `ENOLINK`, protocol/clock failures `EPROTO`,
 and exhausted counters `EOVERFLOW`. An earlier explicit stop/cancel remains a
 cancellation. Stale transport operation IDs cannot assign errors to a newer
-operation. Explicit retirement of inactive artifacts remains integration work.
+operation. The worker consumes this same stop mailbox before retirement commits.
 
 Begin compares `expected_last_id` with the latest issued ID. IDs increase without
 wrapping or entering the syscall error range. Query ID 0 returns the latest ID;

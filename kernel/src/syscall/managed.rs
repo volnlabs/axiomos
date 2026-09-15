@@ -8,7 +8,7 @@ use crate::bpf::preparation::LifecycleTarget;
 use crate::bpf::{installation, BpfManager};
 
 pub(super) fn is_command(cmd: u32) -> bool {
-    (BPF_MANAGED_UPLOAD_BEGIN..=BPF_MANAGED_DEACTIVATE).contains(&cmd)
+    (BPF_MANAGED_UPLOAD_BEGIN..=BPF_MANAGED_RETIRE).contains(&cmd)
 }
 
 fn request_size(cmd: u32) -> Result<usize, Errno> {
@@ -19,9 +19,10 @@ fn request_size(cmd: u32) -> Result<usize, Errno> {
             Ok(size_of::<ManagedOperationRequestV1>())
         }
         BPF_MANAGED_OPERATION_QUERY => Ok(size_of::<ManagedOperationV1>()),
-        BPF_MANAGED_ACTIVATE | BPF_MANAGED_ROLLBACK | BPF_MANAGED_DEACTIVATE => {
-            Ok(size_of::<ManagedInstallationRequestV1>())
-        }
+        BPF_MANAGED_ACTIVATE
+        | BPF_MANAGED_ROLLBACK
+        | BPF_MANAGED_DEACTIVATE
+        | BPF_MANAGED_RETIRE => Ok(size_of::<ManagedInstallationRequestV1>()),
         BPF_MANAGED_SLOT_QUERY => Ok(size_of::<ManagedSlotV1>()),
         BPF_MANAGED_INSTALLATION_CANCEL => Ok(size_of::<ManagedInstallationCancelV1>()),
         _ => Err(ENOTSUP),
@@ -47,7 +48,10 @@ fn validate_header(cmd: u32, bytes: &[u8]) -> Result<(), Errno> {
 fn lifecycle_request(cmd: u32, bytes: &[u8]) -> Result<(u64, u64, LifecycleTarget), Errno> {
     validate_header(cmd, bytes)?;
     match cmd {
-        BPF_MANAGED_ACTIVATE | BPF_MANAGED_ROLLBACK | BPF_MANAGED_DEACTIVATE => {
+        BPF_MANAGED_ACTIVATE
+        | BPF_MANAGED_ROLLBACK
+        | BPF_MANAGED_DEACTIVATE
+        | BPF_MANAGED_RETIRE => {
             let request =
                 ManagedInstallationRequestV1::read_from_bytes(bytes).map_err(|_| EINVAL)?;
             if request.reserved != 0 {
@@ -57,6 +61,7 @@ fn lifecycle_request(cmd: u32, bytes: &[u8]) -> Result<(u64, u64, LifecycleTarge
                 BPF_MANAGED_ACTIVATE => LifecycleTarget::Candidate(request.artifact_handle),
                 BPF_MANAGED_ROLLBACK => LifecycleTarget::Previous(request.artifact_handle),
                 BPF_MANAGED_DEACTIVATE => LifecycleTarget::Deactivate(request.artifact_handle),
+                BPF_MANAGED_RETIRE => LifecycleTarget::Retire(request.artifact_handle),
                 _ => return Err(ENOTSUP),
             };
             Ok((
@@ -75,6 +80,7 @@ fn lifecycle_request(cmd: u32, bytes: &[u8]) -> Result<(u64, u64, LifecycleTarge
                 MANAGED_TARGET_CANDIDATE => LifecycleTarget::Candidate(request.artifact_handle),
                 MANAGED_TARGET_PREVIOUS => LifecycleTarget::Previous(request.artifact_handle),
                 MANAGED_TARGET_DEACTIVATE => LifecycleTarget::Deactivate(request.artifact_handle),
+                MANAGED_TARGET_RETIRE => LifecycleTarget::Retire(request.artifact_handle),
                 _ => return Err(EINVAL),
             };
             Ok((request.id, request.expected_generation, target))
@@ -177,7 +183,10 @@ pub(super) fn dispatch(owner: u64, cmd: u32, ptr: usize, size: usize) -> isize {
         // These wrappers take slot then manager, with IRQs masked. Never enter
         // them from the manager-only upload critical section below.
         match cmd {
-            BPF_MANAGED_ACTIVATE | BPF_MANAGED_ROLLBACK | BPF_MANAGED_DEACTIVATE => {
+            BPF_MANAGED_ACTIVATE
+            | BPF_MANAGED_ROLLBACK
+            | BPF_MANAGED_DEACTIVATE
+            | BPF_MANAGED_RETIRE => {
                 let (last_id, generation, target) = lifecycle_request(cmd, bytes)?;
                 return installation::request_installation(last_id, generation, target)
                     .map(|id| id as usize);
@@ -263,6 +272,12 @@ mod tests {
                 LifecycleTarget::Deactivate(0),
             ),
             (
+                BPF_MANAGED_RETIRE,
+                install.as_bytes(),
+                28,
+                LifecycleTarget::Retire(0),
+            ),
+            (
                 BPF_MANAGED_INSTALLATION_CANCEL,
                 cancel.as_bytes(),
                 32,
@@ -302,21 +317,29 @@ mod tests {
             lifecycle_request(BPF_MANAGED_INSTALLATION_CANCEL, cancel.as_bytes()),
             Ok((1 << 40, 1 << 41, LifecycleTarget::Deactivate(0)))
         );
-        for kind in [0, MANAGED_TARGET_DEACTIVATE + 1, u32::MAX] {
+        cancel.target_kind = MANAGED_TARGET_RETIRE;
+        assert_eq!(
+            lifecycle_request(BPF_MANAGED_INSTALLATION_CANCEL, cancel.as_bytes()),
+            Ok((1 << 40, 1 << 41, LifecycleTarget::Retire(0)))
+        );
+        for kind in [0, MANAGED_TARGET_RETIRE + 1, u32::MAX] {
             cancel.target_kind = kind;
             assert_eq!(
                 lifecycle_request(BPF_MANAGED_INSTALLATION_CANCEL, cancel.as_bytes()),
                 Err(EINVAL)
             );
         }
-        cancel.target_kind = MANAGED_TARGET_CANDIDATE;
         cancel.id = 0;
-        assert_eq!(
-            lifecycle_request(BPF_MANAGED_INSTALLATION_CANCEL, cancel.as_bytes()),
-            Err(EINVAL)
-        );
+        for kind in MANAGED_TARGET_CANDIDATE..=MANAGED_TARGET_RETIRE {
+            cancel.target_kind = kind;
+            assert_eq!(
+                lifecycle_request(BPF_MANAGED_INSTALLATION_CANCEL, cancel.as_bytes()),
+                Err(EINVAL)
+            );
+        }
         assert_eq!(request_size(BPF_MANAGED_CANCEL), Ok(24));
         assert_eq!(request_size(BPF_MANAGED_DEACTIVATE), Ok(32));
+        assert_eq!(request_size(BPF_MANAGED_RETIRE), Ok(32));
         assert_eq!(request_size(BPF_MANAGED_INSTALLATION_CANCEL), Ok(40));
         // A lifecycle cancellation cannot be smuggled into the old upload shape.
         assert_eq!(
@@ -368,7 +391,7 @@ mod tests {
 
     #[test]
     fn lifecycle_commands_reject_wrong_syscall_size_before_user_copy() {
-        for cmd in BPF_MANAGED_ACTIVATE..=BPF_MANAGED_DEACTIVATE {
+        for cmd in BPF_MANAGED_ACTIVATE..=BPF_MANAGED_RETIRE {
             assert!(is_command(cmd));
             for size in [0, request_size(cmd).unwrap() - 1, usize::MAX] {
                 let error = if cfg!(feature = "managed-runtime") {
@@ -380,7 +403,7 @@ mod tests {
             }
         }
         assert!(!is_command(BPF_MANAGED_UPLOAD_BEGIN - 1));
-        assert!(!is_command(BPF_MANAGED_DEACTIVATE + 1));
+        assert!(!is_command(BPF_MANAGED_RETIRE + 1));
     }
 
     #[test]

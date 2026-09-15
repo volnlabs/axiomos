@@ -1,6 +1,10 @@
 version = 1
 baseline_sites = 708
-baseline_fingerprint = "sha256:8d5eb40330bc62cb1d3ad0e043202cfda1f07fcd85be61137b929c5f21fef88c"
+baseline_fingerprint = "sha256:c5f2361d2c688d8634a6bf762eacdda1ff8f8d1b9c4ea10bbe32bd6a00e2120f"
+
+# 2026-09-15: inactive retirement reuses the worker batch and stop mailbox.
+# Only the existing worker scheduler site moved; normalized file/kind/obligation
+# entries remain identical (708 sites). No new unsafe syntax or obligation.
 
 # 2026-09-15: cleanup-counter preflight moves the worker source by five lines;
 # all 708 site/file/kind/obligation entries remain identical after normalization.

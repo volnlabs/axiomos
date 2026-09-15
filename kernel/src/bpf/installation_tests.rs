@@ -95,6 +95,206 @@ fn acknowledge(handoff: &mut Handoff, tx: &mut TxState, sent: u64, ack: u64) {
 }
 
 #[test]
+fn inactive_retirement_skips_handoff_and_holds_charge_until_last_reader_release() {
+    let mut manager = BpfManager::new();
+    let mut slot = ControlSlot::new();
+    let a = candidate(&mut manager, 1);
+    let usage = manager.resource_usage();
+    let reader = manager.managed_artifact(a).unwrap().clone();
+    let weak = Arc::downgrade(&reader);
+    // Retirement needs no new generation, even at the exhausted slot epoch.
+    slot.generation = u64::MAX;
+    let id = slot
+        .begin_artifact_retirement(&mut manager, u64::MAX, a)
+        .unwrap();
+    assert!(!slot.needs_handoff_transport());
+    assert_eq!(slot.enter_handoff(id), Err(BpfError::ObjectBusy));
+    let mut handoff = Handoff::new();
+    let mut tx = TxState::new();
+    let mut sequence = 0;
+    assert_eq!(
+        slot.handoff_boundary(
+            release(1, 100, 100),
+            1000,
+            &mut handoff,
+            &mut tx,
+            &mut sequence
+        ),
+        Ok(None)
+    );
+    assert!(tx.is_idle());
+    assert_eq!(handoff.operation(), None);
+    assert_eq!(manager.preparation.candidate, Some(a));
+    slot.commit_artifact_retirement(&mut manager, id).unwrap();
+    assert_eq!(slot.snapshot().generation, u64::MAX);
+    assert!(slot.snapshot().inhibited);
+    assert!(manager.preparation.candidate.is_none());
+    assert_eq!(manager.resource_usage(), usage);
+    let mut retirement = slot.take_retirement().unwrap().release_references();
+    assert!(matches!(
+        retirement.begin_release(&mut manager),
+        Err(BpfError::ObjectBusy)
+    ));
+    drop(reader);
+    assert!(matches!(
+        retirement.begin_release(&mut manager),
+        Err(BpfError::ObjectBusy)
+    ));
+    drop(weak);
+    let release = retirement.begin_release(&mut manager).unwrap().unwrap();
+    assert_eq!(manager.resource_usage(), usage);
+    assert!(manager.managed_artifact(a).is_err());
+    let receipt = release.release();
+    assert_eq!(manager.resource_usage(), usage);
+    retirement.finish_release(&mut manager, receipt).unwrap();
+    assert!(manager.resource_usage().program_bytes < usage.program_bytes);
+    assert!(retirement.begin_release(&mut manager).unwrap().is_none());
+    slot.finish_retirement(&mut manager, retirement.complete().ok().unwrap())
+        .unwrap();
+    assert!(!manager.managed_slot_busy);
+    assert_eq!(slot.snapshot().generation, u64::MAX);
+    assert_eq!(manager.admission.reserved_ns_per_s(), 0);
+}
+
+#[test]
+fn inactive_retirement_at_max_generation_reuses_bounded_capacity_and_receipts() {
+    use crate::bpf::preparation::{WorkerAction, WorkerState};
+    let manager = spin::Mutex::new(BpfManager::new());
+    let slot = spin::Mutex::new(ControlSlot::new());
+    let mut worker = WorkerState::default();
+    manager.lock().prepare_managed_storage().unwrap();
+    let floor = manager.lock().resource_usage();
+    slot.lock().generation = u64::MAX;
+    let mut last = 0;
+    let mut first_handle = None;
+    for revision in 1..=16 {
+        let handle = candidate(&mut manager.lock(), revision);
+        let old_handle = *first_handle.get_or_insert(handle);
+        if revision > 1 {
+            assert_ne!(old_handle, handle);
+            assert_eq!(
+                manager.lock().request_installation(
+                    &mut slot.lock(),
+                    last,
+                    u64::MAX,
+                    LifecycleTarget::Retire(old_handle)
+                ),
+                Err(kernel_abi::ESTALE)
+            );
+        }
+        last = manager
+            .lock()
+            .request_installation(
+                &mut slot.lock(),
+                last,
+                u64::MAX,
+                LifecycleTarget::Retire(handle),
+            )
+            .unwrap();
+        assert_eq!(
+            manager
+                .lock()
+                .query_installation(&slot.lock(), last)
+                .unwrap()
+                .phase,
+            kernel_abi::MANAGED_OPERATION_QUEUED
+        );
+        for _ in 0..4 {
+            let action = {
+                let mut slot = slot.lock();
+                let mut manager = manager.lock();
+                worker.take(&mut slot, &mut manager)
+            };
+            match action {
+                WorkerAction::Wait => break,
+                WorkerAction::Retry => panic!("no retained reader"),
+                action => worker.perform(action, &slot, &manager),
+            }
+        }
+        assert_eq!(
+            manager.lock().managed_operation_query(last).unwrap().phase,
+            kernel_abi::MANAGED_OPERATION_COMMITTED
+        );
+        assert_eq!(manager.lock().resource_usage(), floor);
+        assert!(!manager.lock().managed_slot_busy);
+        assert_eq!(slot.lock().snapshot().generation, u64::MAX);
+        assert!(slot.lock().snapshot().inhibited);
+    }
+    assert_eq!(
+        manager.lock().managed_operation_query(1),
+        Err(kernel_abi::ESTALE)
+    );
+}
+
+#[test]
+fn inactive_retirement_worker_consumes_stop_mailbox_before_its_commit() {
+    use crate::bpf::preparation::{WorkerAction, WorkerState};
+    for before_commit in [true, false] {
+        for stale_handoff in [false, true] {
+            let manager = spin::Mutex::new(BpfManager::new());
+            let slot = spin::Mutex::new(ControlSlot::new());
+            let mut worker = WorkerState::default();
+            let requested = spin::Mutex::new(None);
+            let handle = candidate(&mut manager.lock(), 1);
+            let operation = manager
+                .lock()
+                .request_installation(&mut slot.lock(), 0, 0, LifecycleTarget::Retire(handle))
+                .unwrap();
+            let notice = if stale_handoff {
+                StopNotice::Handoff {
+                    instance_id: slot.lock().snapshot().pending.unwrap() + 1,
+                    error: HandoffError::TimedOut,
+                }
+            } else {
+                StopNotice::Stop
+            };
+            if before_commit {
+                latch_stop(&requested, notice);
+            }
+            let action = worker.take_requested(&mut slot.lock(), &mut manager.lock(), &requested);
+            assert!(matches!(action, WorkerAction::Retire(_)));
+            if !before_commit {
+                latch_stop(&requested, notice);
+            }
+            worker.perform(action, &slot, &manager);
+            for _ in 0..4 {
+                let action =
+                    worker.take_requested(&mut slot.lock(), &mut manager.lock(), &requested);
+                match action {
+                    WorkerAction::Wait => break,
+                    WorkerAction::Retry => panic!("no retained reader"),
+                    action => worker.perform(action, &slot, &manager),
+                }
+            }
+            let receipt = manager.lock().managed_operation_query(operation).unwrap();
+            assert_eq!(
+                receipt.phase,
+                if before_commit {
+                    kernel_abi::MANAGED_OPERATION_CANCELLED
+                } else {
+                    kernel_abi::MANAGED_OPERATION_COMMITTED
+                }
+            );
+            assert_eq!(
+                receipt.error,
+                if before_commit {
+                    i32::from(kernel_abi::ECANCELED) as u32
+                } else {
+                    0
+                }
+            );
+            assert_eq!(
+                manager.lock().preparation.candidate,
+                before_commit.then_some(handle)
+            );
+            assert!(!manager.lock().managed_slot_busy);
+            assert_eq!(slot.lock().snapshot().generation, 0);
+            assert!(requested.lock().is_none());
+        }
+    }
+}
+
+#[test]
 fn deactivation_requires_safe_ack_and_retires_state_before_refunding_admission() {
     let mut manager = BpfManager::new();
     let mut slot = ControlSlot::new();

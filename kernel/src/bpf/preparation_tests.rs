@@ -603,6 +603,452 @@ fn host_commit(slot: &spin::Mutex<ControlSlot>) {
 }
 
 #[test]
+fn worker_inactive_retirement_candidate_commit_keeps_public_identity_and_reader_custody() {
+    let (mut worker, slot, manager) = fixture_worker();
+    let (uploaded, candidate) = resident_via_worker(&mut worker, &slot, &manager, 0, 1);
+    let identity = manager.lock().managed_operation_query(uploaded).unwrap();
+    let reader = manager
+        .lock()
+        .managed_artifact(candidate.handle())
+        .unwrap()
+        .clone();
+    let weak = Arc::downgrade(&reader);
+    let usage = manager.lock().resource_usage();
+    let before = slot.lock().snapshot();
+    let private_before = manager.lock().next_managed_preparation;
+    let reclaim_before = manager.lock().next_managed_reclamation;
+    let target = LifecycleTarget::Retire(candidate.handle());
+    let operation = manager
+        .lock()
+        .request_installation(&mut slot.lock(), uploaded, 0, target)
+        .unwrap();
+    assert_eq!(operation, uploaded + 1);
+    assert_eq!(slot.lock().snapshot().pending, Some(private_before + 1));
+    assert_ne!(operation, private_before + 1);
+    assert_eq!(
+        manager.lock().preparation.candidate,
+        Some(candidate.handle())
+    );
+    assert_eq!(manager.lock().resource_usage(), usage);
+    assert!(!slot.lock().needs_handoff_transport());
+    assert!(manager.lock().managed_instance_preparation.is_none());
+    assert_eq!(manager.lock().managed_instances.iter().flatten().count(), 0);
+    assert_eq!(manager.lock().admission.reserved_ns_per_s(), 0);
+    assert!(
+        manager.lock().reclaim_owner(7),
+        "accepted work survives loader exit"
+    );
+    let accepted = manager.lock().query_installation(&slot.lock(), 0).unwrap();
+    assert_eq!(
+        (accepted.id, accepted.phase),
+        (operation, MANAGED_OPERATION_QUEUED)
+    );
+    let action = worker.take(&mut slot.lock(), &mut manager.lock());
+    assert!(matches!(action, WorkerAction::Retire(_)));
+    assert!(manager.lock().preparation.candidate.is_none());
+    let committed = manager.lock().query_installation(&slot.lock(), 0).unwrap();
+    assert_eq!(
+        (committed.id, committed.phase, committed.error),
+        (operation, MANAGED_OPERATION_COMMITTED, 0)
+    );
+    assert_eq!(
+        manager
+            .lock()
+            .cancel_installation(&mut slot.lock(), operation, 0, target),
+        Err(EALREADY)
+    );
+    assert_eq!(manager.lock().resource_usage(), usage);
+    worker.perform(action, &slot, &manager);
+    for attempt in 0..2 {
+        assert!(
+            !service_worker(&mut worker, &slot, &manager),
+            "Busy attempt {attempt} retains ownership"
+        );
+        assert_eq!(manager.lock().resource_usage(), usage);
+        assert_eq!(manager.lock().next_managed_reclamation, reclaim_before);
+        let query = manager.lock().managed_slot_query(&slot.lock());
+        assert_eq!(query.pending_id, operation);
+        assert_eq!(query.pending_target_kind, MANAGED_TARGET_RETIRE);
+        assert_eq!(
+            query.flags,
+            MANAGED_SLOT_INHIBITED | MANAGED_SLOT_HAS_PENDING | MANAGED_SLOT_RETIRING
+        );
+        assert_eq!(
+            manager
+                .lock()
+                .query_installation(&slot.lock(), operation)
+                .unwrap()
+                .phase,
+            MANAGED_OPERATION_COMMITTED
+        );
+        assert_eq!(
+            manager.lock().managed_upload_begin(7, operation, 8),
+            Err(EBUSY)
+        );
+    }
+    drop(reader);
+    assert!(
+        !service_worker(&mut worker, &slot, &manager),
+        "weak reader also prevents extraction"
+    );
+    drop(weak);
+    let action = worker.take(&mut slot.lock(), &mut manager.lock());
+    assert!(matches!(action, WorkerAction::Release(_)));
+    assert_eq!(manager.lock().resource_usage(), usage);
+    assert_eq!(manager.lock().next_managed_reclamation, reclaim_before + 1);
+    assert_eq!(
+        manager
+            .lock()
+            .cancel_installation(&mut slot.lock(), operation, 0, target),
+        Err(EALREADY)
+    );
+    worker.perform(action, &slot, &manager);
+    assert!(service_worker(&mut worker, &slot, &manager));
+    let after = slot.lock().snapshot();
+    assert_eq!(
+        (
+            after.generation,
+            after.active,
+            after.previous,
+            after.inhibited,
+            after.active_charge_ns_per_s
+        ),
+        (
+            before.generation,
+            before.active,
+            before.previous,
+            before.inhibited,
+            before.active_charge_ns_per_s
+        )
+    );
+    let released = manager.lock().resource_usage();
+    assert_eq!(released.live_programs, usage.live_programs - 1);
+    assert!(released.program_bytes < usage.program_bytes);
+    assert_eq!(
+        (released.live_maps, released.map_bytes),
+        (usage.live_maps, usage.map_bytes)
+    );
+    assert_eq!(manager.lock().next_managed_reclamation, reclaim_before + 1);
+    assert!(!manager.lock().managed_slot_busy);
+    let terminal = manager.lock().managed_operation_query(0).unwrap();
+    assert_eq!(
+        (terminal.id, terminal.phase, terminal.error),
+        (operation, MANAGED_OPERATION_COMMITTED, 0)
+    );
+    assert_eq!(
+        (
+            terminal.behavior_id,
+            terminal.revision,
+            terminal.bundle_digest,
+            terminal.payload_digest,
+            terminal.signer_fingerprint,
+            terminal.signer_public_key
+        ),
+        (
+            identity.behavior_id,
+            identity.revision,
+            identity.bundle_digest,
+            identity.payload_digest,
+            identity.signer_fingerprint,
+            identity.signer_public_key
+        )
+    );
+    assert_eq!(
+        manager.lock().managed_slot_query(&slot.lock()).pending_id,
+        0
+    );
+}
+
+#[test]
+fn worker_inactive_retirement_previous_and_candidate_alias_refund_once_keep_active_running() {
+    for alias_candidate in [false, true] {
+        let (mut worker, slot, manager) = fixture_worker();
+        let mut last = 0;
+        let mut handles = [0; 2];
+        for revision in 1..=2 {
+            let (uploaded, candidate) =
+                resident_via_worker(&mut worker, &slot, &manager, last, revision);
+            handles[(revision - 1) as usize] = candidate.handle();
+            last = manager
+                .lock()
+                .request_installation(&mut slot.lock(), uploaded, revision - 1, candidate)
+                .unwrap();
+            assert!(service_worker(&mut worker, &slot, &manager));
+            host_commit(&slot);
+            assert!(service_worker(&mut worker, &slot, &manager));
+        }
+        // An active artifact is forbidden even if an inactive role aliases it.
+        for candidate_aliases_active in [false, true] {
+            manager.lock().preparation.candidate = candidate_aliases_active.then_some(handles[1]);
+            let before = manager.lock().managed_slot_query(&slot.lock());
+            let usage = manager.lock().resource_usage();
+            assert_eq!(
+                manager.lock().request_installation(
+                    &mut slot.lock(),
+                    last,
+                    2,
+                    LifecycleTarget::Retire(handles[1])
+                ),
+                Err(EBUSY)
+            );
+            assert_eq!(manager.lock().managed_slot_query(&slot.lock()), before);
+            assert_eq!(manager.lock().resource_usage(), usage);
+        }
+        manager.lock().preparation.candidate = None;
+        let retained_candidate = if alias_candidate {
+            manager.lock().preparation.candidate = Some(handles[0]);
+            None
+        } else {
+            let (uploaded, candidate) = resident_via_worker(&mut worker, &slot, &manager, last, 3);
+            last = uploaded;
+            Some(candidate.handle())
+        };
+        let before = slot.lock().snapshot();
+        let charge = manager.lock().admission.committed_ns_per_s();
+        let usage = manager.lock().resource_usage();
+        let reclaim = manager.lock().next_managed_reclamation;
+        let candidate_before = manager.lock().preparation.candidate;
+        let target = LifecycleTarget::Retire(handles[0]);
+        let operation = manager
+            .lock()
+            .request_installation(&mut slot.lock(), last, 2, target)
+            .unwrap();
+        assert_eq!(slot.lock().snapshot().previous, Some(handles[0]));
+        assert_eq!(manager.lock().preparation.candidate, candidate_before);
+        assert!(!slot.lock().needs_handoff_transport());
+        assert_eq!(manager.lock().resource_usage(), usage);
+        let action = worker.take(&mut slot.lock(), &mut manager.lock());
+        assert!(matches!(action, WorkerAction::Retire(_)));
+        let committed = slot.lock().snapshot();
+        assert_eq!(committed.previous, None);
+        assert_eq!(manager.lock().preparation.candidate, retained_candidate);
+        assert_eq!(
+            (
+                committed.active,
+                committed.generation,
+                committed.inhibited,
+                committed.active_charge_ns_per_s
+            ),
+            (
+                before.active,
+                before.generation,
+                before.inhibited,
+                before.active_charge_ns_per_s
+            )
+        );
+        assert_eq!(manager.lock().resource_usage(), usage);
+        assert_eq!(manager.lock().admission.committed_ns_per_s(), charge);
+        assert_eq!(
+            manager
+                .lock()
+                .cancel_installation(&mut slot.lock(), operation, 2, target),
+            Err(EALREADY)
+        );
+        assert_eq!(
+            manager.lock().request_installation(
+                &mut slot.lock(),
+                operation,
+                2,
+                LifecycleTarget::Deactivate(handles[1])
+            ),
+            Err(EBUSY)
+        );
+        worker.perform(action, &slot, &manager);
+        assert!(service_worker(&mut worker, &slot, &manager));
+        let after = slot.lock().snapshot();
+        assert_eq!(
+            (
+                after.active,
+                after.generation,
+                after.inhibited,
+                after.active_charge_ns_per_s
+            ),
+            (
+                before.active,
+                before.generation,
+                before.inhibited,
+                before.active_charge_ns_per_s
+            )
+        );
+        assert_eq!(manager.lock().admission.committed_ns_per_s(), charge);
+        assert_eq!(manager.lock().next_managed_reclamation, reclaim + 1);
+        let released = manager.lock().resource_usage();
+        assert_eq!(released.live_programs, usage.live_programs - 1);
+        assert!(released.program_bytes < usage.program_bytes);
+        assert_eq!(
+            (released.live_maps, released.map_bytes),
+            (usage.live_maps, usage.map_bytes)
+        );
+        assert_eq!(manager.lock().managed_instances.iter().flatten().count(), 1);
+        assert!(manager.lock().managed_artifact(handles[0]).is_err());
+        assert!(manager.lock().managed_artifact(handles[1]).is_ok());
+        assert_eq!(
+            manager
+                .lock()
+                .managed_operation_query(operation)
+                .unwrap()
+                .phase,
+            MANAGED_OPERATION_COMMITTED
+        );
+        assert!(!manager.lock().managed_slot_busy);
+    }
+}
+
+#[test]
+fn worker_inactive_retirement_precommit_cancel_at_generation_zero_keeps_roles_and_charge() {
+    for stop in [false, true] {
+        let (mut worker, slot, manager) = fixture_worker();
+        let (uploaded, candidate) = resident_via_worker(&mut worker, &slot, &manager, 0, 1);
+        let target = LifecycleTarget::Retire(candidate.handle());
+        let usage = manager.lock().resource_usage();
+        let reclaim = manager.lock().next_managed_reclamation;
+        let operation = manager
+            .lock()
+            .request_installation(&mut slot.lock(), uploaded, 0, target)
+            .unwrap();
+        assert_eq!(
+            manager
+                .lock()
+                .query_installation(&slot.lock(), operation)
+                .unwrap()
+                .phase,
+            MANAGED_OPERATION_QUEUED
+        );
+        if stop {
+            slot.lock().stop();
+        }
+        manager
+            .lock()
+            .cancel_installation(&mut slot.lock(), operation, 0, target)
+            .unwrap();
+        manager
+            .lock()
+            .cancel_installation(&mut slot.lock(), operation, 0, target)
+            .unwrap();
+        let query = manager.lock().query_installation(&slot.lock(), 0).unwrap();
+        assert_eq!(
+            (query.phase, query.error),
+            (MANAGED_OPERATION_CLEANUP, i32::from(ECANCELED) as u32)
+        );
+        let action = worker.take(&mut slot.lock(), &mut manager.lock());
+        assert!(matches!(action, WorkerAction::Retire(_)));
+        assert_eq!(
+            manager.lock().preparation.candidate,
+            Some(candidate.handle())
+        );
+        assert_eq!(manager.lock().resource_usage(), usage);
+        worker.perform(action, &slot, &manager);
+        assert!(service_worker(&mut worker, &slot, &manager));
+        assert_eq!(manager.lock().resource_usage(), usage);
+        assert_eq!(manager.lock().next_managed_reclamation, reclaim);
+        assert_eq!(
+            manager.lock().preparation.candidate,
+            Some(candidate.handle())
+        );
+        assert_eq!(manager.lock().admission.reserved_ns_per_s(), 0);
+        assert!(!manager.lock().managed_slot_busy);
+        let after = slot.lock().snapshot();
+        assert_eq!(
+            (after.generation, after.active, after.previous),
+            (0, None, None)
+        );
+        assert!(after.inhibited && !after.retiring && after.pending.is_none());
+        let terminal = manager.lock().managed_operation_query(operation).unwrap();
+        assert_eq!(
+            (terminal.phase, terminal.error),
+            (MANAGED_OPERATION_CANCELLED, i32::from(ECANCELED) as u32)
+        );
+        assert_eq!(
+            manager
+                .lock()
+                .request_installation(&mut slot.lock(), operation, 0, target),
+            Ok(operation + 1)
+        );
+        assert!(service_worker(&mut worker, &slot, &manager));
+        assert_eq!(
+            manager
+                .lock()
+                .managed_operation_query(operation + 1)
+                .unwrap()
+                .phase,
+            MANAGED_OPERATION_COMMITTED
+        );
+    }
+}
+
+#[test]
+fn worker_inactive_retirement_rejects_stale_and_exhausted_ids_but_uses_last_reclamation_id() {
+    let (mut worker, slot, manager) = fixture_worker();
+    let (uploaded, candidate) = resident_via_worker(&mut worker, &slot, &manager, 0, 1);
+    let target = LifecycleTarget::Retire(candidate.handle());
+    let usage = manager.lock().resource_usage();
+    let initial = manager.lock().managed_slot_query(&slot.lock());
+    let private = manager.lock().next_managed_preparation;
+    let reclaim = manager.lock().next_managed_reclamation;
+    for (last, generation, target) in [
+        (uploaded - 1, 0, target),
+        (uploaded, 1, target),
+        (uploaded, 0, LifecycleTarget::Retire(candidate.handle() + 1)),
+    ] {
+        assert_eq!(
+            manager
+                .lock()
+                .request_installation(&mut slot.lock(), last, generation, target),
+            Err(ESTALE)
+        );
+        assert_eq!(manager.lock().managed_slot_query(&slot.lock()), initial);
+        assert_eq!(manager.lock().resource_usage(), usage);
+    }
+    for counter in 0..3 {
+        match counter {
+            0 => manager.lock().preparation.last_id = isize::MAX as u64,
+            1 => manager.lock().next_managed_preparation = u64::MAX,
+            2 => manager.lock().next_managed_reclamation = u64::MAX,
+            _ => unreachable!(),
+        }
+        let before = manager.lock().managed_slot_query(&slot.lock());
+        let private_before = manager.lock().next_managed_preparation;
+        let reclaim_before = manager.lock().next_managed_reclamation;
+        assert_eq!(
+            manager
+                .lock()
+                .request_installation(&mut slot.lock(), before.last_id, 0, target),
+            Err(EOVERFLOW)
+        );
+        assert_eq!(manager.lock().managed_slot_query(&slot.lock()), before);
+        assert_eq!(manager.lock().resource_usage(), usage);
+        assert_eq!(manager.lock().next_managed_preparation, private_before);
+        assert_eq!(manager.lock().next_managed_reclamation, reclaim_before);
+        assert!(!manager.lock().managed_slot_busy);
+        assert_eq!(manager.lock().admission.reserved_ns_per_s(), 0);
+        manager.lock().preparation.last_id = uploaded;
+        manager.lock().next_managed_preparation = private;
+        manager.lock().next_managed_reclamation = reclaim;
+    }
+    manager.lock().next_managed_reclamation = u64::MAX - 1;
+    let operation = manager
+        .lock()
+        .request_installation(&mut slot.lock(), uploaded, 0, target)
+        .unwrap();
+    assert!(service_worker(&mut worker, &slot, &manager));
+    assert_eq!(manager.lock().next_managed_reclamation, u64::MAX);
+    assert_eq!(slot.lock().snapshot().generation, 0);
+    assert_eq!(
+        manager.lock().resource_usage().live_programs,
+        usage.live_programs - 1
+    );
+    assert_eq!(
+        manager
+            .lock()
+            .managed_operation_query(operation)
+            .unwrap()
+            .phase,
+        MANAGED_OPERATION_COMMITTED
+    );
+    assert!(!manager.lock().managed_slot_busy);
+}
+
+#[test]
 fn worker_deactivation_commits_without_allocating_an_instance_and_refunds_after_release() {
     let (mut worker, slot, manager) = fixture_worker();
     let mut last = 0;
