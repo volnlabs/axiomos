@@ -32,6 +32,20 @@ def require_equal(label: str, expected: set[str], actual: set[str]) -> None:
         )
 
 
+def match_arm_constants(match_body: str, prefix: str) -> set[str]:
+    """Return constants used in match patterns, including `A | B =>` arms."""
+    patterns = re.findall(
+        rf"^\s*((?:{prefix}[A-Z0-9_]+)(?:\s*\|\s*{prefix}[A-Z0-9_]+)*)\s*=>",
+        match_body,
+        re.MULTILINE,
+    )
+    return {
+        constant
+        for pattern in patterns
+        for constant in re.findall(rf"{prefix}[A-Z0-9_]+", pattern)
+    }
+
+
 def main() -> None:
     catalog = source("kernel/crates/kernel_abi/src/catalog.rs")
 
@@ -61,6 +75,10 @@ def main() -> None:
         )
     )
     dispatched_commands.discard("BPF_BENCH_EXEC")
+    managed_dispatch = source("kernel/src/syscall/managed.rs").split(
+        "let value = match cmd {", 1
+    )[1].split("Ok((value, None))", 1)[0]
+    dispatched_commands.update(match_arm_constants(managed_dispatch, "BPF_MANAGED_"))
     require_equal("BPF command", command_catalog, dispatched_commands)
 
     map_catalog = entries(

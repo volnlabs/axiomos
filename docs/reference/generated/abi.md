@@ -59,6 +59,11 @@ This catalog contains only interfaces dispatched by shipped kernels. Reserved sy
 | 101 | `BPF_PROG_UNLOAD` | all shipped kernels |
 | 102 | `BPF_MAP_DESTROY` | all shipped kernels |
 | 103 | `BPF_OBJ_UNPIN` | all shipped kernels |
+| 256 | `BPF_MANAGED_UPLOAD_BEGIN` | managed-runtime feature |
+| 257 | `BPF_MANAGED_UPLOAD_CHUNK` | managed-runtime feature |
+| 258 | `BPF_MANAGED_UPLOAD_FINALIZE` | managed-runtime feature |
+| 259 | `BPF_MANAGED_OPERATION_QUERY` | managed-runtime feature |
+| 260 | `BPF_MANAGED_CANCEL` | managed-runtime feature |
 
 ## BPF map types
 

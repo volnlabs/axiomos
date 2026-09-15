@@ -135,7 +135,12 @@ pub fn init() -> Result<(), KernelInitError> {
     dbg_mark(0x67); // 'g'
     info!("Initializing BPF subsystem...");
     BPF_MANAGER.init_once(|| {
-        let manager = bpf::BpfManager::new();
+        #[allow(unused_mut)]
+        let mut manager = bpf::BpfManager::new();
+        #[cfg(feature = "managed-runtime")]
+        manager
+            .enable_managed_preparation()
+            .expect("managed preparation boot storage");
         Mutex::new(manager)
     });
     dbg_mark(0x68); // 'h'
@@ -172,6 +177,8 @@ pub fn init() -> Result<(), KernelInitError> {
     {
         info!("Initializing multicore/scheduler...");
         mcore::init();
+        #[cfg(feature = "managed-runtime")]
+        bpf::preparation::init();
         dbg_mark(0x6c); // 'l'
         info!("Multicore/scheduler initialized");
     }

@@ -13,7 +13,7 @@
     "retire_batch_capacity": {"displaced_instances": 1, "evicted_artifacts": 1}
   },
   "recorder": {"max_records": 2048, "max_record_bytes": 96, "storage_bytes": 196608},
-  "terminal_receipts": {"bounded": true, "numeric_limit": null},
+  "terminal_receipts": {"bounded": true, "numeric_limit": 4},
   "campaign": {
     "host_churn_operations_min": 100000,
     "physical_boots_min": 3,

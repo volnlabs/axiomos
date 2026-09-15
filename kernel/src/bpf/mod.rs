@@ -4,6 +4,7 @@ pub mod helpers;
 mod limits;
 pub mod managed;
 mod managed_allocation;
+pub mod preparation;
 mod snapshot;
 mod trust;
 
@@ -483,7 +484,7 @@ pub struct BpfManager {
     pinned_maps: Vec<PinnedMap>,
     /// Trust store for program provenance (#20). A program is authentic if it
     /// is an RBPF [`SignedProgram`] signed by a key in here.
-    signature_verifier: SignatureVerifier,
+    signature_verifier: Arc<SignatureVerifier>,
     /// When true, programs without a signature container are accepted. Defaults
     /// to true for v0.1.x because no userspace signer ships yet; flip to false
     /// (via [`BpfManager::set_allow_unsigned`]) to enforce provenance.
@@ -509,6 +510,7 @@ pub struct BpfManager {
     managed_tables: Option<(usize, usize)>,
     managed_instance_preparation: Option<managed::InstanceReservation>,
     next_managed_preparation: u64,
+    preparation: preparation::PreparationState,
 }
 
 /// Default fire frequency assumed for a hook, in Hz. Every hook is assumed to
@@ -637,7 +639,7 @@ impl BpfManager {
             maps: Vec::new(),
             map_generations: Vec::new(),
             pinned_maps: Vec::new(),
-            signature_verifier,
+            signature_verifier: Arc::new(signature_verifier),
             allow_unsigned,
             admission: AdmissionLedger::new(
                 <ActiveProfile as PhysicalProfile>::UTILIZATION_BUDGET_NS_PER_S,
@@ -653,6 +655,7 @@ impl BpfManager {
             managed_tables: None,
             managed_instance_preparation: None,
             next_managed_preparation: 0,
+            preparation: preparation::PreparationState::new(),
         };
         let envelope = EnvelopeMap::<ActiveProfile>::init_from_profile();
         crate::actuation::ACTUATION_MONITOR
@@ -860,6 +863,7 @@ impl BpfManager {
     /// A `false` result means snapshot preparation could not reserve memory or
     /// an independently cloned program reference is still in flight.
     pub(crate) fn reclaim_owner(&mut self, owner: u64) -> bool {
+        self.preparation.cancel_upload_owner(owner);
         #[cfg(any(debug_assertions, feature = "audit-diagnostics"))]
         let had_owned_objects = self
             .programs

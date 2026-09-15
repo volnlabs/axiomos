@@ -51,6 +51,7 @@ impl UserMemory for CurrentUserMemory {
 }
 
 /// Copy a byte-valid plain-data value from the current process.
+/// Bounded management callers supply their own fixed storage instead.
 pub fn copy_from_userspace<T>(ptr: usize) -> Result<T, Errno>
 where
     T: FromBytes + KnownLayout + Immutable,
@@ -60,6 +61,26 @@ where
         .copy_from_user(&mut bytes, VirtAddr::new(ptr as u64))
         .map_err(CurrentUserMemory::map_error)?;
     T::read_from_bytes(&bytes).map_err(|_| EFAULT)
+}
+
+/// Page-validated copy into storage supplied by a bounded syscall. No allocation
+/// or formatting occurs on this path, including rejected addresses.
+pub(super) fn copy_from_userspace_into(ptr: usize, bytes: &mut [u8]) -> Result<(), Errno> {
+    if bytes.len() > MAX_USER_COPY {
+        return Err(EINVAL);
+    }
+    CurrentUserMemory::new()
+        .copy_from_user(bytes, VirtAddr::new(ptr as u64))
+        .map_err(Errno::from)
+}
+
+pub(super) fn copy_to_userspace_bounded(ptr: usize, bytes: &[u8]) -> Result<(), Errno> {
+    if bytes.len() > MAX_USER_COPY {
+        return Err(EINVAL);
+    }
+    CurrentUserMemory::new()
+        .copy_to_user(VirtAddr::new(ptr as u64), bytes)
+        .map_err(Errno::from)
 }
 
 /// Read an owned byte slice from the current process.

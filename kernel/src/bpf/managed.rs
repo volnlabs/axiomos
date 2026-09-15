@@ -211,7 +211,7 @@ impl BpfManager {
 
     /// Accept verified/authenticated code into the existing program table.
     /// The preparation worker must reserve its upload/workspace allowance before
-    /// constructing `artifact`. Save `artifact.code_bytes()` before the move;
+    /// constructing `artifact`. Save `artifact.output_charge()` before the move;
     /// release that output charge from the originating VerificationBudget after
     /// EVERY return, including deduplication and rejection. Success transfers
     /// code into this manager's charge; all other outcomes drop the input code.
@@ -221,6 +221,20 @@ impl BpfManager {
         artifact: BehaviorArtifact,
     ) -> Result<u32, BpfError> {
         self.prepare_managed_storage()?;
+        let runtime = Arc::try_new(artifact).map_err(|_| BpfError::OutOfMemory)?;
+        self.register_managed_shared(runtime)
+    }
+
+    /// Worker commit: wrapper and handle tables already exist. The worker keeps
+    /// another reference so rejection/deduplication cannot destroy code here.
+    pub(super) fn register_managed_shared(
+        &mut self,
+        runtime: Arc<BehaviorArtifact>,
+    ) -> Result<u32, BpfError> {
+        if self.managed_tables.is_none() {
+            return Err(BpfError::ResourceLimit);
+        }
+        let artifact = runtime.as_ref();
         let identity = artifact.identity();
         let mut count = 0;
         for (slot, entry) in self.programs.iter().enumerate() {
@@ -248,7 +262,6 @@ impl BpfManager {
             return Err(BpfError::ResourceLimit);
         }
         let wcet_cycles = artifact.wcet_cycles();
-        let runtime = Arc::try_new(artifact).map_err(|_| BpfError::OutOfMemory)?;
         let id = handles::insert(
             &mut self.programs,
             &mut self.program_generations,

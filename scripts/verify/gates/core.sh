@@ -23,7 +23,7 @@ run_step tooling-integration-tests python3 -B tests/scripts/test_xtask_cli.py
 run_step quality-provenance-tests python3 -B tests/scripts/test_quality.py
 run_step gpio23-probe-prompt-tests python3 -B tests/scripts/test_gpio23_probe.py
 run_step shrike-gpio23-probe-tests python3 -B tests/scripts/test_shrike_gpio23_probe.py
-run_step kernel-host-tests env EMBEDDED_DISK_PATH=/dev/null cargo test --locked -p kernel --lib --features embedded-profile
+run_step kernel-host-tests env EMBEDDED_DISK_PATH=/dev/null cargo test --locked -p kernel --lib --features embedded-profile,managed-runtime
 run_step quality-boundary-static python3 -B scripts/verify/quality.py --check
 run_step artifact-provenance-static python3 scripts/verify/artifact-provenance.py
 run_step target-boundary-static python3 scripts/verify/target-boundary.py
@@ -225,3 +225,5 @@ run_cargo_step kernel-x86-check check -p kernel --target x86_64-unknown-none \
     --no-default-features --features cloud-profile,x86_64_arch
 run_cargo_step kernel-aarch64-check check -p kernel --target aarch64-unknown-none \
     --no-default-features --features cloud-profile,virt
+run_cargo_step kernel-managed-rpi5-check check -p kernel --target aarch64-unknown-none \
+    --no-default-features --features embedded-rpi5,managed-runtime

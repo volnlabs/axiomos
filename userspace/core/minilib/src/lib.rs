@@ -152,6 +152,86 @@ pub fn bpf(cmd: c_int, attr: *const u8, size: c_int) -> c_int {
     ) as i32
 }
 
+// Managed operation IDs use the full syscall word; the legacy c_int wrapper
+// above remains unchanged. Only the fixed plain-data request types call this.
+fn managed_bpf<T>(cmd: u32, request: &mut T) -> Result<usize, kernel_abi::Errno> {
+    let result = syscall3(
+        kernel_abi::SYS_BPF,
+        cmd as usize,
+        core::ptr::from_mut(request) as usize,
+        core::mem::size_of::<T>(),
+    ) as isize;
+    if result < 0 {
+        Err(kernel_abi::Errno::from(-result))
+    } else {
+        Ok(result as usize)
+    }
+}
+
+pub fn managed_upload_begin(
+    expected_last_id: u64,
+    total_bytes: u32,
+) -> Result<u64, kernel_abi::Errno> {
+    let mut request = kernel_abi::ManagedUploadBeginV1 {
+        version: kernel_abi::MANAGED_ADMIN_VERSION,
+        size: core::mem::size_of::<kernel_abi::ManagedUploadBeginV1>() as u32,
+        expected_last_id,
+        total_bytes,
+        reserved: 0,
+    };
+    managed_bpf(kernel_abi::BPF_MANAGED_UPLOAD_BEGIN, &mut request).map(|id| id as u64)
+}
+
+pub fn managed_upload_chunk(id: u64, offset: u32, bytes: &[u8]) -> Result<u32, kernel_abi::Errno> {
+    if bytes.is_empty() || bytes.len() > kernel_abi::MANAGED_UPLOAD_CHUNK_BYTES {
+        return Err(kernel_abi::EINVAL);
+    }
+    let mut request = kernel_abi::ManagedUploadChunkV1 {
+        version: kernel_abi::MANAGED_ADMIN_VERSION,
+        size: core::mem::size_of::<kernel_abi::ManagedUploadChunkV1>() as u32,
+        id,
+        offset,
+        length: bytes.len() as u32,
+        reserved: 0,
+        bytes: [0; kernel_abi::MANAGED_UPLOAD_CHUNK_BYTES],
+    };
+    request.bytes[..bytes.len()].copy_from_slice(bytes);
+    managed_bpf(kernel_abi::BPF_MANAGED_UPLOAD_CHUNK, &mut request).map(|received| received as u32)
+}
+
+pub fn managed_upload_finalize(id: u64) -> Result<u64, kernel_abi::Errno> {
+    let mut request = kernel_abi::ManagedOperationRequestV1 {
+        version: kernel_abi::MANAGED_ADMIN_VERSION,
+        size: core::mem::size_of::<kernel_abi::ManagedOperationRequestV1>() as u32,
+        id,
+        reserved: 0,
+    };
+    managed_bpf(kernel_abi::BPF_MANAGED_UPLOAD_FINALIZE, &mut request).map(|id| id as u64)
+}
+
+pub fn managed_operation_cancel(id: u64) -> Result<(), kernel_abi::Errno> {
+    let mut request = kernel_abi::ManagedOperationRequestV1 {
+        version: kernel_abi::MANAGED_ADMIN_VERSION,
+        size: core::mem::size_of::<kernel_abi::ManagedOperationRequestV1>() as u32,
+        id,
+        reserved: 0,
+    };
+    managed_bpf(kernel_abi::BPF_MANAGED_CANCEL, &mut request).map(|_| ())
+}
+
+pub fn managed_operation_query(
+    id: u64,
+) -> Result<kernel_abi::ManagedOperationV1, kernel_abi::Errno> {
+    let mut request = kernel_abi::ManagedOperationV1 {
+        version: kernel_abi::MANAGED_ADMIN_VERSION,
+        size: core::mem::size_of::<kernel_abi::ManagedOperationV1>() as u32,
+        id,
+        ..Default::default()
+    };
+    managed_bpf(kernel_abi::BPF_MANAGED_OPERATION_QUERY, &mut request)?;
+    Ok(request)
+}
+
 pub fn estop_trigger() -> c_int {
     syscall1(kernel_abi::SYS_ESTOP, kernel_abi::ESTOP_TRIGGER) as i32
 }

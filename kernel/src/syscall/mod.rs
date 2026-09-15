@@ -49,6 +49,7 @@ fn hlt() {
 mod access;
 pub mod bpf;
 mod estop;
+mod managed;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 mod process;
 #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]

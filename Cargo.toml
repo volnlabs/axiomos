@@ -66,6 +66,8 @@ bpf-unsigned-development-aarch64 = [
 audit-diagnostics = ["kernel_x86/audit-diagnostics"]
 audit-diagnostics-aarch64 = ["kernel_aarch64/audit-diagnostics"]
 audit-fault-injection = ["kernel_x86/audit-fault-injection"]
+managed-runtime = ["kernel_x86/managed-runtime"]
+managed-runtime-aarch64 = ["kernel_aarch64/managed-runtime"]
 bringup-diagnostics = ["kernel_aarch64/bringup-diagnostics"]
 
 

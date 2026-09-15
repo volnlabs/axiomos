@@ -21,6 +21,9 @@ use crate::mcore::mtask::process::BpfCapabilities;
 use crate::BPF_MANAGER;
 
 fn required_bpf_capabilities(cmd: u32) -> Option<BpfCapabilities> {
+    if super::managed::is_command(cmd) {
+        return Some(BpfCapabilities::BEHAVIOR_ADMIN);
+    }
     match cmd {
         BPF_MAP_CREATE => Some(BpfCapabilities::MAP_CREATE),
         BPF_MAP_LOOKUP_ELEM | BPF_OBJ_GET_INFO_BY_FD | BPF_RINGBUF_POLL => {
@@ -122,6 +125,12 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
     let capabilities = process.bpf_capabilities();
     if !has_bpf_command_capability(cmd_u32, capabilities) {
         return -isize::from(EPERM);
+    }
+
+    // Managed requests have their own exact versioned layouts. Dispatch before
+    // the legacy BpfAttr size gate and its allocating copy helpers.
+    if super::managed::is_command(cmd_u32) {
+        return super::managed::dispatch(process.pid().as_u64(), cmd_u32, attr_ptr, size);
     }
 
     // Security Hardening: Validate the attribute size matches expected struct size
@@ -887,6 +896,23 @@ mod tests {
                 command,
                 BpfCapabilities::BEHAVIOR_ADMIN
             ));
+        }
+    }
+
+    #[test]
+    fn managed_commands_require_behavior_admin_independently() {
+        for cmd in kernel_abi::BPF_MANAGED_UPLOAD_BEGIN..=kernel_abi::BPF_MANAGED_CANCEL {
+            assert!(has_bpf_command_capability(
+                cmd,
+                BpfCapabilities::BEHAVIOR_ADMIN
+            ));
+            for capabilities in [
+                BpfCapabilities::NONE,
+                BpfCapabilities::USERSPACE_INIT,
+                BpfCapabilities::ACTUATE | BpfCapabilities::PRIVILEGED_VERIFY,
+            ] {
+                assert!(!has_bpf_command_capability(cmd, capabilities));
+            }
         }
     }
 

@@ -4,6 +4,7 @@
 //! numbers and development-only instrumentation deliberately do not appear here.
 
 use crate::bpf::*;
+use crate::managed::*;
 use crate::syscall::*;
 
 /// Current axiomos userspace ABI major version.
@@ -81,6 +82,11 @@ pub const SUPPORTED_BPF_COMMANDS: &[AbiEntry] = &[
     entry!(BPF_PROG_UNLOAD, "all shipped kernels"),
     entry!(BPF_MAP_DESTROY, "all shipped kernels"),
     entry!(BPF_OBJ_UNPIN, "all shipped kernels"),
+    entry!(BPF_MANAGED_UPLOAD_BEGIN, "managed-runtime feature"),
+    entry!(BPF_MANAGED_UPLOAD_CHUNK, "managed-runtime feature"),
+    entry!(BPF_MANAGED_UPLOAD_FINALIZE, "managed-runtime feature"),
+    entry!(BPF_MANAGED_OPERATION_QUERY, "managed-runtime feature"),
+    entry!(BPF_MANAGED_CANCEL, "managed-runtime feature"),
 ];
 
 /// Map types accepted by `BPF_MAP_CREATE`.

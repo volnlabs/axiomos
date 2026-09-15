@@ -112,7 +112,7 @@ under a `VerificationBudget`. It retains identity, binding contract, code and
 scalar verifier results; temporary decode and handle buffers are released.
 The trusted worker supplies signer and slot policy. The returned code capacity
 remains charged to the budget. When passing an artifact to
-`BpfManager::register_managed_artifact`, the caller saves `code_bytes()` and
+`BpfManager::register_managed_artifact`, the caller saves `output_charge()` and
 releases that originating output charge after every return, including duplicate
 or rejected registration. Insertion transfers ownership and accounting to the
 existing manager; other outcomes drop the supplied artifact.
@@ -137,8 +137,9 @@ registry capacity stay charged until release. Layout charges match the pinned
 Rust toolchain and `linked_list_allocator` implementation; the real allocator
 fixture checks Box/Arc charges and final release under Miri.
 
-The asynchronous worker, global upload/verifier-workspace reservation and timing
-admission remain integration work. Kernel dispatch must also discard captured
+The asynchronous worker and global upload/verifier-workspace reservation are
+implemented below. Timing admission remains integration work. Kernel dispatch
+must also discard captured
 requests on later deadline/policy/queue failure. No installation generation,
 timer slot, retirement batch, publication, UART handoff or physical qualification
 is established by these tests. Helper costs remain uncalibrated model values.
@@ -146,3 +147,77 @@ is established by these tests. Helper costs remain uncalibrated model values.
 See [managed verification](../../kernel/crates/kernel_bpf/src/verifier/managed.rs)
 and [managed execution](../../kernel/crates/kernel_bpf/src/execution/interpreter.rs),
 plus [kernel ownership and bindings](../../kernel/src/bpf/managed.rs).
+
+## Bounded upload and preparation administration
+
+The `managed-runtime` kernel feature preallocates one 256 KiB upload buffer and
+starts one permanent root-process worker using the existing task and wait queue.
+It is opt-in; the root build forwards `managed-runtime` for x86 and
+`managed-runtime-aarch64` for AArch64. Direct Pi 5 kernel builds use
+`embedded-rpi5,managed-runtime`. Physical actuation remains disabled.
+
+The upload backing stays charged against the existing program-byte limit even
+when idle. Finalize reserves another 512 KiB for verification and the artifact
+wrapper before accepting kernel ownership. Buffers use the pinned allocator's
+16-byte minimum and 8-byte size quantum, including old and replacement buffers
+during growth. The retained code's raw capacity and originating budget charge
+are separate values. Registration transfers retained code/wrapper charges to the
+existing table; the remaining reservation is refunded only after rejected or
+duplicate code references have actually been dropped by the worker. Four fixed
+terminal receipts retain scalar status and identity without retaining artifacts.
+
+Bulk authentication, verification and allocation run outside `BPF_MANAGER` with
+IRQs enabled. Allocator lock access masks local IRQs and restores their entry
+state, preventing a same-CPU context switch while that lock is held. Buffer
+zeroing/copying and verifier work are outside that scope. This does not establish
+a timing bound for the linked-list allocator's fragmentation-dependent traversal;
+the qualified workload still needs IRQ-off and deadline measurements.
+
+Five commands use independently versioned, padding-free native ABI structures
+through `SYS_BPF`, dispatched before the legacy `BpfAttr` size check. All require
+`BEHAVIOR_ADMIN`, exact version 1 and structure length, and zero reserved fields.
+Ordinary init children have no administration capability. Dedicated installer
+provisioning and debug-UART transport remain integration work.
+
+| Command | Number | Structure / bytes | Result |
+|---|---|---|---|
+| Upload begin | 256 | `ManagedUploadBeginV1` / 24 | New upload/operation ID |
+| Upload chunk | 257 | `ManagedUploadChunkV1` / 288 | Total bytes received |
+| Upload finalize | 258 | `ManagedOperationRequestV1` / 24 | Accepted operation ID |
+| Operation query | 259 | `ManagedOperationV1` / 200 | Fixed status written to the same address |
+| Cancel | 260 | `ManagedOperationRequestV1` / 24 | Cancellation requested |
+
+Begin compares `expected_last_id` with the latest issued ID. IDs increase without
+wrapping or entering the syscall error range. Query ID 0 returns the latest ID;
+before any upload it reports idle ID 0. Chunks contain at most 256 bytes, with a
+zero unused tail, and must arrive at the next expected offset. An exact replay
+of bytes already received is idempotent; gaps, conflicting or partially
+overlapping chunks reject. An incomplete upload belongs to its process and is
+cancelled through the existing owner-exit cleanup path.
+
+Finalize accepts only a complete upload with capacity available. The accepted
+operation survives installer exit. One operation remains busy through queued,
+preparing and worker cleanup, including cancellation. The current conservative
+capacity check rejects preparation when all three artifact positions are
+occupied, even for a possible duplicate. A retry of an accepted finalize returns
+the same ID while work is pending; terminal work returns `EALREADY` and remains
+queryable. A lost response is resolved by querying the original/latest ID before
+starting another upload. Query callers must zero every output field. Receipts expose
+upload progress, phase, positive errno, artifact handle, workspace high-water and
+the complete authenticated identity. Unauthenticated rejection has no trusted
+identity. An expired receipt returns `ESTALE`.
+
+Malformed requests use `EINVAL`; unsupported versions/features use `ENOTSUP`;
+authentication uses `EACCES`; rejected bytecode uses `ENOEXEC`; capacity/allocation
+exhaustion uses `ENOMEM`; a busy operation uses `EBUSY`; stale identities use
+`ESTALE`; counter exhaustion uses `EOVERFLOW`. Wrong upload ownership uses `EPERM`.
+Cancellation before registration prevents residency; after registration it
+returns `EALREADY` and does not unload code. Finalize does not perform timing
+admission, construct an instance or authorize activation. Resident means only
+authenticated and verified code retained in the existing manager.
+
+The [request layouts](../../kernel/crates/kernel_abi/src/managed.rs),
+[bounded dispatcher](../../kernel/src/syscall/managed.rs) and
+[preparation worker](../../kernel/src/bpf/preparation.rs) implement this slice.
+Host tests exercise actual authentication/verification and manager transitions;
+they do not establish a qualified control schedule or a live UART upload.
