@@ -53,6 +53,23 @@ class V05ReducerTests(unittest.TestCase):
         self.assertEqual(report["gate_results"]["physical_campaign"], "blocked")
         self.assertEqual(report["gate_results"]["authentication_and_loading"], "not_evaluated")
 
+    def test_config_cannot_enable_unevaluated_gates(self):
+        for name in ("physical_campaign", "resource_reclamation"):
+            for retain_policy in (True, False):
+                acceptance = json.loads(json.dumps(self.config))
+                gate = acceptance["required_gates"][name]
+                gate["implemented_by_reducer"] = True
+                if not retain_policy:
+                    del gate["missing_policy"]
+                with self.subTest(gate=name, retain_policy=retain_policy), self.assertRaisesRegex(ValueError, "unsupported reducer gate"):
+                    v05.reduce_records(self.records(), self.expectations(), acceptance, self.digest)
+        report = v05.reduce_records(self.records(), self.expectations(), self.config, self.digest)
+        self.assertEqual(report["gate_results"]["physical_campaign"], "blocked")
+        self.assertEqual(report["gate_results"]["resource_reclamation"], "not_evaluated")
+        self.assertEqual(report["release_verdict"], "blocked")
+        self.assertEqual(report["release_blockers"], [name for name, gate in self.config["required_gates"].items()
+                                                     if gate["required"] and report["gate_results"][name] != "pass"])
+
     def test_handoff_timeout_and_exact_deadline_edge(self):
         rows = self.records()
         rows[2]["ticks"], rows[3]["ticks"], rows[4]["ticks"] = 2, 3, 4

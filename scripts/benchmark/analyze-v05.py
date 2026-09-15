@@ -119,9 +119,11 @@ def _validate_acceptance(value: dict) -> None:
             raise ValueError(f"malformed acceptance {section}")
     if not isinstance(value.get("required_gates"), dict):
         raise ValueError("malformed acceptance required_gates")
-    for gate in value["required_gates"].values():
+    for name, gate in value["required_gates"].items():
         if not isinstance(gate, dict) or type(gate.get("required")) is not bool or type(gate.get("implemented_by_reducer")) is not bool or (not gate["implemented_by_reducer"] and not _one_of(gate.get("missing_policy"), {"blocked", "not_evaluated"})):
             raise ValueError("malformed acceptance required_gates")
+        if gate["implemented_by_reducer"] and name != "trace_subset":
+            raise ValueError(f"unsupported reducer gate {name!r}")
 
 
 def reduce_records(rows: list[dict], expectations: dict, acceptance: dict, config_digest: str) -> dict:
@@ -331,14 +333,15 @@ def reduce_records(rows: list[dict], expectations: dict, acceptance: dict, confi
             raise ValueError("installation changed without a successful commit")
 
     failures = sum(actual_outcomes[name] for name in OUTCOMES if name != "successful")
-    gate_results = {name: ("pass" if gate.get("implemented_by_reducer") else gate["missing_policy"])
+    # Successful validation above proves only the trace checks executed here.
+    gate_results = {name: ("pass" if name == "trace_subset" else gate["missing_policy"])
                     for name, gate in acceptance["required_gates"].items()}
     return {
         "schema": "axiomos.v05.results.v1",
         "trace_verdict": "pass",
         "release_verdict": "blocked",
         "gate_results": gate_results,
-        "release_blockers": [name for name, gate in acceptance["required_gates"].items() if gate.get("required") and not gate.get("implemented_by_reducer")],
+        "release_blockers": [name for name, gate in acceptance["required_gates"].items() if gate["required"] and gate_results[name] != "pass"],
         "boots": [{"boot_id": header["boot_id"], "evidence_kind": header["evidence_kind"], "source_id": header["source_id"],
                    "artifact_id": header["artifact_id"], "acceptance_config_sha256": header["acceptance_config_sha256"], "event_counts": actual_counts,
                    "operation_outcomes": actual_outcomes, "failures": failures, "unfinished_operations": unfinished,
