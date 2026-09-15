@@ -129,10 +129,9 @@ pub struct Verifier<'a, P: PhysicalProfile = ActiveProfile> {
     /// Control flow graph
     cfg: Option<ControlFlowGraph>,
 
-    /// Verifier states at each instruction (for path-sensitive analysis).
-    /// Kept alongside [`pruner`] because the post-verification stack-depth
-    /// scan reads `state.stack.max_depth()` from each recorded state.
-    states: Vec<Option<VerifierState>>,
+    /// Maximum stack depth over every explored path, including paths that
+    /// later rejoin. No duplicate state/stack allocation is needed for this.
+    max_stack_depth: usize,
 
     /// State pruning table. The verifier consults this before re-exploring
     /// any program point — if a previously-recorded state at the same pc
@@ -164,7 +163,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
     pub fn new() -> Self {
         Self {
             cfg: None,
-            states: Vec::new(),
+            max_stack_depth: 0,
             pruner: StatePruner::new(),
             liveness: None,
             config: VerifyConfig::default(),
@@ -336,8 +335,8 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
             }
         }
 
-        // Initialize states and pruner.
-        self.states = alloc::vec![None; insns.len()];
+        // Initialize depth accounting and pruner.
+        self.max_stack_depth = 0;
         self.pruner.clear();
 
         // Compute liveness once per verification run; the pruner uses it
@@ -351,16 +350,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
         initial_state.reg_mut(Register::R1).mem_range = Some(self.config.ctx_size);
         self.explore(insns, initial_state)?;
 
-        // Return computed stack size
-        let max_stack = self
-            .states
-            .iter()
-            .filter_map(|s| s.as_ref())
-            .map(|s| s.stack.max_depth())
-            .max()
-            .unwrap_or(0);
-
-        Ok(max_stack)
+        Ok(self.max_stack_depth)
     }
 
     /// Explore all reachable verifier states with an explicit worklist.
@@ -398,6 +388,10 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                     return Err(VerifyError::InfiniteLoop { insn_idx: idx });
                 }
 
+                // Retain the depth before pruning or revisiting a join. A
+                // later shallow path must never erase an earlier deep path.
+                self.max_stack_depth = self.max_stack_depth.max(state.stack.max_depth());
+
                 // Consult the state pruner. If a previously-recorded state at
                 // this pc subsumes the current one, stop exploring this path
                 // and move on to the next work item. Liveness-aware (#104): two
@@ -422,10 +416,6 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                         limit: self.pruner.max_states(),
                     });
                 }
-
-                // Keep `self.states` populated for the post-verification
-                // stack-depth scan (it reads `state.stack.max_depth()`).
-                self.states[idx] = Some(state.clone());
 
                 let insn = &insns[idx];
                 match self.verify_insn(insn, &mut state, idx)? {
@@ -1443,6 +1433,31 @@ fn check_ranged_deref(
 mod tests {
     use super::*;
     use crate::verifier::{HelperId, LoadCaller, MapPerm};
+
+    #[test]
+    fn stack_size_keeps_deep_branch_after_shallow_branch_revisits_join() {
+        // Exploration visits the taken/deep branch first. Both branches join
+        // immediately after the store, then the shallow path revisits the join.
+        let insns = [
+            BpfInsn::new(0x79, 0, 1, 0, 0),
+            BpfInsn::jeq_imm(0, 0, 2),
+            BpfInsn::new(0x7a, 10, 0, -16, 1),
+            BpfInsn::ja(1),
+            BpfInsn::new(0x7a, 10, 0, -64, 1),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ];
+        let program = Verifier::<ActiveProfile>::verify_with_config(
+            BpfProgType::SocketFilter,
+            &insns,
+            VerifyConfig {
+                ctx_size: 8,
+                ..VerifyConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(program.stack_size(), 64);
+    }
 
     #[test]
     fn verify_config_default_caller_is_privileged() {
