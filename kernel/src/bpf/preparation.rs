@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use kernel_abi::*;
 use kernel_bpf::execution::BpfError;
 use kernel_bpf::signing::managed::{
-    ArtifactIdentity, BundleError, EFFECT_MOTOR_PAIR, MAX_BUNDLE_BYTES,
+    ArtifactIdentity, BundleError, EFFECT_MOTOR_PAIR, MANIFEST_SIZE, MAX_BUNDLE_BYTES,
 };
 use kernel_bpf::signing::SignatureVerifier;
 use kernel_bpf::verifier::{BehaviorArtifact, VerificationBudget, VerifyError};
@@ -86,6 +86,7 @@ impl PreparationState {
         if self.phase == Phase::Uploading && self.owner == owner {
             self.active.phase = MANAGED_OPERATION_CANCELLED;
             self.active.error = i32::from(ECANCELED) as u32;
+            super::recorder::events::upload(&self.active, None, None);
             self.complete();
         }
     }
@@ -277,6 +278,7 @@ impl BpfManager {
         state.owner = owner;
         state.cancelled = false;
         state.phase = Phase::Uploading;
+        super::recorder::events::upload(&state.active, None, None);
         Ok(id)
     }
 
@@ -369,6 +371,7 @@ impl BpfManager {
         state.workspace = WORKSPACE_BYTES;
         state.active.phase = MANAGED_OPERATION_QUEUED;
         state.phase = Phase::Queued;
+        super::recorder::events::upload(&state.active, None, None);
         Ok(id)
     }
 
@@ -677,6 +680,7 @@ impl BpfManager {
         let buffer = state.buffer.take()?;
         state.phase = Phase::Preparing;
         state.active.phase = MANAGED_OPERATION_PREPARING;
+        super::recorder::events::upload(&state.active, None, None);
         Some(Work {
             id: state.active.id,
             total: state.active.total_bytes as usize,
@@ -730,6 +734,20 @@ impl BpfManager {
                 };
             }
         }
+        super::recorder::events::upload(
+            &state.active,
+            work.identity.as_ref().map(|identity| {
+                (
+                    work.buffer[..MANIFEST_SIZE]
+                        .try_into()
+                        .expect("authenticated bundle retains its full manifest"),
+                    identity,
+                )
+            }),
+            work.artifact
+                .as_ref()
+                .map(|artifact| artifact.wcet_cycles()),
+        );
         Ok(())
     }
 

@@ -19,6 +19,45 @@ pub const MANAGED_AUDIT_CYCLE: u32 = 3;
 pub const MANAGED_AUDIT_STOP: u32 = 4;
 pub const MANAGED_AUDIT_LINK: u32 = 5;
 
+pub const MANAGED_AUDIT_UPLOAD: u32 = 1;
+pub const MANAGED_AUDIT_UPLOAD_HAS_IDENTITY: u32 = 1;
+pub const MANAGED_AUDIT_UPLOAD_HAS_ARTIFACT: u32 = 2;
+pub const MANAGED_AUDIT_UPLOAD_HAS_COST: u32 = 4;
+
+/// OPERATION payload. Correlation is the public operation ID, not a generation.
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable,
+)]
+pub struct ManagedAuditUploadV1 {
+    pub operation_kind: u32,
+    pub phase: u32,
+    pub error: u32,
+    pub flags: u32,
+    pub artifact_handle: u32,
+    pub total_bytes: u32,
+    pub received_bytes: u32,
+    pub reserved: u32,
+    pub workspace_peak: u64,
+    pub modeled_wcet_cycles: u64,
+    pub reserved_tail: [u8; 16],
+}
+
+/// Four consecutive ARTIFACT fragments follow an authenticated upload outcome.
+/// Correlation and ticks match the preceding OPERATION; index is exactly 0..3.
+/// Concatenated data: canonical manifest (160 bytes), bundle digest (32),
+/// signer fingerprint (32). No signature or unverified manifest is recorded.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable)]
+pub struct ManagedAuditIdentityFragmentV1 {
+    pub index: u32,
+    pub artifact_handle: u32,
+    pub data: [u8; 56],
+}
+
+const _: () = assert!(core::mem::size_of::<ManagedAuditUploadV1>() == 64);
+const _: () = assert!(core::mem::size_of::<ManagedAuditIdentityFragmentV1>() == 64);
+
 pub const MANAGED_AUDIT_CYCLE_HAS_ARTIFACT: u32 = 1;
 pub const MANAGED_AUDIT_CYCLE_SAFE: u32 = 2;
 pub const MANAGED_AUDIT_CYCLE_HANDOFF: u32 = 4;

@@ -5,9 +5,99 @@ use ed25519_dalek::{Signer, SigningKey};
 use kernel_bpf::bytecode::insn::BpfInsn;
 use kernel_bpf::signing::managed::{signing_hash, Manifest, PrivateArray, MANIFEST_SIZE};
 use kernel_bpf::signing::{SignatureVerifier, TrustedKey};
-use zerocopy::IntoBytes;
+use zerocopy::{FromBytes, IntoBytes};
 
 use super::*;
+
+#[test]
+fn preparation_audit_retains_authenticated_rejections_and_exact_registered_identity() {
+    for case in 0..4 {
+        let program = if case == 2 {
+            alloc::vec![BpfInsn::new(0xff, 0, 0, 0, 0)]
+        } else {
+            alloc::vec![BpfInsn::mov64_imm(0, 0), BpfInsn::exit()]
+        };
+        let (mut bytes, trust) = signed_bundle(1 << 40, &program);
+        if case == 1 {
+            bytes[MANIFEST_SIZE] ^= 1;
+        }
+        let mut manager = manager_with_upload(trust);
+        let id = upload(&mut manager, 7, 0, &bytes);
+        manager.managed_upload_finalize(7, id).unwrap();
+        let prepared = manager.take_managed_work().unwrap().prepare();
+        if case == 3 {
+            manager.managed_operation_cancel(7, id).unwrap();
+        }
+        manager.commit_managed_work(&prepared).unwrap();
+        let operation = manager.managed_operation_query(id).unwrap();
+        let usage = manager.resource_usage();
+        let identity = prepared.identity.as_ref().map(|identity| {
+            (
+                prepared.buffer[..MANIFEST_SIZE].try_into().unwrap(),
+                identity,
+            )
+        });
+        let cost = prepared.artifact.as_ref().map(|a| a.wcet_cycles());
+        let records =
+            crate::bpf::recorder::events::tests::upload_records(&operation, identity, cost);
+        assert_eq!(records.len(), if case == 1 { 1 } else { 5 });
+        assert_eq!(records[0].kind, MANAGED_AUDIT_OPERATION);
+        let outcome = ManagedAuditUploadV1::read_from_bytes(&records[0].payload).unwrap();
+        assert_eq!(outcome.operation_kind, MANAGED_AUDIT_UPLOAD);
+        assert_eq!(outcome.phase, operation.phase);
+        assert_eq!(
+            outcome.error,
+            [
+                0,
+                i32::from(EACCES) as u32,
+                i32::from(ENOEXEC) as u32,
+                i32::from(ECANCELED) as u32
+            ][case]
+        );
+        assert_eq!(outcome.artifact_handle, operation.artifact_handle);
+        assert_eq!(
+            outcome.flags & MANAGED_AUDIT_UPLOAD_HAS_ARTIFACT != 0,
+            case == 0
+        );
+        assert_eq!(
+            outcome.flags & MANAGED_AUDIT_UPLOAD_HAS_IDENTITY != 0,
+            case != 1
+        );
+        assert_eq!(
+            outcome.flags & MANAGED_AUDIT_UPLOAD_HAS_COST != 0,
+            cost.is_some()
+        );
+        assert_eq!(outcome.modeled_wcet_cycles, cost.unwrap_or(0));
+        assert_eq!(outcome.workspace_peak, operation.workspace_peak);
+        assert_eq!(outcome.total_bytes, bytes.len() as u32);
+        assert_eq!(outcome.received_bytes, bytes.len() as u32);
+        let mut identity_bytes = Vec::new();
+        for (index, record) in records.iter().enumerate() {
+            assert_eq!(
+                (record.sequence, record.correlation, record.ticks),
+                (index as u64, id, 123)
+            );
+            if index != 0 {
+                assert_eq!(record.kind, MANAGED_AUDIT_ARTIFACT);
+                let fragment =
+                    ManagedAuditIdentityFragmentV1::read_from_bytes(&record.payload).unwrap();
+                assert_eq!(fragment.index, index as u32 - 1);
+                assert_eq!(fragment.artifact_handle, operation.artifact_handle);
+                identity_bytes.extend_from_slice(&fragment.data);
+            }
+        }
+        if let Some((manifest, identity)) = identity {
+            assert_eq!(&identity_bytes[..160], manifest);
+            assert_eq!(&identity_bytes[160..192], identity.bundle_digest.as_bytes());
+            assert_eq!(
+                &identity_bytes[192..224],
+                identity.signer_fingerprint.as_bytes()
+            );
+        }
+        assert_eq!(manager.resource_usage(), usage);
+        finish(&mut manager, prepared);
+    }
+}
 
 #[test]
 fn retained_identity_query_is_bounded_read_only_and_checks_exact_roles() {

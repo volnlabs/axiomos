@@ -167,11 +167,51 @@ All fields below are little-endian on the shipped Pi5/x86 platforms. The envelop
 contains sequence, recording ticks, correlation, kind and 64 payload bytes. An
 artifact handle is a generational manager handle, not the signed artifact digest.
 The header supplies identity for currently retained artifacts even after their
-registration records are overwritten. Historical identity events and strict
-identity resolution still need integration: absent identity for an evicted
-artifact must become an explicit error/gap, never be inferred from another handle.
+registration records are overwritten. Authenticated upload outcomes also retain
+the historical manifest and identity fragments described below. Strict identity
+resolution still needs integration: absent identity for an evicted artifact or
+an incomplete fragment group must become an explicit error/gap, never be inferred
+from another handle.
 Global events have correlation zero and no cycle/artifact flags, so consumers
 must not infer an installation identity from those zero fields.
+
+#### Upload outcomes and historical identity
+
+OPERATION records currently describe upload operations (`operation_kind = 1`).
+Their correlation is the public operation ID, **not** an installation generation.
+The fixed 64-byte payload is `ManagedAuditUploadV1`: kind, phase, positive errno,
+flags, artifact handle, total bytes, received bytes and reserved zero (eight u32s),
+workspace high-water and modeled interpreter cost (two u64s), then 16 zero bytes.
+Flags are `HAS_IDENTITY = 1`, `HAS_ARTIFACT = 2`, `HAS_COST = 4`.
+
+Producers run at accepted upload begin, finalize/queue, worker preparation start,
+incomplete-upload cancellation (including loader exit), and actual registration
+success/failure/cancellation. Repeated chunks and idempotent finalize retries do
+not duplicate these records. Registration produces RESIDENT; it does not claim
+installation, timing admission, sink readiness or execution. HAS_ARTIFACT is set
+only for that successful registration, including valid handle zero. HAS_COST
+means a verified artifact yielded a kernel model estimate, which may also exist
+for a subsequently cancelled or registration-rejected candidate.
+
+When authentication succeeded, the final outcome sets HAS_IDENTITY and is followed
+by exactly four consecutive ARTIFACT records. Each 64-byte fragment contains its
+u32 index (0 through 3), the same u32 artifact handle, and 56 data bytes. All five
+records share operation correlation and recording ticks and append under one
+bounded recorder critical section. The 224 concatenated data bytes are the
+canonical signed manifest (160 bytes, including full payload digest/public key,
+supported versions and requested state/effect declarations), full signed-bundle
+digest (32 bytes), and full signer fingerprint (32 bytes). See the
+[bundle format](managed-bundle-v1.md) for manifest offsets. These declarations are
+authenticated requests; acceptance and modeled cost come from the outcome.
+
+Bad signatures and malformed/unsupported unauthenticated bundles carry no trusted
+identity. A verifier rejection or cancellation after successful authentication
+can retain identity without a registered artifact. Missing, reordered, mismatched
+or partial identity fragments cannot establish identity; the future semantic
+decoder must reject them or report an explicit gap. Ring loss never fails an
+operation. Activation/handoff/rollback/retirement producers, sink correlation and
+semantic acceptance decoding remain open; raw export still declares
+`payloads_decoded: false`.
 
 LINK subtype 1 has its u32 subtype at byte 0 and the physical counter frequency
 at byte 8 (u64); other payload bytes are zero. LINK subtype 2 stores a local

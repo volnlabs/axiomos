@@ -2,6 +2,7 @@
 use kernel_abi::*;
 use kernel_bpf::actuation::{AuditSource, MotorPairDecision};
 use kernel_bpf::execution::BpfError;
+use kernel_bpf::signing::managed::{ArtifactIdentity, MANIFEST_SIZE};
 use kernel_time::periodic::PeriodicRelease;
 use zerocopy::IntoBytes;
 
@@ -9,7 +10,66 @@ use super::{Record, State};
 use crate::actuation::MotorPairSubmissionOutcome;
 use crate::bpf::control::{CycleFailure, CycleReport};
 
+const _: () = assert!(MANIFEST_SIZE + 64 == 4 * 56);
+
 impl State {
+    fn record_upload(
+        &mut self,
+        operation: &ManagedOperationV1,
+        identity: Option<(&[u8; MANIFEST_SIZE], &ArtifactIdentity)>,
+        cost: Option<u64>,
+        ticks: u64,
+    ) {
+        let payload = ManagedAuditUploadV1 {
+            operation_kind: MANAGED_AUDIT_UPLOAD,
+            phase: operation.phase,
+            error: operation.error,
+            flags: (u32::from(identity.is_some()) * MANAGED_AUDIT_UPLOAD_HAS_IDENTITY)
+                | (u32::from(operation.phase == MANAGED_OPERATION_RESIDENT)
+                    * MANAGED_AUDIT_UPLOAD_HAS_ARTIFACT)
+                | (u32::from(cost.is_some()) * MANAGED_AUDIT_UPLOAD_HAS_COST),
+            artifact_handle: operation.artifact_handle,
+            total_bytes: operation.total_bytes,
+            received_bytes: operation.received_bytes,
+            workspace_peak: operation.workspace_peak,
+            modeled_wcet_cycles: cost.unwrap_or(0),
+            ..Default::default()
+        };
+        let record = Record {
+            ticks,
+            correlation: operation.id,
+            kind: MANAGED_AUDIT_OPERATION,
+            payload: payload
+                .as_bytes()
+                .try_into()
+                .expect("64-byte upload payload"),
+            ..Record::EMPTY
+        };
+        let _ = self.window.append(record);
+        if let Some((manifest, identity)) = identity {
+            let mut bytes = [0u8; MANIFEST_SIZE + 64];
+            bytes[..MANIFEST_SIZE].copy_from_slice(manifest);
+            bytes[MANIFEST_SIZE..MANIFEST_SIZE + 32]
+                .copy_from_slice(identity.bundle_digest.as_bytes());
+            bytes[MANIFEST_SIZE + 32..].copy_from_slice(identity.signer_fingerprint.as_bytes());
+            for (index, data) in bytes.chunks_exact(56).enumerate() {
+                let fragment = ManagedAuditIdentityFragmentV1 {
+                    index: index as u32,
+                    artifact_handle: operation.artifact_handle,
+                    data: data.try_into().expect("56-byte identity fragment"),
+                };
+                let _ = self.window.append(Record {
+                    kind: MANAGED_AUDIT_ARTIFACT,
+                    payload: fragment
+                        .as_bytes()
+                        .try_into()
+                        .expect("64-byte identity payload"),
+                    ..record
+                });
+            }
+        }
+    }
+
     fn record_cycle(&mut self, release: PeriodicRelease, report: CycleReport, ticks: u64) {
         if report.safe_mode
             && !report.handoff
@@ -226,6 +286,17 @@ pub(crate) fn cycle(release: PeriodicRelease, report: CycleReport) {
     observe(|state, ticks| state.record_cycle(release, report, ticks));
 }
 
+/// Worker supplies only a successfully authenticated manifest. One owner
+/// critical section keeps the outcome and its four fragments consecutive.
+/// Overflow/exhaustion are recorder loss, never preparation failure.
+pub(crate) fn upload(
+    operation: &ManagedOperationV1,
+    identity: Option<(&[u8; MANIFEST_SIZE], &ArtifactIdentity)>,
+    cost: Option<u64>,
+) {
+    observe(|state, ticks| state.record_upload(operation, identity, cost, ticks));
+}
+
 pub(crate) fn trusted_stop(source: AuditSource) {
     observe(|state, ticks| state.trusted_stop(source, ticks));
 }
@@ -254,7 +325,7 @@ pub(crate) fn completion_miss(release: PeriodicRelease, report: CycleReport, obs
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use kernel_bpf::execution::ManagedMotorPair;
     use kernel_time::periodic::PeriodicSchedule;
     use zerocopy::FromBytes;
@@ -262,6 +333,21 @@ mod tests {
     use super::*;
     use crate::actuation::MotorPairSubmission;
     use crate::bpf::control::SensorSnapshot;
+
+    pub(crate) fn upload_records(
+        operation: &ManagedOperationV1,
+        identity: Option<(&[u8; MANIFEST_SIZE], &ArtifactIdentity)>,
+        cost: Option<u64>,
+    ) -> alloc::vec::Vec<Record> {
+        let mut state = State::new();
+        state.record_upload(operation, identity, cost, 123);
+        let mut records = alloc::vec::Vec::new();
+        while (records.len() as u64) < state.window.status().next {
+            let batch = state.window.read(records.len() as u64).unwrap();
+            records.extend_from_slice(&batch.records[..batch.count]);
+        }
+        records
+    }
 
     #[test]
     fn actual_controller_fault_keeps_queue_outcome_identity_and_stop_window() {
