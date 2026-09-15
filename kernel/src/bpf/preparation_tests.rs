@@ -80,6 +80,12 @@ fn finish(manager: &mut BpfManager, prepared: PreparedWork) {
     manager.finish_managed_work(id, buffer).unwrap();
 }
 
+// These pre-slot tests deliberately retain unassigned low-level artifacts to
+// exercise workspace/dedup/reclamation. Installation tests cover real role moves.
+fn unassign_candidate_fixture(manager: &mut BpfManager) {
+    manager.preparation.candidate = None;
+}
+
 #[test]
 fn managed_preparation_begin_ids_and_counter_exhaustion_are_fail_closed() {
     let (bytes, trust) = signed_bundle(1, &[BpfInsn::mov64_imm(0, 0), BpfInsn::exit()]);
@@ -205,6 +211,7 @@ fn managed_preparation_workspace_rejection_preserves_existing_artifact_and_uploa
     let first = upload(&mut manager, 7, 0, &bytes);
     let (prepared, _) = prepare_and_commit(&mut manager, first);
     finish(&mut manager, prepared);
+    unassign_candidate_fixture(&mut manager);
     let resident = manager.managed_operation_query(first).unwrap();
     let before = manager.resource_usage();
 
@@ -236,6 +243,7 @@ fn managed_preparation_rejects_fourth_transient_artifact_before_workspace_reserv
         let id = upload(&mut manager, 7, expected, &bytes);
         let (prepared, _) = prepare_and_commit(&mut manager, id);
         finish(&mut manager, prepared);
+        unassign_candidate_fixture(&mut manager);
         receipts.push(manager.managed_operation_query(id).unwrap());
         expected = id;
     }
@@ -280,6 +288,7 @@ fn managed_preparation_valid_dedup_auth_verify_and_cancel_paths_balance_charges(
     drop(artifact);
     assert_eq!(manager.resource_usage().program_bytes, workspace_charge);
     manager.finish_managed_work(id, buffer).unwrap();
+    unassign_candidate_fixture(&mut manager);
     let resident_floor = manager.resource_usage();
     assert_eq!(
         manager.managed_operation_query(first).unwrap().phase,
@@ -298,6 +307,7 @@ fn managed_preparation_valid_dedup_auth_verify_and_cancel_paths_balance_charges(
         handle
     );
     finish(&mut manager, prepared);
+    unassign_candidate_fixture(&mut manager);
     assert_eq!(manager.resource_usage(), resident_floor);
 
     let mut bad_auth = bytes.clone();
@@ -309,6 +319,7 @@ fn managed_preparation_valid_dedup_auth_verify_and_cancel_paths_balance_charges(
         i32::from(EACCES) as u32
     );
     finish(&mut manager, prepared);
+    unassign_candidate_fixture(&mut manager);
     assert_eq!(manager.resource_usage(), resident_floor);
 
     let (bad_program, _) = signed_bundle(2, &[BpfInsn::new(0xff, 0, 0, 0, 0)]);
@@ -319,6 +330,7 @@ fn managed_preparation_valid_dedup_auth_verify_and_cancel_paths_balance_charges(
         i32::from(ENOEXEC) as u32
     );
     finish(&mut manager, prepared);
+    unassign_candidate_fixture(&mut manager);
     assert_eq!(manager.resource_usage(), resident_floor);
 
     let cancelled = upload(&mut manager, 7, rejected, &bytes);
@@ -331,6 +343,7 @@ fn managed_preparation_valid_dedup_auth_verify_and_cancel_paths_balance_charges(
         MANAGED_OPERATION_CANCELLED
     );
     finish(&mut manager, prepared);
+    unassign_candidate_fixture(&mut manager);
     assert_eq!(manager.resource_usage(), resident_floor);
 
     let after_commit = upload(&mut manager, 7, cancelled, &bytes);
@@ -340,6 +353,7 @@ fn managed_preparation_valid_dedup_auth_verify_and_cancel_paths_balance_charges(
         Err(EALREADY)
     );
     finish(&mut manager, prepared);
+    unassign_candidate_fixture(&mut manager);
     assert_eq!(
         manager.managed_operation_query(after_commit).unwrap().phase,
         MANAGED_OPERATION_RESIDENT
@@ -378,6 +392,7 @@ fn managed_preparation_waits_for_reclamation_release_and_refund() {
     let first = upload(&mut manager, 7, 0, &bytes);
     let (prepared, _) = prepare_and_commit(&mut manager, first);
     finish(&mut manager, prepared);
+    unassign_candidate_fixture(&mut manager);
     let artifact = manager
         .managed_operation_query(first)
         .unwrap()
@@ -397,6 +412,7 @@ fn managed_preparation_waits_for_reclamation_release_and_refund() {
     let prepared = manager.take_managed_work().unwrap().prepare();
     manager.commit_managed_work(&prepared).unwrap();
     finish(&mut manager, prepared);
+    unassign_candidate_fixture(&mut manager);
     let current = manager.managed_operation_query(second).unwrap();
     assert_eq!(current.phase, MANAGED_OPERATION_RESIDENT);
     assert_ne!(current.artifact_handle, artifact);
@@ -410,6 +426,7 @@ fn managed_preparation_prevents_reclamation_from_disrupting_accepted_work() {
     let first = upload(&mut manager, 7, 0, &bytes);
     let (prepared, _) = prepare_and_commit(&mut manager, first);
     finish(&mut manager, prepared);
+    unassign_candidate_fixture(&mut manager);
     let artifact = manager
         .managed_operation_query(first)
         .unwrap()
@@ -436,6 +453,7 @@ fn managed_preparation_prevents_reclamation_from_disrupting_accepted_work() {
     manager.commit_managed_work(&prepared).unwrap();
     reject_reclamation(&mut manager);
     finish(&mut manager, prepared);
+    unassign_candidate_fixture(&mut manager);
     assert_eq!(
         manager.managed_operation_query(second).unwrap().phase,
         MANAGED_OPERATION_RESIDENT
@@ -445,4 +463,85 @@ fn managed_preparation_prevents_reclamation_from_disrupting_accepted_work() {
         .unwrap();
     let receipt = reclamation.release();
     manager.finish_managed_reclamation(receipt).unwrap();
+}
+
+#[test]
+fn managed_preparation_rejects_second_resident_candidate_even_without_active() {
+    let (bytes, trust) = signed_bundle(1, &[BpfInsn::mov64_imm(0, 0), BpfInsn::exit()]);
+    let mut manager = manager_with_upload(trust);
+    let id = upload(&mut manager, 7, 0, &bytes);
+    let (prepared, _) = prepare_and_commit(&mut manager, id);
+    finish(&mut manager, prepared);
+    let before = manager.resource_usage();
+    let handle = manager.preparation.candidate.unwrap();
+    assert_eq!(
+        manager.managed_upload_begin(7, id, bytes.len() as u32),
+        Err(EBUSY)
+    );
+    assert_eq!(manager.resource_usage(), before);
+    assert_eq!(manager.preparation.candidate, Some(handle));
+    assert!(matches!(
+        manager.begin_managed_artifact_reclamation(handle),
+        Err(BpfError::ObjectBusy)
+    ));
+}
+
+#[test]
+fn managed_accepted_upload_and_instance_preparation_exclude_each_other() {
+    let (bytes, trust) = signed_bundle(1, &[BpfInsn::mov64_imm(0, 0), BpfInsn::exit()]);
+    let mut manager = manager_with_upload(trust);
+    let handle = manager
+        .register_managed_artifact(crate::bpf::managed::tests::artifact(1))
+        .unwrap();
+    let id = upload(&mut manager, 7, 0, &bytes);
+    manager.managed_upload_finalize(7, id).unwrap();
+    let before = manager.resource_usage();
+    assert!(matches!(
+        manager.begin_managed_instance(handle),
+        Err(BpfError::ObjectBusy)
+    ));
+    assert_eq!(manager.resource_usage(), before);
+    let work = manager.take_managed_work().unwrap();
+    assert!(matches!(
+        manager.begin_managed_instance(handle),
+        Err(BpfError::ObjectBusy)
+    ));
+    let prepared = work.prepare();
+    manager.commit_managed_work(&prepared).unwrap();
+    assert!(matches!(
+        manager.begin_managed_instance(handle),
+        Err(BpfError::ObjectBusy)
+    ));
+    finish(&mut manager, prepared);
+}
+
+#[test]
+fn managed_uploaded_candidate_transfers_only_after_actual_slot_commit_and_cleanup() {
+    use crate::bpf::installation::ControlSlot;
+    let (bytes, trust) = signed_bundle(1, &[BpfInsn::mov64_imm(0, 0), BpfInsn::exit()]);
+    let mut manager = manager_with_upload(trust);
+    let mut slot = ControlSlot::new();
+    let id = upload(&mut manager, 7, 0, &bytes);
+    let (prepared, _) = prepare_and_commit(&mut manager, id);
+    finish(&mut manager, prepared);
+    let handle = manager.preparation.candidate.unwrap();
+    let preparation = slot.begin(&mut manager, 0, None).unwrap();
+    let operation = slot.snapshot().pending.unwrap();
+    slot.finish_build(&mut manager, preparation.build())
+        .unwrap();
+    slot.enter_handoff(operation).unwrap();
+    slot.commit_validated_handoff(operation).unwrap();
+    assert_eq!(slot.snapshot().active, Some(handle));
+    assert_eq!(
+        manager.managed_upload_begin(7, id, bytes.len() as u32),
+        Err(EBUSY)
+    );
+    let mut retirement = slot.take_retirement().unwrap().release_references();
+    assert!(retirement.begin_release(&mut manager).unwrap().is_none());
+    slot.finish_retirement(&mut manager, retirement.complete().ok().unwrap())
+        .unwrap();
+    assert!(manager.preparation.candidate.is_none());
+    assert!(manager
+        .managed_upload_begin(7, id, bytes.len() as u32)
+        .is_ok());
 }

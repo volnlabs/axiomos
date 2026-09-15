@@ -50,6 +50,7 @@ impl BehaviorInstance {
 }
 
 pub(super) struct InstanceEntry {
+    id: u64,
     instance: Arc<BehaviorInstance>,
     private_map_id: Option<u32>,
     charged_bytes: usize,
@@ -159,6 +160,10 @@ impl ManagedInstanceFinishError {
 }
 
 impl InstancePreparation {
+    pub(super) fn id(&self) -> u64 {
+        self.id
+    }
+
     /// Consumes the permit exactly once, outside BPF_MANAGER and with IRQs
     /// enabled. Failure drops all candidate allocations before reporting it.
     pub fn build(self) -> PreparedInstance {
@@ -386,7 +391,11 @@ impl BpfManager {
         &mut self,
         artifact_id: u32,
     ) -> Result<InstancePreparation, BpfError> {
-        if self.managed_instance_preparation.is_some() || self.managed_reclamation.is_some() {
+        if self.managed_slot_busy
+            || self.managed_instance_preparation.is_some()
+            || self.managed_reclamation.is_some()
+            || self.preparation.accepted()
+        {
             return Err(BpfError::ObjectBusy);
         }
         let slot = self
@@ -539,6 +548,7 @@ impl BpfManager {
             None
         };
         self.managed_instances[reservation.slot] = Some(InstanceEntry {
+            id: prepared_id,
             instance: instance.clone(),
             private_map_id,
             charged_bytes: reservation.instance_bytes,
@@ -603,14 +613,30 @@ impl BpfManager {
     pub(super) fn begin_managed_instance_reclamation(
         &mut self,
     ) -> Result<ManagedReclamation, BpfError> {
+        let id = self
+            .managed_instances
+            .iter_mut()
+            .find_map(|entry| {
+                let entry = entry.as_mut()?;
+                Arc::get_mut(&mut entry.instance).map(|_| entry.id)
+            })
+            .ok_or(BpfError::ObjectBusy)?;
+        self.begin_managed_instance_reclamation_for(id)
+    }
+
+    /// Exact batch member; never reclaim a different available instance.
+    pub(super) fn begin_managed_instance_reclamation_for(
+        &mut self,
+        id: u64,
+    ) -> Result<ManagedReclamation, BpfError> {
         let reclamation_id = self.next_reclamation_id()?;
         let slot = self
             .managed_instances
             .iter_mut()
             .position(|entry| {
-                entry
-                    .as_mut()
-                    .is_some_and(|entry| Arc::get_mut(&mut entry.instance).is_some())
+                entry.as_mut().is_some_and(|entry| {
+                    entry.id == id && Arc::get_mut(&mut entry.instance).is_some()
+                })
             })
             .ok_or(BpfError::ObjectBusy)?;
 
@@ -688,6 +714,9 @@ impl BpfManager {
         artifact_id: u32,
     ) -> Result<ManagedReclamation, BpfError> {
         let reclamation_id = self.next_reclamation_id()?;
+        if self.preparation.candidate == Some(artifact_id) {
+            return Err(BpfError::ObjectBusy);
+        }
         let slot = self.program_slot(artifact_id).ok_or(BpfError::NotLoaded)?;
         let entry = self.programs[slot].as_mut().ok_or(BpfError::NotLoaded)?;
         let ProgramObject::Managed(artifact) = &mut entry.program else {

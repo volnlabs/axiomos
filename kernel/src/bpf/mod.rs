@@ -1,6 +1,7 @@
 mod authorization;
 mod handles;
 pub mod helpers;
+pub(crate) mod installation;
 mod limits;
 pub mod managed;
 mod managed_allocation;
@@ -512,6 +513,7 @@ pub struct BpfManager {
     next_managed_preparation: u64,
     managed_reclamation: Option<managed::ReclamationReservation>,
     next_managed_reclamation: u64,
+    managed_slot_busy: bool,
     preparation: preparation::PreparationState,
 }
 
@@ -659,6 +661,7 @@ impl BpfManager {
             next_managed_preparation: 0,
             managed_reclamation: None,
             next_managed_reclamation: 0,
+            managed_slot_busy: false,
             preparation: preparation::PreparationState::new(),
         };
         let envelope = EnvelopeMap::<ActiveProfile>::init_from_profile();

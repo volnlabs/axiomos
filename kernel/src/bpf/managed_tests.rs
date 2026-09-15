@@ -33,7 +33,7 @@ pub(in crate::bpf) fn artifact_with_state(
     )
 }
 
-fn artifact_from_program(
+pub(in crate::bpf) fn artifact_from_program(
     revision: u64,
     envelope: bool,
     effects: u32,
@@ -517,7 +517,7 @@ fn managed_ownership_lifecycle_survives_100_000_fresh_instances() {
     );
 }
 
-fn stateful_managed_program() -> alloc::vec::Vec<BpfInsn> {
+pub(in crate::bpf) fn stateful_managed_program() -> alloc::vec::Vec<BpfInsn> {
     alloc::vec![
         BpfInsn::new(0x62, 10, 0, -4, 0), // key = 0
         BpfInsn::mov64_imm(1, 1),

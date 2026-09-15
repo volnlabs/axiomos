@@ -150,19 +150,27 @@ from disrupting its reserved resources. Private-map reclamation temporarily
 removes the instance's redundant reference while the table retains ownership,
 then uses atomic Arc uniqueness to exclude both strong and weak readers. A busy
 reader or lease restores the original binding and leaves charges unchanged.
-The installation retirement batch and its worker dispatch remain integration
-work; these APIs and their host/Miri checks establish the release mechanism.
+The kernel-private installation slot uses one retirement batch for both displaced
+state and evicted previous code. Worker cleanup extracts those exact objects,
+drops them outside locks, refunds their charges and consumes a final receipt
+before reusing capacity. Rollback retains the artifact that has become active;
+its new instance starts zeroed. The actual permanent-worker dispatch and CPU0
+synchronization remain integration work.
 
 The asynchronous worker and global upload/verifier-workspace reservation are
 implemented below. Timing admission remains integration work. Kernel dispatch
 must also discard captured
-requests on later deadline/policy/queue failure. No installation generation,
-timer slot, retirement batch, publication, UART handoff or physical qualification
-is established by these tests. Helper costs remain uncalibrated model values.
+requests on later deadline/policy/queue failure. The internal installation
+boundary tests cover fresh generations, ownership moves, cancellation, stop and
+100,000 transitions with bounded retained resources. No production caller can
+activate this slot yet; authority/admission checks, physical eligibility, timer
+scheduling and UART handoff remain unresolved. Helper costs remain uncalibrated
+model values.
 
 See [managed verification](../../kernel/crates/kernel_bpf/src/verifier/managed.rs)
 and [managed execution](../../kernel/crates/kernel_bpf/src/execution/interpreter.rs),
-plus [kernel ownership and bindings](../../kernel/src/bpf/managed.rs).
+plus [kernel ownership and bindings](../../kernel/src/bpf/managed.rs) and
+[installation ownership](../../kernel/src/bpf/installation.rs).
 
 ## Bounded upload and preparation administration
 
@@ -212,7 +220,9 @@ overlapping chunks reject. An incomplete upload belongs to its process and is
 cancelled through the existing owner-exit cleanup path.
 
 Finalize accepts only a complete upload with capacity available. The accepted
-operation survives installer exit. One operation remains busy through queued,
+operation survives installer exit. One resident candidate is retained, and a
+second upload is busy until its activation cleanup releases that role. Slot
+preparation and retirement also block upload acceptance. One operation remains busy through queued,
 preparing and worker cleanup, including cancellation. The current conservative
 capacity check rejects preparation when all three artifact positions are
 occupied, even for a possible duplicate. A retry of an accepted finalize returns

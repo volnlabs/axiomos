@@ -33,6 +33,7 @@ pub(super) struct PreparationState {
     receipt_next: usize,
     workspace: usize,
     cancelled: bool,
+    pub(super) candidate: Option<u32>,
 }
 
 impl PreparationState {
@@ -54,6 +55,7 @@ impl PreparationState {
             receipt_next: 0,
             workspace: 0,
             cancelled: false,
+            candidate: None,
         }
     }
 
@@ -188,6 +190,10 @@ impl BpfManager {
         total: u32,
     ) -> Result<u64, Errno> {
         let state = &mut self.preparation;
+        if state.candidate.is_some() || self.managed_slot_busy || self.managed_reclamation.is_some()
+        {
+            return Err(EBUSY);
+        }
         if state.phase != Phase::Idle {
             return Err(EBUSY);
         }
@@ -289,7 +295,9 @@ impl BpfManager {
         {
             return Err(ENOMEM);
         }
-        if self.managed_reclamation.is_some()
+        if state.candidate.is_some()
+            || self.managed_slot_busy
+            || self.managed_reclamation.is_some()
             || self.managed_instance_preparation.is_some()
             || self.managed_instances.iter().flatten().count() >= 2
         {
@@ -400,6 +408,7 @@ impl BpfManager {
         }
         match result {
             Ok(handle) => {
+                state.candidate = Some(handle);
                 state.active.artifact_handle = handle;
                 state.active.phase = MANAGED_OPERATION_RESIDENT;
             }
