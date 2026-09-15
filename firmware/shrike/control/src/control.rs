@@ -71,6 +71,9 @@ pub trait EstopLine {
 
 /// Tunables — all defaulted in `main.rs`, surfaced here so a bench can adjust.
 pub struct Config {
+    /// Managed reference mode waits silently for SessionOffer after the outer
+    /// driver has drained both peers and explicitly requalified the zero sink.
+    pub require_session: bool,
     /// Watchdog: max gap between fresh Pi5 frames before motors fail safe.
     pub link_timeout_us: u64,
     /// How often to fire the ultrasonic + report a Sensor frame.
@@ -109,6 +112,8 @@ pub struct RunSummary {
     pub iterations: u32,
     /// Pairs whose sink call completed with an accepted-sequence acknowledgement.
     pub motor_pairs_accepted: u32,
+    /// Safe barriers accepted by the sink before their correlated reply queued.
+    pub safe_barriers_accepted: u32,
     pub motor_inhibit_calls: u32,
     /// Bytes accepted by local UART writes, not observed delivery.
     pub bytes_written: u64,
@@ -134,7 +139,8 @@ fn terminate<IO: ByteIo, S: MotorPairSink>(
     summary.bytes_written = tx.accepted_bytes();
     summary.telemetry_frames_dropped = summary
         .telemetry_frames_dropped
-        .saturating_add(tx.pending_frames());
+        .saturating_add(tx.pending_frames())
+        .saturating_add(tx.dropped_telemetry());
     summary.io_reset_failed = io.reset().is_err();
     Some(summary)
 }
@@ -143,7 +149,8 @@ fn terminate<IO: ByteIo, S: MotorPairSink>(
 /// submitted once, in decode order; cached watchdog output is never replayed.
 /// The caller supplies a freshly qualified sink already holding zero output.
 /// After any return, drain/requalify explicitly before starting a new run; this
-/// function never establishes a link session or rearms a stopped FPGA.
+/// function never rearms a stopped FPGA. Managed mode accepts a fresh session
+/// offer and barriers only after the caller's drain/requalification procedure.
 pub fn run<IO, CK, US, ES, S>(
     io: &mut IO,
     clock: &CK,
@@ -168,6 +175,8 @@ where
     let mut peer_heartbeat_seq: u16 = 0;
     let mut summary = RunSummary::default();
     let mut command_applied = false;
+    let mut peer_session = None;
+    let mut last_barrier = 0;
 
     if max_iterations == Some(0) {
         return terminate(io, motors, summary, RunTermination::IterationLimit, &tx);
@@ -233,11 +242,67 @@ where
                 );
             }
 
+            // Reuse the same checked pair path for handshake/barrier zero.
+            // Only a successful post-transaction sink acknowledgement below
+            // can produce the corresponding reverse reply.
+            let (msg, reply) = match msg {
+                Msg::SessionOffer { session } if cfg.require_session && peer_session.is_none() => (
+                    Msg::MotorSetpoint {
+                        seq: 0,
+                        left: 0,
+                        right: 0,
+                    },
+                    Some(Msg::SessionReady { session }),
+                ),
+                Msg::SafeBarrier {
+                    session,
+                    correlation,
+                    sequence,
+                } if cfg.require_session
+                    && peer_session == Some(session)
+                    && correlation > last_barrier =>
+                {
+                    (
+                        Msg::MotorSetpoint {
+                            seq: sequence,
+                            left: 0,
+                            right: 0,
+                        },
+                        Some(Msg::SafeAck {
+                            session,
+                            correlation,
+                            sequence,
+                        }),
+                    )
+                }
+                Msg::MotorSetpoint { .. } if cfg.require_session && peer_session.is_none() => {
+                    return terminate(
+                        io,
+                        motors,
+                        summary,
+                        RunTermination::Fault(FaultReason::UnexpectedMessage),
+                        &tx,
+                    );
+                }
+                other => (other, None),
+            };
             match msg {
                 Msg::MotorSetpoint { seq, left, right } => {
+                    // Session establishment consumes sequence zero in both the
+                    // software watchdog and the FPGA. The first subsequent
+                    // command/barrier must therefore carry a newer sequence.
                     let accepted = wd.on_msg(&msg, now);
                     let output = wd.output(now);
                     if !accepted {
+                        if reply.is_some() {
+                            return terminate(
+                                io,
+                                motors,
+                                summary,
+                                RunTermination::Fault(FaultReason::UnexpectedMessage),
+                                &tx,
+                            );
+                        }
                         if command_applied && output == Output::SafeStop {
                             return terminate(
                                 io,
@@ -315,6 +380,26 @@ where
                             &tx,
                         );
                     }
+                    if let Some(reply) = reply {
+                        if !tx.queue_priority(reply) {
+                            return terminate(
+                                io,
+                                motors,
+                                summary,
+                                RunTermination::Fault(FaultReason::Io),
+                                &tx,
+                            );
+                        }
+                        match reply {
+                            Msg::SessionReady { session } => peer_session = Some(session),
+                            Msg::SafeAck { correlation, .. } => {
+                                last_barrier = correlation;
+                                summary.safe_barriers_accepted =
+                                    summary.safe_barriers_accepted.saturating_add(1);
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
                 }
                 Msg::Estop { .. } => {
                     let _ = wd.on_msg(&msg, now);
@@ -338,7 +423,12 @@ where
                         );
                     }
                 }
-                Msg::Sensor { .. } | Msg::HeartbeatToPi { .. } => {
+                Msg::Sensor { .. }
+                | Msg::HeartbeatToPi { .. }
+                | Msg::SessionOffer { .. }
+                | Msg::SessionReady { .. }
+                | Msg::SafeBarrier { .. }
+                | Msg::SafeAck { .. } => {
                     return terminate(
                         io,
                         motors,
@@ -373,33 +463,35 @@ where
             );
         }
 
-        if now.wrapping_sub(last_ping) >= cfg.ping_period_us {
-            ultra.trigger();
-            last_ping = now;
-        }
-        if let Some(echo) = ultra.take_echo_us() {
-            let msg = Msg::Sensor {
-                ultrasonic_echo_us: echo,
-                estop_line: hw_estop,
-                flags: 0,
-            };
-            if !tx.queue(msg) {
-                summary.telemetry_frames_dropped =
-                    summary.telemetry_frames_dropped.saturating_add(1);
+        if !cfg.require_session || peer_session.is_some() {
+            if now.wrapping_sub(last_ping) >= cfg.ping_period_us {
+                ultra.trigger();
+                last_ping = now;
             }
-        }
+            if let Some(echo) = ultra.take_echo_us() {
+                let msg = Msg::Sensor {
+                    ultrasonic_echo_us: echo,
+                    estop_line: hw_estop,
+                    flags: 0,
+                };
+                if !tx.queue(msg) {
+                    summary.telemetry_frames_dropped =
+                        summary.telemetry_frames_dropped.saturating_add(1);
+                }
+            }
 
-        if cfg.peer_heartbeat_period_us > 0
-            && now.wrapping_sub(last_peer_heartbeat) >= cfg.peer_heartbeat_period_us
-        {
-            let msg = Msg::HeartbeatToPi {
-                seq: peer_heartbeat_seq,
-            };
-            peer_heartbeat_seq = peer_heartbeat_seq.wrapping_add(1);
-            last_peer_heartbeat = now;
-            if !tx.queue(msg) {
-                summary.telemetry_frames_dropped =
-                    summary.telemetry_frames_dropped.saturating_add(1);
+            if cfg.peer_heartbeat_period_us > 0
+                && now.wrapping_sub(last_peer_heartbeat) >= cfg.peer_heartbeat_period_us
+            {
+                let msg = Msg::HeartbeatToPi {
+                    seq: peer_heartbeat_seq,
+                };
+                peer_heartbeat_seq = peer_heartbeat_seq.wrapping_add(1);
+                last_peer_heartbeat = now;
+                if !tx.queue(msg) {
+                    summary.telemetry_frames_dropped =
+                        summary.telemetry_frames_dropped.saturating_add(1);
+                }
             }
         }
         if tx.service(io).is_err() {
@@ -656,6 +748,7 @@ mod tests {
 
     fn config(link_timeout_us: u64, ping_period_us: u64, heartbeat_us: u64) -> Config {
         Config {
+            require_session: false,
             link_timeout_us,
             ping_period_us,
             peer_heartbeat_period_us: heartbeat_us,

@@ -7,6 +7,9 @@ use kernel_abi::ManagedControlContextV1;
 use kernel_bpf::execution::{BpfError, ManagedInvocationResult};
 use kernel_bpf::verifier::admission::{ManagedAdmissionError, ManagedAdmissionReservation};
 use kernel_bpf::verifier::BehaviorArtifact;
+use kernel_time::periodic::PeriodicRelease;
+use shrike_link::handoff::{Handoff, HandoffError, SafeReceipt};
+use shrike_link::tx::TxState;
 
 use super::managed::{
     BehaviorInstance, InstancePreparation, ManagedInstanceFinishError, ManagedReclamation,
@@ -431,11 +434,10 @@ impl ControlSlot {
         Ok(())
     }
 
-    /// Only for the future validated handoff caller. No public safety boolean.
-    /// Modeled admission, CPU0 ownership and worker custody are connected.
-    /// Authority, correlated sink acknowledgement and calibrated physical timing
-    /// remain unresolved. Production has no caller; tests supply this boundary.
-    pub(crate) fn commit_validated_handoff(&mut self, id: u64) -> Result<u64, BpfError> {
+    /// Consume transport eligibility at the exclusive CPU0 release boundary.
+    /// Receipt construction requires a matching post-transmission SafeAck.
+    fn commit_validated_handoff(&mut self, receipt: SafeReceipt) -> Result<u64, BpfError> {
+        let id = receipt.operation();
         let pending = self
             .pending
             .filter(|p| p.id == id)
@@ -479,6 +481,101 @@ impl ControlSlot {
             consumed_candidate,
         });
         Ok(self.generation)
+    }
+
+    /// The production timer and host tests share this complete publication path.
+    /// Caller holds the slot and link under CPU0 IRQ masking. It must check stop
+    /// first; any error requires the trusted stop path after releasing the link.
+    pub(crate) fn handoff_boundary(
+        &mut self,
+        release: PeriodicRelease,
+        frequency: u64,
+        handoff: &mut Handoff,
+        tx: &mut TxState,
+        motor_sequence: &mut u8,
+    ) -> Result<Option<u64>, HandoffError> {
+        let result = (|| {
+            if release.sequence <= self.last_control_release
+                || release.scheduled > release.actual
+                || release.actual >= release.deadline
+                || release.missed_before != 0
+            {
+                return Err(HandoffError::InvalidRelease);
+            }
+            handoff.check(release.actual)?;
+            if let Some(operation) = handoff.operation() {
+                if !self.pending.is_some_and(|pending| {
+                    pending.id == operation && pending.handoff && !pending.cancelled
+                }) {
+                    return Err(HandoffError::Stale);
+                }
+                if let Some(receipt) = handoff.take_ready(release.scheduled, release.actual)? {
+                    return self
+                        .commit_validated_handoff(receipt)
+                        .map(Some)
+                        .map_err(|_| HandoffError::Stale);
+                }
+            } else if let Some(pending) = self.pending.filter(|pending| !pending.cancelled) {
+                if pending.handoff {
+                    return Err(HandoffError::NotEstablished);
+                }
+                if self.staged.is_some() {
+                    // Reject unrepresentable 80 ms rather than round a timeout.
+                    let timeout = frequency
+                        .checked_mul(80)
+                        .filter(|ticks| *ticks != 0 && ticks % 1000 == 0)
+                        .ok_or(HandoffError::InvalidTimeout)?
+                        / 1000;
+                    self.enter_handoff(pending.id)
+                        .map_err(|_| HandoffError::Busy)?;
+                    let sequence = motor_sequence.wrapping_add(1);
+                    handoff.begin_on_transport(
+                        pending.id,
+                        sequence,
+                        release.actual,
+                        timeout,
+                        tx,
+                    )?;
+                    *motor_sequence = sequence;
+                }
+            }
+            Ok(None)
+        })();
+        if result.is_err() {
+            self.stop();
+            handoff.disarm();
+            tx.clear_motor();
+            tx.cancel_unsent();
+        }
+        result
+    }
+
+    /// Existing ownership/admission tests exercise the real receipt checks while
+    /// supplying a deterministic, host-only peer acknowledgement.
+    #[cfg(test)]
+    pub(super) fn commit_test_handoff(&mut self, id: u64) -> Result<u64, BpfError> {
+        use shrike_link::Msg;
+        let mut handoff = Handoff::new();
+        let offer = handoff.offer_after_drain().unwrap();
+        handoff.started(offer).unwrap();
+        handoff.sent(0).unwrap();
+        handoff
+            .on_reply(Msg::SessionReady { session: 1 }, 0)
+            .unwrap();
+        let key = handoff.begin(id, 1, 0, 80).unwrap();
+        handoff.started(handoff.outbound().unwrap()).unwrap();
+        handoff.sent(0).unwrap();
+        handoff
+            .on_reply(
+                Msg::SafeAck {
+                    session: key.session,
+                    correlation: key.correlation,
+                    sequence: key.sequence,
+                },
+                0,
+            )
+            .unwrap();
+        self.commit_validated_handoff(handoff.take_ready(0, 0).unwrap().unwrap())
     }
 
     /// Worker discards a staged cancellation/failure without destroying state.

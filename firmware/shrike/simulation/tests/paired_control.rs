@@ -12,9 +12,19 @@ use shrike_rp2040_host_sim::mocks::{
 
 fn config(timeout: u64) -> Config {
     Config {
+        require_session: false,
         link_timeout_us: timeout,
         ping_period_us: u64::MAX,
         peer_heartbeat_period_us: 0,
+    }
+}
+
+fn managed_config(timeout: u64) -> Config {
+    Config {
+        require_session: true,
+        link_timeout_us: timeout,
+        ping_period_us: 1,
+        peer_heartbeat_period_us: 1,
     }
 }
 
@@ -26,6 +36,194 @@ fn frames(messages: &[Msg]) -> Vec<u8> {
         input.extend_from_slice(&frame[..len]);
     }
     input
+}
+
+fn decoded(bytes: &[u8]) -> Vec<Msg> {
+    let mut decoder = shrike_link::Decoder::new();
+    bytes
+        .iter()
+        .filter_map(|&byte| decoder.push(byte))
+        .map(Result::unwrap)
+        .collect()
+}
+
+#[test]
+fn managed_peer_is_silent_and_rejects_motion_before_session_offer() {
+    let mut silent_io = MockByteIo::new(vec![]);
+    let mut silent_ultra = MockUltrasonic::new(vec![77]);
+    let silent = run(
+        &mut silent_io,
+        &MockClock::new(10),
+        &mut silent_ultra,
+        &mut MockEstop::new(false),
+        &mut MockMotorPair::new(),
+        managed_config(100),
+        Some(2),
+    )
+    .unwrap();
+    assert_eq!(silent.termination, RunTermination::IterationLimit);
+    assert_eq!(silent_io.output, []);
+    assert_eq!(silent_ultra.triggers, 0);
+
+    let mut io = MockByteIo::new(frames(&[Msg::MotorSetpoint {
+        seq: 1,
+        left: 100,
+        right: 100,
+    }]));
+    let mut motors = MockMotorPair::new();
+    let rejected = run(
+        &mut io,
+        &MockClock::new(0),
+        &mut MockUltrasonic::new(vec![]),
+        &mut MockEstop::new(false),
+        &mut motors,
+        managed_config(100),
+        Some(1),
+    )
+    .unwrap();
+    assert_eq!(
+        rejected.termination,
+        RunTermination::Fault(FaultReason::UnexpectedMessage)
+    );
+    assert_eq!(motors.calls, [MotorPairCall::Inhibit]);
+    assert_eq!(io.output, []);
+}
+
+#[test]
+fn managed_offer_and_barrier_echo_exact_identity_and_block_stale_motion() {
+    let offer = Msg::SessionOffer {
+        session: 0x1020_3040,
+    };
+    let barrier = Msg::SafeBarrier {
+        session: 0x1020_3040,
+        correlation: 0x0102_0304_0506_0708,
+        sequence: 20,
+    };
+    let stale = Msg::MotorSetpoint {
+        seq: 19,
+        left: 700,
+        right: 700,
+    };
+    let mut io = MockByteIo::new(frames(&[offer, barrier, stale]));
+    let mut motors = MockMotorPair::new();
+    let summary = run(
+        &mut io,
+        &MockClock::new(0),
+        &mut MockUltrasonic::new(vec![]),
+        &mut MockEstop::new(false),
+        &mut motors,
+        managed_config(100),
+        Some(1),
+    )
+    .unwrap();
+
+    assert_eq!(summary.termination, RunTermination::IterationLimit);
+    assert_eq!(summary.safe_barriers_accepted, 1);
+    assert_eq!(
+        decoded(&io.output),
+        [
+            Msg::SessionReady {
+                session: 0x1020_3040
+            },
+            Msg::SafeAck {
+                session: 0x1020_3040,
+                correlation: 0x0102_0304_0506_0708,
+                sequence: 20,
+            }
+        ]
+    );
+    assert_eq!(
+        motors.calls,
+        [
+            MotorPairCall::Apply {
+                seq: 0,
+                left: 0,
+                right: 0,
+            },
+            MotorPairCall::Apply {
+                seq: 20,
+                left: 0,
+                right: 0,
+            },
+            MotorPairCall::Inhibit,
+        ]
+    );
+}
+
+#[test]
+fn managed_session_consumes_zero_and_rejects_equal_first_barrier_without_ack() {
+    let session = 12;
+    let mut io = MockByteIo::new(frames(&[
+        Msg::SessionOffer { session },
+        Msg::SafeBarrier {
+            session,
+            correlation: 1,
+            sequence: 0,
+        },
+    ]));
+    let mut motors = MockMotorPair::new();
+    let summary = run(
+        &mut io,
+        &MockClock::new(0),
+        &mut MockUltrasonic::new(vec![]),
+        &mut MockEstop::new(false),
+        &mut motors,
+        managed_config(100),
+        Some(1),
+    )
+    .unwrap();
+
+    assert_eq!(
+        summary.termination,
+        RunTermination::Fault(FaultReason::UnexpectedMessage)
+    );
+    assert_eq!(summary.safe_barriers_accepted, 0);
+    assert!(io.output.is_empty());
+    assert_eq!(
+        motors.calls,
+        [
+            MotorPairCall::Apply {
+                seq: 0,
+                left: 0,
+                right: 0,
+            },
+            MotorPairCall::Inhibit,
+        ]
+    );
+}
+
+#[test]
+fn managed_ack_capacity_failure_is_terminal_and_does_not_ack_third_barrier() {
+    let session = 9;
+    let input = frames(&[
+        Msg::SessionOffer { session },
+        Msg::SafeBarrier {
+            session,
+            correlation: 1,
+            sequence: 1,
+        },
+        Msg::SafeBarrier {
+            session,
+            correlation: 2,
+            sequence: 2,
+        },
+    ]);
+    let mut io = MockByteIo::new(input);
+    let mut motors = MockMotorPair::new();
+    let summary = run(
+        &mut io,
+        &MockClock::new(0),
+        &mut MockUltrasonic::new(vec![]),
+        &mut MockEstop::new(false),
+        &mut motors,
+        managed_config(100),
+        Some(1),
+    )
+    .unwrap();
+    assert_eq!(summary.termination, RunTermination::Fault(FaultReason::Io));
+    assert_eq!(summary.safe_barriers_accepted, 1);
+    assert!(io.output.is_empty());
+    assert_eq!(motors.calls.last(), Some(&MotorPairCall::Inhibit));
 }
 
 #[test]
@@ -318,8 +516,11 @@ fn failed_sink_blocks_following_commands() {
 
 struct AckingFpga {
     last_seq: u8,
+    sequence_valid: bool,
+    command_valid: bool,
     transfers: usize,
     forced_safe: usize,
+    status_override: Option<(usize, [u8; 2])>,
 }
 
 impl FpgaPlatform for AckingFpga {
@@ -354,13 +555,31 @@ impl FpgaPlatform for AckingFpga {
     }
 
     fn runtime_transfer(&mut self, frame: &[u8; 12]) -> Result<u8, Self::Error> {
-        self.last_seq = frame[4];
+        let sequence = frame[4];
+        let distance = sequence.wrapping_sub(self.last_seq);
+        self.command_valid = !self.sequence_valid || (distance != 0 && distance < 128);
+        if self.command_valid {
+            self.last_seq = sequence;
+            self.sequence_valid = true;
+        }
         self.transfers += 1;
         Ok(0)
     }
 
     fn read_runtime_status(&mut self) -> Result<[u8; 2], Self::Error> {
-        Ok([STATUS_READY | STATUS_COMMAND_VALID, self.last_seq])
+        Ok(self
+            .status_override
+            .filter(|(at, _)| *at == self.transfers)
+            .map(|(_, status)| status)
+            .unwrap_or([
+                STATUS_READY
+                    | if self.command_valid {
+                        STATUS_COMMAND_VALID
+                    } else {
+                        0
+                    },
+                self.last_seq,
+            ]))
     }
 }
 
@@ -377,8 +596,11 @@ fn fpga_lifecycle_sink_requires_and_accepts_the_real_runtime_ack() {
     let mut estop = MockEstop::new(false);
     let mut motors = FpgaLifecycle::new(AckingFpga {
         last_seq: 0,
+        sequence_valid: false,
+        command_valid: false,
         transfers: 0,
         forced_safe: 0,
+        status_override: None,
     });
     motors
         .configure(
@@ -406,6 +628,158 @@ fn fpga_lifecycle_sink_requires_and_accepts_the_real_runtime_ack() {
     assert_eq!(summary.motor_pairs_accepted, 1);
     assert_eq!(motors.platform().transfers, 1);
     assert!(!motors.runtime_ready());
+}
+
+#[test]
+fn managed_fpga_posttransaction_mismatch_cannot_emit_acknowledgement() {
+    for (at, wrong_sequence) in [(1, 1), (2, 0)] {
+        let mut io = MockByteIo::new(frames(&[
+            Msg::SessionOffer { session: 7 },
+            Msg::SafeBarrier {
+                session: 7,
+                correlation: 1,
+                sequence: 1,
+            },
+        ]));
+        let mut motors = FpgaLifecycle::new(AckingFpga {
+            last_seq: 0,
+            sequence_valid: false,
+            command_valid: false,
+            transfers: 0,
+            forced_safe: 0,
+            status_override: Some((at, [STATUS_READY | STATUS_COMMAND_VALID, wrong_sequence])),
+        });
+        motors
+            .configure(
+                BitstreamManifest {
+                    offset: FPGA_STORAGE_START,
+                    length: 1,
+                    sha256: [1; 32],
+                },
+                1,
+            )
+            .unwrap();
+        let summary = run(
+            &mut io,
+            &MockClock::new(0),
+            &mut MockUltrasonic::new(vec![]),
+            &mut MockEstop::new(false),
+            &mut motors,
+            managed_config(100),
+            Some(1),
+        )
+        .unwrap();
+
+        assert_eq!(
+            summary.termination,
+            RunTermination::Fault(FaultReason::MotorSink)
+        );
+        assert_eq!(summary.safe_barriers_accepted, 0);
+        assert!(io.output.is_empty());
+        assert!(!motors.runtime_ready());
+    }
+}
+
+#[test]
+fn managed_fpga_session_zero_then_newer_barrier_one_produces_exact_replies() {
+    let session = 21;
+    let mut io = MockByteIo::new(frames(&[
+        Msg::SessionOffer { session },
+        Msg::SafeBarrier {
+            session,
+            correlation: 33,
+            sequence: 1,
+        },
+    ]));
+    let mut motors = FpgaLifecycle::new(AckingFpga {
+        last_seq: 0,
+        sequence_valid: false,
+        command_valid: false,
+        transfers: 0,
+        forced_safe: 0,
+        status_override: None,
+    });
+    motors
+        .configure(
+            BitstreamManifest {
+                offset: FPGA_STORAGE_START,
+                length: 1,
+                sha256: [1; 32],
+            },
+            1,
+        )
+        .unwrap();
+    let summary = run(
+        &mut io,
+        &MockClock::new(0),
+        &mut MockUltrasonic::new(vec![]),
+        &mut MockEstop::new(false),
+        &mut motors,
+        managed_config(100),
+        Some(1),
+    )
+    .unwrap();
+
+    assert_eq!(summary.termination, RunTermination::IterationLimit);
+    assert_eq!(summary.safe_barriers_accepted, 1);
+    assert_eq!(motors.platform().transfers, 2);
+    assert_eq!(
+        decoded(&io.output),
+        [
+            Msg::SessionReady { session },
+            Msg::SafeAck {
+                session,
+                correlation: 33,
+                sequence: 1,
+            }
+        ]
+    );
+}
+
+#[test]
+fn managed_timeout_after_barrier_apply_suppresses_safe_ack() {
+    let mut io = MockByteIo::new(frames(&[
+        Msg::SessionOffer { session: 7 },
+        Msg::SafeBarrier {
+            session: 7,
+            correlation: 1,
+            sequence: 1,
+        },
+    ]));
+    let clock = SequenceClock::new(vec![0, 0, 0, 0, 0, 0, 100]);
+    let mut motors = MockMotorPair::new();
+    let summary = run(
+        &mut io,
+        &clock,
+        &mut MockUltrasonic::new(vec![]),
+        &mut MockEstop::new(false),
+        &mut motors,
+        managed_config(100),
+        Some(1),
+    )
+    .unwrap();
+
+    assert_eq!(
+        summary.termination,
+        RunTermination::Stop(StopReason::WatchdogExpired)
+    );
+    assert!(io.output.is_empty());
+    assert_eq!(
+        motors.calls,
+        [
+            MotorPairCall::Apply {
+                seq: 0,
+                left: 0,
+                right: 0,
+            },
+            MotorPairCall::Apply {
+                seq: 1,
+                left: 0,
+                right: 0,
+            },
+            MotorPairCall::Inhibit,
+        ]
+    );
 }
 
 struct BackpressuredIo {

@@ -35,7 +35,198 @@ fn stage(slot: &mut ControlSlot, manager: &mut BpfManager, previous: Option<u32>
 
 fn commit(slot: &mut ControlSlot, id: u64) -> u64 {
     slot.enter_handoff(id).unwrap();
-    slot.commit_validated_handoff(id).unwrap()
+    slot.commit_test_handoff(id).unwrap()
+}
+
+fn peer_ready() -> Handoff {
+    let mut handoff = Handoff::new();
+    let offer = handoff.offer_after_drain().unwrap();
+    handoff.started(offer).unwrap();
+    handoff.sent(0).unwrap();
+    assert!(handoff
+        .on_reply(shrike_link::Msg::SessionReady { session: 1 }, 0)
+        .unwrap());
+    handoff
+}
+
+fn release(sequence: u64, scheduled: u64, actual: u64) -> PeriodicRelease {
+    PeriodicRelease {
+        sequence,
+        scheduled,
+        actual,
+        deadline: scheduled + 10,
+        missed_before: 0,
+        wake_lateness: actual - scheduled,
+    }
+}
+
+fn acknowledge(handoff: &mut Handoff, tx: &mut TxState, sent: u64, ack: u64) {
+    let shrike_link::Msg::SafeBarrier {
+        session,
+        correlation,
+        sequence,
+    } = handoff.outbound().unwrap()
+    else {
+        panic!("expected barrier")
+    };
+    handoff.enqueue(tx, sent).unwrap();
+    while tx.next_byte().is_some() {}
+    handoff.sent(sent).unwrap();
+    assert!(!handoff
+        .on_reply(
+            shrike_link::Msg::SafeAck {
+                session,
+                correlation: correlation + 1,
+                sequence,
+            },
+            ack
+        )
+        .unwrap());
+    assert!(handoff
+        .on_reply(
+            shrike_link::Msg::SafeAck {
+                session,
+                correlation,
+                sequence
+            },
+            ack
+        )
+        .unwrap());
+}
+
+#[test]
+fn real_boundary_commits_only_matching_ack_at_next_release_and_keeps_retirement_owned() {
+    let mut manager = BpfManager::new();
+    let mut slot = ControlSlot::new();
+    let mut handoff = peer_ready();
+    let mut tx = TxState::new();
+    let mut seq = 0;
+    let a = candidate(&mut manager, 1);
+    stage(&mut slot, &mut manager, None);
+    assert_eq!(
+        slot.handoff_boundary(release(1, 100, 100), 1000, &mut handoff, &mut tx, &mut seq),
+        Ok(None)
+    );
+    assert!(slot.snapshot().inhibited);
+    assert_eq!(slot.snapshot().generation, 0);
+    acknowledge(&mut handoff, &mut tx, 101, 102);
+    assert_eq!(
+        slot.handoff_boundary(release(1, 100, 103), 1000, &mut handoff, &mut tx, &mut seq),
+        Ok(None)
+    );
+    assert_eq!(
+        slot.handoff_boundary(release(2, 110, 110), 1000, &mut handoff, &mut tx, &mut seq),
+        Ok(Some(1))
+    );
+    assert_eq!(slot.snapshot().active, Some(a));
+    assert!(!slot.snapshot().inhibited);
+    assert!(slot.snapshot().retiring);
+    drain(&mut slot, &mut manager);
+    let b = candidate(&mut manager, 2);
+    stage(&mut slot, &mut manager, None);
+    let charge = slot.snapshot().active_charge_ns_per_s;
+    assert_eq!(
+        slot.handoff_boundary(release(3, 120, 120), 1000, &mut handoff, &mut tx, &mut seq),
+        Ok(None)
+    );
+    assert_eq!(slot.snapshot().active, Some(a));
+    assert_eq!(slot.snapshot().active_charge_ns_per_s, charge);
+    acknowledge(&mut handoff, &mut tx, 121, 129);
+    assert_eq!(
+        slot.handoff_boundary(release(4, 130, 130), 1000, &mut handoff, &mut tx, &mut seq),
+        Ok(Some(2))
+    );
+    assert_eq!(
+        (slot.snapshot().active, slot.snapshot().previous),
+        (Some(b), Some(a))
+    );
+    drain(&mut slot, &mut manager);
+    stage(&mut slot, &mut manager, Some(a));
+    assert_eq!(
+        slot.handoff_boundary(release(5, 140, 140), 1000, &mut handoff, &mut tx, &mut seq),
+        Ok(None)
+    );
+    acknowledge(&mut handoff, &mut tx, 141, 149);
+    assert_eq!(
+        slot.handoff_boundary(release(6, 150, 150), 1000, &mut handoff, &mut tx, &mut seq),
+        Ok(Some(3))
+    );
+    assert_eq!(
+        (slot.snapshot().active, slot.snapshot().previous),
+        (Some(a), Some(b))
+    );
+    slot.stop();
+    assert_eq!(
+        slot.handoff_boundary(release(7, 160, 160), 1000, &mut handoff, &mut tx, &mut seq),
+        Ok(None)
+    );
+    assert!(
+        slot.snapshot().inhibited,
+        "postcommit stop cannot implicitly resume"
+    );
+}
+
+#[test]
+fn stop_cancel_timeout_and_reset_cannot_publish_even_with_matching_ack() {
+    for fault in 0..4 {
+        let mut manager = BpfManager::new();
+        let mut slot = ControlSlot::new();
+        candidate(&mut manager, 1);
+        let id = stage(&mut slot, &mut manager, None);
+        commit(&mut slot, id);
+        drain(&mut slot, &mut manager);
+        let before = slot.snapshot();
+        candidate(&mut manager, 2);
+        let pending = stage(&mut slot, &mut manager, None);
+        let mut handoff = peer_ready();
+        let mut tx = TxState::new();
+        let mut seq = 0;
+        slot.handoff_boundary(release(1, 100, 100), 1000, &mut handoff, &mut tx, &mut seq)
+            .unwrap();
+        acknowledge(
+            &mut handoff,
+            &mut tx,
+            101,
+            if fault == 2 { 179 } else { 109 },
+        );
+        match fault {
+            0 => slot.stop(),
+            1 => {
+                slot.cancel(pending).unwrap();
+            }
+            2 => {}
+            3 => handoff.disarm(),
+            _ => unreachable!(),
+        }
+        let at = if fault == 2 { 180 } else { 110 };
+        assert!(slot
+            .handoff_boundary(release(2, at, at), 1000, &mut handoff, &mut tx, &mut seq)
+            .is_err());
+        let after = slot.snapshot();
+        assert_eq!(
+            (
+                after.generation,
+                after.active,
+                after.previous,
+                after.active_charge_ns_per_s
+            ),
+            (
+                before.generation,
+                before.active,
+                before.previous,
+                before.active_charge_ns_per_s
+            )
+        );
+        assert!(after.inhibited);
+        assert!(!handoff.motion_permitted());
+        assert_eq!(tx.take_motor(), None);
+        slot.abort_cancelled();
+        drain(&mut slot, &mut manager);
+        assert_eq!(
+            slot.snapshot().active_charge_ns_per_s,
+            before.active_charge_ns_per_s
+        );
+    }
 }
 
 #[test]
@@ -65,7 +256,7 @@ fn trusted_stop_notification_cancels_prepublication_and_inhibits_committed_code(
     slot.enter_handoff(id).unwrap();
     requested.store(true, Ordering::Release);
     apply_requested_stop(&mut slot, &requested);
-    assert_eq!(slot.commit_validated_handoff(id), Err(BpfError::ObjectBusy));
+    assert_eq!(slot.commit_test_handoff(id), Err(BpfError::ObjectBusy));
     assert_eq!(slot.snapshot().active, active);
     assert_eq!(slot.snapshot().generation, generation);
 }
@@ -212,7 +403,7 @@ fn installation_cancel_and_stop_cover_worker_and_both_boundary_sides() {
                 slot.enter_handoff(id).unwrap();
             }
             if phase == 3 {
-                slot.commit_validated_handoff(id).unwrap();
+                slot.commit_test_handoff(id).unwrap();
             }
             if stop {
                 slot.stop();
@@ -222,7 +413,7 @@ fn installation_cancel_and_stop_cover_worker_and_both_boundary_sides() {
                 slot.cancel(id).unwrap();
             }
             if phase < 3 {
-                assert_eq!(slot.commit_validated_handoff(id), Err(BpfError::ObjectBusy));
+                assert_eq!(slot.commit_test_handoff(id), Err(BpfError::ObjectBusy));
                 slot.abort_staged().unwrap();
             }
             assert_eq!(slot.snapshot().inhibited, stop || phase == 2);

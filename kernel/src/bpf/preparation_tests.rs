@@ -530,7 +530,7 @@ fn managed_uploaded_candidate_transfers_only_after_actual_slot_commit_and_cleanu
     slot.finish_build(&mut manager, preparation.build())
         .unwrap();
     slot.enter_handoff(operation).unwrap();
-    slot.commit_validated_handoff(operation).unwrap();
+    slot.commit_test_handoff(operation).unwrap();
     assert_eq!(slot.snapshot().active, Some(handle));
     assert_eq!(
         manager.managed_upload_begin(7, id, bytes.len() as u32),
@@ -599,7 +599,7 @@ fn host_commit(slot: &spin::Mutex<ControlSlot>) {
     let mut slot = slot.lock();
     let private_id = slot.snapshot().pending.unwrap();
     slot.enter_handoff(private_id).unwrap();
-    slot.commit_validated_handoff(private_id).unwrap();
+    slot.commit_test_handoff(private_id).unwrap();
 }
 
 #[test]
@@ -646,7 +646,7 @@ fn worker_signed_upload_install_commit_cleanup_and_next_operation_share_ids_and_
             .phase,
         MANAGED_OPERATION_HANDOFF
     );
-    slot.lock().commit_validated_handoff(private_id).unwrap();
+    slot.lock().commit_test_handoff(private_id).unwrap();
     let charged = manager.lock().resource_usage();
     assert_eq!(
         manager

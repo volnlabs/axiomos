@@ -8,7 +8,7 @@ struct Frame {
     len: u8,
     sent: u8,
     motor_pair: Option<(i16, i16)>,
-    estop_assert: bool,
+    clears_motor: bool,
     queued_at: u64,
 }
 
@@ -43,7 +43,10 @@ impl TxState {
                 Msg::MotorSetpoint { left, right, .. } => Some((left, right)),
                 _ => None,
             },
-            estop_assert: matches!(msg, Msg::Estop { assert: true }),
+            clears_motor: matches!(
+                msg,
+                Msg::Estop { assert: true } | Msg::SafeBarrier { .. } | Msg::SessionOffer { .. }
+            ),
             queued_at: now,
         });
         true
@@ -63,7 +66,7 @@ impl TxState {
         if frame.sent == frame.len {
             if let Some(pair) = frame.motor_pair {
                 self.last_motor_on_wire = pair;
-            } else if frame.estop_assert {
+            } else if frame.clears_motor {
                 self.last_motor_on_wire = (0, 0);
             }
             self.active = None;

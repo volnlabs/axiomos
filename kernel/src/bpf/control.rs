@@ -92,6 +92,7 @@ pub(crate) enum CycleFailure {
     Invocation(BpfError),
     Submission(MotorPairSubmissionOutcome),
     PolicyStopped,
+    Handoff(shrike_link::handoff::HandoffError),
 }
 
 /// One bounded latest result for the timer; the rolling recorder is separate.
@@ -194,7 +195,13 @@ pub(crate) fn on_release(
 ) -> Result<CycleReport, BpfError> {
     let sensor = *SENSOR.try_lock().ok_or(BpfError::ObjectBusy)?;
     let report = super::installation::try_release_boundary(|slot| {
-        slot.run_release(
+        let handoff = crate::arch::aarch64::platform::rpi5::control_link::handoff_boundary(
+            slot, release, frequency,
+        );
+        if handoff.is_err() {
+            slot.stop();
+        }
+        let mut report = slot.run_release(
             release,
             frequency,
             sensor,
@@ -209,7 +216,11 @@ pub(crate) fn on_release(
                     clock,
                 )
             },
-        )
+        );
+        if let Err(error) = handoff {
+            report.failure = Some(CycleFailure::Handoff(error));
+        }
+        report
     })?;
     if report.failure.is_some() {
         crate::actuation::trigger_estop(kernel_bpf::actuation::AuditSource::ManagedControl);

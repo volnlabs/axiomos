@@ -20,6 +20,8 @@ use alloc::boxed::Box;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use conquer_once::spin::OnceCell;
+#[cfg(feature = "managed-runtime")]
+use shrike_link::handoff::{Handoff, HandoffError};
 use shrike_link::motor::MotorSide;
 use shrike_link::ring::RingBuf;
 use shrike_link::session::{LinkAction, LinkSession};
@@ -143,6 +145,8 @@ pub struct ControlLink {
     motor_seq: u8,
     pending_estop: Option<PendingEstop>,
     link_loss_reported: bool,
+    #[cfg(feature = "managed-runtime")]
+    handoff: Handoff,
 }
 
 impl ControlLink {
@@ -176,6 +180,15 @@ impl ControlLink {
                 out.estop = true;
             }
             if let Some(Ok(msg)) = decoded {
+                #[cfg(feature = "managed-runtime")]
+                if self
+                    .handoff
+                    .on_reply(msg, crate::arch::aarch64::interrupts::physical_counter())
+                    .is_err()
+                {
+                    self.queue_estop(true);
+                    out.estop = true;
+                }
                 self.session.on_inbound(now);
                 self.link_loss_reported = false;
                 if let Msg::Sensor {
@@ -232,6 +245,14 @@ impl ControlLink {
             LinkAction::Idle => None,
         };
         #[cfg(feature = "managed-runtime")]
+        if self
+            .handoff
+            .check(crate::arch::aarch64::interrupts::physical_counter())
+            .is_err()
+        {
+            out.estop = true;
+        }
+        #[cfg(feature = "managed-runtime")]
         if out.estop || out.link_loss || out.overflow_count != 0 {
             crate::bpf::control::invalidate_sensor();
             crate::bpf::installation::request_stop();
@@ -245,6 +266,11 @@ impl ControlLink {
         let estop_queue_empty = self.flush_pending_estop(now);
         if matches!(action, LinkAction::SafeStop) && !self.has_pending_estop_assert() {
             self.session.estop_sent();
+        }
+        #[cfg(feature = "managed-runtime")]
+        if estop_queue_empty && self.handoff.enqueue(&mut self.tx, now).is_err() {
+            self.queue_estop(true);
+            out.estop = true;
         }
         if estop_queue_empty && self.tx.is_idle() {
             self.flush_pending_motor(now);
@@ -264,6 +290,17 @@ impl ControlLink {
             self.uart.write_byte(byte);
             sent += 1;
         }
+        #[cfg(feature = "managed-runtime")]
+        if self.tx.is_idle()
+            && self.handoff.has_started_frame()
+            && self
+                .handoff
+                .sent(crate::arch::aarch64::interrupts::physical_counter())
+                .is_err()
+        {
+            self.queue_estop(true);
+            out.estop = true;
+        }
         out
     }
 
@@ -282,6 +319,8 @@ impl ControlLink {
     fn queue_estop(&mut self, assert: bool) {
         if assert {
             self.tx.clear_motor();
+            #[cfg(feature = "managed-runtime")]
+            self.handoff.disarm();
         }
         self.pending_estop = match (self.pending_estop, assert) {
             (None, true) | (Some(PendingEstop::Release), true) => Some(PendingEstop::Assert),
@@ -327,6 +366,10 @@ impl ControlLink {
     }
 
     fn set_motor_pair(&mut self, left: i16, right: i16, now: u64) -> bool {
+        #[cfg(feature = "managed-runtime")]
+        if !self.handoff.motion_permitted() {
+            return false;
+        }
         if self.has_pending_estop_assert() && (left != 0 || right != 0) {
             return false;
         }
@@ -335,11 +378,20 @@ impl ControlLink {
     }
 
     fn set_safe_motor_pair(&mut self, now: u64) -> bool {
+        #[cfg(feature = "managed-runtime")]
+        if !self.handoff.motion_permitted() {
+            return false;
+        }
         self.tx.prioritize_motor(0, 0, now);
         true
     }
 
     fn flush_pending_motor(&mut self, _now: u64) -> bool {
+        #[cfg(feature = "managed-runtime")]
+        if !self.handoff.motion_permitted() {
+            self.tx.clear_motor();
+            return true;
+        }
         let Some((left, right, queued_at)) = self.tx.take_motor() else {
             return true;
         };
@@ -497,6 +549,8 @@ fn init() {
             motor_seq: 0,
             pending_estop: None,
             link_loss_reported: false,
+            #[cfg(feature = "managed-runtime")]
+            handoff: Handoff::new(),
         })
     });
 }
@@ -572,6 +626,49 @@ pub fn command_estop(assert: bool) -> bool {
 /// Enqueue a message for transmission after any pending e-stop command.
 /// False if link down, full, or an earlier e-stop command still cannot fit.
 pub fn send(msg: &Msg) -> bool {
-    let now = now_ns();
-    with_link(|l| l.flush_pending_estop(now) && l.enqueue(msg, now)).unwrap_or(false)
+    // Managed traffic uses the pair mailbox, trusted stop or correlated
+    // transaction owner. An arbitrary frame cannot bypass those boundaries.
+    #[cfg(feature = "managed-runtime")]
+    {
+        let _ = msg;
+        false
+    }
+    #[cfg(not(feature = "managed-runtime"))]
+    {
+        let now = now_ns();
+        with_link(|l| l.flush_pending_estop(now) && l.enqueue(msg, now)).unwrap_or(false)
+    }
+}
+
+/// Called with the slot already exclusively borrowed at the CPU0 boundary.
+/// Session establishment remains closed until the physical drain/rearm adapter
+/// supplies its prerequisites; peer liveness alone cannot enable this path.
+#[cfg(feature = "managed-runtime")]
+pub(crate) fn handoff_boundary(
+    slot: &mut crate::bpf::installation::ControlSlot,
+    release: kernel_time::periodic::PeriodicRelease,
+    frequency: u64,
+) -> Result<Option<u64>, HandoffError> {
+    let result = with_link(|link| {
+        if link.pending_estop.is_some() {
+            link.handoff.disarm();
+        }
+        slot.handoff_boundary(
+            kernel_time::periodic::PeriodicRelease {
+                actual: crate::arch::aarch64::interrupts::physical_counter(),
+                ..release
+            },
+            frequency,
+            &mut link.handoff,
+            &mut link.tx,
+            &mut link.motor_seq,
+        )
+    });
+    result.unwrap_or_else(|| {
+        if slot.snapshot().pending.is_some() {
+            Err(HandoffError::NotEstablished)
+        } else {
+            Ok(None)
+        }
+    })
 }

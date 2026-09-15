@@ -112,8 +112,14 @@ impl Watchdog {
                 true
             }
             Msg::HeartbeatToShrike { .. } => true,
-            // Shrike->Pi5 telemetry is not a watchdog input.
-            Msg::Sensor { .. } | Msg::HeartbeatToPi { .. } => false,
+            // Telemetry and managed handshake traffic do not directly refresh
+            // command age. The managed owner validates and applies barrier zero.
+            Msg::Sensor { .. }
+            | Msg::HeartbeatToPi { .. }
+            | Msg::SessionOffer { .. }
+            | Msg::SessionReady { .. }
+            | Msg::SafeBarrier { .. }
+            | Msg::SafeAck { .. } => false,
         }
     }
 

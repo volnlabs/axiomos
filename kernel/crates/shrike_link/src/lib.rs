@@ -13,6 +13,7 @@
 //! FPGA envelope are the single clamp source of truth.
 #![cfg_attr(not(test), no_std)]
 
+pub mod handoff;
 pub mod motor;
 pub mod ring;
 pub mod session;
@@ -30,8 +31,12 @@ pub const MAX_FRAME: usize = 4 + MAX_PAYLOAD + 2;
 const T_MOTOR: u8 = 0x01;
 const T_ESTOP: u8 = 0x02;
 const T_HB_TO_SHRIKE: u8 = 0x03;
+const T_SESSION_OFFER: u8 = 0x04;
+const T_SAFE_BARRIER: u8 = 0x05;
 const T_SENSOR: u8 = 0x81;
 const T_HB_TO_PI: u8 = 0x82;
+const T_SESSION_READY: u8 = 0x83;
+const T_SAFE_ACK: u8 = 0x84;
 
 /// A decoded control-link message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +50,15 @@ pub enum Msg {
     Estop { assert: bool },
     /// Pi5 -> Shrike. Liveness.
     HeartbeatToShrike { seq: u16 },
+    /// Pi5 -> Shrike. Nonzero session identity, encoded as u32 LE.
+    /// Callers establish identity freshness; reset requires a qualified drain.
+    SessionOffer { session: u32 },
+    /// Pi5 -> Shrike. Safe barrier: u32 LE session, u64 LE correlation, u8 sequence.
+    SafeBarrier {
+        session: u32,
+        correlation: u64,
+        sequence: u8,
+    },
     /// Shrike -> Pi5. Sensor frame.
     Sensor {
         ultrasonic_echo_us: u16,
@@ -53,6 +67,14 @@ pub enum Msg {
     },
     /// Shrike -> Pi5. Liveness.
     HeartbeatToPi { seq: u16 },
+    /// Shrike -> Pi5. Nonzero session identity, encoded as u32 LE.
+    SessionReady { session: u32 },
+    /// Shrike -> Pi5. Safe acknowledgement with the barrier's field order.
+    SafeAck {
+        session: u32,
+        correlation: u64,
+        sequence: u8,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +87,8 @@ pub enum LinkError {
     BadCrc,
     /// Version byte not `VERSION`.
     BadVersion,
+    /// A session identity or safe-barrier correlation is zero.
+    BadIdentity,
     /// CRC/LEN valid but TYPE unknown — consumed by count, stream stays aligned.
     UnknownType,
 }
@@ -105,6 +129,41 @@ pub fn encode(msg: &Msg, out: &mut [u8]) -> Result<usize, LinkError> {
         Msg::HeartbeatToShrike { seq } => {
             payload[0..2].copy_from_slice(&seq.to_le_bytes());
             (T_HB_TO_SHRIKE, 2)
+        }
+        Msg::SessionOffer { session } | Msg::SessionReady { session } => {
+            if session == 0 {
+                return Err(LinkError::BadIdentity);
+            }
+            payload[..4].copy_from_slice(&session.to_le_bytes());
+            let ty = if matches!(msg, Msg::SessionOffer { .. }) {
+                T_SESSION_OFFER
+            } else {
+                T_SESSION_READY
+            };
+            (ty, 4)
+        }
+        Msg::SafeBarrier {
+            session,
+            correlation,
+            sequence,
+        }
+        | Msg::SafeAck {
+            session,
+            correlation,
+            sequence,
+        } => {
+            if session == 0 || correlation == 0 {
+                return Err(LinkError::BadIdentity);
+            }
+            payload[..4].copy_from_slice(&session.to_le_bytes());
+            payload[4..12].copy_from_slice(&correlation.to_le_bytes());
+            payload[12] = sequence;
+            let ty = if matches!(msg, Msg::SafeBarrier { .. }) {
+                T_SAFE_BARRIER
+            } else {
+                T_SAFE_ACK
+            };
+            (ty, 13)
         }
         Msg::Sensor {
             ultrasonic_echo_us,
@@ -304,6 +363,41 @@ fn decode_msg(ty: u8, len: usize, p: &[u8]) -> Result<Msg, LinkError> {
                 seq: u16::from_le_bytes([p[0], p[1]]),
             })
         }
+        T_SESSION_OFFER | T_SESSION_READY => {
+            need(4)?;
+            let session = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
+            if session == 0 {
+                return Err(LinkError::BadIdentity);
+            }
+            Ok(if ty == T_SESSION_OFFER {
+                Msg::SessionOffer { session }
+            } else {
+                Msg::SessionReady { session }
+            })
+        }
+        T_SAFE_BARRIER | T_SAFE_ACK => {
+            need(13)?;
+            let session = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
+            let correlation =
+                u64::from_le_bytes([p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11]]);
+            let sequence = p[12];
+            if session == 0 || correlation == 0 {
+                return Err(LinkError::BadIdentity);
+            }
+            Ok(if ty == T_SAFE_BARRIER {
+                Msg::SafeBarrier {
+                    session,
+                    correlation,
+                    sequence,
+                }
+            } else {
+                Msg::SafeAck {
+                    session,
+                    correlation,
+                    sequence,
+                }
+            })
+        }
         T_SENSOR => {
             need(4)?;
             Ok(Msg::Sensor {
@@ -342,6 +436,210 @@ mod tests {
         let mut dec = Decoder::new();
         let got = drain(&mut dec, &buf[..n]);
         assert_eq!(got, vec![Ok(msg)], "roundtrip {:?}", msg);
+    }
+
+    const HANDOFF_CASES: [(Msg, u8, &[u8]); 4] = [
+        (
+            Msg::SessionOffer {
+                session: 0x4433227e,
+            },
+            0x04,
+            &[0x7e, 0x22, 0x33, 0x44],
+        ),
+        (
+            Msg::SafeBarrier {
+                session: 0x4433227e,
+                correlation: 0xccbbaa998877667e,
+                sequence: 0x7e,
+            },
+            0x05,
+            &[
+                0x7e, 0x22, 0x33, 0x44, 0x7e, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0x7e,
+            ],
+        ),
+        (
+            Msg::SessionReady {
+                session: 0x4433227e,
+            },
+            0x83,
+            &[0x7e, 0x22, 0x33, 0x44],
+        ),
+        (
+            Msg::SafeAck {
+                session: 0x4433227e,
+                correlation: 0xccbbaa998877667e,
+                sequence: 0x7e,
+            },
+            0x84,
+            &[
+                0x7e, 0x22, 0x33, 0x44, 0x7e, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0x7e,
+            ],
+        ),
+    ];
+
+    fn raw_frame(ty: u8, payload: &[u8]) -> Vec<u8> {
+        let mut frame = vec![SYNC, VERSION, ty, payload.len() as u8];
+        frame.extend_from_slice(payload);
+        let crc = crc16(&frame[1..]);
+        frame.extend_from_slice(&crc.to_le_bytes());
+        frame
+    }
+
+    #[test]
+    fn handoff_wire_layout_roundtrip_and_every_truncated_prefix() {
+        assert_eq!((VERSION, MAX_PAYLOAD, MAX_FRAME), (1, 16, 22));
+        for (msg, ty, payload) in HANDOFF_CASES {
+            let mut buf = [0xa5; MAX_FRAME];
+            let n = encode(&msg, &mut buf).unwrap();
+            assert_eq!(n, if matches!(ty, 0x04 | 0x83) { 10 } else { 19 });
+            assert_eq!(&buf[..4], &[0x7e, 1, ty, payload.len() as u8]);
+            assert_eq!(&buf[4..n - 2], payload);
+            assert!(buf[n..].iter().all(|&b| b == 0xa5));
+            roundtrip(msg);
+            let mut small = [0xa5; MAX_FRAME];
+            assert_eq!(
+                encode(&msg, &mut small[..n - 1]),
+                Err(LinkError::BufTooSmall)
+            );
+            assert_eq!(small, [0xa5; MAX_FRAME]);
+            for split in 0..n {
+                let mut dec = Decoder::new();
+                assert!(drain(&mut dec, &buf[..split]).is_empty());
+                assert_eq!(drain(&mut dec, &buf[split..n]), vec![Ok(msg)]);
+            }
+        }
+        for (session, correlation, sequence) in [(1, 1, 0), (u32::MAX, u64::MAX, u8::MAX)] {
+            roundtrip(Msg::SessionOffer { session });
+            roundtrip(Msg::SessionReady { session });
+            roundtrip(Msg::SafeBarrier {
+                session,
+                correlation,
+                sequence,
+            });
+            roundtrip(Msg::SafeAck {
+                session,
+                correlation,
+                sequence,
+            });
+        }
+    }
+
+    #[test]
+    fn handoff_zero_identity_is_rejected_on_encode_and_decode() {
+        for msg in [
+            Msg::SessionOffer { session: 0 },
+            Msg::SessionReady { session: 0 },
+            Msg::SafeBarrier {
+                session: 0,
+                correlation: 1,
+                sequence: 0,
+            },
+            Msg::SafeAck {
+                session: 0,
+                correlation: 1,
+                sequence: 0,
+            },
+            Msg::SafeBarrier {
+                session: 1,
+                correlation: 0,
+                sequence: 0,
+            },
+            Msg::SafeAck {
+                session: 1,
+                correlation: 0,
+                sequence: 0,
+            },
+        ] {
+            let mut buf = [0xa5; MAX_FRAME];
+            assert_eq!(encode(&msg, &mut buf), Err(LinkError::BadIdentity));
+            assert_eq!(buf, [0xa5; MAX_FRAME]);
+        }
+        for (msg, ty, payload) in HANDOFF_CASES {
+            for field in [0..4, 4..12] {
+                if field.end > payload.len() {
+                    continue;
+                }
+                let mut invalid = payload.to_vec();
+                invalid[field].fill(0);
+                let mut dec = Decoder::new();
+                assert_eq!(
+                    drain(&mut dec, &raw_frame(ty, &invalid)),
+                    vec![Err(LinkError::BadIdentity)]
+                );
+                assert_eq!(drain(&mut dec, &raw_frame(ty, payload)), vec![Ok(msg)]);
+            }
+        }
+    }
+
+    #[test]
+    fn handoff_wrong_lengths_and_crc_tampering_stay_aligned() {
+        for (msg, ty, payload) in HANDOFF_CASES {
+            for len in 0..=MAX_PAYLOAD {
+                if len == payload.len() {
+                    continue;
+                }
+                let mut dec = Decoder::new();
+                assert_eq!(
+                    drain(&mut dec, &raw_frame(ty, &[0xff; MAX_PAYLOAD][..len])),
+                    vec![Err(LinkError::BadLen)]
+                );
+                assert_eq!(drain(&mut dec, &raw_frame(ty, payload)), vec![Ok(msg)]);
+            }
+            let frame = raw_frame(ty, payload);
+            for byte in 4..frame.len() {
+                let mut tampered = frame.clone();
+                tampered[byte] ^= 1;
+                let mut dec = Decoder::new();
+                assert_eq!(drain(&mut dec, &tampered), vec![Err(LinkError::BadCrc)]);
+                assert_eq!(drain(&mut dec, &frame), vec![Ok(msg)]);
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_wire_bytes_are_unchanged() {
+        let cases: &[(Msg, &[u8])] = &[
+            (
+                Msg::MotorSetpoint {
+                    seq: 7,
+                    left: -1000,
+                    right: 1000,
+                },
+                &[
+                    0x7e, 0x01, 0x01, 0x05, 0x07, 0x18, 0xfc, 0xe8, 0x03, 0x76, 0x4b,
+                ],
+            ),
+            (
+                Msg::Estop { assert: false },
+                &[0x7e, 0x01, 0x02, 0x01, 0x00, 0x25, 0xaf],
+            ),
+            (
+                Msg::Estop { assert: true },
+                &[0x7e, 0x01, 0x02, 0x01, 0x01, 0x04, 0xbf],
+            ),
+            (
+                Msg::HeartbeatToShrike { seq: 0xbeef },
+                &[0x7e, 0x01, 0x03, 0x02, 0xef, 0xbe, 0x78, 0x08],
+            ),
+            (
+                Msg::Sensor {
+                    ultrasonic_echo_us: 12345,
+                    estop_line: true,
+                    flags: 0xa5,
+                },
+                &[0x7e, 0x01, 0x81, 0x04, 0x39, 0x30, 0x01, 0xa5, 0x6c, 0x9d],
+            ),
+            (
+                Msg::HeartbeatToPi { seq: 1 },
+                &[0x7e, 0x01, 0x82, 0x02, 0x01, 0x00, 0x5c, 0xd6],
+            ),
+        ];
+        for &(msg, frame) in cases {
+            let mut buf = [0u8; MAX_FRAME];
+            let n = encode(&msg, &mut buf).unwrap();
+            assert_eq!(&buf[..n], frame);
+            assert_eq!(drain(&mut Decoder::new(), frame), vec![Ok(msg)]);
+        }
     }
 
     #[test]

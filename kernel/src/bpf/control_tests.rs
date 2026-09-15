@@ -30,7 +30,7 @@ fn installed(program: &[BpfInsn]) -> (BpfManager, ControlSlot) {
     slot.finish_build(&mut manager, token.build()).unwrap();
     slot.enter_handoff(id).unwrap();
     // Explicit host boundary; production still requires correlated sink safety.
-    slot.commit_validated_handoff(id).unwrap();
+    slot.commit_test_handoff(id).unwrap();
     (manager, slot)
 }
 

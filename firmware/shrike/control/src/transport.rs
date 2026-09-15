@@ -14,21 +14,27 @@ pub enum TransportError {
     ClockRegression,
 }
 
-/// One active frame and one pending frame. Overflow rejects a whole message;
-/// the caller counts the loss. This carries telemetry only, not M5 safe acks.
+/// One active frame and one pending frame. Priority replies may replace
+/// telemetry, but a started frame and an acknowledgement are never evicted.
 #[derive(Default)]
 pub struct TelemetryTx {
     frame: TxState,
+    active: Option<Msg>,
+    active_started: bool,
     pending: Option<Msg>,
     accepted_bytes: u64,
+    dropped_telemetry: u64,
 }
 
 impl TelemetryTx {
     pub const fn new() -> Self {
         Self {
             frame: TxState::new(),
+            active: None,
+            active_started: false,
             pending: None,
             accepted_bytes: 0,
+            dropped_telemetry: 0,
         }
     }
 
@@ -38,13 +44,47 @@ impl TelemetryTx {
         }
         self.promote();
         if self.frame.is_idle() {
-            self.frame.start(&msg, 0)
+            self.start(msg)
         } else if self.pending.is_none() {
             self.pending = Some(msg);
             true
         } else {
             false
         }
+    }
+
+    /// Queue a session/safety acknowledgement ahead of telemetry. An exact
+    /// duplicate is idempotent; a distinct acknowledgement receives bounded
+    /// backpressure when both ownership slots already contain acknowledgements.
+    pub fn queue_priority(&mut self, msg: Msg) -> bool {
+        if !is_priority(msg) {
+            return false;
+        }
+        // Validate the complete canonical frame before inspecting or mutating
+        // either ownership slot. In particular, an invalid identity must not
+        // evict telemetry and later disappear when `TxState::start` rejects it.
+        let mut encoded = [0; MAX_FRAME];
+        if shrike_link::encode(&msg, &mut encoded).is_err() {
+            return false;
+        }
+        if self.active == Some(msg) || self.pending == Some(msg) {
+            return true;
+        }
+        if self.frame.is_idle() {
+            return self.start(msg);
+        }
+
+        if self.active.is_some_and(is_priority) {
+            return self.replace_pending_telemetry(msg);
+        }
+        if !self.active_started {
+            self.frame.cancel_unsent();
+            if self.active.take().is_some_and(is_telemetry) {
+                self.dropped_telemetry = self.dropped_telemetry.saturating_add(1);
+            }
+            return self.start(msg);
+        }
+        self.replace_pending_telemetry(msg)
     }
 
     /// Make at most 2*MAX_FRAME one-byte nonblocking attempts. Only an accepted
@@ -59,9 +99,14 @@ impl TelemetryTx {
             match io.try_write(&[byte]).map_err(|_| TransportError::Io)? {
                 0 => break,
                 1 => {
+                    self.active_started = true;
                     self.frame.next_byte();
                     self.accepted_bytes = self.accepted_bytes.saturating_add(1);
                     accepted += 1;
+                    if self.frame.is_idle() {
+                        self.active = None;
+                        self.active_started = false;
+                    }
                 }
                 _ => return Err(TransportError::InvalidWriteCount),
             }
@@ -73,6 +118,10 @@ impl TelemetryTx {
         self.accepted_bytes
     }
 
+    pub const fn dropped_telemetry(&self) -> u64 {
+        self.dropped_telemetry
+    }
+
     pub fn pending_frames(&self) -> u64 {
         u64::from(!self.frame.is_idle()) + u64::from(self.pending.is_some())
     }
@@ -80,12 +129,43 @@ impl TelemetryTx {
     fn promote(&mut self) {
         if self.frame.is_idle() {
             if let Some(msg) = self.pending.take() {
-                // Both permitted telemetry shapes always fit MAX_FRAME.
-                let started = self.frame.start(&msg, 0);
+                let started = self.start(msg);
                 debug_assert!(started);
             }
         }
     }
+
+    fn start(&mut self, msg: Msg) -> bool {
+        let started = self.frame.start(&msg, 0);
+        if started {
+            self.active = Some(msg);
+            self.active_started = false;
+        }
+        started
+    }
+
+    fn replace_pending_telemetry(&mut self, msg: Msg) -> bool {
+        match self.pending {
+            Some(pending) if is_priority(pending) => false,
+            Some(_) => {
+                self.pending = Some(msg);
+                self.dropped_telemetry = self.dropped_telemetry.saturating_add(1);
+                true
+            }
+            None => {
+                self.pending = Some(msg);
+                true
+            }
+        }
+    }
+}
+
+const fn is_priority(msg: Msg) -> bool {
+    matches!(msg, Msg::SessionReady { .. } | Msg::SafeAck { .. })
+}
+
+const fn is_telemetry(msg: Msg) -> bool {
+    matches!(msg, Msg::Sensor { .. } | Msg::HeartbeatToPi { .. })
 }
 
 /// Local prerequisite for session establishment, not a session or rearm token.
@@ -266,6 +346,139 @@ mod tests {
             assert_eq!(messages(&io.wire), [first, second]);
             assert_eq!(tx.service(&mut io), Ok(0));
         }
+    }
+
+    #[test]
+    fn priority_reply_never_truncates_a_started_frame_at_any_byte_offset() {
+        let telemetry = Msg::Sensor {
+            ultrasonic_echo_us: 126,
+            estop_line: true,
+            flags: 0,
+        };
+        let displaced = Msg::HeartbeatToPi { seq: 9 };
+        let reply = Msg::SafeAck {
+            session: 7,
+            correlation: 0x0102_0304_0506_0708,
+            sequence: 4,
+        };
+        let mut encoded = [0; MAX_FRAME];
+        let telemetry_len = shrike_link::encode(&telemetry, &mut encoded).unwrap();
+
+        for split in 0..=telemetry_len {
+            let mut tx = TelemetryTx::new();
+            let mut io = Io {
+                quota: split,
+                ..Io::default()
+            };
+            assert!(tx.queue(telemetry));
+            assert!(tx.queue(displaced));
+            assert_eq!(tx.service(&mut io), Ok(split));
+            assert!(tx.queue_priority(reply));
+            assert_eq!(tx.dropped_telemetry(), 1);
+
+            io.quota = usize::MAX;
+            tx.service(&mut io).unwrap();
+            let expected = if split == 0 {
+                std::vec![reply, displaced]
+            } else {
+                std::vec![telemetry, reply]
+            };
+            assert_eq!(messages(&io.wire), expected, "split {split}");
+        }
+    }
+
+    #[test]
+    fn priority_capacity_is_exact_and_acknowledgements_are_idempotent_not_evicted() {
+        let ready = Msg::SessionReady { session: 11 };
+        let ack = Msg::SafeAck {
+            session: 11,
+            correlation: 29,
+            sequence: 3,
+        };
+        let other = Msg::SafeAck {
+            session: 11,
+            correlation: 30,
+            sequence: 3,
+        };
+        let mut tx = TelemetryTx::new();
+        assert!(tx.queue_priority(ready));
+        assert!(tx.queue_priority(ready));
+        assert!(tx.queue_priority(ack));
+        assert!(tx.queue_priority(ack));
+        assert!(!tx.queue_priority(other));
+        assert!(!tx.queue(Msg::HeartbeatToPi { seq: 1 }));
+        assert_eq!(tx.pending_frames(), 2);
+        assert_eq!(tx.dropped_telemetry(), 0);
+
+        let mut io = Io {
+            quota: usize::MAX,
+            ..Io::default()
+        };
+        tx.service(&mut io).unwrap();
+        assert_eq!(messages(&io.wire), [ready, ack]);
+    }
+
+    #[test]
+    fn priority_rejects_unrelated_messages_and_counts_each_telemetry_eviction() {
+        let mut tx = TelemetryTx::new();
+        assert!(!tx.queue_priority(Msg::HeartbeatToPi { seq: 1 }));
+        assert!(tx.queue(Msg::HeartbeatToPi { seq: 2 }));
+        assert!(tx.queue(Msg::HeartbeatToPi { seq: 3 }));
+        assert!(tx.queue_priority(Msg::SessionReady { session: 9 }));
+        assert_eq!(tx.dropped_telemetry(), 1);
+        assert_eq!(tx.pending_frames(), 2);
+    }
+
+    #[test]
+    fn invalid_priority_identity_cannot_mutate_or_evict_queued_frames() {
+        let first = Msg::HeartbeatToPi { seq: 17 };
+        let second = Msg::Sensor {
+            ultrasonic_echo_us: 81,
+            estop_line: false,
+            flags: 2,
+        };
+        let mut tx = TelemetryTx::new();
+        assert!(tx.queue(first));
+        assert!(tx.queue(second));
+        let mut io = Io {
+            quota: 1,
+            ..Io::default()
+        };
+        assert_eq!(tx.service(&mut io), Ok(1));
+        let before = (
+            tx.pending_frames(),
+            tx.accepted_bytes(),
+            tx.dropped_telemetry(),
+        );
+
+        for invalid in [
+            Msg::SessionReady { session: 0 },
+            Msg::SafeAck {
+                session: 0,
+                correlation: 1,
+                sequence: 0,
+            },
+            Msg::SafeAck {
+                session: 1,
+                correlation: 0,
+                sequence: 0,
+            },
+        ] {
+            assert!(!tx.queue_priority(invalid));
+            assert_eq!(
+                (
+                    tx.pending_frames(),
+                    tx.accepted_bytes(),
+                    tx.dropped_telemetry(),
+                ),
+                before
+            );
+        }
+
+        io.quota = usize::MAX;
+        tx.service(&mut io).unwrap();
+        assert_eq!(messages(&io.wire), [first, second]);
+        assert_eq!(tx.dropped_telemetry(), 0);
     }
 
     #[test]

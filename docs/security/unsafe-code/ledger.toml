@@ -1,8 +1,8 @@
 version = 1
 baseline_sites = 708
-baseline_fingerprint = "sha256:90040c01794032f798cf265017d3586ae496f6066039d96dafcbb0990fcaed45"
+baseline_fingerprint = "sha256:2fc0af2a5f1661d065fc805e77613827bfd3600edd54cc7570d45e332406e928"
 
-# 2026-09-15: managed release/sensor/actuator integration adds no unsafe syntax;
+# 2026-09-15: correlated handoff/MCU integration adds no unsafe syntax;
 # all 708 constructs retain their kinds and obligations, with reviewed source
 # relocation. Actual borrowed stateful release passes focused Miri; Pi5 target
 # compiles. No hardware scheduling or sink acknowledgement is inferred.
