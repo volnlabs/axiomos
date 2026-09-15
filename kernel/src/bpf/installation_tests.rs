@@ -38,6 +38,38 @@ fn commit(slot: &mut ControlSlot, id: u64) -> u64 {
     slot.commit_validated_handoff(id).unwrap()
 }
 
+#[test]
+fn trusted_stop_notification_cancels_prepublication_and_inhibits_committed_code() {
+    let mut manager = BpfManager::new();
+    let mut slot = ControlSlot::new();
+    let requested = AtomicBool::new(false);
+    candidate(&mut manager, 1);
+    let id = stage(&mut slot, &mut manager, None);
+    commit(&mut slot, id);
+    drain(&mut slot, &mut manager);
+    let active = slot.snapshot().active;
+    let generation = slot.snapshot().generation;
+    requested.store(true, Ordering::Release);
+    apply_requested_stop(&mut slot, &requested);
+    assert!(slot.snapshot().inhibited);
+    assert_eq!(slot.snapshot().active, active);
+    assert_eq!(slot.snapshot().generation, generation);
+    apply_requested_stop(&mut slot, &requested);
+    assert!(
+        slot.snapshot().inhibited,
+        "consuming stop never resumes an installation"
+    );
+
+    candidate(&mut manager, 2);
+    let id = stage(&mut slot, &mut manager, None);
+    slot.enter_handoff(id).unwrap();
+    requested.store(true, Ordering::Release);
+    apply_requested_stop(&mut slot, &requested);
+    assert_eq!(slot.commit_validated_handoff(id), Err(BpfError::ObjectBusy));
+    assert_eq!(slot.snapshot().active, active);
+    assert_eq!(slot.snapshot().generation, generation);
+}
+
 fn costlier_artifact(revision: u64) -> BehaviorArtifact {
     let mut program = std::vec::Vec::new();
     for value in 0..32 {

@@ -28,9 +28,14 @@ use super::gic;
 const TIMER_IRQ: u32 = gic::irq::TIMER_PHYS;
 
 struct TimerState {
+    frequency: u64,
     schedule: PeriodicSchedule,
     last_release: Option<PeriodicRelease>,
     completion_misses: u64,
+    #[cfg(all(feature = "rpi5", feature = "managed-runtime"))]
+    last_control: Option<crate::bpf::control::CycleReport>,
+    #[cfg(all(feature = "rpi5", feature = "managed-runtime"))]
+    safe_releases: u64,
 }
 
 static TIMER: Mutex<Option<TimerState>> = Mutex::new(None);
@@ -47,6 +52,7 @@ pub enum TimerFault {
     ClockReversed,
     Exhausted,
     Stopped,
+    ManagedControl,
 }
 
 impl From<ReleaseError> for TimerFault {
@@ -61,12 +67,17 @@ impl From<ReleaseError> for TimerFault {
 
 #[derive(Clone, Copy, Debug)]
 pub struct TimerSnapshot {
+    pub frequency: u64,
     pub releases: ReleaseStats,
     pub last_release: Option<PeriodicRelease>,
     /// Completion covers timer work before EOI and scheduler dispatch.
     pub completion_misses: u64,
     /// Zero is healthy; otherwise the first TimerFault discriminant.
     pub fault_code: u8,
+    #[cfg(all(feature = "rpi5", feature = "managed-runtime"))]
+    pub(crate) last_control: Option<crate::bpf::control::CycleReport>,
+    #[cfg(all(feature = "rpi5", feature = "managed-runtime"))]
+    pub safe_releases: u64,
 }
 
 pub fn timer_snapshot() -> Option<TimerSnapshot> {
@@ -74,10 +85,15 @@ pub fn timer_snapshot() -> Option<TimerSnapshot> {
         let timer = TIMER.try_lock()?;
         let state = timer.as_ref()?;
         Some(TimerSnapshot {
+            frequency: state.frequency,
             releases: state.schedule.stats(),
             last_release: state.last_release,
             completion_misses: state.completion_misses,
             fault_code: TIMER_FAULT.load(Ordering::Relaxed),
+            #[cfg(all(feature = "rpi5", feature = "managed-runtime"))]
+            last_control: state.last_control,
+            #[cfg(all(feature = "rpi5", feature = "managed-runtime"))]
+            safe_releases: state.safe_releases,
         })
     })
 }
@@ -207,8 +223,8 @@ pub extern "C" fn handle_irq(_ctx: &mut ExceptionContext) {
         // Signal end of interrupt for timer
         gic::end_of_interrupt(iar);
 
-        // (The Shrike control link is serviced by a dedicated kernel poller
-        // task, not here — actuation/BPF work must run in thread context.)
+        // UART framing and RX remain in the poller. Managed execution captures
+        // and queues one pair here; it never drains UART or runs IIO fanout.
 
         // Trigger scheduler tick (may cause context switch)
         // We do this AFTER EOI so that new tasks don't inherit the active interrupt state
@@ -236,7 +252,7 @@ pub extern "C" fn handle_irq(_ctx: &mut ExceptionContext) {
 /// Handle timer interrupt (without rescheduling)
 fn handle_timer_interrupt(_ctx: &ExceptionContext) -> bool {
     clear_timer_interrupt();
-    let release = match set_next_timer() {
+    let (release, _frequency) = match set_next_timer() {
         Ok(Some(release)) => release,
         Ok(None) => return false,
         Err(error) => {
@@ -248,6 +264,35 @@ fn handle_timer_interrupt(_ctx: &ExceptionContext) -> bool {
     crate::mcore::mtask::scheduler::sleep::TaskSleep::wake_expired(
         crate::time::get_monotonic_time_ns(),
     );
+
+    #[cfg(all(feature = "rpi5", feature = "managed-runtime"))]
+    {
+        let report = match crate::bpf::control::on_release(release, _frequency) {
+            Ok(report) => report,
+            Err(_) => {
+                timer_failed(TimerFault::ManagedControl);
+                return false;
+            }
+        };
+        let Some(mut timer) = TIMER.try_lock() else {
+            timer_failed(TimerFault::Busy);
+            return false;
+        };
+        let Some(state) = timer.as_mut() else {
+            drop(timer);
+            timer_failed(TimerFault::NotStarted);
+            return false;
+        };
+        state.last_control = Some(report);
+        if report.safe_mode {
+            let Some(count) = state.safe_releases.checked_add(1) else {
+                drop(timer);
+                timer_failed(TimerFault::Exhausted);
+                return false;
+            };
+            state.safe_releases = count;
+        }
+    }
 
     // Build the timer context, then resolve the bounded hook snapshot without
     // allocating while the interrupt is active.
@@ -287,7 +332,12 @@ fn handle_timer_interrupt(_ctx: &ExceptionContext) -> bool {
     #[cfg(all(feature = "rpi5", feature = "bench", not(feature = "managed-runtime")))]
     crate::serial::drain_bench_buffer();
 
-    if !release.completed_in_time(physical_counter()) {
+    let completed = physical_counter();
+    if completed < release.actual {
+        timer_failed(TimerFault::ClockReversed);
+        return false;
+    }
+    if !release.completed_in_time(completed) {
         let Some(mut timer) = TIMER.try_lock() else {
             timer_failed(TimerFault::Busy);
             return false;
@@ -303,6 +353,9 @@ fn handle_timer_interrupt(_ctx: &ExceptionContext) -> bool {
             return false;
         };
         state.completion_misses = misses;
+        drop(timer);
+        #[cfg(feature = "managed-runtime")]
+        crate::actuation::trigger_estop(kernel_bpf::actuation::AuditSource::ManagedControl);
     }
     true
 }
@@ -316,7 +369,7 @@ fn clear_timer_interrupt() {
     }
 }
 
-fn physical_counter() -> u64 {
+pub(crate) fn physical_counter() -> u64 {
     let count: u64;
     // SAFETY: EL1 can read CNTPCT; it uses the same counter as CNTP_CVAL.
     unsafe {
@@ -335,7 +388,7 @@ fn arm_timer(next: u64) {
 }
 
 /// No allocation, manager lock, waiting or deadline rebasing in the IRQ.
-fn set_next_timer() -> Result<Option<PeriodicRelease>, TimerFault> {
+fn set_next_timer() -> Result<Option<(PeriodicRelease, u64)>, TimerFault> {
     if TIMER_FAULT.load(Ordering::Relaxed) != 0 {
         return Err(TimerFault::Stopped);
     }
@@ -346,7 +399,7 @@ fn set_next_timer() -> Result<Option<PeriodicRelease>, TimerFault> {
         state.last_release = release;
     }
     arm_timer(state.schedule.next_deadline());
-    Ok(release)
+    Ok(release.map(|release| (release, state.frequency)))
 }
 
 fn timer_failed(error: TimerFault) {
@@ -379,9 +432,14 @@ pub fn init_timer() -> Result<(), TimerFault> {
         let schedule = PeriodicSchedule::new(physical_counter(), frequency / 100)?;
         arm_timer(schedule.next_deadline());
         *timer = Some(TimerState {
+            frequency,
             schedule,
             last_release: None,
             completion_misses: 0,
+            #[cfg(all(feature = "rpi5", feature = "managed-runtime"))]
+            last_control: None,
+            #[cfg(all(feature = "rpi5", feature = "managed-runtime"))]
+            safe_releases: 0,
         });
         Ok(())
     })

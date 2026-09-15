@@ -1,4 +1,5 @@
 mod authorization;
+pub(crate) mod control;
 mod handles;
 pub mod helpers;
 pub(crate) mod installation;

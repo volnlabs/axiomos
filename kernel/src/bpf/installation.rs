@@ -1,6 +1,7 @@
 //! Exclusive fixed-slot ownership. Kernel-private until authority and correlated
 //! physical handoff are wired. CPU0 access and worker custody remain separate.
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use kernel_abi::ManagedControlContextV1;
 use kernel_bpf::execution::{BpfError, ManagedInvocationResult};
@@ -16,6 +17,19 @@ use super::BpfManager;
 /// One slot, separate from manager storage. Combined paths always lock this
 /// first, with local IRQs masked; the release boundary only uses try_lock.
 pub(super) static CONTROL_SLOT: spin::Mutex<ControlSlot> = spin::Mutex::new(ControlSlot::new());
+static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Trusted stop writers never take the slot lock (they may already hold the
+/// actuator lock). The next CPU0 slot boundary consumes this before publication.
+pub(crate) fn request_stop() {
+    STOP_REQUESTED.store(true, Ordering::Release);
+}
+
+fn apply_requested_stop(slot: &mut ControlSlot, requested: &AtomicBool) {
+    if requested.swap(false, Ordering::AcqRel) {
+        slot.stop();
+    }
+}
 
 pub(crate) fn qualified_topology() -> bool {
     #[cfg(all(target_arch = "aarch64", feature = "rpi5", feature = "managed-runtime"))]
@@ -42,6 +56,7 @@ pub(crate) fn request_installation(
             return Err(kernel_abi::ENOTSUP);
         }
         let mut slot = CONTROL_SLOT.lock();
+        apply_requested_stop(&mut slot, &STOP_REQUESTED);
         let mut manager = crate::BPF_MANAGER.get().ok_or(kernel_abi::ENODEV)?.lock();
         manager.request_installation(&mut slot, expected_last_id, expected_generation, target)
     });
@@ -58,7 +73,8 @@ pub(crate) fn query_installation(
         if !qualified_topology() {
             return Err(kernel_abi::ENOTSUP);
         }
-        let slot = CONTROL_SLOT.lock();
+        let mut slot = CONTROL_SLOT.lock();
+        apply_requested_stop(&mut slot, &STOP_REQUESTED);
         let manager = crate::BPF_MANAGER.get().ok_or(kernel_abi::ENODEV)?.lock();
         manager.query_installation(&slot, id)
     })
@@ -74,6 +90,7 @@ pub(crate) fn cancel_installation(
             return Err(kernel_abi::ENOTSUP);
         }
         let mut slot = CONTROL_SLOT.lock();
+        apply_requested_stop(&mut slot, &STOP_REQUESTED);
         let mut manager = crate::BPF_MANAGER.get().ok_or(kernel_abi::ENODEV)?.lock();
         manager.cancel_installation(&mut slot, id, expected_generation, target)
     });
@@ -83,7 +100,7 @@ pub(crate) fn cancel_installation(
     result
 }
 
-/// Future CPU0 boundary access: no manager, allocation, waiting or physical
+/// CPU0 boundary access: no manager, allocation, waiting or physical
 /// safety assertion. Failure requires the caller to keep its sink inhibited.
 /// The callback must remain bounded and must not retain instance references.
 pub(crate) fn try_release_boundary<R>(
@@ -94,7 +111,16 @@ pub(crate) fn try_release_boundary<R>(
             return Err(BpfError::PermissionDenied);
         }
         let mut slot = CONTROL_SLOT.try_lock().ok_or(BpfError::ObjectBusy)?;
+        apply_requested_stop(&mut slot, &STOP_REQUESTED);
+        // Ownership persists through inhibition. Only acknowledged safe
+        // deactivation may release it; that production path is not enabled yet.
+        if slot.active.is_some() || slot.pending.is_some_and(|pending| pending.handoff) {
+            crate::actuation::set_managed_motor_pair_owner(true);
+        }
         let result = boundary(&mut slot);
+        if slot.active.is_some() || slot.pending.is_some_and(|pending| pending.handoff) {
+            crate::actuation::set_managed_motor_pair_owner(true);
+        }
         if slot.retire.is_some()
             || slot
                 .pending
@@ -157,6 +183,7 @@ pub(crate) struct ControlSlot {
     retiring: Option<u64>,
     generation: u64,
     inhibited: bool,
+    pub(super) last_control_release: u64,
 }
 
 pub(crate) struct InstallationPreparation {
@@ -219,6 +246,7 @@ impl ControlSlot {
             retiring: None,
             generation: 0,
             inhibited: true,
+            last_control_release: 0,
         }
     }
 

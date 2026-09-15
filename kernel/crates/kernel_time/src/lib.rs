@@ -218,6 +218,21 @@ pub const fn frequency_ticks_to_nanoseconds(ticks: u64, frequency_hz: u64) -> Op
     ))
 }
 
+/// Convert managed timestamps without disguising counter exhaustion as valid
+/// saturated time. The intermediate product fits in u128 for every u64 input.
+#[must_use]
+pub const fn checked_frequency_ticks_to_nanoseconds(ticks: u64, frequency_hz: u64) -> Option<u64> {
+    if frequency_hz == 0 {
+        return None;
+    }
+    let ns = ticks as u128 * NANOSECONDS_PER_SECOND as u128 / frequency_hz as u128;
+    if ns > u64::MAX as u128 {
+        None
+    } else {
+        Some(ns as u64)
+    }
+}
+
 /// Validate a POSIX-style `(seconds, nanoseconds)` pair and convert it to a
 /// duration. Negative values, non-normalized nanoseconds, and overflow are
 /// rejected.
@@ -264,6 +279,26 @@ mod tests {
     #[test]
     fn frequency_conversion_rejects_zero_frequency() {
         assert_eq!(frequency_ticks_to_nanoseconds(1, 0), None);
+    }
+
+    #[test]
+    fn checked_frequency_conversion_never_turns_exhaustion_into_valid_time() {
+        assert_eq!(checked_frequency_ticks_to_nanoseconds(1, 0), None);
+        assert_eq!(checked_frequency_ticks_to_nanoseconds(u64::MAX, 1), None);
+        assert_eq!(
+            checked_frequency_ticks_to_nanoseconds(u64::MAX, NANOSECONDS_PER_SECOND),
+            Some(u64::MAX)
+        );
+        assert_eq!(
+            checked_frequency_ticks_to_nanoseconds(1, 3),
+            Some(333_333_333)
+        );
+        assert_eq!(
+            checked_frequency_ticks_to_nanoseconds(37_500_000, 50_000_000),
+            Some(750_000_000)
+        );
+        // Preserve the existing saturating compatibility conversion.
+        assert_eq!(frequency_ticks_to_nanoseconds(u64::MAX, 1), Some(u64::MAX));
     }
 
     #[test]

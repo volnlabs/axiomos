@@ -102,10 +102,15 @@ The managed payload uses the existing context wrapper and a new sealed,
 padding-free `ManagedControlContextV1`: version/size (u32), cycle ID,
 scheduled/actual/sensor nanoseconds (u64), sensor value (i64), validity/reserved
 (u32). It is 56 bytes; version is 1, size is 56, validity is 0 or 1, reserved is
-zero. Existing IIO/context layouts are unchanged. The managed sensor producer
-and timestamp provenance remain integration work. The current Pi adapter emits
-raw sonar echo microseconds; selecting and documenting the managed source is
-required before its reference image is qualified.
+zero. Existing IIO/context layouts are unchanged. The managed Pi adapter copies
+raw sonar echo microseconds at completion of a CRC-validated Sensor frame. Its
+timestamp is Pi receive time from CNTPCT, converted with the same checked
+frequency as scheduled/actual releases; it is not MCU acquisition time. Zero
+echo, unsupported flags, asserted e-stop, missing/future samples and samples at
+least 80 ms old are invalid. The 80 ms receive-age ceiling reuses the link timeout
+and remains provisional pending adapter calibration. Signed controllers receive
+validity explicitly; a valid receive timestamp does not establish physical
+measurement accuracy. Link faults invalidate the mailbox and inhibit control.
 
 `BehaviorArtifact::prepare` decodes and verifies the same authenticated payload
 under a `VerificationBudget`. It retains identity, binding contract, code and
@@ -154,8 +159,8 @@ The kernel-private installation slot uses one retirement batch for both displace
 state and evicted previous code. Worker cleanup extracts those exact objects,
 drops them outside locks, refunds their charges and consumes a final receipt
 before reusing capacity. Rollback retains the artifact that has become active;
-its new instance starts zeroed. The actual permanent-worker dispatch and CPU0
-synchronization remain integration work.
+its new instance starts zeroed. The permanent worker dispatch and CPU0 slot
+synchronization are connected; physical publication eligibility remains open.
 
 The asynchronous worker and global upload/verifier-workspace reservation are
 implemented below. The private slot reserves the retained artifact's verified
@@ -163,12 +168,13 @@ model cost at 100 Hz through the existing utilization ledger. It holds the large
 of active and prepared costs alongside legacy contributions; the installation's
 active charge changes at publication and its opaque ticket settles only after
 worker cleanup. Rejection and cancellation preserve the old charge. Kernel dispatch
-must also discard captured
-requests on later deadline/policy/queue failure. The internal installation
+discards captured requests on invocation or pre-enqueue deadline failure and
+inhibits control on policy/queue failure. A later failure preserves any actual
+queue outcome and invokes trusted stop. The internal installation
 boundary tests cover fresh generations, ownership moves, cancellation, stop and
 100,000 transitions with bounded retained resources. No production caller can
-activate this slot yet; authority checks, physical eligibility, timer
-scheduling and UART handoff remain unresolved. Helper costs remain uncalibrated
+activate this slot yet; authority checks, physical eligibility and UART handoff
+remain unresolved. Absolute timer scheduling is connected. Helper costs remain uncalibrated
 model values.
 
 See [managed verification](../../kernel/crates/kernel_bpf/src/verifier/managed.rs)

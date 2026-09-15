@@ -1,9 +1,8 @@
 //! Pi5 <-> Shrike-lite control link transport (v0.4 M2–M4).
 //!
-//! Runs in a dedicated KERNEL THREAD (the poller task), NOT the timer IRQ — so
-//! the RX side-effects (IIO dispatch, e-stop) and the motor TX all happen in
-//! thread context, where taking BPF_MANAGER / APPLY_LOCK is safe. The timer IRQ
-//! does nothing here.
+//! The poller owns UART RX/TX framing. The managed timer only submits a bounded
+//! complete pair under the same IRQ-masked link lock. Managed RX publishes one
+//! trusted sample; legacy IIO observers and synchronous markers are separate.
 //!
 //! Layers:
 //! - M2 dumb byte transport: `Pl011` + TX/RX rings + `shrike_link::Decoder`.
@@ -41,7 +40,7 @@ const TX_PER_POLL: usize = 64;
 /// Inbound-silence timeout. Keep this below the RP2040 firmware LINK_TIMEOUT
 /// (100 ms) so one-way Shrike->Pi silence stops Pi heartbeats before the MCU
 /// watchdog deadline. (ns)
-const LINK_TIMEOUT_NS: u64 = 80_000_000; // 80 ms
+pub(crate) const LINK_TIMEOUT_NS: u64 = 80_000_000; // 80 ms
 /// Heartbeat period while the link is alive. (ns)
 const HEARTBEAT_PERIOD_NS: u64 = 20_000_000; // 20 ms (50 Hz)
 
@@ -151,6 +150,7 @@ impl ControlLink {
     /// inbound side-effects to run after the lock is dropped. No BPF/estop here.
     fn poll_decode(&mut self, now: u64) -> PollOutcome {
         let mut out = PollOutcome::default();
+        let overflow_before = self.rx_overflows;
 
         // RX: bounded pull from the UART FIFO into the ring, then decode.
         let mut got = 0;
@@ -165,16 +165,35 @@ impl ControlLink {
                 None => break,
             }
         }
+        out.overflow_count = self.rx_overflows.wrapping_sub(overflow_before) as usize;
         while let Some(b) = self.rx.pop() {
-            if let Some(Ok(msg)) = self.dec.push(b) {
+            let decoded = self.dec.push(b);
+            #[cfg(feature = "managed-runtime")]
+            if matches!(decoded, Some(Err(_))) {
+                crate::bpf::control::invalidate_sensor();
+                crate::bpf::installation::request_stop();
+                self.queue_estop(true);
+                out.estop = true;
+            }
+            if let Some(Ok(msg)) = decoded {
                 self.session.on_inbound(now);
                 self.link_loss_reported = false;
                 if let Msg::Sensor {
                     ultrasonic_echo_us,
                     estop_line,
-                    ..
+                    flags: _flags,
                 } = msg
                 {
+                    #[cfg(feature = "managed-runtime")]
+                    {
+                        let sample = crate::bpf::control::SensorSnapshot::received(
+                            crate::arch::aarch64::interrupts::physical_counter(),
+                            ultrasonic_echo_us,
+                            _flags,
+                            estop_line,
+                        );
+                        crate::bpf::control::publish_sensor(sample);
+                    }
                     if out.sensor_count == RX_PER_POLL {
                         out.overflow_count += 1;
                     } else {
@@ -212,6 +231,12 @@ impl ControlLink {
             }
             LinkAction::Idle => None,
         };
+        #[cfg(feature = "managed-runtime")]
+        if out.estop || out.link_loss || out.overflow_count != 0 {
+            crate::bpf::control::invalidate_sensor();
+            crate::bpf::installation::request_stop();
+            self.queue_estop(true);
+        }
         // This sender-side age bound is independent of the MCU receive
         // watchdog. A partial frame (and bytes already in the UART FIFO) cannot
         // be retracted, but obsolete work that has sent no byte is discarded.
@@ -352,6 +377,9 @@ fn with_link<R>(f: impl FnOnce(&mut ControlLink) -> R) -> Option<R> {
 pub fn service() {
     let now = now_ns();
     let Some(out) = with_link(|l| l.poll_decode(now)) else {
+        #[cfg(feature = "managed-runtime")]
+        crate::bpf::control::invalidate_sensor();
+        #[cfg(not(feature = "managed-runtime"))]
         if !LINK_UNINITIALIZED_REPORTED.swap(true, Ordering::AcqRel) {
             #[cfg(feature = "trace-control-link")]
             let chunk_id = NEXT_CHUNK_ID.fetch_add(1, Ordering::Relaxed);
@@ -371,59 +399,68 @@ pub fn service() {
         return;
     };
 
-    // Empty polls are work, not events. Trace them only when measuring link
-    // cadence; their sustained text output can exceed the deferred UART drain.
-    #[cfg(feature = "trace-control-link")]
-    let chunk_id = NEXT_CHUNK_ID.fetch_add(1, Ordering::Relaxed);
-    #[cfg(feature = "trace-control-link")]
-    crate::serial_println!("V04_CHUNK chunk_id={} stage=start ts_ns={}", chunk_id, now);
-    // Side-effects OUTSIDE the CONTROL_LINK lock (thread context).
-    if out.overflow_count != 0 {
+    #[cfg(feature = "managed-runtime")]
+    if out.estop || out.link_loss || out.overflow_count != 0 {
+        crate::actuation::trigger_estop(kernel_bpf::actuation::AuditSource::ManagedControl);
+    }
+
+    #[cfg(not(feature = "managed-runtime"))]
+    {
+        // Empty polls are work, not events. Trace them only when measuring link
+        // cadence; their sustained text output can exceed the deferred UART drain.
+        #[cfg(feature = "trace-control-link")]
+        let chunk_id = NEXT_CHUNK_ID.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "trace-control-link")]
+        crate::serial_println!("V04_CHUNK chunk_id={} stage=start ts_ns={}", chunk_id, now);
+        // Side-effects OUTSIDE the CONTROL_LINK lock (thread context).
+        if out.overflow_count != 0 {
+            crate::serial_println!(
+                "V04_FAILURE reason=input_overflow count={} ts_ns={}",
+                out.overflow_count,
+                now
+            );
+        }
+        if out.estop {
+            crate::actuation::watchdog_estop_trigger();
+        }
+        for seq in out.heartbeats[..out.heartbeat_count].iter().flatten() {
+            crate::serial_println!("V04_HEARTBEAT seq={} ts_ns={}", seq, now_ns());
+        }
+        if out.link_loss {
+            let timestamp = now_ns();
+            crate::serial_println!(
+                "V04_LINK_LOSS event_id={} reason=timeout ts_ns={}",
+                NEXT_LINK_LOSS_EVENT_ID.fetch_add(1, Ordering::Relaxed),
+                timestamp
+            );
+            crate::serial_println!(
+                "V04_ESTOP event_id={} source=link stage=assert ts_ns={}",
+                crate::actuation::next_v04_estop_event_id(),
+                timestamp
+            );
+        }
+        for (sample_id, echo) in out.sensors[..out.sensor_count].iter().flatten() {
+            let timestamp = now_ns();
+            crate::serial_println!(
+                "V04_ECHO_DONE sample_id={} echo_us={} ts_ns={}",
+                sample_id,
+                echo,
+                timestamp
+            );
+            dispatch_ultrasonic(timestamp, *echo, *sample_id);
+        }
+        #[cfg(feature = "trace-control-link")]
         crate::serial_println!(
-            "V04_FAILURE reason=input_overflow count={} ts_ns={}",
-            out.overflow_count,
-            now
+            "V04_CHUNK chunk_id={} stage=end ts_ns={}",
+            chunk_id,
+            now_ns()
         );
     }
-    if out.estop {
-        crate::actuation::watchdog_estop_trigger();
-    }
-    for seq in out.heartbeats[..out.heartbeat_count].iter().flatten() {
-        crate::serial_println!("V04_HEARTBEAT seq={} ts_ns={}", seq, now_ns());
-    }
-    if out.link_loss {
-        let timestamp = now_ns();
-        crate::serial_println!(
-            "V04_LINK_LOSS event_id={} reason=timeout ts_ns={}",
-            NEXT_LINK_LOSS_EVENT_ID.fetch_add(1, Ordering::Relaxed),
-            timestamp
-        );
-        crate::serial_println!(
-            "V04_ESTOP event_id={} source=link stage=assert ts_ns={}",
-            crate::actuation::next_v04_estop_event_id(),
-            timestamp
-        );
-    }
-    for (sample_id, echo) in out.sensors[..out.sensor_count].iter().flatten() {
-        let timestamp = now_ns();
-        crate::serial_println!(
-            "V04_ECHO_DONE sample_id={} echo_us={} ts_ns={}",
-            sample_id,
-            echo,
-            timestamp
-        );
-        dispatch_ultrasonic(timestamp, *echo, *sample_id);
-    }
-    #[cfg(feature = "trace-control-link")]
-    crate::serial_println!(
-        "V04_CHUNK chunk_id={} stage=end ts_ns={}",
-        chunk_id,
-        now_ns()
-    );
 }
 
 /// Inject an ultrasonic reading as a synthetic IIO event so `ATTACH_TYPE_IIO`
 /// BPF behaviors see it (bypasses the stub `IioAttach::attach`).
+#[cfg(not(feature = "managed-runtime"))]
 fn dispatch_ultrasonic(now: u64, echo_us: u16, sample_id: u64) {
     use kernel_bpf::attach::IioEvent;
     if let Some(mgr) = crate::driver::iio::IIO_MANAGER.get() {

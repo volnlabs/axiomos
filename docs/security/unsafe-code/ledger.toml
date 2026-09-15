@@ -1,6 +1,11 @@
 version = 1
 baseline_sites = 708
-baseline_fingerprint = "sha256:f7d6201ef4442a67d0b9dfaa67eeb6cddc657e6981702eb5adc907d2b450824b"
+baseline_fingerprint = "sha256:90040c01794032f798cf265017d3586ae496f6066039d96dafcbb0990fcaed45"
+
+# 2026-09-15: managed release/sensor/actuator integration adds no unsafe syntax;
+# all 708 constructs retain their kinds and obligations, with reviewed source
+# relocation. Actual borrowed stateful release passes focused Miri; Pi5 target
+# compiles. No hardware scheduling or sink acknowledgement is inferred.
 
 # 2026-09-09: reviewed prerequisite delta: seven motor-pair no_mangle
 # attributes (production helper and isolated test/fuzz stubs), minus one

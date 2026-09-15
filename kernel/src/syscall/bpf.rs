@@ -117,6 +117,43 @@ fn bpf_error_errno(error: BpfError) -> isize {
     }
 }
 
+fn legacy_command_blocked(cmd: u32, managed_owned: bool) -> bool {
+    managed_owned
+        && matches!(
+            cmd,
+            BPF_MAP_CREATE
+                | BPF_MAP_UPDATE_ELEM
+                | BPF_MAP_DELETE_ELEM
+                | BPF_MAP_DESTROY
+                | BPF_OBJ_PIN
+                | BPF_OBJ_GET
+                | BPF_OBJ_UNPIN
+                | BPF_PROG_LOAD
+                | BPF_PROG_LOAD_ELF
+                | BPF_PROG_UNLOAD
+                | BPF_PROG_ATTACH
+                | BPF_PROG_DETACH
+                | BPF_RINGBUF_POLL
+                | kernel_abi::BPF_BENCH_EXEC
+        )
+}
+
+fn legacy_lookup_key_size(
+    manager: &crate::bpf::BpfManager,
+    owner: u64,
+    map: u32,
+    managed_owned: bool,
+) -> Result<usize, isize> {
+    let def = manager
+        .get_map_def_for(owner, map)
+        .map_err(bpf_error_errno)?;
+    // RingBufMap::lookup consumes a record just like RINGBUF_POLL.
+    if managed_owned && def.map_type == kernel_bpf::maps::MapType::RingBuf {
+        return Err(-isize::from(EBUSY));
+    }
+    Ok(def.key_size as usize)
+}
+
 pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
     let Ok(cmd_u32) = u32::try_from(cmd) else {
         return -isize::from(EINVAL);
@@ -131,6 +168,12 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
     // the legacy BpfAttr size gate and its allocating copy helpers.
     if super::managed::is_command(cmd_u32) {
         return super::managed::dispatch(process.pid().as_u64(), cmd_u32, attr_ptr, size);
+    }
+    // Reject mutations before legacy copying/allocation, including while the
+    // installation is inhibited. Legacy reads remain outside the timing claim.
+    let managed_owned = crate::actuation::managed_motor_pair_owned();
+    if legacy_command_blocked(cmd_u32, managed_owned) {
+        return -isize::from(EBUSY);
     }
 
     // Security Hardening: Validate the attribute size matches expected struct size
@@ -201,9 +244,9 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
                 let mgr = manager.lock();
 
                 // Get map definition to determine key size
-                let key_size = match mgr.get_map_def_for(owner, map_id) {
-                    Ok(def) => def.key_size as usize,
-                    Err(error) => return bpf_error_errno(error),
+                let key_size = match legacy_lookup_key_size(&mgr, owner, map_id, managed_owned) {
+                    Ok(size) => size,
+                    Err(error) => return error,
                 };
 
                 let key = match read_userspace_slice(key_ptr as usize, key_size) {
@@ -807,6 +850,54 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ringbuf_lookup_alias_cannot_consume_records_during_managed_ownership() {
+        let mut manager = crate::bpf::BpfManager::new();
+        let ring = manager
+            .create_map_for(7, kernel_abi::BPF_MAP_TYPE_RINGBUF, 0, 0, 256)
+            .unwrap();
+        manager.ringbuf_output(ring, b"retained", 0).unwrap();
+        assert_eq!(
+            legacy_lookup_key_size(&manager, 7, ring, true),
+            Err(-isize::from(EBUSY))
+        );
+        assert_eq!(legacy_lookup_key_size(&manager, 7, ring, false), Ok(0));
+        assert_eq!(
+            manager.map_lookup_for(7, ring, &[]).unwrap().unwrap(),
+            b"retained"
+        );
+        let array = manager
+            .create_map_for(7, kernel_abi::BPF_MAP_TYPE_ARRAY, 4, 8, 1)
+            .unwrap();
+        assert_eq!(legacy_lookup_key_size(&manager, 7, array, true), Ok(4));
+    }
+
+    #[test]
+    fn managed_wheel_ownership_blocks_legacy_mutations_but_preserves_read_commands() {
+        for cmd in [
+            BPF_MAP_CREATE,
+            BPF_MAP_UPDATE_ELEM,
+            BPF_MAP_DELETE_ELEM,
+            BPF_MAP_DESTROY,
+            BPF_OBJ_PIN,
+            BPF_OBJ_GET,
+            BPF_OBJ_UNPIN,
+            BPF_PROG_LOAD,
+            BPF_PROG_LOAD_ELF,
+            BPF_PROG_UNLOAD,
+            BPF_PROG_ATTACH,
+            BPF_PROG_DETACH,
+            BPF_RINGBUF_POLL,
+            kernel_abi::BPF_BENCH_EXEC,
+        ] {
+            assert!(legacy_command_blocked(cmd, true));
+            assert!(!legacy_command_blocked(cmd, false));
+        }
+        for cmd in [BPF_MAP_LOOKUP_ELEM, BPF_OBJ_GET_INFO_BY_FD] {
+            assert!(!legacy_command_blocked(cmd, true));
+        }
+    }
 
     #[test]
     fn map_commands_require_the_narrow_operation_capability() {
