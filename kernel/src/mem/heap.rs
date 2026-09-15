@@ -1,3 +1,4 @@
+use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::AtomicBool;
 use core::sync::atomic::Ordering::Relaxed;
 
@@ -39,8 +40,38 @@ static HEAP_START: VirtAddr = VirtAddr::new(crate::arch::aarch64::mem::kernel::H
 /// Runtime-initialized heap sizes based on available physical memory.
 static HEAP_SIZES: OnceCell<HeapSizes> = OnceCell::uninit();
 
-#[cfg_attr(not(test), global_allocator)]
 static ALLOCATOR: linked_list_allocator::LockedHeap = linked_list_allocator::LockedHeap::empty();
+
+struct IrqMaskedHeap;
+
+#[cfg_attr(not(test), global_allocator)]
+static GLOBAL_ALLOCATOR: IrqMaskedHeap = IrqMaskedHeap;
+
+#[inline]
+fn with_allocator_critical<R>(f: impl FnOnce() -> R) -> R {
+    crate::mcore::context::with_interrupts_masked(f)
+}
+
+// SAFETY: every request is delegated to the initialized LockedHeap with the
+// original pointer/layout contract. IRQ masking prevents same-CPU preemption
+// while its lock is held; the heap lock continues to serialize other CPUs.
+unsafe impl GlobalAlloc for IrqMaskedHeap {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        with_allocator_critical(|| {
+            // SAFETY: delegation preserves the caller-provided GlobalAlloc
+            // layout contract. LockedHeap returns null on allocation failure.
+            unsafe { GlobalAlloc::alloc(&ALLOCATOR, layout) }
+        })
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        with_allocator_critical(|| {
+            // SAFETY: delegation preserves the pointer/layout pair supplied by
+            // the caller; the same allocator produced this allocation.
+            unsafe { GlobalAlloc::dealloc(&ALLOCATOR, ptr, layout) }
+        });
+    }
+}
 
 pub(in crate::mem) fn init(address_space: &AddressSpace, usable_physical_memory_bytes: usize) {
     #[cfg(target_arch = "x86_64")]
@@ -118,7 +149,9 @@ pub(in crate::mem) fn init(address_space: &AddressSpace, usable_physical_memory_
         #[cfg(target_arch = "aarch64")]
         let ptr = HEAP_START.as_u64().into_usize() as *mut u8;
 
-        ALLOCATOR.lock().init(ptr, initial_heap_size);
+        with_allocator_critical(|| {
+            ALLOCATOR.lock().init(ptr, initial_heap_size);
+        });
     }
 
     HEAP_INITIALIZED.store(true, Relaxed);
@@ -186,7 +219,9 @@ pub(in crate::mem) fn init_stage2() {
     // SAFETY: We are extending the global allocator with a new memory range
     // that has just been mapped. The range is contiguous with the previous heap.
     unsafe {
-        ALLOCATOR.lock().extend(total_heap_size - initial_heap_size);
+        with_allocator_critical(|| {
+            ALLOCATOR.lock().extend(total_heap_size - initial_heap_size);
+        });
     }
 }
 
@@ -199,22 +234,22 @@ impl Heap {
     }
 
     pub fn free() -> usize {
-        ALLOCATOR.lock().free()
+        with_allocator_critical(|| ALLOCATOR.lock().free())
     }
 
     pub fn used() -> usize {
-        ALLOCATOR.lock().used()
+        with_allocator_critical(|| ALLOCATOR.lock().used())
     }
 
     pub fn size() -> usize {
-        ALLOCATOR.lock().size()
+        with_allocator_critical(|| ALLOCATOR.lock().size())
     }
 
     pub fn bottom() -> VirtAddr {
         #[cfg(target_arch = "x86_64")]
-        return VirtAddr::new(ALLOCATOR.lock().bottom() as u64);
+        return with_allocator_critical(|| VirtAddr::new(ALLOCATOR.lock().bottom() as u64));
         #[cfg(target_arch = "aarch64")]
-        return VirtAddr::new(ALLOCATOR.lock().bottom() as u64);
+        return with_allocator_critical(|| VirtAddr::new(ALLOCATOR.lock().bottom() as u64));
     }
 }
 
@@ -226,5 +261,23 @@ impl core::fmt::Debug for Heap {
             .field("used", &Self::used())
             .field("size", &Self::size())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::with_allocator_critical;
+
+    #[test]
+    fn allocator_critical_scope_masks_and_restores_nested_irq_state() {
+        assert!(!crate::mcore::context::interrupts_masked_for_test());
+        with_allocator_critical(|| {
+            assert!(crate::mcore::context::interrupts_masked_for_test());
+            with_allocator_critical(|| {
+                assert!(crate::mcore::context::interrupts_masked_for_test());
+            });
+            assert!(crate::mcore::context::interrupts_masked_for_test());
+        });
+        assert!(!crate::mcore::context::interrupts_masked_for_test());
     }
 }

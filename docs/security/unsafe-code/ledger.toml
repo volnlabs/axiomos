@@ -1,6 +1,6 @@
 version = 1
-baseline_sites = 700
-baseline_fingerprint = "sha256:f44712f3aef3da7151d3ce80bf858bef6cfbc65c60bb714d111c72d64a52a9a2"
+baseline_sites = 705
+baseline_fingerprint = "sha256:3da87f4c06548f6a206a0b388306b1fc7613c1589fe525236111867313917ada"
 
 # 2026-09-09: reviewed prerequisite delta: seven motor-pair no_mangle
 # attributes (production helper and isolated test/fuzz stubs), minus one
@@ -27,6 +27,10 @@ baseline_fingerprint = "sha256:f44712f3aef3da7151d3ce80bf858bef6cfbc65c60bb714d1
 # 2026-09-15: the managed allocation accounting test owns its synthetic heap
 # backing and validates the pinned allocator normalization and Box/Arc layouts.
 # The four added unsafe constructs remain confined to this test fixture.
+
+# 2026-09-15: the global heap wrapper adds IRQ-masked GlobalAlloc delegation;
+# shared AArch64 IRQ blocks moved to the context helper without changing their
+# architecture contract. Host nesting and both target builds are reviewed.
 
 [[obligation]]
 id = "TEST-HARNESS"
@@ -71,6 +75,17 @@ callers = "address spaces, heap, MMIO and JIT mappings"
 tests = "kernel_virtual_memory unit tests; transactional map/unmap and double-release integration tests remain missing."
 priority = "P0"
 reviewed = "2026-07-12"
+
+[[obligation]]
+id = "GLOBAL-ALLOCATOR-IRQ"
+paths = ["kernel/src/mem/heap.rs"]
+scope = "production"
+owner = "kernel memory/SMP maintainers"
+invariant = "Every LockedHeap operation masks local IRQ delivery before taking the heap lock and restores the entry IRQ state afterward; the lock serializes other CPUs, delegated allocation preserves the original pointer/Layout contract, and heap init/extension use live mapped ranges without allocating recursively."
+callers = "global allocation/deallocation including default zero/reallocation methods, heap boot/extension, heap telemetry"
+tests = "Modeled host IRQ scope covers nested mask/restore; x86_64 and AArch64 target builds cover architecture paths. Preemption timing remains unqualified."
+priority = "P0"
+reviewed = "2026-09-15"
 
 [[obligation]]
 id = "MEM-KERNEL-RAW"

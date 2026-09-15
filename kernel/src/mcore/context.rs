@@ -30,6 +30,77 @@ static ONLINE_CPU_MASK: AtomicU64 = AtomicU64::new(0);
 #[cfg(target_arch = "x86_64")]
 static ONLINE_LAPIC_IDS: [AtomicU32; 64] = [const { AtomicU32::new(u32::MAX) }; 64];
 
+/// Run one CPU-local critical section with IRQ delivery masked, restoring the
+/// entry state afterward. This does not require an initialized execution
+/// context, so boot-time and global-allocation paths can use it safely.
+#[cfg(not(test))]
+pub(crate) fn with_interrupts_masked<R>(f: impl FnOnce() -> R) -> R {
+    #[cfg(target_arch = "x86_64")]
+    {
+        return x86_64::instructions::interrupts::without_interrupts(f);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        let daif: u64;
+        // SAFETY: DAIF is CPU-local interrupt state. The guard restores IRQ
+        // delivery to its entry state and leaves the other mask bits unchanged.
+        unsafe {
+            core::arch::asm!("mrs {}, daif", out(reg) daif, options(nostack, preserves_flags));
+            core::arch::asm!("msr daifset, #2", options(nostack, preserves_flags));
+        }
+        struct RestoreIrq(bool);
+        impl Drop for RestoreIrq {
+            fn drop(&mut self) {
+                if self.0 {
+                    // SAFETY: restore IRQ delivery only when enabled at entry.
+                    unsafe {
+                        core::arch::asm!("msr daifclr, #2", options(nostack, preserves_flags));
+                    }
+                }
+            }
+        }
+        let _restore = RestoreIrq((daif & (1 << 7)) == 0);
+        return f();
+    }
+}
+
+#[cfg(test)]
+mod host_irq {
+    extern crate std;
+    std::thread_local! {
+        static IRQ_MASKED: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    }
+
+    pub(super) fn masked() -> bool {
+        IRQ_MASKED.with(core::cell::Cell::get)
+    }
+
+    pub(super) fn with_masked<R>(f: impl FnOnce() -> R) -> R {
+        IRQ_MASKED.with(|masked| {
+            let entry = masked.replace(true);
+            struct Restore<'a>(&'a core::cell::Cell<bool>, bool);
+            impl Drop for Restore<'_> {
+                fn drop(&mut self) {
+                    self.0.set(self.1);
+                }
+            }
+            let _restore = Restore(masked, entry);
+            f()
+        })
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn with_interrupts_masked<R>(f: impl FnOnce() -> R) -> R {
+    host_irq::with_masked(f)
+}
+
+#[cfg(test)]
+pub(crate) fn interrupts_masked_for_test() -> bool {
+    host_irq::masked()
+}
+
 fn cpu_bit(cpu_id: usize) -> u64 {
     1u64.checked_shl(u32::try_from(cpu_id).expect("CPU id must fit u32"))
         .filter(|bit| *bit != 0)
@@ -350,38 +421,7 @@ impl ExecutionContext {
     }
 
     pub(crate) fn with_interrupts_masked<R>(&self, f: impl FnOnce() -> R) -> R {
-        #[cfg(target_arch = "x86_64")]
-        {
-            return x86_64::instructions::interrupts::without_interrupts(f);
-        }
-
-        #[cfg(target_arch = "aarch64")]
-        {
-            let daif: u64;
-            // SAFETY: DAIF is CPU-local interrupt state. The guard restores the
-            // IRQ mask to its entry state after the scoped scheduler access.
-            unsafe {
-                core::arch::asm!("mrs {}, daif", out(reg) daif, options(nostack, preserves_flags));
-                core::arch::asm!("msr daifset, #2", options(nostack, preserves_flags));
-            }
-            struct RestoreIrq(bool);
-            impl Drop for RestoreIrq {
-                fn drop(&mut self) {
-                    if self.0 {
-                        // SAFETY: Restore IRQ delivery only when it was enabled
-                        // at entry; other DAIF mask bits remain unchanged.
-                        unsafe {
-                            core::arch::asm!("msr daifclr, #2", options(nostack, preserves_flags));
-                        }
-                    }
-                }
-            }
-            let _restore = RestoreIrq((daif & (1 << 7)) == 0);
-            return f();
-        }
-
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-        f()
+        with_interrupts_masked(f)
     }
 
     pub fn with_current_task<R>(&self, f: impl for<'task> FnOnce(&'task Task) -> R) -> R {
