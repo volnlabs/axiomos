@@ -114,6 +114,7 @@ impl<P: PhysicalProfile> BpfLoader<P> {
     pub fn load(&mut self, elf_data: &[u8]) -> LoadResult<BpfObject<P>> {
         // Parse ELF header and sections
         let mut parser = ElfParser::new(elf_data)?;
+        Relocator::validate_relocation_types(&parser)?;
 
         // Extract license
         let license = parser.find_license()?;
@@ -352,13 +353,166 @@ impl BpfInsn {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
+
+    fn elf_with_relocation(
+        rel_type: u32,
+        symbol: u32,
+        target: u32,
+        relocation_size: usize,
+        relocation_section_type: u32,
+    ) -> Vec<u8> {
+        let names = b"\0.shstrtab\0.strtab\0.symtab\0socket/a\0.relsocket/a\0";
+        let strtab_offset = 64 + names.len();
+        let symtab_offset = strtab_offset + 1;
+        let program_offset = symtab_offset + 24;
+        let relocation_offset = program_offset + 16;
+        let shoff = relocation_offset + relocation_size;
+        let mut elf = vec![0u8; shoff + 6 * 64];
+        elf[0..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2;
+        elf[5] = 1;
+        elf[6] = 1;
+        elf[18..20].copy_from_slice(&247u16.to_le_bytes());
+        elf[40..48].copy_from_slice(&(shoff as u64).to_le_bytes());
+        elf[60..62].copy_from_slice(&6u16.to_le_bytes());
+        elf[62..64].copy_from_slice(&1u16.to_le_bytes());
+        elf[64..64 + names.len()].copy_from_slice(names);
+
+        elf[program_offset..program_offset + 16]
+            .copy_from_slice(&[0xb7, 0, 0, 0, 0, 0, 0, 0, 0x95, 0, 0, 0, 0, 0, 0, 0]);
+        write_section(&mut elf, shoff + 64, 1, 3, 64, names.len(), 0, 0);
+        write_section(&mut elf, shoff + 128, 11, 3, strtab_offset, 1, 0, 0);
+        write_section(&mut elf, shoff + 192, 19, 2, symtab_offset, 24, 2, 0);
+        write_section(&mut elf, shoff + 256, 27, 1, program_offset, 16, 0, 0);
+        elf[shoff + 264..shoff + 272].copy_from_slice(&4u64.to_le_bytes());
+        write_section(
+            &mut elf,
+            shoff + 320,
+            36,
+            relocation_section_type,
+            relocation_offset,
+            relocation_size,
+            3,
+            target,
+        );
+        if relocation_size >= 16 {
+            elf[relocation_offset + 12..relocation_offset + 16]
+                .copy_from_slice(&symbol.to_le_bytes());
+            elf[relocation_offset + 8..relocation_offset + 12]
+                .copy_from_slice(&rel_type.to_le_bytes());
+        }
+        elf
+    }
+
+    fn write_section(
+        elf: &mut [u8],
+        header: usize,
+        name: u32,
+        section_type: u32,
+        offset: usize,
+        size: usize,
+        link: u32,
+        info: u32,
+    ) {
+        elf[header..header + 4].copy_from_slice(&name.to_le_bytes());
+        elf[header + 4..header + 8].copy_from_slice(&section_type.to_le_bytes());
+        elf[header + 24..header + 32].copy_from_slice(&(offset as u64).to_le_bytes());
+        elf[header + 32..header + 40].copy_from_slice(&(size as u64).to_le_bytes());
+        elf[header + 40..header + 44].copy_from_slice(&link.to_le_bytes());
+        elf[header + 44..header + 48].copy_from_slice(&info.to_le_bytes());
+    }
 
     #[test]
     fn loader_creation() {
         let loader = BpfLoader::<ActiveProfile>::new();
         assert!(loader.max_programs > 0);
         assert!(loader.max_maps > 0);
+    }
+
+    #[test]
+    fn rejects_unsupported_relocation_on_data_section() {
+        let elf = elf_with_relocation(2, 0, 4, 16, 9);
+        let result = BpfLoader::<ActiveProfile>::new().load(&elf);
+        assert_eq!(result.err(), Some(LoadError::UnsupportedRelocationType(2)));
+    }
+
+    #[test]
+    fn rejects_orphan_relocation_section() {
+        let elf = elf_with_relocation(1, 0, 99, 16, 9);
+        assert!(matches!(
+            BpfLoader::<ActiveProfile>::new().load(&elf),
+            Err(LoadError::InvalidRelocation)
+        ));
+    }
+
+    #[test]
+    fn rejects_truncated_relocation_section() {
+        let elf = elf_with_relocation(1, 0, 4, 15, 9);
+        assert!(matches!(
+            BpfLoader::<ActiveProfile>::new().load(&elf),
+            Err(LoadError::InvalidRelocation)
+        ));
+    }
+
+    #[test]
+    fn rejects_rela_sections() {
+        let elf = elf_with_relocation(1, 0, 4, 24, 4);
+        assert!(matches!(
+            BpfLoader::<ActiveProfile>::new().load(&elf),
+            Err(LoadError::InvalidRelocation)
+        ));
+    }
+
+    #[test]
+    fn rejects_relocation_symbol_outside_linked_table() {
+        let elf = elf_with_relocation(1, 1, 4, 16, 9);
+        let result = BpfLoader::<ActiveProfile>::new().load(&elf);
+        assert_eq!(result.err(), Some(LoadError::UndefinedSymbol));
+    }
+
+    #[test]
+    fn rejects_supported_relocation_for_nonprogram_section() {
+        let elf = elf_with_relocation(1, 0, 2, 16, 9);
+        assert!(matches!(
+            BpfLoader::<ActiveProfile>::new().load(&elf),
+            Err(LoadError::InvalidRelocation)
+        ));
+    }
+
+    #[test]
+    fn rejects_relocation_without_linked_symbol_table() {
+        let mut elf = elf_with_relocation(1, 0, 4, 16, 9);
+        let relocation_header = elf.len() - 64;
+        elf[relocation_header + 40..relocation_header + 44].copy_from_slice(&0u32.to_le_bytes());
+        assert!(matches!(
+            BpfLoader::<ActiveProfile>::new().load(&elf),
+            Err(LoadError::InvalidRelocation)
+        ));
+    }
+
+    #[test]
+    fn rejects_multiple_symbol_tables() {
+        let mut elf = elf_with_relocation(1, 0, 4, 16, 9);
+        let relocation_header = elf.len() - 64;
+        elf[relocation_header + 4..relocation_header + 8].copy_from_slice(&2u32.to_le_bytes());
+        assert!(matches!(
+            BpfLoader::<ActiveProfile>::new().load(&elf),
+            Err(LoadError::InvalidRelocation)
+        ));
+    }
+
+    #[test]
+    fn rejects_symbol_table_linked_to_non_string_section() {
+        let mut elf = elf_with_relocation(1, 0, 4, 16, 9);
+        let symtab_header = elf.len() - 3 * 64;
+        elf[symtab_header + 40..symtab_header + 44].copy_from_slice(&4u32.to_le_bytes());
+        assert!(matches!(
+            BpfLoader::<ActiveProfile>::new().load(&elf),
+            Err(LoadError::InvalidStringTable)
+        ));
     }
 
     #[test]

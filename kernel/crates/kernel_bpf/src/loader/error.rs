@@ -37,6 +37,8 @@ pub enum LoadError {
     InvalidInstructionData,
     /// Invalid relocation
     InvalidRelocation,
+    /// Relocation type is not implemented by this loader
+    UnsupportedRelocationType(u32),
     /// Undefined symbol in relocation
     UndefinedSymbol,
     /// Symbol table not found
@@ -82,6 +84,7 @@ impl fmt::Display for LoadError {
             Self::UnsupportedMapType(t) => write!(f, "unsupported map type: {}", t),
             Self::InvalidInstructionData => write!(f, "invalid instruction data"),
             Self::InvalidRelocation => write!(f, "invalid relocation"),
+            Self::UnsupportedRelocationType(t) => write!(f, "unsupported relocation type: {}", t),
             Self::UndefinedSymbol => write!(f, "undefined symbol in relocation"),
             Self::NoSymbolTable => write!(f, "symbol table not found"),
             Self::LicenseNotFound => write!(f, "license not found"),

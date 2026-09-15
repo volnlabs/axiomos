@@ -6,7 +6,6 @@
 
 extern crate alloc;
 
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -24,6 +23,7 @@ const SHT_NULL: u32 = 0;
 const SHT_PROGBITS: u32 = 1;
 const SHT_SYMTAB: u32 = 2;
 const SHT_STRTAB: u32 = 3;
+const SHT_RELA: u32 = 4;
 const SHT_REL: u32 = 9;
 const SHT_NOBITS: u32 = 8;
 
@@ -280,11 +280,15 @@ impl<'a> ElfParser<'a> {
                     }
                 }
                 SHT_SYMTAB => {
+                    if self.symtab_idx.is_some() {
+                        return Err(LoadError::InvalidRelocation);
+                    }
                     self.symtab_idx = Some(i);
                     SectionType::SymTab
                 }
                 SHT_STRTAB => SectionType::StrTab,
                 SHT_REL => SectionType::Rel,
+                SHT_RELA => return Err(LoadError::InvalidRelocation),
                 SHT_NOBITS => SectionType::Bss,
                 _ => SectionType::Unknown,
             };
@@ -310,26 +314,38 @@ impl<'a> ElfParser<'a> {
     /// Find string tables.
     fn find_string_tables(&mut self) -> LoadResult<()> {
         // Section header string table
-        if (self.shstrndx as usize) < self.sections.len() {
-            let shstrtab_section = &self.sections[self.shstrndx as usize];
+        if self.shstrndx != 0 {
+            let shstrtab_section = self
+                .sections
+                .get(self.shstrndx as usize)
+                .filter(|section| section.section_type == SectionType::StrTab)
+                .ok_or(LoadError::InvalidStringTable)?;
             let start = shstrtab_section.offset as usize;
-            let end = start + shstrtab_section.size as usize;
-            if end <= self.data.len() {
-                self.shstrtab = Some(&self.data[start..end]);
+            let end = start
+                .checked_add(shstrtab_section.size as usize)
+                .ok_or(LoadError::InvalidStringTable)?;
+            if end > self.data.len() {
+                return Err(LoadError::InvalidStringTable);
             }
+            self.shstrtab = Some(&self.data[start..end]);
         }
 
         // Find regular string table (usually .strtab)
         if let Some(symtab_idx) = self.symtab_idx {
             let link = self.sections[symtab_idx].link as usize;
-            if link < self.sections.len() {
-                let strtab_section = &self.sections[link];
-                let start = strtab_section.offset as usize;
-                let end = start + strtab_section.size as usize;
-                if end <= self.data.len() {
-                    self.strtab = Some(&self.data[start..end]);
-                }
+            let strtab_section = self
+                .sections
+                .get(link)
+                .filter(|section| section.section_type == SectionType::StrTab)
+                .ok_or(LoadError::InvalidStringTable)?;
+            let start = strtab_section.offset as usize;
+            let end = start
+                .checked_add(strtab_section.size as usize)
+                .ok_or(LoadError::InvalidStringTable)?;
+            if end > self.data.len() {
+                return Err(LoadError::InvalidStringTable);
             }
+            self.strtab = Some(&self.data[start..end]);
         }
 
         Ok(())
@@ -418,62 +434,85 @@ impl<'a> ElfParser<'a> {
 
     /// Get relocations for a section.
     pub fn relocations(&self, section_idx: usize) -> LoadResult<Vec<Relocation>> {
-        // Find relocation section for this section
-        let rel_name = format!(".rel{}", self.section_name(&self.sections[section_idx])?);
-
         let mut relocs = Vec::new();
 
         for section in &self.sections {
-            if section.section_type != SectionType::Rel {
-                continue;
-            }
-
-            if let Ok(name) = self.section_name(section)
-                && (name == rel_name || section.info as usize == section_idx)
-            {
-                // Parse relocations
-                let data = self.section_data(section)?;
-                const REL_SIZE: usize = 16; // Elf64_Rel size
-
-                for i in (0..data.len()).step_by(REL_SIZE) {
-                    if i + REL_SIZE > data.len() {
-                        break;
-                    }
-
-                    let r_offset =
-                        Self::read_u64(self.data, section.offset as usize + i, self.little_endian);
-                    let r_info = Self::read_u64(
-                        self.data,
-                        section.offset as usize + i + 8,
-                        self.little_endian,
-                    );
-
-                    relocs.push(Relocation {
-                        offset: r_offset,
-                        sym_idx: (r_info >> 32) as u32,
-                        rel_type: (r_info & 0xffffffff) as u32,
-                    });
-                }
+            if section.section_type == SectionType::Rel && section.info as usize == section_idx {
+                relocs.extend(self.parse_relocation_section(section)?);
             }
         }
 
         Ok(relocs)
     }
 
+    /// Get every relocation, rejecting malformed or orphan relocation sections.
+    pub fn all_relocations(&self) -> LoadResult<Vec<Relocation>> {
+        let mut relocs = Vec::new();
+        let symtab_idx = self.symtab_idx;
+        for section in &self.sections {
+            if section.section_type != SectionType::Rel {
+                continue;
+            }
+            if section.info == 0
+                || section.info as usize >= self.sections.len()
+                || self.sections[section.info as usize].section_type != SectionType::Program
+                || Some(section.link as usize) != symtab_idx
+            {
+                return Err(LoadError::InvalidRelocation);
+            }
+            let symbols = self.symbols_in_section(section.link as usize)?;
+            let section_relocs = self.parse_relocation_section(section)?;
+            if section_relocs
+                .iter()
+                .any(|relocation| relocation.sym_idx as usize >= symbols.len())
+            {
+                return Err(LoadError::UndefinedSymbol);
+            }
+            relocs.extend(section_relocs);
+        }
+        Ok(relocs)
+    }
+
+    fn parse_relocation_section(&self, section: &SectionHeader) -> LoadResult<Vec<Relocation>> {
+        const REL_SIZE: usize = 16;
+        let data = self.section_data(section)?;
+        if !data.len().is_multiple_of(REL_SIZE) {
+            return Err(LoadError::InvalidRelocation);
+        }
+        let mut relocs = Vec::new();
+        for i in (0..data.len()).step_by(REL_SIZE) {
+            let r_offset = Self::read_u64(data, i, self.little_endian);
+            let r_info = Self::read_u64(data, i + 8, self.little_endian);
+            relocs.push(Relocation {
+                offset: r_offset,
+                sym_idx: (r_info >> 32) as u32,
+                rel_type: (r_info & 0xffff_ffff) as u32,
+            });
+        }
+        Ok(relocs)
+    }
+
     /// Get symbols from symbol table.
     pub fn symbols(&self) -> LoadResult<Vec<Symbol>> {
         let symtab_idx = self.symtab_idx.ok_or(LoadError::NoSymbolTable)?;
-        let section = &self.sections[symtab_idx];
+        self.symbols_in_section(symtab_idx)
+    }
+
+    fn symbols_in_section(&self, symtab_idx: usize) -> LoadResult<Vec<Symbol>> {
+        let section = self
+            .sections
+            .get(symtab_idx)
+            .filter(|section| section.section_type == SectionType::SymTab)
+            .ok_or(LoadError::NoSymbolTable)?;
         let data = self.section_data(section)?;
 
         const SYM_SIZE: usize = 24; // Elf64_Sym size
+        if !data.len().is_multiple_of(SYM_SIZE) {
+            return Err(LoadError::InvalidRelocation);
+        }
         let mut symbols = Vec::new();
 
         for i in (0..data.len()).step_by(SYM_SIZE) {
-            if i + SYM_SIZE > data.len() {
-                break;
-            }
-
             symbols.push(Symbol {
                 name_offset: Self::read_u32(data, i, self.little_endian),
                 info: data[i + 4],

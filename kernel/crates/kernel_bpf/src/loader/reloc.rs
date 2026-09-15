@@ -15,7 +15,9 @@ use crate::verifier::HelperId;
 
 // BPF relocation types
 const R_BPF_64_64: u32 = 1;
+#[cfg(test)]
 const R_BPF_64_ABS64: u32 = 2;
+#[cfg(test)]
 const R_BPF_64_ABS32: u32 = 3;
 const R_BPF_64_32: u32 = 10;
 const STT_FUNC: u8 = 2;
@@ -69,6 +71,20 @@ impl<'a> Relocator<'a> {
         let mut out = Vec::new();
         Self::collect_linked_call_sections(root_section_idx, root_section_idx, parser, &mut out)?;
         Ok(out)
+    }
+
+    pub(crate) fn validate_relocation_types(parser: &ElfParser) -> LoadResult<()> {
+        for relocation in parser.all_relocations()? {
+            Self::ensure_supported_type(relocation.rel_type)?;
+        }
+        Ok(())
+    }
+
+    fn ensure_supported_type(rel_type: u32) -> LoadResult<()> {
+        match rel_type {
+            R_BPF_64_64 | R_BPF_64_32 => Ok(()),
+            _ => Err(LoadError::UnsupportedRelocationType(rel_type)),
+        }
     }
 
     /// Apply relocations to instructions.
@@ -190,6 +206,7 @@ impl<'a> Relocator<'a> {
         ctx: SectionContext,
     ) -> LoadResult<()> {
         for reloc in relocs {
+            Self::ensure_supported_type(reloc.rel_type)?;
             if !reloc.offset.is_multiple_of(BpfInsn::SIZE as u64) {
                 return Err(LoadError::InvalidRelocation);
             }
@@ -218,13 +235,7 @@ impl<'a> Relocator<'a> {
                     // Helper or BPF-to-BPF function call.
                     self.relocate_call(insns, insn_idx, sym, &sym_name, ctx)?;
                 }
-                R_BPF_64_ABS64 | R_BPF_64_ABS32 => {
-                    // Absolute references - typically for data
-                    // These are handled differently based on context
-                }
-                _ => {
-                    // Unknown relocation type - ignore for now
-                }
+                _ => unreachable!("relocation type checked above"),
             }
         }
 
@@ -429,6 +440,24 @@ mod tests {
                 "{name} relocated to id {id}, which the runtime ABI does not know"
             );
         }
+    }
+
+    #[test]
+    fn rejects_previously_ignored_relocation_types() {
+        assert_eq!(
+            Relocator::ensure_supported_type(R_BPF_64_ABS64),
+            Err(LoadError::UnsupportedRelocationType(R_BPF_64_ABS64))
+        );
+        assert_eq!(
+            Relocator::ensure_supported_type(R_BPF_64_ABS32),
+            Err(LoadError::UnsupportedRelocationType(R_BPF_64_ABS32))
+        );
+        assert_eq!(
+            Relocator::ensure_supported_type(99),
+            Err(LoadError::UnsupportedRelocationType(99))
+        );
+        assert!(Relocator::ensure_supported_type(R_BPF_64_64).is_ok());
+        assert!(Relocator::ensure_supported_type(R_BPF_64_32).is_ok());
     }
 
     #[test]

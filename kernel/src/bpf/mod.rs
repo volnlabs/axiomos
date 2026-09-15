@@ -32,7 +32,7 @@ use kernel_bpf::attach::{GpioEdge, GpioRouteTable};
 use kernel_bpf::bytecode::insn::BpfInsn;
 use kernel_bpf::bytecode::program::{BpfProgType, BpfProgram};
 use kernel_bpf::execution::{BpfContext, BpfError, Interpreter};
-use kernel_bpf::loader::BpfLoader;
+use kernel_bpf::loader::{BpfLoader, BpfObject, LoadedProgram};
 use kernel_bpf::maps::{ArrayMap, BpfMap, HashMap as BpfHashMap, RingBufMap, TimeSeriesMap};
 use kernel_bpf::profile::{ActiveProfile, PhysicalProfile};
 use kernel_bpf::signing::SignatureVerifier;
@@ -1002,8 +1002,9 @@ impl BpfManager {
 
         let mut loader = BpfLoader::<ActiveProfile>::new();
         let obj = loader.load(elf_bytes).map_err(|_| BpfError::NotLoaded)?;
+        let loaded_prog = Self::legacy_elf_entry(&obj)?;
 
-        if let Some(loaded_prog) = obj.programs().first() {
+        {
             let charge = loaded_prog
                 .insns()
                 .len()
@@ -1056,9 +1057,14 @@ impl BpfManager {
                 }
             );
             Ok(id)
-        } else {
-            Err(BpfError::NotLoaded)
         }
+    }
+
+    fn legacy_elf_entry(obj: &BpfObject<ActiveProfile>) -> Result<&LoadedProgram, BpfError> {
+        if obj.program_count() != 1 || obj.map_count() != 0 {
+            return Err(BpfError::NotLoaded);
+        }
+        obj.programs().first().ok_or(BpfError::NotLoaded)
     }
 
     pub fn load_raw_program(&mut self, insns: Vec<BpfInsn>) -> Result<u32, BpfError> {
@@ -2044,6 +2050,102 @@ mod tests {
         limits.max_owner_map_bytes = 32;
         limits.max_pinned_maps = 1;
         limits
+    }
+
+    fn legacy_elf(programs: usize, with_map: bool) -> Vec<u8> {
+        let names = b"\0.shstrtab\0socket/a\0socket/b\0.maps\0";
+        let program_data = [
+            0xb7, 0, 0, 0, 0, 0, 0, 0, // r0 = 0
+            0x95, 0, 0, 0, 0, 0, 0, 0, // exit
+        ];
+        let section_count = 2 + programs + usize::from(with_map);
+        let shoff = 64 + names.len() + programs * program_data.len() + usize::from(with_map) * 20;
+        let mut elf = vec![0u8; shoff + section_count * 64];
+        elf[0..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2;
+        elf[5] = 1;
+        elf[6] = 1;
+        elf[18..20].copy_from_slice(&247u16.to_le_bytes());
+        elf[40..48].copy_from_slice(&(shoff as u64).to_le_bytes());
+        elf[60..62].copy_from_slice(&(section_count as u16).to_le_bytes());
+        elf[62..64].copy_from_slice(&1u16.to_le_bytes());
+
+        let mut data_offset = 64;
+        elf[data_offset..data_offset + names.len()].copy_from_slice(names);
+        write_elf_section(&mut elf, shoff + 64, 1, 3, 0, data_offset, names.len());
+        data_offset += names.len();
+        for index in 0..programs {
+            elf[data_offset..data_offset + program_data.len()].copy_from_slice(&program_data);
+            write_elf_section(
+                &mut elf,
+                shoff + (2 + index) * 64,
+                if index == 0 { 11 } else { 20 },
+                1,
+                4,
+                data_offset,
+                program_data.len(),
+            );
+            data_offset += program_data.len();
+        }
+        if with_map {
+            elf[data_offset..data_offset + 4]
+                .copy_from_slice(&(MapType::Array as u32).to_ne_bytes());
+            elf[data_offset + 4..data_offset + 8].copy_from_slice(&4u32.to_ne_bytes());
+            elf[data_offset + 8..data_offset + 12].copy_from_slice(&8u32.to_ne_bytes());
+            elf[data_offset + 12..data_offset + 16].copy_from_slice(&1u32.to_ne_bytes());
+            write_elf_section(
+                &mut elf,
+                shoff + (2 + programs) * 64,
+                29,
+                1,
+                0,
+                data_offset,
+                20,
+            );
+        }
+        elf
+    }
+
+    fn write_elf_section(
+        elf: &mut [u8],
+        header: usize,
+        name: u32,
+        section_type: u32,
+        flags: u64,
+        offset: usize,
+        size: usize,
+    ) {
+        elf[header..header + 4].copy_from_slice(&name.to_le_bytes());
+        elf[header + 4..header + 8].copy_from_slice(&section_type.to_le_bytes());
+        elf[header + 8..header + 16].copy_from_slice(&flags.to_le_bytes());
+        elf[header + 24..header + 32].copy_from_slice(&(offset as u64).to_le_bytes());
+        elf[header + 32..header + 40].copy_from_slice(&(size as u64).to_le_bytes());
+    }
+
+    #[test]
+    fn legacy_elf_composition_rejects_without_publishing_resources() {
+        let mut manager = BpfManager::new();
+        manager.set_allow_unsigned(true);
+        let initial = manager.resource_usage();
+        assert_eq!(
+            manager.load_program(&legacy_elf(2, false)),
+            Err(BpfError::NotLoaded)
+        );
+        assert_eq!(manager.resource_usage(), initial);
+        assert_eq!(
+            manager.load_program(&legacy_elf(1, true)),
+            Err(BpfError::NotLoaded)
+        );
+        assert_eq!(manager.resource_usage(), initial);
+    }
+
+    #[test]
+    fn legacy_elf_composition_accepts_one_map_free_entry() {
+        let mut manager = BpfManager::new();
+        manager.set_allow_unsigned(true);
+
+        assert!(manager.load_program(&legacy_elf(1, false)).is_ok());
+        assert_eq!(manager.resource_usage().live_programs, 1);
     }
 
     #[test]
