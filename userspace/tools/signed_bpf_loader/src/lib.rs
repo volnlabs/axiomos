@@ -137,6 +137,12 @@ mod managed {
             BPF_MANAGED_INSTALLATION_CANCEL => {
                 forward::<ManagedInstallationCancelV1>(command, body, response, false, &mut bpf)
             }
+            BPF_MANAGED_RECORDER_STATUS => {
+                forward::<ManagedAuditStatusV1>(command, body, response, true, &mut bpf)
+            }
+            BPF_MANAGED_RECORDER_READ => {
+                forward::<ManagedAuditReadV1>(command, body, response, true, &mut bpf)
+            }
             _ => result_only(response, -isize::from(ENOTSUP)),
         }
     }
@@ -325,6 +331,14 @@ mod managed {
                     BPF_MANAGED_RETIRE,
                     core::mem::size_of::<ManagedInstallationRequestV1>(),
                 ),
+                (
+                    BPF_MANAGED_RECORDER_STATUS,
+                    core::mem::size_of::<ManagedAuditStatusV1>(),
+                ),
+                (
+                    BPF_MANAGED_RECORDER_READ,
+                    core::mem::size_of::<ManagedAuditReadV1>(),
+                ),
             ];
             for (command, body_len) in cases {
                 let request = message(command as u16, &[0; 288]);
@@ -347,7 +361,10 @@ mod managed {
                     len,
                     if matches!(
                         command,
-                        BPF_MANAGED_OPERATION_QUERY | BPF_MANAGED_SLOT_QUERY
+                        BPF_MANAGED_OPERATION_QUERY
+                            | BPF_MANAGED_SLOT_QUERY
+                            | BPF_MANAGED_RECORDER_STATUS
+                            | BPF_MANAGED_RECORDER_READ
                     ) {
                         8 + body_len
                     } else {

@@ -75,9 +75,11 @@ def main() -> None:
         )
     )
     dispatched_commands.discard("BPF_BENCH_EXEC")
+    # Include both manager-owned upload handling and the early dispatch arms
+    # for lifecycle/recorder requests, which intentionally bypass that lock.
     managed_dispatch = source("kernel/src/syscall/managed.rs").split(
-        "let value = match cmd {", 1
-    )[1].split("Ok((value, None))", 1)[0]
+        "fn handle(", 1
+    )[1].split("#[cfg(test)]", 1)[0]
     dispatched_commands.update(match_arm_constants(managed_dispatch, "BPF_MANAGED_"))
     require_equal("BPF command", command_catalog, dispatched_commands)
 

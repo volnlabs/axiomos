@@ -64,6 +64,14 @@ This catalog contains only interfaces dispatched by shipped kernels. Reserved sy
 | 258 | `BPF_MANAGED_UPLOAD_FINALIZE` | managed-runtime feature |
 | 259 | `BPF_MANAGED_OPERATION_QUERY` | managed-runtime feature |
 | 260 | `BPF_MANAGED_CANCEL` | managed-runtime feature |
+| 261 | `BPF_MANAGED_ACTIVATE` | managed-runtime feature |
+| 262 | `BPF_MANAGED_ROLLBACK` | managed-runtime feature |
+| 263 | `BPF_MANAGED_SLOT_QUERY` | managed-runtime feature |
+| 264 | `BPF_MANAGED_INSTALLATION_CANCEL` | managed-runtime feature |
+| 265 | `BPF_MANAGED_DEACTIVATE` | managed-runtime feature |
+| 266 | `BPF_MANAGED_RETIRE` | managed-runtime feature |
+| 267 | `BPF_MANAGED_RECORDER_STATUS` | managed-runtime feature |
+| 268 | `BPF_MANAGED_RECORDER_READ` | managed-runtime feature |
 
 ## BPF map types
 

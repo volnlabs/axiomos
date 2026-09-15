@@ -430,6 +430,8 @@ pub fn init_timer() -> Result<(), TimerFault> {
             return Err(TimerFault::InvalidPeriod);
         }
         let schedule = PeriodicSchedule::new(physical_counter(), frequency / 100)?;
+        #[cfg(all(feature = "rpi5", feature = "managed-runtime"))]
+        crate::bpf::recorder::init_clock(frequency, physical_counter());
         arm_timer(schedule.next_deadline());
         *timer = Some(TimerState {
             frequency,

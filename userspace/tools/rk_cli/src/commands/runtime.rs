@@ -1,5 +1,7 @@
 //! One bounded request at a time over the Pi debug UART.
 
+mod audit;
+
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -16,6 +18,13 @@ use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 #[derive(Subcommand)]
 pub enum RuntimeCommand {
+    /// Query the retained audit interval, clock and explicit loss counters
+    AuditStatus,
+    /// Export one bounded audit interval as JSON lines, including any gaps
+    AuditExport {
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Upload a canonical signed managed bundle, then enqueue preparation
     Upload { bundle: PathBuf },
     /// Query the consistent slot, or a retained operation (0 selects latest)
@@ -328,6 +337,21 @@ pub fn run(port: &Path, command: RuntimeCommand) -> Result<()> {
         Duration::from_secs(2),
     )?;
     match command {
+        RuntimeCommand::AuditStatus => {
+            println!("{}", audit::status_json(&client.audit_status()?));
+        }
+        RuntimeCommand::AuditExport { output } => {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&output)
+                .with_context(|| format!("create new audit export {}", output.display()))?;
+            client.export_audit(&mut file)?;
+            println!(
+                "Audit interval exported to {}; inspect its gap and loss fields.",
+                output.display()
+            );
+        }
         RuntimeCommand::Query {
             operation: Some(id),
         } => {
@@ -603,6 +627,111 @@ mod tests {
         assert_eq!(slot.active_artifact, 0);
         assert_eq!(client.io.calls.len(), 2);
         assert_eq!(client.io.stops, 0);
+    }
+
+    fn audit_reply(command: u32, body: &mut [u8]) -> isize {
+        match command {
+            BPF_MANAGED_RECORDER_STATUS => {
+                let mut status = ManagedAuditStatusV1::read_from_bytes(body).unwrap();
+                status.clock_frequency = 54_000_000;
+                status.flags = MANAGED_AUDIT_CLOCK_READY;
+                status.capacity = MANAGED_AUDIT_RECORDS as u32;
+                status.record_bytes = std::mem::size_of::<ManagedAuditRecordV1>() as u32;
+                status.next = 2052;
+                status.oldest = 4;
+                status.overwritten = 4;
+                body.copy_from_slice(status.as_bytes());
+            }
+            BPF_MANAGED_RECORDER_READ => {
+                let mut reply = ManagedAuditReadV1::read_from_bytes(body).unwrap();
+                assert_eq!(reply.end, 2052);
+                assert_eq!(reply.expected_session, 0);
+                let start = match reply.cursor {
+                    4 => {
+                        reply.gap = 2045;
+                        reply.flags = MANAGED_AUDIT_READ_GAP;
+                        2049
+                    }
+                    2051 => 2051,
+                    _ => panic!("export did not advance within the frozen interval"),
+                };
+                reply.count = (reply.end - start).min(2) as u32;
+                reply.next_cursor = start + u64::from(reply.count);
+                for (i, record) in reply.records[..reply.count as usize].iter_mut().enumerate() {
+                    *record = ManagedAuditRecordV1 {
+                        sequence: start + i as u64,
+                        ticks: (start + i as u64) * 540_000,
+                        correlation: 1 << 40,
+                        kind: MANAGED_AUDIT_CYCLE,
+                        payload: [0xa5; 64],
+                        ..Default::default()
+                    };
+                }
+                body.copy_from_slice(reply.as_bytes());
+            }
+            _ => panic!("unexpected audit command"),
+        }
+        0
+    }
+
+    #[test]
+    fn audit_export_preserves_binary_records_and_exact_gaps_through_real_dispatcher() {
+        let mut peer = Peer::new();
+        peer.syscall = audit_reply;
+        let mut client = Client::connect(peer, 17, [0xa5; 8], Duration::from_secs(1)).unwrap();
+        let mut output = Vec::new();
+        client.export_audit(&mut output).unwrap();
+        let lines: Vec<serde_json::Value> = std::str::from_utf8(&output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 6);
+        assert_eq!(lines[0]["clock_frequency"], 54_000_000);
+        assert_eq!(lines[0]["session_established"], false);
+        assert_eq!(lines[0]["payloads_decoded"], false);
+        assert_eq!(
+            lines[1],
+            serde_json::json!({"type":"gap", "start":4, "end":2049, "count":2045})
+        );
+        assert_eq!(lines[2]["correlation"], 1u64 << 40);
+        assert_eq!(lines[2]["payload_hex"], "a5".repeat(64));
+        assert_eq!(lines[4]["sequence"], 2051);
+        assert_eq!(
+            lines[5],
+            serde_json::json!({"type":"end", "cursor":2052, "records":3, "gaps":2045})
+        );
+        assert_eq!(client.io.calls.len(), 3);
+        assert_eq!(client.io.stops, 0);
+    }
+
+    #[test]
+    fn interrupted_audit_export_has_no_end_marker_and_malformed_status_rejects() {
+        let mut peer = Peer::new();
+        peer.syscall = |command, body| {
+            if command == BPF_MANAGED_RECORDER_READ {
+                -isize::from(EIO)
+            } else {
+                audit_reply(command, body)
+            }
+        };
+        let mut client = Client::connect(peer, 17, [0xa5; 8], Duration::from_secs(1)).unwrap();
+        let mut output = Vec::new();
+        assert!(client.export_audit(&mut output).is_err());
+        let lines: Vec<_> = std::str::from_utf8(&output).unwrap().lines().collect();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("header"));
+        assert_eq!(client.io.calls.len(), 2);
+        assert_eq!(client.io.stops, 0);
+
+        client.io.syscall = |command, body| {
+            let result = audit_reply(command, body);
+            let mut status = ManagedAuditStatusV1::read_from_bytes(body).unwrap();
+            status.flags |= 0x8000_0000;
+            body.copy_from_slice(status.as_bytes());
+            result
+        };
+        assert!(client.audit_status().is_err());
     }
 
     #[test]

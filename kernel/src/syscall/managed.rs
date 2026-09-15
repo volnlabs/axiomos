@@ -8,7 +8,7 @@ use crate::bpf::preparation::LifecycleTarget;
 use crate::bpf::{installation, BpfManager};
 
 pub(super) fn is_command(cmd: u32) -> bool {
-    (BPF_MANAGED_UPLOAD_BEGIN..=BPF_MANAGED_RETIRE).contains(&cmd)
+    (BPF_MANAGED_UPLOAD_BEGIN..=BPF_MANAGED_RECORDER_READ).contains(&cmd)
 }
 
 fn request_size(cmd: u32) -> Result<usize, Errno> {
@@ -25,6 +25,8 @@ fn request_size(cmd: u32) -> Result<usize, Errno> {
         | BPF_MANAGED_RETIRE => Ok(size_of::<ManagedInstallationRequestV1>()),
         BPF_MANAGED_SLOT_QUERY => Ok(size_of::<ManagedSlotV1>()),
         BPF_MANAGED_INSTALLATION_CANCEL => Ok(size_of::<ManagedInstallationCancelV1>()),
+        BPF_MANAGED_RECORDER_STATUS => Ok(size_of::<ManagedAuditStatusV1>()),
+        BPF_MANAGED_RECORDER_READ => Ok(size_of::<ManagedAuditReadV1>()),
         _ => Err(ENOTSUP),
     }
 }
@@ -180,9 +182,23 @@ pub(super) fn dispatch(owner: u64, cmd: u32, ptr: usize, size: usize) -> isize {
         let mut bytes = [0u8; size_of::<ManagedUploadChunkV1>()];
         super::validation::copy_from_userspace_into(ptr, &mut bytes[..size])?;
         let bytes = &bytes[..size];
-        // These wrappers take slot then manager, with IRQs masked. Never enter
-        // them from the manager-only upload critical section below.
+        // Recorder queries own only the recorder. Lifecycle wrappers take slot
+        // then manager with IRQs masked; keep both outside the upload lock below.
         match cmd {
+            BPF_MANAGED_RECORDER_STATUS => {
+                validate_header(cmd, bytes)?;
+                let request = ManagedAuditStatusV1::read_from_bytes(bytes).map_err(|_| EINVAL)?;
+                let reply = crate::bpf::recorder::status(request)?;
+                super::validation::copy_to_userspace_bounded(ptr, reply.as_bytes())?;
+                return Ok(0);
+            }
+            BPF_MANAGED_RECORDER_READ => {
+                validate_header(cmd, bytes)?;
+                let request = ManagedAuditReadV1::read_from_bytes(bytes).map_err(|_| EINVAL)?;
+                let reply = crate::bpf::recorder::read(request)?;
+                super::validation::copy_to_userspace_bounded(ptr, reply.as_bytes())?;
+                return Ok(0);
+            }
             BPF_MANAGED_ACTIVATE
             | BPF_MANAGED_ROLLBACK
             | BPF_MANAGED_DEACTIVATE
@@ -232,6 +248,31 @@ pub(super) fn dispatch(owner: u64, cmd: u32, ptr: usize, size: usize) -> isize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recorder_headers_reject_inexact_lengths_and_unknown_versions() {
+        for cmd in [BPF_MANAGED_RECORDER_STATUS, BPF_MANAGED_RECORDER_READ] {
+            assert!(is_command(cmd));
+            let size = request_size(cmd).unwrap();
+            assert!(size <= size_of::<ManagedUploadChunkV1>());
+            let mut bytes = alloc::vec![0; size];
+            bytes[..4].copy_from_slice(&MANAGED_ADMIN_VERSION.to_ne_bytes());
+            bytes[4..8].copy_from_slice(&(size as u32).to_ne_bytes());
+            assert_eq!(validate_header(cmd, &bytes), Ok(()));
+            for len in 0..size {
+                assert_eq!(validate_header(cmd, &bytes[..len]), Err(EINVAL));
+            }
+            bytes.push(0);
+            assert_eq!(validate_header(cmd, &bytes), Err(EINVAL));
+            bytes.pop();
+            bytes[..4].copy_from_slice(&(MANAGED_ADMIN_VERSION + 1).to_ne_bytes());
+            assert_eq!(validate_header(cmd, &bytes), Err(ENOTSUP));
+            bytes[..4].copy_from_slice(&MANAGED_ADMIN_VERSION.to_ne_bytes());
+            bytes[4..8].fill(0);
+            assert_eq!(validate_header(cmd, &bytes), Err(EINVAL));
+        }
+        assert!(!is_command(BPF_MANAGED_RECORDER_READ + 1));
+    }
 
     #[test]
     fn lifecycle_layouts_validate_before_resolving_exact_targets() {
@@ -390,8 +431,8 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_commands_reject_wrong_syscall_size_before_user_copy() {
-        for cmd in BPF_MANAGED_ACTIVATE..=BPF_MANAGED_RETIRE {
+    fn managed_commands_reject_wrong_syscall_size_before_user_copy() {
+        for cmd in BPF_MANAGED_UPLOAD_BEGIN..=BPF_MANAGED_RECORDER_READ {
             assert!(is_command(cmd));
             for size in [0, request_size(cmd).unwrap() - 1, usize::MAX] {
                 let error = if cfg!(feature = "managed-runtime") {
@@ -403,7 +444,7 @@ mod tests {
             }
         }
         assert!(!is_command(BPF_MANAGED_UPLOAD_BEGIN - 1));
-        assert!(!is_command(BPF_MANAGED_RETIRE + 1));
+        assert!(!is_command(BPF_MANAGED_RECORDER_READ + 1));
     }
 
     #[test]

@@ -233,7 +233,7 @@ zeroing/copying and verifier work are outside that scope. This does not establis
 a timing bound for the linked-list allocator's fragmentation-dependent traversal;
 the qualified workload still needs IRQ-off and deadline measurements.
 
-Eleven commands use independently versioned, padding-free native ABI structures
+Thirteen commands use independently versioned, padding-free native ABI structures
 through `SYS_BPF`, dispatched before the legacy `BpfAttr` size check. All require
 `BEHAVIOR_ADMIN`, exact version 1 and structure length, and zero reserved fields.
 Ordinary init children have no administration capability. The
@@ -253,6 +253,16 @@ transport and receives only administration authority in the managed image.
 | Cancel installation | 264 | `ManagedInstallationCancelV1` / 40 | Lifecycle cancellation requested |
 | Deactivate | 265 | `ManagedInstallationRequestV1` / 32 | Accepted operation ID |
 | Retire inactive artifact | 266 | `ManagedInstallationRequestV1` / 32 | Accepted operation ID |
+| Recorder status | 267 | `ManagedAuditStatusV1` / 176 | Clock, retained interval, loss counters and latest stop |
+| Recorder read | 268 | `ManagedAuditReadV1` / 248 | At most two records and an explicit cursor gap |
+
+Recorder queries use the single preallocated kernel window, without taking the
+program manager lock. All output fields must be zero on input. Reads supply a
+cursor, the frozen exclusive end from status and its expected control-link
+session; a mismatched session or future end returns `ESTALE`. Cursor gaps do not
+fail the query: the exact overwritten count accompanies the retained records.
+See the [installer export format](runtime-installer-v1.md#bounded-audit-export)
+for current producer coverage and limitations.
 
 Activate and rollback compare both the last issued operation ID and current
 installation generation. Their artifact handle must exactly identify the resident

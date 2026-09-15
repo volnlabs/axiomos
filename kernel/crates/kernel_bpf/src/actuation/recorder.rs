@@ -2,37 +2,12 @@
 //! this core neither masks IRQs nor performs I/O. Wire payload schemas and event
 //! producers are separate from retention, and are not inferred from these bytes.
 
-pub const RECORD_CAPACITY: usize = 2048;
-pub const READ_RECORDS: usize = 2;
-
-/// Internal record envelope; no Rust layout is promised as a userspace ABI.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Record {
-    pub sequence: u64,
-    pub ticks: u64,
-    pub correlation: u64,
-    pub kind: u32,
-    pub reserved: u32,
-    pub payload: [u8; 64],
-}
-
-impl Record {
-    pub const EMPTY: Self = Self {
-        sequence: 0,
-        ticks: 0,
-        correlation: 0,
-        kind: 0,
-        reserved: 0,
-        payload: [0; 64],
-    };
-}
-
-pub const ARTIFACT: u32 = 1;
-pub const OPERATION: u32 = 2;
-pub const CYCLE: u32 = 3;
-pub const STOP: u32 = 4;
-pub const LINK: u32 = 5;
+pub use kernel_abi::{
+    MANAGED_AUDIT_ARTIFACT as ARTIFACT, MANAGED_AUDIT_CYCLE as CYCLE, MANAGED_AUDIT_LINK as LINK,
+    MANAGED_AUDIT_OPERATION as OPERATION, MANAGED_AUDIT_READ_RECORDS as READ_RECORDS,
+    MANAGED_AUDIT_RECORDS as RECORD_CAPACITY, MANAGED_AUDIT_STOP as STOP,
+    ManagedAuditRecordV1 as Record,
+};
 
 const _: () = assert!(core::mem::size_of::<Record>() == 96);
 const _: () = assert!(core::mem::size_of::<[Record; RECORD_CAPACITY]>() == 192 * 1024);
@@ -162,11 +137,17 @@ impl<const N: usize> Recorder<N> {
     /// At most two copies; a cursor denotes the next unread sequence, including
     /// cursor zero. Overwrite never silently advances the caller's cursor.
     pub fn read(&self, cursor: u64) -> Result<ReadBatch, Error> {
-        if cursor > self.status.next {
+        self.read_until(cursor, self.status.next)
+    }
+
+    /// Read a frozen export interval even while new records arrive. If that
+    /// entire interval was overwritten, return its exact gap and no newer data.
+    pub fn read_until(&self, cursor: u64, end: u64) -> Result<ReadBatch, Error> {
+        if cursor > end || end > self.status.next {
             return Err(Error::FutureCursor);
         }
-        let start = cursor.max(self.status.oldest);
-        let count = (self.status.next - start).min(READ_RECORDS as u64) as usize;
+        let start = cursor.max(self.status.oldest).min(end);
+        let count = (end - start).min(READ_RECORDS as u64) as usize;
         let mut batch = ReadBatch {
             records: [Record::EMPTY; READ_RECORDS],
             count,
@@ -250,6 +231,27 @@ mod tests {
             ),
             (4, 7, 4)
         );
+    }
+
+    #[test]
+    fn frozen_export_never_reads_beyond_its_original_end() {
+        let mut recorder = Recorder::<3>::new();
+        for i in 0..3 {
+            recorder.append(event(CYCLE, i, i)).unwrap();
+        }
+        let end = recorder.status().next;
+        recorder.append(event(CYCLE, 3, 3)).unwrap();
+        let page = recorder.read_until(2, end).unwrap();
+        assert_eq!((page.count, page.next_cursor, page.gap), (1, 3, 0));
+        assert_eq!(page.records[0].sequence, 2);
+        for i in 4..8 {
+            recorder.append(event(CYCLE, i, i)).unwrap();
+        }
+        let lost = recorder.read_until(1, end).unwrap();
+        assert_eq!((lost.count, lost.next_cursor, lost.gap), (0, 3, 2));
+        assert_eq!(lost.records, [Record::EMPTY; 2]);
+        assert_eq!(recorder.read_until(4, 3), Err(Error::FutureCursor));
+        assert_eq!(recorder.read_until(0, 9), Err(Error::FutureCursor));
     }
 
     #[test]

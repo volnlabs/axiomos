@@ -106,10 +106,10 @@ response remains unread. The installer preserves partial TX and reads no further
 frame until its reply is written. `EAGAIN`/`EINTR` preserve partial RX;
 other RX errors invalidate transport state and require Reset.
 
-Messages begin with the little-endian u16 management command (256..266), then its
+Messages begin with the little-endian u16 management command (256..268), then its
 exact versioned ABI structure. The only additional command, `0xffff` with no body,
 invokes trusted stop. Responses begin with the signed 64-bit syscall result;
-successful slot/operation queries append the entire updated ABI structure.
+successful slot/operation/recorder queries append the entire updated ABI structure.
 No legacy BPF or arbitrary syscall forwarding exists. The kernel validates
 versions, reserved fields, authority, identity, capacities and admission.
 
@@ -117,3 +117,36 @@ Host checks exercise the real codec, installer transport/dispatcher and CLI
 through partial I/O, lost replies and full-width identities. These checks do not
 replace post-boot hardware upload, receive-capacity measurements, timing under
 upload pressure or the physical acceptance campaign.
+
+## Bounded audit export
+
+`rk runtime --port /dev/ttyUSB0 audit-status` queries the preallocated 2,048-record
+kernel window. `rk runtime --port /dev/ttyUSB0 audit-export --output audit.jsonl`
+creates a new file and exports the interval retained at the initial status query.
+Existing output files are rejected. These commands require the dedicated
+installer's existing `BEHAVIOR_ADMIN` authority and do not actuate or rearm.
+
+The native ABI contains 96-byte records and copies at most two per read. Status
+contains clock frequency, control-link session, exclusive retained interval,
+overwrite/drop/suppression counters and independent latest-stop custody. On the
+qualified single CPU, queries and append use a bounded IRQ-masked critical
+section; no program-manager lock, allocation or waiting occurs in that section.
+
+JSONL starts with a versioned `axiomos-managed-audit` header, followed by record
+envelopes and explicit gap entries, then an end marker with record/gap counts.
+The host freezes the original end cursor, so ongoing recording cannot prolong
+export indefinitely. Overwrite during export advances only through a reported
+gap. Invalid sizes, flags, record kinds, sequence order, reversed timestamps or
+unaccounted cursor movement fail export. Interrupted transport leaves an
+incomplete file without the end marker; write/flush errors are reported. The
+export is not crash-persistent or an atomic file transaction.
+
+Current coverage is deliberately explicit: the kernel emits the physical-clock
+initialization event only. Its LINK payload has little-endian subtype 1 at bytes
+0..4 and the frequency at bytes 8..16, with all other payload bytes zero. Ticks
+use CNTPCT, the same domain as managed releases. Session remains zero and
+`session_established` false until bilateral control-link integration lands; the
+clock value is never presented as a persistent boot identity. Lifecycle, cycle,
+actual stop and sink-ack producers remain to be connected. Payload bytes are
+exported losslessly as `payload_hex`, with `payloads_decoded: false`; this envelope
+export is not yet the semantic acceptance decoder or a qualified runtime trace.

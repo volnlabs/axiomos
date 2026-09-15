@@ -177,6 +177,33 @@ pub fn managed_bpf_bytes(cmd: u32, request: &mut [u8]) -> isize {
     ) as isize
 }
 
+pub fn managed_recorder_status() -> Result<kernel_abi::ManagedAuditStatusV1, kernel_abi::Errno> {
+    let mut request = kernel_abi::ManagedAuditStatusV1 {
+        version: kernel_abi::MANAGED_ADMIN_VERSION,
+        size: core::mem::size_of::<kernel_abi::ManagedAuditStatusV1>() as u32,
+        ..Default::default()
+    };
+    managed_bpf(kernel_abi::BPF_MANAGED_RECORDER_STATUS, &mut request)?;
+    Ok(request)
+}
+
+pub fn managed_recorder_read(
+    cursor: u64,
+    end: u64,
+    expected_session: u64,
+) -> Result<kernel_abi::ManagedAuditReadV1, kernel_abi::Errno> {
+    let mut request = kernel_abi::ManagedAuditReadV1 {
+        version: kernel_abi::MANAGED_ADMIN_VERSION,
+        size: core::mem::size_of::<kernel_abi::ManagedAuditReadV1>() as u32,
+        cursor,
+        end,
+        expected_session,
+        ..Default::default()
+    };
+    managed_bpf(kernel_abi::BPF_MANAGED_RECORDER_READ, &mut request)?;
+    Ok(request)
+}
+
 pub fn managed_upload_begin(
     expected_last_id: u64,
     total_bytes: u32,

@@ -5,6 +5,7 @@
 
 use crate::bpf::*;
 use crate::managed::*;
+use crate::recorder::*;
 use crate::syscall::*;
 
 /// Current axiomos userspace ABI major version.
@@ -87,6 +88,14 @@ pub const SUPPORTED_BPF_COMMANDS: &[AbiEntry] = &[
     entry!(BPF_MANAGED_UPLOAD_FINALIZE, "managed-runtime feature"),
     entry!(BPF_MANAGED_OPERATION_QUERY, "managed-runtime feature"),
     entry!(BPF_MANAGED_CANCEL, "managed-runtime feature"),
+    entry!(BPF_MANAGED_ACTIVATE, "managed-runtime feature"),
+    entry!(BPF_MANAGED_ROLLBACK, "managed-runtime feature"),
+    entry!(BPF_MANAGED_SLOT_QUERY, "managed-runtime feature"),
+    entry!(BPF_MANAGED_INSTALLATION_CANCEL, "managed-runtime feature"),
+    entry!(BPF_MANAGED_DEACTIVATE, "managed-runtime feature"),
+    entry!(BPF_MANAGED_RETIRE, "managed-runtime feature"),
+    entry!(BPF_MANAGED_RECORDER_STATUS, "managed-runtime feature"),
+    entry!(BPF_MANAGED_RECORDER_READ, "managed-runtime feature"),
 ];
 
 /// Map types accepted by `BPF_MAP_CREATE`.

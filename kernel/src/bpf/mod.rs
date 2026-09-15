@@ -7,6 +7,7 @@ mod limits;
 pub mod managed;
 mod managed_allocation;
 pub mod preparation;
+pub(crate) mod recorder;
 mod snapshot;
 mod trust;
 
