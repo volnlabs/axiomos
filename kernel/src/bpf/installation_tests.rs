@@ -40,7 +40,7 @@ fn commit(slot: &mut ControlSlot, id: u64) -> u64 {
 
 fn peer_ready() -> Handoff {
     let mut handoff = Handoff::new();
-    let offer = handoff.offer_after_drain().unwrap();
+    let offer = handoff.offer_after_drain(0, 80).unwrap();
     handoff.started(offer).unwrap();
     handoff.sent(0).unwrap();
     assert!(handoff

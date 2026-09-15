@@ -1,6 +1,6 @@
 version = 1
 baseline_sites = 717
-baseline_fingerprint = "sha256:13ec0f1775b41de1c90f2c2d6da9aad9f0855e5bc012d85bea6d79ca2b18a29f"
+baseline_fingerprint = "sha256:611f8a96418a27fb171bed40c3fb07ce92e3cd29f75e0dc8457643430db01df7"
 
 # 2026-09-15: UART0 adapter adds nine reviewed PAC writes under exclusive
 # ownership (error clear, byte TX, IRQ/DMA/UART disable, baud/format and IRQ clear).

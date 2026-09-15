@@ -30,7 +30,7 @@ use shrike_link::{Decoder, Msg};
 use spin::Mutex;
 
 use super::memory_map::RP1_UART0_BASE;
-use super::pl011::{Pl011, DEFAULT_UART_CLK_HZ};
+use super::pl011::{InitError, Pl011, DEFAULT_UART_CLK_HZ};
 
 /// RX ring capacity.
 const RING_BYTES: usize = 256;
@@ -56,7 +56,7 @@ const MOTOR_CHIP: u8 = 0;
 const ULTRASONIC_DEVICE_ID: u32 = 0x5072_0000; // "pr" + 0 (proximity dev)
 const ULTRASONIC_CHANNEL: u32 = 0; // proximity / range
 
-static CONTROL_LINK: OnceCell<Mutex<ControlLink>> = OnceCell::uninit();
+static CONTROL_LINK: OnceCell<Result<Mutex<ControlLink>, InitError>> = OnceCell::uninit();
 static NEXT_SENSOR_SAMPLE_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_LINK_LOSS_EVENT_ID: AtomicU64 = AtomicU64::new(1);
 #[cfg(feature = "trace-control-link")]
@@ -453,7 +453,7 @@ fn with_link<R>(f: impl FnOnce(&mut ControlLink) -> R) -> Option<R> {
     use crate::arch::aarch64::Aarch64;
     use crate::arch::traits::Architecture;
 
-    let link = CONTROL_LINK.get()?;
+    let link = CONTROL_LINK.get()?.as_ref().ok()?;
     let were_enabled = Aarch64::are_interrupts_enabled();
     if were_enabled {
         Aarch64::disable_interrupts();
@@ -573,34 +573,49 @@ fn dispatch_ultrasonic(now: u64, echo_us: u16, sample_id: u64) {
 }
 
 /// Bring up the dedicated link UART. Called by `spawn()` at HW bring-up — NOT in
-/// early boot. No-op if already initialized.
-fn init() {
-    CONTROL_LINK.init_once(|| {
-        LINK_UNINITIALIZED_REPORTED.store(false, Ordering::Release);
-        // SAFETY: RP1_UART0 is a mapped RP1 peripheral on the Pi5; single owner.
-        let mut uart = unsafe { Pl011::new(RP1_UART0_BASE) };
-        uart.init(LINK_BAUD, DEFAULT_UART_CLK_HZ);
-        Mutex::new(ControlLink {
-            uart,
-            rx: RingBuf::new(),
-            tx: TxState::new(),
-            dec: Decoder::new(),
-            rx_overflows: 0,
-            session: LinkSession::new(LINK_TIMEOUT_NS, HEARTBEAT_PERIOD_NS),
-            motor_seq: 0,
-            pending_estop: None,
-            link_loss_reported: false,
-            #[cfg(feature = "managed-runtime")]
-            handoff: Handoff::new(),
+/// early boot. Retain either success or failure; no automatic retry/rearm.
+fn init() -> Result<(), InitError> {
+    CONTROL_LINK
+        .get_or_init(|| {
+            LINK_UNINITIALIZED_REPORTED.store(false, Ordering::Release);
+            // SAFETY: RP1_UART0 is a mapped RP1 peripheral on the Pi5; single owner.
+            let mut uart = unsafe { Pl011::new(RP1_UART0_BASE) };
+            uart.init(LINK_BAUD, DEFAULT_UART_CLK_HZ)?;
+            Ok(Mutex::new(ControlLink {
+                uart,
+                rx: RingBuf::new(),
+                tx: TxState::new(),
+                dec: Decoder::new(),
+                rx_overflows: 0,
+                session: LinkSession::new(LINK_TIMEOUT_NS, HEARTBEAT_PERIOD_NS),
+                motor_seq: 0,
+                pending_estop: None,
+                link_loss_reported: false,
+                #[cfg(feature = "managed-runtime")]
+                handoff: Handoff::new(),
+            }))
         })
-    });
+        .as_ref()
+        .map(|_| ())
+        .map_err(|error| *error)
 }
 
 /// Poller task entry: bring up the link, then service it forever. `wfi` sleeps
 /// until the next interrupt (the timer tick), giving ~per-tick service cadence
 /// at low CPU.
 extern "C" fn poller_entry(_arg: *mut core::ffi::c_void) {
-    init();
+    if let Err(error) = init() {
+        #[cfg(feature = "managed-runtime")]
+        crate::bpf::control::invalidate_sensor();
+        #[cfg(feature = "managed-runtime")]
+        crate::actuation::trigger_estop(kernel_bpf::actuation::AuditSource::ManagedControl);
+        #[cfg(not(feature = "managed-runtime"))]
+        crate::actuation::trigger_estop(kernel_bpf::actuation::AuditSource::Watchdog);
+        #[cfg(not(feature = "managed-runtime"))]
+        log::error!("control_link: UART initialization failed: {:?}", error);
+        #[cfg(feature = "managed-runtime")]
+        let _ = error;
+    }
     loop {
         service();
         // SAFETY: wait-for-interrupt; the periodic timer wakes us.

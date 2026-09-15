@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run actual GPIO setup and PL011 byte methods against host register storage.
+"""Run actual GPIO setup and PL011 methods against host register storage.
 
 python3 tests/scripts/test_rpi5_peripheral_output.py
 The unrelated AArch64 interrupt-dispatch tail is excluded from this host check.
@@ -59,9 +59,9 @@ UART_HARNESS = r'''
 #![allow(dead_code)]
 mod mmio {
     use std::sync::Mutex;
-    struct Registers { words: [u32; 32], accesses: usize, writes: Vec<(usize, u32)>, error_on_flags: u32 }
+    struct Registers { words: [u32; 32], accesses: usize, limit: usize, writes: Vec<(usize, u32)>, error_on_flags: u32 }
     static REGS: Mutex<Registers> = Mutex::new(Registers {
-        words: [0; 32], accesses: 0, writes: Vec::new(), error_on_flags: 0,
+        words: [0; 32], accesses: 0, limit: 6, writes: Vec::new(), error_on_flags: 0,
     });
     pub struct MmioReg<T> { addr: usize, marker: std::marker::PhantomData<T> }
     impl MmioReg<u32> {
@@ -71,14 +71,14 @@ mod mmio {
         pub fn read(&self) -> u32 {
             let mut regs = REGS.lock().unwrap();
             regs.accesses += 1;
-            assert!(regs.accesses <= 6, "a nonblocking operation must not poll");
+            assert!(regs.accesses <= regs.limit, "a nonblocking operation must not poll");
             if self.addr == 0x18 { regs.words[1] |= regs.error_on_flags; }
             regs.words[self.addr / 4]
         }
         pub fn write(&self, value: u32) {
             let mut regs = REGS.lock().unwrap();
             regs.accesses += 1;
-            assert!(regs.accesses <= 6, "a nonblocking operation must not poll");
+            assert!(regs.accesses <= regs.limit, "a nonblocking operation must not poll");
             regs.words[self.addr / 4] = value;
             regs.writes.push((self.addr, value));
         }
@@ -90,10 +90,12 @@ mod mmio {
         regs.words[0x04 / 4] = status;
         regs.words[0] = data;
         regs.accesses = 0;
+        regs.limit = 6;
         regs.writes.clear();
         regs.error_on_flags = 0;
     }
     pub fn late_error(error: u32) { REGS.lock().unwrap().error_on_flags = error; }
+    pub fn budget(limit: usize) { REGS.lock().unwrap().limit = limit; }
     pub fn writes() -> Vec<(usize, u32)> { REGS.lock().unwrap().writes.clone() }
 }
 mod pl011;
@@ -128,7 +130,35 @@ fn main() {
         mmio::prepare(flags, 0, 0);
         assert_eq!(uart.tx_idle(), idle, "FIFO empty alone does not drain the shift register");
     }
-    println!("PASS: actual PL011 RX faults, TX backpressure and physical-idle checks are bounded");
+    let mut uart = uart;
+    let disabled = [(0x30, 0), (0x38, 0), (0x48, 0)];
+    let empty = (1 << 7) | (1 << 4);
+    for flags in [0, 1 << 7, 1 << 4, empty | (1 << 3), 1 << 3] {
+        mmio::prepare(flags, 0, 0);
+        assert_eq!(uart.init(115200, 48_000_000), Err(pl011::InitError::NotIdle));
+        assert_eq!(mmio::writes(), disabled,
+            "busy/nonempty startup must stay disabled without dropping or replaying bytes");
+    }
+    for (baud, clock) in [(0, 48_000_000), (115200, 0), (1, 15), (4, 4_194_241), (1, u32::MAX)] {
+        mmio::prepare(empty, 0, 0);
+        assert_eq!(uart.init(baud, clock), Err(pl011::InitError::BaudRate));
+        assert_eq!(mmio::writes(), disabled);
+    }
+    for errors in 1..=15 {
+        mmio::prepare(empty, errors, 0);
+        assert_eq!(uart.init(115200, 48_000_000),
+            Err(pl011::InitError::Receive(pl011::ReceiveError(errors as u8))));
+        assert_eq!(mmio::writes(), [(0x30, 0), (0x38, 0), (0x48, 0), (0x04, 0)]);
+    }
+    for (baud, clock, integer, fraction) in [(115200, 48_000_000, 26, 3), (1, 16, 1, 0), (1, 1_048_560, 65535, 0)] {
+        mmio::prepare(empty, 0, 0);
+        mmio::budget(11);
+        assert_eq!(uart.init(baud, clock), Ok(()));
+        assert_eq!(mmio::writes(), [(0x30, 0), (0x38, 0), (0x48, 0), (0x2c, 0),
+            (0x24, integer), (0x28, fraction), (0x2c, 0x70), (0x44, 0x7ff), (0x30, 0x301)],
+            "enable only after checked divisor, FIFO setup and interrupt/DMA shutdown");
+    }
+    println!("PASS: actual PL011 RX/TX and startup reject faults with bounded register accesses");
 }
 '''
 

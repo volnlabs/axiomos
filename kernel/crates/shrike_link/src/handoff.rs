@@ -69,9 +69,16 @@ struct Barrier {
 }
 
 #[derive(Clone, Copy)]
+struct Offer {
+    deadline: u64,
+    last_seen: u64,
+    tx: Transmission,
+}
+
+#[derive(Clone, Copy)]
 enum Phase {
     Disarmed,
-    Offering(Transmission),
+    Offering(Offer),
     Ready,
     Barrier(Barrier),
 }
@@ -102,16 +109,25 @@ impl Handoff {
     /// Caller must first inhibit both peers, drain software/FIFOs/decoder, keep
     /// 200 ms quiet and explicitly requalify/rearm. This method does no such I/O.
     /// IDs are unique only in this object's lifetime, never claimed across boot.
-    pub fn offer_after_drain(&mut self) -> Result<Msg, HandoffError> {
+    /// `now` and `timeout` use the caller's monotonic physical-counter ticks.
+    pub fn offer_after_drain(&mut self, now: u64, timeout: u64) -> Result<Msg, HandoffError> {
         if !matches!(self.phase, Phase::Disarmed) {
             return Err(HandoffError::Busy);
         }
+        if timeout == 0 {
+            return Err(HandoffError::InvalidTimeout);
+        }
+        let deadline = now.checked_add(timeout).ok_or(HandoffError::Exhausted)?;
         let session = self
             .last_session
             .checked_add(1)
             .ok_or(HandoffError::Exhausted)?;
         self.last_session = session;
-        self.phase = Phase::Offering(Transmission::Pending);
+        self.phase = Phase::Offering(Offer {
+            deadline,
+            last_seen: now,
+            tx: Transmission::Pending,
+        });
         Ok(Msg::SessionOffer { session })
     }
 
@@ -150,9 +166,11 @@ impl Handoff {
 
     /// Caller gives trusted stop frames priority before calling this. The
     /// existing TxState owns bytes; this mailbox only tracks their correlation.
-    pub fn enqueue(&mut self, tx: &mut TxState, now: u64) -> Result<(), HandoffError> {
+    /// `transport_now` belongs to TxState's transport timestamp domain and is
+    /// deliberately not compared with this handoff's physical-counter deadline.
+    pub fn enqueue(&mut self, tx: &mut TxState, transport_now: u64) -> Result<(), HandoffError> {
         if let Some(message) = self.outbound() {
-            if tx.start(&message, now) {
+            if tx.start(&message, transport_now) {
                 self.started(message)?;
             }
         }
@@ -202,7 +220,10 @@ impl Handoff {
     /// Complete message to prioritize after any already-started UART frame.
     pub fn outbound(&self) -> Option<Msg> {
         match self.phase {
-            Phase::Offering(Transmission::Pending) => Some(Msg::SessionOffer {
+            Phase::Offering(Offer {
+                tx: Transmission::Pending,
+                ..
+            }) => Some(Msg::SessionOffer {
                 session: self.last_session,
             }),
             Phase::Barrier(Barrier {
@@ -220,7 +241,7 @@ impl Handoff {
             return Err(HandoffError::Stale);
         }
         match &mut self.phase {
-            Phase::Offering(tx) => *tx = Transmission::Started,
+            Phase::Offering(offer) => offer.tx = Transmission::Started,
             Phase::Barrier(barrier) => barrier.tx = Transmission::Started,
             _ => return Err(HandoffError::Stale),
         }
@@ -230,11 +251,13 @@ impl Handoff {
     pub const fn has_started_frame(&self) -> bool {
         matches!(
             self.phase,
-            Phase::Offering(Transmission::Started)
-                | Phase::Barrier(Barrier {
-                    tx: Transmission::Started,
-                    ..
-                })
+            Phase::Offering(Offer {
+                tx: Transmission::Started,
+                ..
+            }) | Phase::Barrier(Barrier {
+                tx: Transmission::Started,
+                ..
+            })
         )
     }
 
@@ -242,7 +265,10 @@ impl Handoff {
     pub fn sent(&mut self, now: u64) -> Result<(), HandoffError> {
         self.check(now)?;
         match &mut self.phase {
-            Phase::Offering(tx @ Transmission::Started) => *tx = Transmission::Sent,
+            Phase::Offering(Offer {
+                tx: tx @ Transmission::Started,
+                ..
+            }) => *tx = Transmission::Sent,
             Phase::Barrier(Barrier {
                 tx: tx @ Transmission::Started,
                 ..
@@ -255,9 +281,13 @@ impl Handoff {
     pub fn on_reply(&mut self, msg: Msg, received_at: u64) -> Result<bool, HandoffError> {
         self.check(received_at)?;
         match (&mut self.phase, msg) {
-            (Phase::Offering(Transmission::Sent), Msg::SessionReady { session })
-                if session == self.last_session =>
-            {
+            (
+                Phase::Offering(Offer {
+                    tx: Transmission::Sent,
+                    ..
+                }),
+                Msg::SessionReady { session },
+            ) if session == self.last_session => {
                 self.phase = Phase::Ready;
                 Ok(true)
             }
@@ -287,20 +317,26 @@ impl Handoff {
     /// Called both while waiting and at commitment, so waiting for the next
     /// eligible release is included in the operational timeout.
     pub fn check(&mut self, now: u64) -> Result<(), HandoffError> {
-        if let Phase::Barrier(barrier) = &mut self.phase {
-            let error = if now < barrier.last_seen {
-                Some(HandoffError::ClockReversed)
-            } else if now >= barrier.deadline {
-                Some(HandoffError::TimedOut)
-            } else {
-                None
-            };
-            if let Some(error) = error {
-                self.disarm();
-                return Err(error);
-            }
-            barrier.last_seen = now;
+        let bound = match &mut self.phase {
+            Phase::Offering(offer) => Some((offer.deadline, &mut offer.last_seen)),
+            Phase::Barrier(barrier) => Some((barrier.deadline, &mut barrier.last_seen)),
+            Phase::Disarmed | Phase::Ready => None,
+        };
+        let Some((deadline, last_seen)) = bound else {
+            return Ok(());
+        };
+        let error = if now < *last_seen {
+            Some(HandoffError::ClockReversed)
+        } else if now >= deadline {
+            Some(HandoffError::TimedOut)
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            self.disarm();
+            return Err(error);
         }
+        *last_seen = now;
         Ok(())
     }
 
@@ -336,7 +372,7 @@ mod tests {
 
     fn ready() -> Handoff {
         let mut h = Handoff::new();
-        let offer = h.offer_after_drain().unwrap();
+        let offer = h.offer_after_drain(0, 80).unwrap();
         assert_eq!(offer, Msg::SessionOffer { session: 1 });
         assert!(!h.on_reply(Msg::SessionReady { session: 1 }, 0).unwrap());
         h.started(offer).unwrap();
@@ -426,7 +462,7 @@ mod tests {
         h.disarm();
         assert!(!h.motion_permitted());
         assert!(h.take_ready(130, 130).unwrap().is_none());
-        let offer = h.offer_after_drain().unwrap();
+        let offer = h.offer_after_drain(200, 80).unwrap();
         assert_eq!(offer, Msg::SessionOffer { session: 2 });
         assert!(!h.on_reply(Msg::SessionReady { session: 1 }, 200).unwrap());
         h.started(offer).unwrap();
@@ -451,9 +487,70 @@ mod tests {
         assert_eq!(h.begin(1, 9, 100, 80), Err(HandoffError::Exhausted));
         h.disarm();
         h.last_session = u32::MAX;
-        assert_eq!(h.offer_after_drain(), Err(HandoffError::Exhausted));
+        assert_eq!(h.offer_after_drain(200, 80), Err(HandoffError::Exhausted));
         assert!(!h.motion_permitted());
         assert!(h.outbound().is_none());
+    }
+
+    #[test]
+    fn session_offer_is_bounded_before_during_and_after_transmission() {
+        let mut pending = Handoff::new();
+        let pending_offer = pending.offer_after_drain(100, 80).unwrap();
+        assert_eq!(pending_offer, Msg::SessionOffer { session: 1 });
+        assert_eq!(pending.check(180), Err(HandoffError::TimedOut));
+        assert_eq!(pending.outbound(), None);
+
+        let mut started = Handoff::new();
+        let started_offer = started.offer_after_drain(100, 80).unwrap();
+        started.started(started_offer).unwrap();
+        assert_eq!(started.sent(180), Err(HandoffError::TimedOut));
+        assert!(!started.has_started_frame());
+
+        let mut sent = Handoff::new();
+        let sent_offer = sent.offer_after_drain(100, 80).unwrap();
+        sent.started(sent_offer).unwrap();
+        sent.sent(120).unwrap();
+        assert!(!sent
+            .on_reply(Msg::SessionReady { session: 2 }, 130)
+            .unwrap());
+        assert_eq!(
+            sent.on_reply(Msg::SessionReady { session: 1 }, 180),
+            Err(HandoffError::TimedOut)
+        );
+        assert!(!sent
+            .on_reply(Msg::SessionReady { session: 1 }, 181)
+            .unwrap());
+
+        let new_offer = sent.offer_after_drain(200, 80).unwrap();
+        assert_eq!(new_offer, Msg::SessionOffer { session: 2 });
+        assert!(!sent
+            .on_reply(Msg::SessionReady { session: 1 }, 201)
+            .unwrap());
+    }
+
+    #[test]
+    fn invalid_session_bounds_and_reversed_clock_preserve_or_disarm_state() {
+        let mut h = Handoff::new();
+        assert_eq!(
+            h.offer_after_drain(100, 0),
+            Err(HandoffError::InvalidTimeout)
+        );
+        assert_eq!(
+            h.offer_after_drain(u64::MAX, 1),
+            Err(HandoffError::Exhausted)
+        );
+        assert_eq!(h.last_session, 0);
+        assert_eq!(h.outbound(), None);
+
+        let offer = h.offer_after_drain(100, 80).unwrap();
+        assert_eq!(offer, Msg::SessionOffer { session: 1 });
+        assert_eq!(h.check(99), Err(HandoffError::ClockReversed));
+        assert!(!h.on_reply(Msg::SessionReady { session: 1 }, 101).unwrap());
+
+        h.last_session = u32::MAX;
+        assert_eq!(h.offer_after_drain(200, 80), Err(HandoffError::Exhausted));
+        assert_eq!(h.last_session, u32::MAX);
+        assert_eq!(h.outbound(), None);
     }
 
     #[test]

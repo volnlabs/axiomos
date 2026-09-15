@@ -25,6 +25,7 @@ mod reg {
     pub const CR: usize = 0x30; // control
     pub const IMSC: usize = 0x38; // interrupt mask set/clear
     pub const ICR: usize = 0x44; // interrupt clear
+    pub const DMACR: usize = 0x48; // DMA control
 }
 
 mod fr {
@@ -56,6 +57,13 @@ const DR_ERR_MASK: u32 = 0xF00;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReceiveError(pub u8);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitError {
+    BaudRate,
+    NotIdle,
+    Receive(ReceiveError),
+}
+
 /// A PL011 UART instance at a fixed MMIO base.
 pub struct Pl011 {
     base: usize,
@@ -74,29 +82,49 @@ impl Pl011 {
         unsafe { MmioReg::<u32>::new(self.base + off) }
     }
 
-    /// Program 8N1 at `baud` from `uart_clk` and enable TX+RX. Unlike the
-    /// console, this does the real init (the link UART is not firmware-set up).
-    pub fn init(&mut self, baud: u32, uart_clk: u32) {
-        // Disable while reconfiguring, and drain any in-flight TX.
+    /// One bounded cold-start attempt. Reject a busy/nonempty UART without
+    /// waiting or replaying its buffered bytes; every failure leaves it disabled.
+    /// This is not the bilateral reset/drain or 200 ms session qualification.
+    pub fn init(&mut self, baud: u32, uart_clk: u32) -> Result<(), InitError> {
         self.r(reg::CR).write(0);
-        while self.r(reg::FR).read() & fr::BUSY != 0 {}
+        self.r(reg::IMSC).write(0);
+        self.r(reg::DMACR).write(0);
 
         // Baud divisor: clk / (16*baud), split integer + 6-bit fraction.
         // BAUDDIV = clk*4 / baud == 64*(clk/(16*baud)); low 6 bits = FBRD.
         // Round (ARM convention) rather than truncate to avoid a systematic
         // positive baud bias.
-        let b = baud.max(1) as u64;
+        if baud == 0 {
+            return Err(InitError::BaudRate);
+        }
+        let b = baud as u64;
         let div64 = ((uart_clk as u64) * 4 + b / 2) / b;
+        // PL011 permits divisors 1..=65535; fraction must be zero at 65535.
+        if !(64..=65535 * 64).contains(&div64) {
+            return Err(InitError::BaudRate);
+        }
+        let flags = self.r(reg::FR).read();
+        let errors = self.r(reg::RSRECR).read() & 0xF;
+        if errors != 0 {
+            self.r(reg::RSRECR).write(0);
+            return Err(InitError::Receive(ReceiveError(errors as u8)));
+        }
+        if flags & (fr::TXFE | fr::RXFE | fr::BUSY) != fr::TXFE | fr::RXFE {
+            return Err(InitError::NotIdle);
+        }
+        // Disable FIFO mode before programming. No old bytes are accepted as
+        // part of a new session merely because this local setup succeeds.
+        self.r(reg::LCRH).write(0);
         self.r(reg::IBRD).write((div64 >> 6) as u32);
         self.r(reg::FBRD).write((div64 & 0x3F) as u32);
 
         // 8 data bits, FIFOs on.
         self.r(reg::LCRH).write(lcrh::WLEN_8 | lcrh::FEN);
-        // Mask all interrupts (polled v0.4) and clear any pending.
-        self.r(reg::IMSC).write(0);
+        // Clear pending interrupts; this owner remains polled with DMA off.
         self.r(reg::ICR).write(ICR_ALL);
         // Enable.
         self.r(reg::CR).write(cr::UARTEN | cr::TXE | cr::RXE);
+        Ok(())
     }
 
     /// Nonblocking RX. Only an error-free empty FIFO returns `Ok(None)`;

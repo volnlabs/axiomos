@@ -837,7 +837,7 @@ impl ControlSlot {
     pub(super) fn commit_test_handoff(&mut self, id: u64) -> Result<u64, BpfError> {
         use shrike_link::Msg;
         let mut handoff = Handoff::new();
-        let offer = handoff.offer_after_drain().unwrap();
+        let offer = handoff.offer_after_drain(0, 80).unwrap();
         handoff.started(offer).unwrap();
         handoff.sent(0).unwrap();
         handoff
