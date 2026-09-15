@@ -60,9 +60,9 @@ UART_HARNESS = r'''
 #![allow(dead_code)]
 mod mmio {
     use std::sync::Mutex;
-    struct Registers { words: [u32; 32], accesses: usize, limit: usize, writes: Vec<(usize, u32)>, error_on_flags: u32 }
+    struct Registers { words: [u32; 32], accesses: usize, limit: usize, writes: Vec<(usize, u32)>, error_on_flags: u32, rx: std::collections::VecDeque<u32>, tx_flush: bool }
     static REGS: Mutex<Registers> = Mutex::new(Registers {
-        words: [0; 32], accesses: 0, limit: 6, writes: Vec::new(), error_on_flags: 0,
+        words: [0; 32], accesses: 0, limit: 6, writes: Vec::new(), error_on_flags: 0, rx: std::collections::VecDeque::new(), tx_flush: false,
     });
     pub struct MmioReg<T> { addr: usize, marker: std::marker::PhantomData<T> }
     impl MmioReg<u32> {
@@ -74,6 +74,11 @@ mod mmio {
             regs.accesses += 1;
             assert!(regs.accesses <= regs.limit, "a nonblocking operation must not poll");
             if self.addr == 0x18 { regs.words[1] |= regs.error_on_flags; }
+            if self.addr == 0 && !regs.rx.is_empty() {
+                let byte = regs.rx.pop_front().unwrap();
+                if regs.rx.is_empty() { regs.words[0x18 / 4] |= 1 << 4; }
+                return byte;
+            }
             regs.words[self.addr / 4]
         }
         pub fn write(&self, value: u32) {
@@ -81,6 +86,10 @@ mod mmio {
             regs.accesses += 1;
             assert!(regs.accesses <= regs.limit, "a nonblocking operation must not poll");
             regs.words[self.addr / 4] = value;
+            if self.addr == 0x2c && value & 0x10 == 0 && regs.tx_flush {
+                regs.words[0x18 / 4] |= 1 << 7;
+                regs.words[0x18 / 4] &= !(1 << 3);
+            }
             regs.writes.push((self.addr, value));
         }
     }
@@ -94,6 +103,13 @@ mod mmio {
         regs.limit = 6;
         regs.writes.clear();
         regs.error_on_flags = 0;
+        regs.rx.clear(); regs.tx_flush = false;
+    }
+    pub fn reset_fifo(bytes: &[u32], flush: bool) {
+        let mut regs=REGS.lock().unwrap();
+        regs.rx.extend(bytes.iter().copied());
+        if !bytes.is_empty() { regs.words[0x18/4] &= !(1 << 4); }
+        regs.tx_flush=flush;
     }
     pub fn late_error(error: u32) { REGS.lock().unwrap().error_on_flags = error; }
     pub fn budget(limit: usize) { REGS.lock().unwrap().limit = limit; }
@@ -159,7 +175,125 @@ fn main() {
             (0x24, integer), (0x28, fraction), (0x2c, 0x70), (0x44, 0x7ff), (0x30, 0x301)],
             "enable only after checked divisor, FIFO setup and interrupt/DMA shutdown");
     }
-    println!("PASS: actual PL011 RX/TX and startup reject faults with bounded register accesses");
+    // 115200 baud with the actual rounded divisor: one 8N1 character needs
+    // >86us. Driver owns the interval; the test's clock never sleeps.
+    mmio::prepare(empty,0,0); mmio::budget(11);
+    uart.init(115200,48_000_000).unwrap();
+    let now=std::cell::Cell::new(0u64);
+    let mut clock=|| now.get();
+    mmio::prepare(1 << 3,8,0); mmio::reset_fifo(&[0xa5,0x800|0x7e,0xff],true); mmio::budget(64);
+    uart.begin_quiescence(&mut clock,1_000_000_000,1).unwrap();
+    assert!(!uart.try_write_byte(0xaa), "no writes while quiescing");
+    assert!(!uart.poll_quiescence(&mut clock).unwrap());
+    assert!(!mmio::writes().iter().any(|(a,_)| *a==0x2c), "do not truncate the current character");
+    now.set(100_000);
+    assert!(!uart.poll_quiescence(&mut clock).unwrap());
+    assert_eq!(mmio::writes().last(),Some(&(0x30,0x201)), "only RX enabled after reset/drain");
+    mmio::prepare(empty,0,0); mmio::budget(64);
+    now.set(200_099_999);
+    assert!(!uart.poll_quiescence(&mut clock).unwrap());
+    now.set(200_100_000);
+    assert!(!uart.poll_quiescence(&mut clock).unwrap());
+    now.set(200_100_001);
+    assert!(uart.poll_quiescence(&mut clock).unwrap());
+    assert!(!uart.try_write_byte(0xaa), "quiet alone cannot enable TX");
+    uart.finish_quiescence(&mut clock).unwrap();
+    assert!(uart.try_write_byte(0xbb));
+    assert_eq!(mmio::writes(),[(0x30,0x301),(0,0xbb)]);
+
+    // Receive traffic restarts a full interval; errors permanently poison this
+    // attempt even if a later poll sees empty hardware.
+    for fault in [false,true] {
+        mmio::prepare(empty,0,0); mmio::budget(100);
+        now.set(1_000_000_000);
+        uart.begin_quiescence(&mut clock,1_000_000_000,1).unwrap();
+        now.set(now.get()+100_000);
+        assert!(!uart.poll_quiescence(&mut clock).unwrap());
+        now.set(now.get()+199_000_000);
+        mmio::prepare(empty,if fault {8} else {0},0); mmio::reset_fifo(&[0x5a],true); mmio::budget(100);
+        let result=uart.poll_quiescence(&mut clock);
+        if fault {
+            assert_eq!(result,Err(pl011::InitError::Receive(pl011::ReceiveError(8))));
+            mmio::prepare(empty,0,0); now.set(now.get()+200_000_000);
+            assert_eq!(uart.poll_quiescence(&mut clock),result);
+            assert!(uart.finish_quiescence(&mut clock).is_err());
+        } else {
+            assert_eq!(result,Ok(false));
+            now.set(now.get()+199_999_999);
+            assert_eq!(uart.poll_quiescence(&mut clock),Ok(false));
+            now.set(now.get()+1);
+            assert_eq!(uart.poll_quiescence(&mut clock),Ok(false));
+            now.set(now.get()+1);
+            assert_eq!(uart.poll_quiescence(&mut clock),Ok(true));
+            // Byte arriving between quiet and finish must revoke readiness.
+            mmio::reset_fifo(&[0xcc],true);
+            assert!(uart.finish_quiescence(&mut clock).is_err());
+        }
+        assert!(!uart.try_write_byte(0xaa));
+    }
+    for (start, timeout, error) in [(0,0,pl011::InitError::InvalidTimeout),
+        (0,200_000_000,pl011::InitError::InvalidTimeout),
+        (u64::MAX-2,1_000_000_000,pl011::InitError::InvalidTimeout)] {
+        mmio::prepare(empty,0,0); now.set(start);
+        assert_eq!(uart.begin_quiescence(&mut clock,timeout,1),Err(error));
+        assert!(!uart.try_write_byte(0xee));
+        assert_eq!(uart.poll_quiescence(&mut clock),Err(error));
+        assert_eq!(uart.finish_quiescence(&mut clock),Err(error));
+    }
+    // A whole character from the actual 1667/64 divisor is 86822.917ns.
+    // Require the upward-rounded duration plus one quantization tick.
+    mmio::prepare(empty,0,0); mmio::budget(128); now.set(0);
+    uart.begin_quiescence(&mut clock,1_000_000_000,1).unwrap();
+    for _ in 0..16 { assert_eq!(uart.poll_quiescence(&mut clock),Ok(false)); }
+    now.set(86_823); assert_eq!(uart.poll_quiescence(&mut clock),Ok(false));
+    assert!(!mmio::writes().iter().any(|(a,_)| *a==0x2c));
+    now.set(86_824); assert_eq!(uart.poll_quiescence(&mut clock),Ok(false));
+    assert_eq!(mmio::writes().last(),Some(&(0x30,0x201)));
+    now.set(0); assert_eq!(uart.poll_quiescence(&mut clock),Err(pl011::InitError::ClockRegression));
+    now.set(500_000_000); assert_eq!(uart.poll_quiescence(&mut clock),Err(pl011::InitError::ClockRegression));
+
+    // Disable I/O, empty reads and the final TX-enable write all belong to the
+    // same operation deadline. The final fault must re-disable the transmitter.
+    mmio::prepare(empty,0,0); mmio::budget(128);
+    let mut delayed=[0,1_000_000_000].into_iter();
+    assert_eq!(uart.begin_quiescence(&mut || delayed.next().unwrap(),1_000_000_000,1),Err(pl011::InitError::TimedOut));
+    now.set(0); uart.begin_quiescence(&mut clock,1_000_000_000,1).unwrap();
+    now.set(100_000); uart.poll_quiescence(&mut clock).unwrap();
+    let mut slow_read=[199_000_000,199_000_000,300_000_000].into_iter();
+    assert_eq!(uart.poll_quiescence(&mut || slow_read.next().unwrap()),Ok(false));
+    now.set(300_000_000); assert_eq!(uart.poll_quiescence(&mut clock),Ok(true));
+    let mut slow_enable=[300_000_000,300_000_000,300_000_000,300_000_000,1_000_000_000].into_iter();
+    assert_eq!(uart.finish_quiescence(&mut || slow_enable.next().unwrap()),Err(pl011::InitError::TimedOut));
+    assert!(!uart.try_write_byte(0xaa));
+    assert!(mmio::writes().ends_with(&[(0x30,0),(0x38,0),(0x48,0)]));
+
+    // The reset pass discards at most 64 retained bytes and never enables RX
+    // if a supposedly disabled receiver or TX engine failed to become empty.
+    for bytes in [32,65] {
+        mmio::prepare(1 << 3,0,0); mmio::reset_fifo(&vec![0xaa;bytes],true); mmio::budget(150);
+        now.set(0); uart.begin_quiescence(&mut clock,1_000_000_000,1).unwrap();
+        now.set(100_000);
+        assert_eq!(uart.poll_quiescence(&mut clock),if bytes==32 {Ok(false)} else {Err(pl011::InitError::NotIdle)});
+        if bytes==32 {
+            mmio::prepare(empty | (1<<3),0,0); mmio::budget(8);
+            now.set(now.get()+200_000_000);
+            assert_eq!(uart.poll_quiescence(&mut clock),Err(pl011::InitError::NotIdle));
+        }
+        assert!(!uart.try_write_byte(0xaa));
+    }
+    // A coarse but declared clock needs its whole quantum, not merely +1ns.
+    for quantum in [0,u64::MAX] {
+        mmio::prepare(empty,0,0); now.set(0);
+        assert_eq!(uart.begin_quiescence(&mut clock,1_000_000_000,quantum),Err(pl011::InitError::InvalidTimeout));
+    }
+    mmio::prepare(empty,0,0); mmio::budget(64); now.set(0);
+    uart.begin_quiescence(&mut clock,1_000_000_000,2_000).unwrap();
+    now.set(88_822); assert_eq!(uart.poll_quiescence(&mut clock),Ok(false));
+    assert!(!mmio::writes().iter().any(|(a,_)| *a==0x2c));
+    now.set(90_000); assert_eq!(uart.poll_quiescence(&mut clock),Ok(false));
+    now.set(200_091_999); assert_eq!(uart.poll_quiescence(&mut clock),Ok(false));
+    now.set(200_092_000); assert_eq!(uart.poll_quiescence(&mut clock),Ok(true));
+    println!("PASS: actual PL011 RX/TX, startup and reset/quiescence have bounded register accesses");
 }
 '''
 

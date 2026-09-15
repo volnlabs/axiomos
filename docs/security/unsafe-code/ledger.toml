@@ -1,6 +1,11 @@
 version = 1
 baseline_sites = 720
-baseline_fingerprint = "sha256:b5dc22fa37f972748bcf8f9cb3604f5f7bc8fae185d9ec538556529cda3bb60c"
+baseline_fingerprint = "sha256:21711903c50aadef6e7807c099da073d0129be83bf4ea88b3d53c28ade1d29a1"
+
+# 2026-09-16: local PL011 quiescence reuses the existing exclusive MMIO
+# owner and counter access. No new unsafe site; bounded passes disable TX,
+# wait the current character plus clock quantum, flush/drain old state and
+# observe quiet. Startup cannot turn local readiness into session authority.
 
 # 2026-09-16: bounded power/startup and runtime entry move existing SPI PAC
 # writes into the same register seam. Shared RESETS accesses modify distinct

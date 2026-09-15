@@ -228,7 +228,8 @@ impl LinkQuiescence {
             }
             self.last_poll = after_read;
             if !received {
-                return Ok(before_read - quiet_since >= Self::QUIET_US);
+                // One extra microsecond covers timer quantization after I/O.
+                return Ok(before_read - quiet_since > Self::QUIET_US);
             }
             quiet_since = after_read;
             self.quiet_since = Ok(after_read);
@@ -544,6 +545,8 @@ mod tests {
         clock.set(400_099);
         assert_eq!(drain.poll(&mut io, &clock), Ok(false));
         clock.set(400_100);
+        assert_eq!(drain.poll(&mut io, &clock), Ok(false));
+        clock.set(400_100 + 1);
         assert_eq!(drain.poll(&mut io, &clock), Ok(true));
         assert!(sink.stopped); // eligibility does not rearm or manufacture a session
         let mut frame = [0; shrike_link::MAX_FRAME];
@@ -612,6 +615,8 @@ mod tests {
         clock.set(999_999);
         assert_eq!(fresh.poll(&mut io, &clock), Ok(false));
         clock.set(1_000_000);
+        assert_eq!(fresh.poll(&mut io, &clock), Ok(false));
+        clock.set(1_000_000 + 1);
         assert_eq!(fresh.poll(&mut io, &clock), Ok(true));
         assert!(sink.stopped);
     }
@@ -656,6 +661,8 @@ mod tests {
         clock.set(200_000);
         assert_eq!(drain.poll(&mut io, &clock), Ok(false));
         clock.set(200_050);
+        assert_eq!(drain.poll(&mut io, &clock), Ok(false));
+        clock.set(200_050 + 1);
         assert_eq!(drain.poll(&mut io, &clock), Ok(true));
     }
 
@@ -678,6 +685,8 @@ mod tests {
         clock.set(200_000);
         assert_eq!(drain.poll(&mut io, &clock), Ok(false));
         clock.set(200_050);
+        assert_eq!(drain.poll(&mut io, &clock), Ok(false));
+        clock.set(200_050 + 1);
         assert_eq!(drain.poll(&mut io, &clock), Ok(true));
     }
 
@@ -698,6 +707,8 @@ mod tests {
         clock.set(199_950);
         assert_eq!(drain.poll(&mut io, &clock), Ok(false));
         assert_eq!(clock.now_us(), 200_000);
+        assert_eq!(drain.poll(&mut io, &clock), Ok(false));
+        clock.set(200_001);
         assert_eq!(drain.poll(&mut io, &clock), Ok(true));
     }
 }

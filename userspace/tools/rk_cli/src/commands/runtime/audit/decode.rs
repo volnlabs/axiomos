@@ -1176,6 +1176,7 @@ fn link_fault(reason: u32, detail: u32) -> Result<&'static str> {
             3 => (1..=64).contains(&detail),
             4 | 5 | 7 => detail == 0,
             6 => (2001..=2009).contains(&detail),
+            8 => (1..=6).contains(&detail) || (0x101..=0x10f).contains(&detail),
             _ => false,
         },
         "invalid link fault reason/detail"
@@ -1188,6 +1189,7 @@ fn link_fault(reason: u32, detail: u32) -> Result<&'static str> {
         "pi_inbound_timeout",
         "handoff",
         "link_unavailable",
+        "local_quiescence",
     ][reason as usize - 1])
 }
 
@@ -1694,6 +1696,9 @@ mod tests {
 
     #[test]
     fn offline_link_faults_keep_operation_distinct_from_generation() {
+        for detail in [0, 7, 0x100, 0x110, u32::MAX] {
+            assert!(link_fault(8, detail).is_err());
+        }
         for (reason, detail, name) in [
             (1, 15, "uart_receive"),
             (2, 3, "decoder"),
@@ -1702,6 +1707,8 @@ mod tests {
             (5, 0, "pi_inbound_timeout"),
             (6, 2007, "handoff"),
             (7, 0, "link_unavailable"),
+            (8, 6, "local_quiescence"),
+            (8, 0x108, "local_quiescence"),
         ] {
             let p = ManagedAuditStopV1 {
                 category: 5,

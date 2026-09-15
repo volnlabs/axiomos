@@ -438,6 +438,7 @@ pub(crate) enum LinkFault {
     InboundTimeout,
     Handoff(shrike_link::handoff::HandoffError),
     Unavailable,
+    Quiescence(u32),
 }
 
 pub(crate) fn link_fault(operation: Option<u64>, fault: LinkFault) {
@@ -460,6 +461,7 @@ pub(crate) fn link_fault(operation: Option<u64>, fault: LinkFault) {
         LinkFault::InboundTimeout => (5, 0),
         LinkFault::Handoff(error) => (6, failure_code(Some(CycleFailure::Handoff(error))).0),
         LinkFault::Unavailable => (7, 0),
+        LinkFault::Quiescence(detail) => (8, detail),
     };
     observe(|state, ticks| state.link_fault(operation.unwrap_or(0), reason, detail, ticks));
 }
@@ -629,6 +631,7 @@ pub(crate) mod tests {
             (LinkFault::InboundTimeout, 5, 0),
             (LinkFault::Handoff(HandoffError::TimedOut), 6, 2007),
             (LinkFault::Unavailable, 7, 0),
+            (LinkFault::Quiescence(6), 8, 6),
         ];
         let records = capture_records(|| {
             for (fault, _, _) in faults {
@@ -639,19 +642,19 @@ pub(crate) mod tests {
             CAPTURE.with(|capture| {
                 let state = capture.borrow();
                 let status = state.as_ref().unwrap().window.status();
-                assert_eq!(status.suppressed, 14);
+                assert_eq!(status.suppressed, faults.len() as u64 * 2);
                 let latest = status.latest_stop.unwrap().0;
                 assert_eq!(latest.correlation, 42);
                 assert_eq!(
                     u32::from_le_bytes(latest.payload[40..44].try_into().unwrap()),
-                    7
+                    8
                 );
             });
             // A different explicit cause must remain visible.
             trusted_stop(AuditSource::Operator);
             trusted_stop(AuditSource::ManagedControl);
         });
-        assert_eq!(records.len(), 9);
+        assert_eq!(records.len(), faults.len() + 2);
         for (record, (_, reason, detail)) in records.iter().zip(faults) {
             assert_eq!(record.kind, MANAGED_AUDIT_STOP);
             assert_eq!(record.correlation, 42);
@@ -662,7 +665,7 @@ pub(crate) mod tests {
                 (5, 7, 4, reason, detail)
             );
         }
-        assert_eq!(records[8].correlation, 0);
+        assert_eq!(records[faults.len() + 1].correlation, 0);
     }
 
     #[test]

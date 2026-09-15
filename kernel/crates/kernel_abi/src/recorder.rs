@@ -233,11 +233,13 @@ pub struct ManagedAuditStopV1 {
     /// 5 mission, 6 PWM syscall, 7 managed control.
     pub source: u32,
     /// Category 5: 1 UART receive, 2 decoder, 3 RX overflow, 4 peer e-stop,
-    /// 5 Pi inbound timeout, 6 handoff failure, 7 unavailable link.
+    /// 5 Pi inbound timeout, 6 handoff failure, 7 unavailable link, 8 local quiescence.
     pub reason: u32,
     /// Category 5: UART low-four error bits; decoder 1 buffer, 2 length,
     /// 3 CRC, 4 version, 5 identity, 6 type; overflow byte count;
     /// handoff 2001..2009; zero for peer e-stop/timeout/unavailable.
+    /// Quiescence: 1 baud, 2 not idle, 3 invalid state, 4 invalid timeout,
+    /// 5 clock regression, 6 timeout, or 0x100 | UART low-four error bits.
     pub detail: u32,
     pub reserved: [u8; 16],
 }

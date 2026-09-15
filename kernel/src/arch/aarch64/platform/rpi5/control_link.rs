@@ -54,6 +54,9 @@ const TX_PER_POLL: usize = 64;
 /// (100 ms) so one-way Shrike->Pi silence stops Pi heartbeats before the MCU
 /// watchdog deadline. (ns)
 pub(crate) const LINK_TIMEOUT_NS: u64 = 80_000_000; // 80 ms
+/// Local UART reset/quiet attempt bound, separate from the 80 ms handoff.
+#[cfg(feature = "managed-runtime")]
+const LOCAL_DRAIN_TIMEOUT_NS: u64 = 1_000_000_000;
 /// Heartbeat period while the link is alive. (ns)
 const HEARTBEAT_PERIOD_NS: u64 = 20_000_000; // 20 ms (50 Hz)
 
@@ -95,14 +98,20 @@ pub fn motor_side(chip: u8, channel: u8) -> Option<MotorSide> {
     }
 }
 
-/// Monotonic nanoseconds from the ARM generic timer (CNTVCT/CNTFRQ).
-fn now_ns() -> u64 {
+/// One architectural counter sample and its configured frequency.
+fn counter_sample() -> (u64, u64) {
     let (cnt, frq): (u64, u64);
     // SAFETY: reading the virtual counter + its frequency is allowed in EL1.
     unsafe {
         core::arch::asm!("mrs {}, cntvct_el0", out(reg) cnt);
         core::arch::asm!("mrs {}, cntfrq_el0", out(reg) frq);
     }
+    (cnt, frq)
+}
+
+/// Monotonic nanoseconds from the ARM generic timer (CNTVCT/CNTFRQ).
+fn now_ns() -> u64 {
+    let (cnt, frq) = counter_sample();
     if frq == 0 {
         return 0;
     }
@@ -158,6 +167,8 @@ pub struct ControlLink {
     link_loss_reported: bool,
     #[cfg(feature = "managed-runtime")]
     handoff: Handoff,
+    #[cfg(feature = "managed-runtime")]
+    local_quiescence: bool,
 }
 
 impl ControlLink {
@@ -165,6 +176,17 @@ impl ControlLink {
     /// inbound side-effects to run after the lock is dropped. No BPF/estop here.
     fn poll_decode(&mut self, now: u64) -> PollOutcome {
         let mut out = PollOutcome::default();
+        #[cfg(feature = "managed-runtime")]
+        if self.local_quiescence {
+            // Reset-era bytes never reach either decoder or liveness tracker.
+            // Even successful local quiet stays silent until explicit peer/
+            // FPGA requalification and operator rearm complete in the owner.
+            if let Err(error) = self.uart.poll_quiescence(&mut now_ns) {
+                self.link_failed(None, events::LinkFault::Quiescence(error.audit_code()));
+                out.estop = true;
+            }
+            return out;
+        }
         let overflow_before = self.rx_overflows;
 
         // RX: bounded pull from the UART FIFO into the ring, then decode.
@@ -677,7 +699,8 @@ fn init() -> Result<(), InitError> {
             // SAFETY: RP1_UART0 is a mapped RP1 peripheral on the Pi5; single owner.
             let mut uart = unsafe { Pl011::new(RP1_UART0_BASE) };
             uart.init(LINK_BAUD, DEFAULT_UART_CLK_HZ)?;
-            Ok(Mutex::new(ControlLink {
+            #[allow(unused_mut)]
+            let mut link = ControlLink {
                 uart,
                 rx: RingBuf::new(),
                 tx: TxState::new(),
@@ -689,7 +712,24 @@ fn init() -> Result<(), InitError> {
                 link_loss_reported: false,
                 #[cfg(feature = "managed-runtime")]
                 handoff: Handoff::new(),
-            }))
+                #[cfg(feature = "managed-runtime")]
+                local_quiescence: true,
+            };
+            #[cfg(feature = "managed-runtime")]
+            let quantum_ns = match counter_sample().1 {
+                0 => 0,
+                frequency => 1_000_000_000u64.div_ceil(frequency),
+            };
+            #[cfg(feature = "managed-runtime")]
+            if let Err(error) =
+                link.uart
+                    .begin_quiescence(&mut now_ns, LOCAL_DRAIN_TIMEOUT_NS, quantum_ns)
+            {
+                // Retain the failed driver for bounded status/explicit recovery;
+                // do not reinterpret a failed reset as an uninitialized UART.
+                events::link_fault(None, events::LinkFault::Quiescence(error.audit_code()));
+            }
+            Ok(Mutex::new(link))
         })
         .as_ref()
         .map(|_| ())
@@ -700,6 +740,8 @@ fn init() -> Result<(), InitError> {
 /// until the next interrupt (the timer tick), giving ~per-tick service cadence
 /// at low CPU.
 extern "C" fn poller_entry(_arg: *mut core::ffi::c_void) {
+    #[cfg(feature = "managed-runtime")]
+    crate::actuation::trigger_estop(kernel_bpf::actuation::AuditSource::ManagedControl);
     if let Err(error) = init() {
         #[cfg(feature = "managed-runtime")]
         crate::bpf::control::invalidate_sensor();
