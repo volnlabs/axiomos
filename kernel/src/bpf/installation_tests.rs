@@ -446,6 +446,107 @@ fn deactivation_100000_transitions_keep_retained_code_and_zero_instance_floor() 
 }
 
 #[test]
+fn real_boundary_records_discarded_originals_for_handoff_and_failure() {
+    use shrike_link::tx::{MotorOrigin, MotorRequest};
+    use zerocopy::FromBytes;
+    for fail in [false, true] {
+        for partial in [false, true] {
+            let mut manager = BpfManager::new();
+            let mut slot = ControlSlot::new();
+            let a = candidate(&mut manager, 1);
+            let id = stage(&mut slot, &mut manager, None);
+            commit(&mut slot, id);
+            drain(&mut slot, &mut manager);
+            candidate(&mut manager, 2);
+            stage(&mut slot, &mut manager, None);
+            let origin = MotorOrigin {
+                cycle: 11,
+                generation: 1,
+                artifact_handle: a,
+            };
+            let request = MotorRequest {
+                left: 100,
+                right: -200,
+                queued_at: 1,
+                origin: Some(origin),
+            };
+            let mut tx = TxState::new();
+            tx.replace_motor_request(request);
+            tx.start_pending_motor(255).unwrap();
+            if partial {
+                tx.next_byte();
+            }
+            tx.replace_motor_request(MotorRequest {
+                origin: Some(MotorOrigin {
+                    cycle: 12,
+                    ..origin
+                }),
+                ..request
+            });
+            let mut handoff = if fail { Handoff::new() } else { peer_ready() };
+            let mut sequence = 255;
+            let records = super::super::recorder::events::tests::capture_records(|| {
+                assert_eq!(
+                    slot.handoff_boundary(
+                        release(1, 100, 100),
+                        1000,
+                        &mut handoff,
+                        &mut tx,
+                        &mut sequence
+                    )
+                    .is_err(),
+                    fail
+                );
+                let _ = slot.handoff_boundary(
+                    release(2, 110, 110),
+                    1000,
+                    &mut handoff,
+                    &mut tx,
+                    &mut sequence,
+                );
+            });
+            let drops: alloc::vec::Vec<_> = records
+                .iter()
+                .filter(|r| r.kind == MANAGED_AUDIT_LINK)
+                .map(|r| {
+                    (
+                        r.correlation,
+                        ManagedAuditMotorTxV1::read_from_bytes(&r.payload).unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(drops.len(), if partial { 1 } else { 2 });
+            for (i, (generation, p)) in drops.iter().enumerate() {
+                assert_eq!(*generation, 1);
+                assert_eq!(p.artifact_handle, a);
+                assert_eq!(
+                    p.reason,
+                    if fail {
+                        MANAGED_AUDIT_DISCARD_STOP
+                    } else {
+                        MANAGED_AUDIT_DISCARD_HANDOFF
+                    }
+                );
+                assert_eq!(
+                    p.event,
+                    if i == 0 {
+                        MANAGED_AUDIT_MOTOR_PENDING_DISCARDED
+                    } else {
+                        MANAGED_AUDIT_MOTOR_FRAME_DISCARDED
+                    }
+                );
+                assert_eq!(p.cycle_id, if i == 0 { 12 } else { 11 });
+                assert_eq!(p.command_sequence, if i == 0 { 0 } else { 255 });
+            }
+            assert_eq!(tx.pending_motor(), None);
+            assert_eq!(tx.active_motor().is_some(), partial);
+            assert_eq!(slot.snapshot().active, Some(a));
+            assert_eq!(slot.snapshot().generation, 1);
+        }
+    }
+}
+
+#[test]
 fn real_boundary_commits_only_matching_ack_at_next_release_and_keeps_retirement_owned() {
     let mut manager = BpfManager::new();
     let mut slot = ControlSlot::new();

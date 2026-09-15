@@ -305,14 +305,15 @@ attempts emit no additional events.
 | Byte | Field / type | Meaning |
 |---|---|---|
 | 0 | link_kind / u32 | 3, motor transmission |
-| 4 | event / u32 | 1 framed, 2 local UART complete |
+| 4 | event / u32 | 1 framed, 2 local UART complete, 3 pending discarded, 4 unsent frame discarded |
 | 8 | cycle_id / u64 | Originating scheduled release, when origin is present |
 | 16 | queued_at_ns / u64 | Sender CNTVCT-derived queue time in nanoseconds |
 | 24 | artifact_handle / u32 | Originating artifact, when origin is present |
 | 28 | flags / u32 | Bit 0 origin present; bit 1 intermediate reversal zero |
-| 32 | left, right / i16 each | Actual framed pair |
-| 36 | command_sequence / u32 | Wrapping u8 wire sequence widened to u32 |
-| 40 | reserved / 24 bytes | Zero |
+| 32 | left, right / i16 each | Actual pending or framed pair, according to event |
+| 36 | command_sequence / u32 | Wrapping u8 wire sequence; zero and unassigned for pending discard |
+| 40 | reason / u32 | Zero for events 1/2; discard reason for events 3/4 |
+| 44 | reserved / 20 bytes | Zero |
 
 With origin present, envelope correlation is the captured installation generation.
 Without it, correlation, cycle and artifact fields are zero and decoded identity
@@ -321,10 +322,23 @@ the pending request and frame, so a later activation or queued request cannot
 relabel a partial frame. An intermediate reversal frame is `(0,0)` and retains
 its requesting origin; it is distinct from the policy-decided target pair.
 
-The decoder emits `motor_frame_created` and `motor_frame_local_uart_complete`,
-retains sequence/pair/origin/queue time and resolves any retained artifact context.
+Discard reasons are superseded (1), prioritized safe pair (2), expired (3), stop
+or handoff failure (4), handoff entry (5), and inhibited transport (6). Frame
+discard supports reasons 2 through 5; ordinary replacement and inhibited cleanup
+remove only a pending request. Pending discard has no assigned sequence or
+intermediate-zero flag. The existing mutators return at most one removed pending
+request and one removed frame directly; no deferred discard queue is added.
+Empty results emit nothing. Partial frames remain owned and complete normally.
+The shared installation boundary records both successful handoff cleanup and
+failure cleanup with the displaced originals, before any new installation.
+
+The decoder emits `motor_frame_created`, `motor_frame_local_uart_complete`,
+`motor_pending_discarded` and `motor_frame_discarded`. It retains original
+identity, queue time, discard reason and the corresponding pending/framed pair;
+pending discards decode with null command sequence and framed pair.
 It rejects unsupported events/flags, nonzero reserved bytes, out-of-range wire
-sequences, contradictory origin fields and nonzero intermediate pairs. Missing
+sequences, incompatible discard reasons, contradictory origin fields and nonzero
+intermediate pairs. Missing
 retained identity is a semantic gap. `sink_acceptance` remains null: these events
 do not establish MCU receipt, FPGA acceptance or movement. Queue nanoseconds
 must not be compared directly with recording CNTPCT ticks. A wire sequence alone
@@ -399,6 +413,6 @@ reversed clock and invalid release; their details are zero.
 STOP category 1 reason/detail are zero. Category 3 reasons 1 through 8 are timer
 busy, not started, already started, invalid period, reversed clock, exhaustion,
 stopped and managed-control boundary failure. Category 4 reason is 5 (deadline).
-These timer details are zero. Transport discard outcomes, correlated sink
-acknowledgements, dedicated link/reset events and measured acceptance reduction
+These timer details are zero. Correlated sink acknowledgements, dedicated
+link/reset events and measured acceptance reduction
 remain required before the trace can satisfy the release acceptance gate.

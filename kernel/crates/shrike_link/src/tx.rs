@@ -26,6 +26,15 @@ pub struct MotorFrame {
     pub intermediate_zero: bool,
 }
 
+/// Observed removals returned directly by a mutation, never queued or retained.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MotorDiscards {
+    pub pending: Option<MotorRequest>,
+    pub frame: Option<MotorFrame>,
+}
+
+const _: () = assert!(core::mem::size_of::<MotorDiscards>() <= 128);
+
 #[derive(Clone, Copy)]
 struct Frame {
     bytes: [u8; MAX_FRAME],
@@ -45,8 +54,11 @@ pub struct TxState {
 const _: () = assert!(core::mem::size_of::<TxState>() <= 256);
 
 impl TxState {
-    pub fn replace_motor_request(&mut self, request: MotorRequest) {
-        self.pending_motor = Some(request);
+    pub fn replace_motor_request(&mut self, request: MotorRequest) -> MotorDiscards {
+        MotorDiscards {
+            pending: self.pending_motor.replace(request),
+            frame: None,
+        }
     }
     /// Busy/encode failure preserves the exact pending request, including a
     /// reversal target. The sequence is consumed only when Some is returned.
@@ -156,9 +168,14 @@ impl TxState {
         self.next_byte_with_motor_completion().map(|(byte, _)| byte)
     }
 
-    pub fn cancel_unsent(&mut self) {
-        if self.active.is_some_and(|frame| frame.sent == 0) {
-            self.active = None;
+    pub fn cancel_unsent(&mut self) -> MotorDiscards {
+        MotorDiscards {
+            pending: None,
+            frame: if self.active.is_some_and(|frame| frame.sent == 0) {
+                self.active.take().and_then(|frame| frame.motor)
+            } else {
+                None
+            },
         }
     }
 
@@ -184,18 +201,24 @@ impl TxState {
         });
     }
 
-    pub fn prioritize_motor_request(&mut self, request: MotorRequest) {
+    pub fn prioritize_motor_request(&mut self, request: MotorRequest) -> MotorDiscards {
         // A safe motor value cannot cancel a queued e-stop or its release.
-        if self
+        let mut discarded = if self
             .active
             .is_some_and(|frame| frame.motor.is_some() && frame.sent == 0)
         {
-            self.active = None;
-        }
-        self.replace_motor_request(request);
+            self.cancel_unsent()
+        } else {
+            MotorDiscards::default()
+        };
+        discarded.pending = self.pending_motor.replace(request);
+        discarded
     }
-    pub fn clear_motor(&mut self) {
-        self.pending_motor = None;
+    pub fn clear_motor(&mut self) -> MotorDiscards {
+        MotorDiscards {
+            pending: self.pending_motor.take(),
+            frame: None,
+        }
     }
     pub fn take_motor(&mut self) -> Option<(i16, i16, u64)> {
         // Legacy tuple callers cannot accidentally strip a managed origin.
@@ -232,20 +255,22 @@ impl TxState {
 
     /// Drop motor work that has not put a byte on the wire within the sender
     /// bound. A partial frame must finish; bytes may already be in a UART FIFO.
-    pub fn discard_expired_motor(&mut self, now: u64, timeout: u64) {
+    pub fn discard_expired_motor(&mut self, now: u64, timeout: u64) -> MotorDiscards {
+        let mut discarded = MotorDiscards::default();
         if self
             .pending_motor
             .is_some_and(|request| now.saturating_sub(request.queued_at) >= timeout)
         {
-            self.pending_motor = None;
+            discarded.pending = self.pending_motor.take();
         }
         if self.active.is_some_and(|frame| {
             frame.motor.is_some()
                 && frame.sent == 0
                 && now.saturating_sub(frame.queued_at) >= timeout
         }) {
-            self.active = None;
+            discarded.frame = self.cancel_unsent().frame;
         }
+        discarded
     }
 }
 
@@ -259,6 +284,89 @@ impl Default for TxState {
 mod tests {
     use super::*;
     use crate::Decoder;
+
+    #[test]
+    fn discarded_motor_custody_reports_original_owners_once() {
+        let mut tx = TxState::new();
+        let old = MotorRequest {
+            left: 100,
+            right: -200,
+            queued_at: 1,
+            origin: Some(MotorOrigin {
+                cycle: 7,
+                generation: 9,
+                artifact_handle: 0,
+            }),
+        };
+        let new = MotorRequest {
+            queued_at: 2,
+            origin: None,
+            ..old
+        };
+        assert_eq!(tx.replace_motor_request(old), MotorDiscards::default());
+        assert_eq!(
+            tx.replace_motor_request(new),
+            MotorDiscards {
+                pending: Some(old),
+                frame: None
+            }
+        );
+        assert_eq!(tx.pending_motor(), Some(new));
+        assert_eq!(tx.clear_motor().pending, Some(new));
+        assert_eq!(tx.clear_motor(), MotorDiscards::default());
+        let mut bytes = [0; MAX_FRAME];
+        let len = encode(
+            &Msg::MotorSetpoint {
+                seq: 255,
+                left: old.left,
+                right: old.right,
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        for action in 0..3 {
+            for offset in 0..=len {
+                let mut tx = TxState::new();
+                tx.replace_motor_request(old);
+                let frame = tx.start_pending_motor(255).unwrap();
+                for _ in 0..offset {
+                    tx.next_byte();
+                }
+                tx.replace_motor_request(new);
+                let safe = MotorRequest {
+                    left: 0,
+                    right: 0,
+                    queued_at: 100,
+                    ..new
+                };
+                let discarded = match action {
+                    0 => {
+                        let mut dropped = tx.clear_motor();
+                        dropped.frame = tx.cancel_unsent().frame;
+                        dropped
+                    }
+                    1 => tx.prioritize_motor_request(safe),
+                    _ => {
+                        assert_eq!(tx.discard_expired_motor(9, 10), MotorDiscards::default());
+                        tx.discard_expired_motor(12, 10)
+                    }
+                };
+                assert_eq!(discarded.pending, Some(new));
+                assert_eq!(discarded.frame, (offset == 0).then_some(frame));
+                assert_eq!(tx.pending_motor(), (action == 1).then_some(safe));
+                assert_eq!(tx.cancel_unsent(), MotorDiscards::default());
+                assert_eq!(tx.discard_expired_motor(12, 10), MotorDiscards::default());
+                let mut completion = None;
+                while let Some((_, done)) = tx.next_byte_with_motor_completion() {
+                    if done.is_some() {
+                        assert!(completion.is_none());
+                        completion = done;
+                    }
+                }
+                assert_eq!(completion, (offset > 0 && offset < len).then_some(frame));
+            }
+        }
+    }
 
     #[test]
     fn tagged_motor_origin_survives_busy_reversal_and_complete_frame() {

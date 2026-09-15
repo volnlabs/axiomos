@@ -322,37 +322,82 @@ pub(crate) fn lifecycle(public_id: u64, payload: ManagedAuditLifecycleV1) {
     });
 }
 
+fn motor_record(
+    request: shrike_link::tx::MotorRequest,
+    frame: Option<(u8, bool)>,
+    event: u32,
+    reason: u32,
+    ticks: u64,
+) -> Record {
+    let origin = request.origin;
+    let payload = ManagedAuditMotorTxV1 {
+        link_kind: MANAGED_AUDIT_MOTOR_TX,
+        event,
+        cycle_id: origin.map_or(0, |v| v.cycle),
+        queued_at_ns: request.queued_at,
+        artifact_handle: origin.map_or(0, |v| v.artifact_handle),
+        flags: (u32::from(origin.is_some()) * MANAGED_AUDIT_MOTOR_HAS_ORIGIN)
+            | (u32::from(frame.is_some_and(|(_, zero)| zero))
+                * MANAGED_AUDIT_MOTOR_INTERMEDIATE_ZERO),
+        left: request.left,
+        right: request.right,
+        command_sequence: frame.map_or(0, |(sequence, _)| u32::from(sequence)),
+        reason,
+        ..Default::default()
+    };
+    Record {
+        ticks,
+        correlation: origin.map_or(0, |v| v.generation),
+        kind: MANAGED_AUDIT_LINK,
+        payload: payload
+            .as_bytes()
+            .try_into()
+            .expect("64-byte motor TX payload"),
+        ..Record::EMPTY
+    }
+}
+
 /// Only a successfully framed command or its final locally accepted byte.
 pub(crate) fn motor_tx(frame: shrike_link::tx::MotorFrame, completed: bool) {
     observe(|state, ticks| {
-        let origin = frame.request.origin;
-        let payload = ManagedAuditMotorTxV1 {
-            link_kind: MANAGED_AUDIT_MOTOR_TX,
-            event: if completed {
+        let _ = state.window.append(motor_record(
+            frame.request,
+            Some((frame.sequence, frame.intermediate_zero)),
+            if completed {
                 MANAGED_AUDIT_MOTOR_LOCAL_COMPLETE
             } else {
                 MANAGED_AUDIT_MOTOR_FRAMED
             },
-            cycle_id: origin.map_or(0, |v| v.cycle),
-            queued_at_ns: frame.request.queued_at,
-            artifact_handle: origin.map_or(0, |v| v.artifact_handle),
-            flags: (u32::from(origin.is_some()) * MANAGED_AUDIT_MOTOR_HAS_ORIGIN)
-                | (u32::from(frame.intermediate_zero) * MANAGED_AUDIT_MOTOR_INTERMEDIATE_ZERO),
-            left: frame.request.left,
-            right: frame.request.right,
-            command_sequence: u32::from(frame.sequence),
-            ..Default::default()
-        };
-        let _ = state.window.append(Record {
+            0,
             ticks,
-            correlation: origin.map_or(0, |v| v.generation),
-            kind: MANAGED_AUDIT_LINK,
-            payload: payload
-                .as_bytes()
-                .try_into()
-                .expect("64-byte motor TX payload"),
-            ..Record::EMPTY
-        });
+        ));
+    });
+}
+
+/// At most two directly returned removals, with their original identities.
+pub(crate) fn motor_discard(discarded: shrike_link::tx::MotorDiscards, reason: u32) {
+    if discarded.pending.is_none() && discarded.frame.is_none() {
+        return;
+    }
+    observe(|state, ticks| {
+        if let Some(request) = discarded.pending {
+            let _ = state.window.append(motor_record(
+                request,
+                None,
+                MANAGED_AUDIT_MOTOR_PENDING_DISCARDED,
+                reason,
+                ticks,
+            ));
+        }
+        if let Some(frame) = discarded.frame {
+            let _ = state.window.append(motor_record(
+                frame.request,
+                Some((frame.sequence, frame.intermediate_zero)),
+                MANAGED_AUDIT_MOTOR_FRAME_DISCARDED,
+                reason,
+                ticks,
+            ));
+        }
     });
 }
 
@@ -436,6 +481,79 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn motor_discard_records_real_removals_and_suppresses_empty_batches() {
+        use shrike_link::tx::{MotorDiscards, MotorOrigin, MotorRequest, TxState};
+        let request = MotorRequest {
+            left: 200,
+            right: -300,
+            queued_at: 1,
+            origin: Some(MotorOrigin {
+                cycle: 30,
+                generation: 7,
+                artifact_handle: 0,
+            }),
+        };
+        let pending = MotorRequest {
+            queued_at: 2,
+            origin: Some(MotorOrigin {
+                cycle: 31,
+                generation: 9,
+                artifact_handle: 17,
+            }),
+            ..request
+        };
+        for reason in 1..=6 {
+            let mut tx = TxState::new();
+            tx.replace_motor_request(request);
+            tx.start_pending_motor(255).unwrap();
+            tx.replace_motor_request(pending);
+            let discarded = match reason {
+                1 => tx.replace_motor_request(request),
+                2 => tx.prioritize_motor_request(MotorRequest {
+                    left: 0,
+                    right: 0,
+                    ..request
+                }),
+                3 => tx.discard_expired_motor(12, 10),
+                4 | 5 => {
+                    let mut d = tx.clear_motor();
+                    d.frame = tx.cancel_unsent().frame;
+                    d
+                }
+                _ => tx.clear_motor(),
+            };
+            let records = capture_records(|| {
+                motor_discard(discarded, reason);
+                motor_discard(MotorDiscards::default(), reason);
+            });
+            assert_eq!(
+                records.len(),
+                if reason == 1 || reason == 6 { 1 } else { 2 }
+            );
+            let p = ManagedAuditMotorTxV1::read_from_bytes(&records[0].payload).unwrap();
+            assert_eq!(p.event, MANAGED_AUDIT_MOTOR_PENDING_DISCARDED);
+            assert_eq!(p.reason, reason);
+            assert_eq!(
+                (p.cycle_id, p.artifact_handle, records[0].correlation),
+                (31, 17, 9)
+            );
+            assert_eq!(p.command_sequence, 0);
+            assert_eq!(p.flags, MANAGED_AUDIT_MOTOR_HAS_ORIGIN);
+            if records.len() == 2 {
+                let f = ManagedAuditMotorTxV1::read_from_bytes(&records[1].payload).unwrap();
+                assert_eq!(f.event, MANAGED_AUDIT_MOTOR_FRAME_DISCARDED);
+                assert_eq!(
+                    (f.cycle_id, f.artifact_handle, records[1].correlation),
+                    (30, 0, 7)
+                );
+                assert_eq!(f.command_sequence, 255);
+                assert_eq!(f.reason, reason);
+                assert_eq!(records[0].ticks, records[1].ticks);
+            }
+        }
+    }
+
+    #[test]
     fn motor_tx_records_exact_frame_origin_and_only_local_completion() {
         use shrike_link::tx::{MotorOrigin, MotorRequest, TxState};
         let origin = MotorOrigin {
@@ -515,7 +633,8 @@ pub(crate) mod tests {
             );
             assert_eq!(framed.command_sequence, u32::from(frame.sequence));
             assert_eq!(framed.queued_at_ns, u64::MAX - 10);
-            assert_eq!(framed.reserved, [0; 24]);
+            assert_eq!(framed.reason, 0);
+            assert_eq!(framed.reserved, [0; 20]);
         }
         assert!(expected[1].intermediate_zero);
         assert_eq!(

@@ -21,6 +21,12 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use conquer_once::spin::OnceCell;
 #[cfg(feature = "managed-runtime")]
+use kernel_abi::MANAGED_AUDIT_DISCARD_INHIBITED;
+use kernel_abi::{
+    MANAGED_AUDIT_DISCARD_EXPIRED, MANAGED_AUDIT_DISCARD_SAFE_PAIR, MANAGED_AUDIT_DISCARD_STOP,
+    MANAGED_AUDIT_DISCARD_SUPERSEDED,
+};
+#[cfg(feature = "managed-runtime")]
 use shrike_link::handoff::{Handoff, HandoffError};
 use shrike_link::motor::MotorSide;
 use shrike_link::ring::RingBuf;
@@ -31,6 +37,7 @@ use spin::Mutex;
 
 use super::memory_map::RP1_UART0_BASE;
 use super::pl011::{InitError, Pl011, DEFAULT_UART_CLK_HZ};
+use crate::bpf::recorder::events::motor_discard;
 
 /// RX ring capacity.
 const RING_BYTES: usize = 256;
@@ -287,7 +294,8 @@ impl ControlLink {
         // This sender-side age bound is independent of the MCU receive
         // watchdog. A partial frame (and bytes already in the UART FIFO) cannot
         // be retracted, but obsolete work that has sent no byte is discarded.
-        self.tx.discard_expired_motor(now, LINK_TIMEOUT_NS);
+        let discarded = self.tx.discard_expired_motor(now, LINK_TIMEOUT_NS);
+        motor_discard(discarded, MANAGED_AUDIT_DISCARD_EXPIRED);
         self.cancel_unsent_for_stop();
         let estop_queue_empty = self.flush_pending_estop(now);
         if matches!(action, LinkAction::SafeStop) && !self.has_pending_estop_assert() {
@@ -365,7 +373,8 @@ impl ControlLink {
 
     fn queue_estop(&mut self, assert: bool) {
         if assert {
-            self.tx.clear_motor();
+            let discarded = self.tx.clear_motor();
+            motor_discard(discarded, MANAGED_AUDIT_DISCARD_STOP);
             #[cfg(feature = "managed-runtime")]
             self.handoff.disarm();
         }
@@ -384,7 +393,8 @@ impl ControlLink {
 
     fn cancel_unsent_for_stop(&mut self) {
         if self.has_pending_estop_assert() {
-            self.tx.cancel_unsent();
+            let discarded = self.tx.cancel_unsent();
+            motor_discard(discarded, MANAGED_AUDIT_DISCARD_STOP);
         }
     }
 
@@ -426,12 +436,13 @@ impl ControlLink {
         if self.has_pending_estop_assert() && (left != 0 || right != 0) {
             return false;
         }
-        self.tx.replace_motor_request(MotorRequest {
+        let discarded = self.tx.replace_motor_request(MotorRequest {
             left,
             right,
             queued_at: now,
             origin,
         });
+        motor_discard(discarded, MANAGED_AUDIT_DISCARD_SUPERSEDED);
         true
     }
 
@@ -440,19 +451,21 @@ impl ControlLink {
         if !self.handoff.motion_permitted() {
             return false;
         }
-        self.tx.prioritize_motor_request(MotorRequest {
+        let discarded = self.tx.prioritize_motor_request(MotorRequest {
             left: 0,
             right: 0,
             queued_at: now,
             origin,
         });
+        motor_discard(discarded, MANAGED_AUDIT_DISCARD_SAFE_PAIR);
         true
     }
 
     fn flush_pending_motor(&mut self, _now: u64) -> bool {
         #[cfg(feature = "managed-runtime")]
         if !self.handoff.motion_permitted() {
-            self.tx.clear_motor();
+            let discarded = self.tx.clear_motor();
+            motor_discard(discarded, MANAGED_AUDIT_DISCARD_INHIBITED);
             return true;
         }
         if self.tx.pending_motor().is_none() {

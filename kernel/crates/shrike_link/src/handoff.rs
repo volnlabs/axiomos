@@ -1,7 +1,7 @@
 //! Bounded Pi-side session and safe-barrier correlation. The platform owns
 //! drain/requalification and physical I/O; these states never assert motion.
 
-use crate::tx::TxState;
+use crate::tx::{MotorDiscards, TxState};
 use crate::Msg;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,11 +157,11 @@ impl Handoff {
         now: u64,
         timeout: u64,
         tx: &mut TxState,
-    ) -> Result<BarrierIdentity, HandoffError> {
+    ) -> Result<(BarrierIdentity, MotorDiscards), HandoffError> {
         let identity = self.begin(operation, sequence, now, timeout)?;
-        tx.clear_motor();
-        tx.cancel_unsent();
-        Ok(identity)
+        let mut discarded = tx.clear_motor();
+        discarded.frame = tx.cancel_unsent().frame;
+        Ok((identity, discarded))
     }
 
     /// Caller gives trusted stop frames priority before calling this. The
@@ -555,6 +555,7 @@ mod tests {
 
     #[test]
     fn barrier_follows_a_whole_old_frame_at_every_offset_and_discards_unsent_motion() {
+        use crate::tx::{MotorOrigin, MotorRequest};
         let old = Msg::MotorSetpoint {
             seq: 8,
             left: 200,
@@ -567,14 +568,43 @@ mod tests {
             let mut tx = TxState::new();
             let mut wire = [0; crate::MAX_FRAME * 2];
             let mut count = 0;
-            assert!(tx.start(&old, 0));
+            let origin = MotorOrigin {
+                cycle: 100,
+                generation: 7,
+                artifact_handle: 0,
+            };
+            tx.replace_motor_request(MotorRequest {
+                left: 200,
+                right: -300,
+                queued_at: 0,
+                origin: Some(origin),
+            });
+            let frame = tx.start_pending_motor(8).unwrap();
             for _ in 0..split {
                 wire[count] = tx.next_byte().unwrap();
                 count += 1;
             }
-            tx.replace_motor(400, -500, 1);
-            let key = handoff.begin_on_transport(42, 9, 100, 80, &mut tx).unwrap();
-            assert_eq!(tx.take_motor(), None);
+            let pending = MotorRequest {
+                left: 400,
+                right: -500,
+                queued_at: 1,
+                origin: Some(MotorOrigin {
+                    cycle: 101,
+                    ..origin
+                }),
+            };
+            tx.replace_motor_request(pending);
+            let mut disarmed = Handoff::new();
+            assert_eq!(
+                disarmed.begin_on_transport(42, 9, 100, 80, &mut tx),
+                Err(HandoffError::NotEstablished)
+            );
+            assert_eq!(tx.pending_motor(), Some(pending));
+            assert_eq!(tx.active_motor(), (split < length).then_some(frame));
+            let (key, discarded) = handoff.begin_on_transport(42, 9, 100, 80, &mut tx).unwrap();
+            assert_eq!(discarded.pending, Some(pending));
+            assert_eq!(discarded.frame, (split == 0).then_some(frame));
+            assert_eq!(tx.pending_motor(), None);
             assert!(!handoff.motion_permitted());
             for _ in 0..2 {
                 handoff.enqueue(&mut tx, 100).unwrap();

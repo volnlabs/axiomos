@@ -652,16 +652,33 @@ impl DecodeState {
                         let p = ManagedAuditMotorTxV1::read_from_bytes(&r.payload).unwrap();
                         let origin = p.flags & MANAGED_AUDIT_MOTOR_HAS_ORIGIN != 0;
                         let intermediate = p.flags & MANAGED_AUDIT_MOTOR_INTERMEDIATE_ZERO != 0;
+                        let pending = p.event == MANAGED_AUDIT_MOTOR_PENDING_DISCARDED;
+                        let discarded = matches!(
+                            p.event,
+                            MANAGED_AUDIT_MOTOR_PENDING_DISCARDED
+                                | MANAGED_AUDIT_MOTOR_FRAME_DISCARDED
+                        );
                         ensure!(
                             matches!(
                                 p.event,
-                                MANAGED_AUDIT_MOTOR_FRAMED | MANAGED_AUDIT_MOTOR_LOCAL_COMPLETE
+                                MANAGED_AUDIT_MOTOR_FRAMED
+                                    | MANAGED_AUDIT_MOTOR_LOCAL_COMPLETE
+                                    | MANAGED_AUDIT_MOTOR_PENDING_DISCARDED
+                                    | MANAGED_AUDIT_MOTOR_FRAME_DISCARDED
                             ) && p.flags
                                 & !(MANAGED_AUDIT_MOTOR_HAS_ORIGIN
                                     | MANAGED_AUDIT_MOTOR_INTERMEDIATE_ZERO)
                                 == 0
                                 && p.command_sequence <= u8::MAX as u32
-                                && p.reserved == [0; 24]
+                                && p.reserved == [0; 20]
+                                && if discarded {
+                                    (1..=6).contains(&p.reason)
+                                } else {
+                                    p.reason == 0
+                                }
+                                && (!pending || (p.command_sequence == 0 && !intermediate))
+                                && (p.event != MANAGED_AUDIT_MOTOR_FRAME_DISCARDED
+                                    || (2..=5).contains(&p.reason))
                                 && (!intermediate || (p.left, p.right) == (0, 0))
                                 && if origin {
                                     r.correlation != 0
@@ -676,13 +693,15 @@ impl DecodeState {
                             Value::Null
                         };
                         Ok(json!({
-                            "event": if p.event == MANAGED_AUDIT_MOTOR_FRAMED { "motor_frame_created" } else { "motor_frame_local_uart_complete" },
+                            "event": (["motor_frame_created", "motor_frame_local_uart_complete", "motor_pending_discarded", "motor_frame_discarded"][p.event as usize - 1]),
                             "origin_known": origin,
                             "cycle_id": origin.then_some(p.cycle_id),
                             "generation": origin.then_some(r.correlation),
                             "artifact_handle": origin.then_some(p.artifact_handle),
-                            "command_sequence": p.command_sequence,
-                            "framed_pair": [p.left, p.right],
+                            "command_sequence": (!pending).then_some(p.command_sequence),
+                            "framed_pair": (!pending).then_some([p.left, p.right]),
+                            "pending_pair": pending.then_some([p.left, p.right]),
+                            "discard_reason": if discarded { Some(["superseded", "safe_pair", "expired", "stop", "handoff", "inhibited"][p.reason as usize - 1]) } else { None },
                             "intermediate_zero": intermediate,
                             "queued_at_ns": p.queued_at_ns,
                             "queued_clock": "pi_cntvct_ns",
@@ -1089,6 +1108,91 @@ mod tests {
     }
 
     #[test]
+    fn motor_discard_decode_distinguishes_pending_and_framed_custody() {
+        let p = ManagedAuditMotorTxV1 {
+            link_kind: MANAGED_AUDIT_MOTOR_TX,
+            event: MANAGED_AUDIT_MOTOR_PENDING_DISCARDED,
+            reason: MANAGED_AUDIT_DISCARD_SUPERSEDED,
+            cycle_id: 40,
+            artifact_handle: 0,
+            flags: MANAGED_AUDIT_MOTOR_HAS_ORIGIN,
+            left: 200,
+            right: -300,
+            ..Default::default()
+        };
+        let decode_one = |p: ManagedAuditMotorTxV1| {
+            decode(
+                export(&[ManagedAuditRecordV1 {
+                    correlation: 9,
+                    kind: MANAGED_AUDIT_LINK,
+                    payload: p.as_bytes().try_into().unwrap(),
+                    ..Default::default()
+                }])
+                .as_bytes(),
+            )
+        };
+        let reasons = [
+            "superseded",
+            "safe_pair",
+            "expired",
+            "stop",
+            "handoff",
+            "inhibited",
+        ];
+        for reason in 1..=6 {
+            let result = decode_one(ManagedAuditMotorTxV1 { reason, ..p }).unwrap();
+            let d = &result["events"][0]["decoded"];
+            assert_eq!(d["event"], "motor_pending_discarded");
+            assert_eq!(d["discard_reason"], reasons[reason as usize - 1]);
+            assert_eq!(d["pending_pair"], json!([200, -300]));
+            assert!(d["framed_pair"].is_null());
+            assert!(d["command_sequence"].is_null());
+            assert_eq!(d["generation"], 9);
+            assert_eq!(d["cycle_id"], 40);
+            assert_eq!(d["artifact_handle"], 0);
+            assert!(d["sink_acceptance"].is_null());
+            assert_eq!(result["semantic_gaps"].as_array().unwrap().len(), 1);
+        }
+        let frame = ManagedAuditMotorTxV1 {
+            event: MANAGED_AUDIT_MOTOR_FRAME_DISCARDED,
+            command_sequence: 255,
+            reason: 2,
+            ..p
+        };
+        for reason in 2..=5 {
+            let result = decode_one(ManagedAuditMotorTxV1 { reason, ..frame }).unwrap();
+            let d = &result["events"][0]["decoded"];
+            assert_eq!(d["event"], "motor_frame_discarded");
+            assert_eq!(d["discard_reason"], reasons[reason as usize - 1]);
+            assert_eq!(d["framed_pair"], json!([200, -300]));
+            assert!(d["pending_pair"].is_null());
+            assert_eq!(d["command_sequence"], 255);
+        }
+        for bad in [
+            ManagedAuditMotorTxV1 { reason: 0, ..p },
+            ManagedAuditMotorTxV1 { reason: 7, ..p },
+            ManagedAuditMotorTxV1 {
+                command_sequence: 1,
+                ..p
+            },
+            ManagedAuditMotorTxV1 {
+                flags: 3,
+                left: 0,
+                right: 0,
+                ..p
+            },
+            ManagedAuditMotorTxV1 { reason: 1, ..frame },
+            ManagedAuditMotorTxV1 { reason: 6, ..frame },
+            ManagedAuditMotorTxV1 {
+                event: MANAGED_AUDIT_MOTOR_FRAMED,
+                ..frame
+            },
+        ] {
+            assert!(decode_one(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
     fn motor_tx_decode_preserves_origin_and_never_claims_sink_acceptance() {
         let mut records = identity_and_lifecycle();
         let p = ManagedAuditMotorTxV1 {
@@ -1171,7 +1275,7 @@ mod tests {
             },
             ManagedAuditMotorTxV1 { left: 1, ..p },
             ManagedAuditMotorTxV1 {
-                reserved: [1; 24],
+                reserved: [1; 20],
                 ..p
             },
         ] {

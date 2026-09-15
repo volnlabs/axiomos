@@ -878,7 +878,7 @@ impl ControlSlot {
                     self.enter_handoff(pending.id)
                         .map_err(|_| HandoffError::Busy)?;
                     let sequence = motor_sequence.wrapping_add(1);
-                    handoff.begin_on_transport(
+                    let (_, discarded) = handoff.begin_on_transport(
                         pending.id,
                         sequence,
                         release.actual,
@@ -886,6 +886,10 @@ impl ControlSlot {
                         tx,
                     )?;
                     *motor_sequence = sequence;
+                    super::recorder::events::motor_discard(
+                        discarded,
+                        MANAGED_AUDIT_DISCARD_HANDOFF,
+                    );
                 }
             }
             Ok(None)
@@ -897,8 +901,9 @@ impl ControlSlot {
                 self.stop();
             }
             handoff.disarm();
-            tx.clear_motor();
-            tx.cancel_unsent();
+            let mut discarded = tx.clear_motor();
+            discarded.frame = tx.cancel_unsent().frame;
+            super::recorder::events::motor_discard(discarded, MANAGED_AUDIT_DISCARD_STOP);
         }
         result
     }

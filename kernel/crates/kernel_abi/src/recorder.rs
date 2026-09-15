@@ -22,12 +22,21 @@ pub const MANAGED_AUDIT_LINK: u32 = 5;
 pub const MANAGED_AUDIT_MOTOR_TX: u32 = 3;
 pub const MANAGED_AUDIT_MOTOR_FRAMED: u32 = 1;
 pub const MANAGED_AUDIT_MOTOR_LOCAL_COMPLETE: u32 = 2;
+pub const MANAGED_AUDIT_MOTOR_PENDING_DISCARDED: u32 = 3;
+pub const MANAGED_AUDIT_MOTOR_FRAME_DISCARDED: u32 = 4;
 pub const MANAGED_AUDIT_MOTOR_HAS_ORIGIN: u32 = 1;
 pub const MANAGED_AUDIT_MOTOR_INTERMEDIATE_ZERO: u32 = 2;
+pub const MANAGED_AUDIT_DISCARD_SUPERSEDED: u32 = 1;
+pub const MANAGED_AUDIT_DISCARD_SAFE_PAIR: u32 = 2;
+pub const MANAGED_AUDIT_DISCARD_EXPIRED: u32 = 3;
+pub const MANAGED_AUDIT_DISCARD_STOP: u32 = 4;
+pub const MANAGED_AUDIT_DISCARD_HANDOFF: u32 = 5;
+pub const MANAGED_AUDIT_DISCARD_INHIBITED: u32 = 6;
 
 /// LINK subtype 3. Correlation is the originating installation generation only
-/// with HAS_ORIGIN. The pair is the actual framed command, including reversal
-/// zero crossings. Local completion is UART acceptance, never sink acceptance.
+/// with HAS_ORIGIN. Event distinguishes the pending pair from the actual framed
+/// command, including reversal zeros. Local completion is UART acceptance,
+/// never sink acceptance. Discard reports only work removed by the sender.
 #[repr(C)]
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable,
@@ -43,8 +52,11 @@ pub struct ManagedAuditMotorTxV1 {
     pub left: i16,
     pub right: i16,
     /// Wrapping u8 wire sequence, widened for the fixed payload layout.
+    /// Pending discard has no assigned sequence and stores zero.
     pub command_sequence: u32,
-    pub reserved: [u8; 24],
+    /// Zero for framing/completion; a MANAGED_AUDIT_DISCARD_* reason otherwise.
+    pub reason: u32,
+    pub reserved: [u8; 20],
 }
 
 const _: () = assert!(core::mem::size_of::<ManagedAuditMotorTxV1>() == 64);
