@@ -6,6 +6,14 @@ Status: in progress. Baseline: `05e2b25763546bcf4b6031b4767ac7be125dd31b`
 
 ## Current gate status
 
+On 2026-09-15 the operator moved hardware testing to the final v0.5 phase.
+Complete the remaining software prerequisites and M2–M6 implementation with
+host/model tests first. The open physical checks below remain mandatory before
+hardware actuation and release; they no longer block runtime software work.
+Earlier dated records retain the original hardware-first order as history.
+The [canonical runtime plan](https://github.com/volnlabs/axiomos/blob/feat/v0.5-runtime/docs/plans/active/v0.5-bounded-runtime-evolution.md)
+owns the revised sequencing and unchanged acceptance requirements.
+
 The software continuation starts from `e0da976` (including CI fix `135e53b`).
 The dated execution records below preserve earlier failures; use this table
 and the final timing-closure record for the current status.
