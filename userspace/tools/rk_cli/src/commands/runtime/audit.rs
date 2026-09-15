@@ -1,4 +1,5 @@
 //! Bounded audit transport and envelope export. Payload interpretation is separate.
+pub(super) mod decode;
 use std::io::{Read, Write};
 use std::mem::size_of;
 

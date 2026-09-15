@@ -23,6 +23,31 @@ fn path(path: &Path) -> &str {
     path.to_str().expect("temporary path is UTF-8")
 }
 
+#[test]
+fn audit_decode_is_offline_and_does_not_overwrite_or_publish_invalid_output() {
+    let temp = TempDir::new().unwrap();
+    let input = temp.path().join("raw.jsonl");
+    let output = temp.path().join("decoded.json");
+    let header = serde_json::json!({"type":"header","format":"axiomos-managed-audit","version":1,
+        "clock_frequency":1000,"session":0,"session_established":false,"persistent_boot_identity":false,
+        "oldest":0,"end":0,"overwritten":0,"dropped":0,"suppressed":0,"flags":1,"capacity":2048,
+        "record_bytes":96,"latest_stop":null,"payloads_decoded":false,"slot_generation":0,"slot_last_id":0,"artifacts":[]});
+    let end = serde_json::json!({"type":"end","cursor":0,"records":0,"gaps":0});
+    fs::write(&input, format!("{header}\n{end}\n")).unwrap();
+    let args = ["audit-decode", path(&input), "--output", path(&output)];
+    let result = rk(&args, temp.path());
+    assert!(result.status.success(), "{}", text(&result.stderr));
+    let original = fs::read(&output).unwrap();
+    let decoded: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    assert_eq!(decoded["qualification_evaluated"], false);
+    assert!(!rk(&args, temp.path()).status.success());
+    assert_eq!(fs::read(&output).unwrap(), original);
+    fs::remove_file(&output).unwrap();
+    fs::write(&input, format!("{header}\n")).unwrap();
+    assert!(!rk(&args, temp.path()).status.success());
+    assert!(!output.exists());
+}
+
 fn bpf_elf() -> Vec<u8> {
     let mut elf = vec![0u8; 64];
     elf[..4].copy_from_slice(b"\x7fELF");

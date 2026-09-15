@@ -1,13 +1,13 @@
 //! One bounded request at a time over the Pi debug UART.
 
 mod audit;
-
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
+pub use audit::decode::run as decode_audit;
 use clap::Subcommand;
 use kernel_abi::*;
 use ring::rand::{SecureRandom, SystemRandom};

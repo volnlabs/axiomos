@@ -161,6 +161,47 @@ clock value is never presented as a persistent boot identity. Payload bytes are
 exported losslessly as `payload_hex`, with `payloads_decoded: false`; this envelope
 export is not yet the semantic acceptance decoder or a qualified runtime trace.
 
+#### Offline inspection
+
+Decode a saved export without opening a serial device:
+
+```sh
+rk audit-decode audit.jsonl --output audit.decoded.json
+```
+
+The input is the current canonical compact JSONL produced by `audit-export`,
+including its retained-artifact header and final end marker. The decoder caps
+input at 8 MiB, each line at 16 KiB, and line count at twice the recorder capacity
+plus header/end. The retained interval still permits at most 2,048 records.
+Unknown fields/versions, duplicate JSON keys, noncanonical lines, inconsistent
+counters, malformed payloads, reversed timestamps, reordered sequences and an
+absent/inconsistent end marker reject before creating output. Existing output
+files are never overwritten. Source exports remain unchanged.
+
+The decoded JSON retains the source header and raw records, adds named events,
+requested/decided pairs and distinct local queue outcomes, and resolves full
+identities from current retained context or complete historical fragment groups.
+No-request invocations with a known successful return expose the effective zero
+request; unknown discarded requests remain unknown. Lifecycle events join public
+and internal IDs through recorded acceptance. Conflicting immutable identities,
+fragment ordering, generations, operation mappings and impossible retained
+handoff/commit order reject. Missing retained context or prerequisites lost in an
+explicit overwrite gap are listed in `semantic_gaps`; missing information is not
+filled from another handle or inferred as sink acceptance.
+
+The latest-stop summary is decoded separately, including when its record has
+been overwritten or sequence exhaustion prevented recording it. Transport gaps
+and original loss counters remain visible alongside semantic gaps. Decoding
+uses bounded transient host storage; it adds no kernel registry or history store.
+
+Decoded output sets `payloads_decoded: true`, `qualification_evaluated: false`
+and `signature_reverified: false`. It checks recorded manifest shapes and full
+signer fingerprints; signature bytes are absent from these records, so it does
+not independently authenticate the original bundle. Retain the signed bundles
+and provenance required by the qualification plan. This is an inspectable
+interpretation of the retained kernel observations, not timing admission,
+observed movement, a complete run history or a release-acceptance verdict.
+
 ### Current record payloads
 
 All fields below are little-endian on the shipped Pi5/x86 platforms. The envelope
@@ -248,8 +289,8 @@ target artifact was unloaded (a newly activated target remains active).
 
 These records describe software lifecycle boundaries. The existing transport
 receipt guards publication, but detailed sink command/acknowledgement records,
-physical output observation, session qualification and semantic acceptance
-decoding are still required.
+physical output observation, session qualification and acceptance reduction
+are still required. Offline decoding covers the current producer schemas.
 
 LINK subtype 1 has its u32 subtype at byte 0 and the physical counter frequency
 at byte 8 (u64); other payload bytes are zero. LINK subtype 2 stores a local

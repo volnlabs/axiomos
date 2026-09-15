@@ -34,6 +34,13 @@ enum Commands {
     /// Sign normalized raw BPF instructions as a managed controller bundle
     Bundle(commands::bundle::BundleArgs),
 
+    /// Decode a saved bounded audit export without opening a serial device
+    AuditDecode {
+        input: std::path::PathBuf,
+        #[arg(long)]
+        output: std::path::PathBuf,
+    },
+
     /// Upload and administer managed controllers over the physical debug UART
     Runtime {
         /// Linux serial character device, for example /dev/ttyACM0
@@ -188,6 +195,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Bundle(args) => commands::bundle::run(args),
+        Commands::AuditDecode { input, output } => commands::runtime::decode_audit(&input, &output),
         Commands::Runtime { port, command } => commands::runtime::run(&port, command),
         Commands::Key(key_cmd) => match key_cmd {
             KeyCommands::Generate { output } => commands::key::generate(&output),
