@@ -552,14 +552,40 @@ impl DecodeState {
             }
             MANAGED_AUDIT_STOP => {
                 let p = ManagedAuditStopV1::read_from_bytes(&r.payload).unwrap();
+                let mut public_operation = None;
                 ensure!(
                     p.reserved == [0; 16]
-                        && p.flags & !3 == 0
+                        && p.flags & !7 == 0
+                        && (p.category == 5 || p.flags & 4 == 0)
                         && p.source <= 7
                         && (p.flags & 2 != 0 || p.artifact_handle == 0),
                     "invalid stop payload"
                 );
                 let event = match p.category {
+                    5 => {
+                        ensure!(
+                            p.source == 7
+                                && p.flags & !4 == 0
+                                && (p.flags & 4 != 0) == (r.correlation != 0)
+                                && p.cycle_id == 0
+                                && p.observed_ticks == 0
+                                && p.deadline_ticks == 0,
+                            "invalid link fault stop fields"
+                        );
+                        link_fault(p.reason, p.detail)?;
+                        if p.flags & 4 != 0 {
+                            if let Some(trace) = self.lifecycles.get_mut(&r.correlation) {
+                                public_operation = Some(trace.public);
+                                trace.seen |= 1 << 14;
+                            } else {
+                                self.gap(
+                                    r.sequence,
+                                    "link fault operation mapping is outside the retained context",
+                                );
+                            }
+                        }
+                        "link_fault_stop_requested"
+                    }
                     1 | 3 => {
                         ensure!(
                             p.flags == 0
@@ -608,6 +634,7 @@ impl DecodeState {
                     Value::Null
                 };
                 let fault = match p.category {
+                    5 => Some(link_fault(p.reason, p.detail)?),
                     2 | 4 => Some(failure(p.reason, p.detail)?),
                     3 => Some(
                         [
@@ -626,7 +653,8 @@ impl DecodeState {
                 };
                 Ok(
                     json!({"event":event,"source":source(p.source),"source_code":p.source,"reason":p.reason,"failure":fault,"detail":p.detail,"cycle_id":(p.flags&1!=0).then_some(p.cycle_id),
-                    "generation":(p.flags&1!=0).then_some(r.correlation),"observed_ticks":p.observed_ticks,"deadline_ticks":p.deadline_ticks,"identity":identity}),
+                    "generation":(p.flags&1!=0).then_some(r.correlation),"observed_ticks":p.observed_ticks,"deadline_ticks":p.deadline_ticks,"identity":identity,
+                    "instance_id":(p.flags&4!=0).then_some(r.correlation),"public_operation_id":public_operation,"physical_output_observed":false}),
                 )
             }
             MANAGED_AUDIT_LINK => {
@@ -1140,6 +1168,29 @@ fn manifest_identity(bytes: &[u8; 224], outcome: &ManagedAuditUploadV1) -> Resul
     Ok(identity)
 }
 
+fn link_fault(reason: u32, detail: u32) -> Result<&'static str> {
+    ensure!(
+        match reason {
+            1 => (1..=15).contains(&detail),
+            2 => (1..=6).contains(&detail),
+            3 => (1..=64).contains(&detail),
+            4 | 5 | 7 => detail == 0,
+            6 => (2001..=2009).contains(&detail),
+            _ => false,
+        },
+        "invalid link fault reason/detail"
+    );
+    Ok([
+        "uart_receive",
+        "decoder",
+        "rx_overflow",
+        "peer_estop",
+        "pi_inbound_timeout",
+        "handoff",
+        "link_unavailable",
+    ][reason as usize - 1])
+}
+
 #[cfg(test)]
 mod tests {
     use zerocopy::IntoBytes;
@@ -1639,6 +1690,105 @@ mod tests {
         let decoded = decode(raw.as_bytes()).unwrap();
         assert!(!decoded["semantic_gaps"].as_array().unwrap().is_empty());
         assert_eq!(decoded["qualification_evaluated"], false);
+    }
+
+    #[test]
+    fn offline_link_faults_keep_operation_distinct_from_generation() {
+        for (reason, detail, name) in [
+            (1, 15, "uart_receive"),
+            (2, 3, "decoder"),
+            (3, 2, "rx_overflow"),
+            (4, 0, "peer_estop"),
+            (5, 0, "pi_inbound_timeout"),
+            (6, 2007, "handoff"),
+            (7, 0, "link_unavailable"),
+        ] {
+            let p = ManagedAuditStopV1 {
+                category: 5,
+                source: 7,
+                reason,
+                detail,
+                flags: 4,
+                ..Default::default()
+            };
+            let mut records = identity_and_lifecycle();
+            // The fixture's installation uses internal ID 7, public ID 42.
+            let r = ManagedAuditRecordV1 {
+                ticks: 50,
+                kind: MANAGED_AUDIT_STOP,
+                correlation: 7,
+                payload: p.as_bytes().try_into().unwrap(),
+                ..Default::default()
+            };
+            records.push(r);
+            let decoded = decode(export(&records).as_bytes()).unwrap();
+            let last = decoded["events"].as_array().unwrap().last().unwrap();
+            assert_eq!(last["decoded"]["event"], "link_fault_stop_requested");
+            assert_eq!(last["decoded"]["failure"], name);
+            assert_eq!(last["decoded"]["instance_id"], 7);
+            assert_eq!(last["decoded"]["public_operation_id"], 42);
+            assert!(last["decoded"]["generation"].is_null());
+            assert_eq!(last["decoded"]["physical_output_observed"], false);
+            let mut lines: Vec<Value> = export(&records)
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            lines[0]["flags"] = json!(
+                MANAGED_AUDIT_CLOCK_READY | MANAGED_AUDIT_HAS_STOP | MANAGED_AUDIT_STOP_RECORDED
+            );
+            lines[0]["latest_stop"] = record_json(&ManagedAuditRecordV1 {
+                sequence: records.len() as u64 - 1,
+                ..r
+            });
+            let text: String = lines
+                .into_iter()
+                .map(|line| line.to_string() + "\n")
+                .collect();
+            let decoded = decode(text.as_bytes()).unwrap();
+            assert_eq!(decoded["latest_stop_decoded"]["failure"], name);
+            assert_eq!(decoded["latest_stop_decoded"]["instance_id"], 7);
+            for (offset, value) in [(28, 1u32), (32, 0), (36, 2), (48, 1)] {
+                let mut bad = records.clone();
+                bad.last_mut().unwrap().payload[offset..offset + 4]
+                    .copy_from_slice(&value.to_le_bytes());
+                assert!(decode(export(&bad).as_bytes()).is_err());
+            }
+            let mut bad = records.clone();
+            bad.last_mut().unwrap().payload[44..48].copy_from_slice(&u32::MAX.to_le_bytes());
+            assert!(decode(export(&bad).as_bytes()).is_err());
+        }
+        let mut records = handoff_trace();
+        let ack = records
+            .iter()
+            .position(|r| {
+                r.kind == MANAGED_AUDIT_LINK
+                    && u32::from_le_bytes(r.payload[4..8].try_into().unwrap()) == 4
+            })
+            .unwrap();
+        let p = ManagedAuditStopV1 {
+            category: 5,
+            source: 7,
+            reason: 1,
+            detail: 8,
+            flags: 4,
+            ..Default::default()
+        };
+        let fault = ManagedAuditRecordV1 {
+            kind: MANAGED_AUDIT_STOP,
+            correlation: 7,
+            payload: p.as_bytes().try_into().unwrap(),
+            ..Default::default()
+        };
+        records.insert(ack, fault);
+        // A matched ack cannot revive eligibility invalidated by a link fault.
+        assert!(decode(export(&records).as_bytes()).is_err());
+        records.truncate(ack + 1);
+        assert!(decode(export(&records).as_bytes()).is_ok());
+        let mut uncorrelated = fault;
+        uncorrelated.correlation = 0;
+        uncorrelated.payload[28..32].copy_from_slice(&0u32.to_le_bytes());
+        let decoded = decode(export(&[uncorrelated]).as_bytes()).unwrap();
+        assert!(decoded["events"][0]["decoded"]["instance_id"].is_null());
     }
 
     #[test]

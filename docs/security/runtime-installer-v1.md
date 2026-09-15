@@ -434,8 +434,38 @@ observed_ticks (u64, 8), deadline_ticks (u64, 16), artifact_handle (u32, 24),
 flags (u32, 28), category (u32, 32), source (u32, 36), reason (u32, 40),
 detail (u32, 44) and 16 reserved-zero bytes. Flags 1 and 2 indicate cycle and
 artifact validity. Categories are 1 trusted e-stop assertion, 2 cycle fault,
-3 timer fault and 4 final timer completion miss. Only category 4 sets
+3 timer fault, 4 final timer completion miss and 5 link fault requesting stop. Only category 4 sets
 observed_ticks; recording ticks always come from the append point.
+
+Category 5 uses source 7 and flag 4 only when the envelope correlation identifies
+the pending internal installation operation captured before disarm. It is never
+an installation generation; the decoder joins the public operation ID when its
+acceptance is retained and reports a context gap otherwise. Cycle, artifact,
+deadline and observed-timestamp fields remain zero. Reasons/details are:
+
+| Reason | Observation | Detail |
+| --- | --- | --- |
+| 1 | Pi UART receive error | Low four framing/parity/break/overrun bits, 1..15 |
+| 2 | Decoder rejection | 1 buffer, 2 length, 3 CRC, 4 version, 5 identity, 6 type |
+| 3 | Pi RX ring overflow | Dropped bytes in this bounded pull, 1..64 |
+| 4 | Peer sensor reports e-stop | Zero |
+| 5 | Pi inbound liveness timeout | Zero |
+| 6 | Failed handoff eligibility | Existing 2001..2009 handoff error |
+| 7 | Pi link unavailable | Zero |
+
+The Pi records these causes before clearing handoff eligibility. Receive errors
+and overflow clear the software RX ring and decoder before buffered replies are
+processed. These observations request the trusted stop path; they prove neither
+remote zero output, MCU watchdog/reset detection nor a completed hardware drain.
+An unavailable managed link also requests a stop instead of only invalidating
+the sensor. The offline decoder rejects later successful handoff progress for a
+correlated operation invalidated by a retained fault.
+
+Repeated generic managed assertions preserve the specific link cause and use
+the recorder's existing suppression counter. A different explicit stop cause
+or actual controller execution clears that attribution. One bounded scalar
+tuple retains the cause; the 192 KiB window and 256-byte metadata ceiling are
+unchanged. The latest-stop summary retains the fault outside the rolling window.
 
 Sources are 0 unspecified, 1 operator, 2 watchdog, 3 GPIO hook, 4 learned behavior,
 5 mission, 6 PWM syscall and 7 managed control. Trusted assertion records prove

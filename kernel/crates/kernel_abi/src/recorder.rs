@@ -182,6 +182,8 @@ pub const MANAGED_AUDIT_CYCLE_HAS_REQUEST: u32 = 8;
 pub const MANAGED_AUDIT_CYCLE_REQUEST_KNOWN: u32 = 16;
 pub const MANAGED_AUDIT_STOP_HAS_CYCLE: u32 = 1;
 pub const MANAGED_AUDIT_STOP_HAS_ARTIFACT: u32 = 2;
+/// STOP category 5 only: envelope correlation is a pending internal instance ID.
+pub const MANAGED_AUDIT_STOP_HAS_OPERATION: u32 = 4;
 
 /// CYCLE payload on the shipped little-endian platforms. Envelope correlation
 /// is the installation generation. Envelope ticks mark recording, not observed
@@ -212,8 +214,8 @@ pub struct ManagedAuditCycleV1 {
     pub failure_detail: u32,
 }
 
-/// STOP payload. Missing cycle/artifact flags mean global attribution only;
-/// consumers must never infer an installation identity from zero-valued fields.
+/// STOP payload. Flags explicitly distinguish cycle/artifact attribution from
+/// a pending internal operation. Never infer identity from zero-valued fields.
 #[repr(C)]
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable,
@@ -225,12 +227,17 @@ pub struct ManagedAuditStopV1 {
     pub artifact_handle: u32,
     pub flags: u32,
     /// 1 trusted e-stop assertion, 2 controller-cycle fault, 3 timer fault,
-    /// 4 final timer completion miss.
+    /// 4 final timer completion miss, 5 link fault requesting stop.
     pub category: u32,
     /// 0 unspecified, 1 operator, 2 watchdog, 3 GPIO hook, 4 learned behavior,
     /// 5 mission, 6 PWM syscall, 7 managed control.
     pub source: u32,
+    /// Category 5: 1 UART receive, 2 decoder, 3 RX overflow, 4 peer e-stop,
+    /// 5 Pi inbound timeout, 6 handoff failure, 7 unavailable link.
     pub reason: u32,
+    /// Category 5: UART low-four error bits; decoder 1 buffer, 2 length,
+    /// 3 CRC, 4 version, 5 identity, 6 type; overflow byte count;
+    /// handoff 2001..2009; zero for peer e-stop/timeout/unavailable.
     pub detail: u32,
     pub reserved: [u8; 16],
 }

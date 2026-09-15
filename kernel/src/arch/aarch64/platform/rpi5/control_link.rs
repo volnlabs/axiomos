@@ -178,7 +178,7 @@ impl ControlLink {
                     got += 1;
                 }
                 Ok(None) => break,
-                Err(_) => {
+                Err(_error) => {
                     // A lost/corrupt byte breaks framing and link eligibility.
                     // Discard even earlier bytes from this pull before decode;
                     // no buffered reply may authorize a handoff after the fault.
@@ -187,7 +187,10 @@ impl ControlLink {
                     out.link_loss = true;
                     out.estop = true;
                     #[cfg(feature = "managed-runtime")]
-                    self.handoff_failed(self.handoff.operation(), HandoffError::NotEstablished);
+                    self.link_failed(
+                        self.handoff.operation(),
+                        events::LinkFault::Receive(_error.0),
+                    );
                     #[cfg(not(feature = "managed-runtime"))]
                     self.queue_estop(true);
                     break;
@@ -195,13 +198,22 @@ impl ControlLink {
             }
         }
         out.overflow_count = self.rx_overflows.wrapping_sub(overflow_before) as usize;
+        #[cfg(feature = "managed-runtime")]
+        if out.overflow_count != 0 {
+            // A dropped byte invalidates the entire buffered framing context.
+            // Do not decode a previously buffered acknowledgement first.
+            self.rx = RingBuf::new();
+            self.dec = Decoder::new();
+            self.link_failed(
+                self.handoff.operation(),
+                events::LinkFault::Overflow(out.overflow_count as u32),
+            );
+        }
         while let Some(b) = self.rx.pop() {
             let decoded = self.dec.push(b);
             #[cfg(feature = "managed-runtime")]
-            if matches!(decoded, Some(Err(_))) {
-                crate::bpf::control::invalidate_sensor();
-                crate::bpf::installation::request_stop();
-                self.queue_estop(true);
+            if let Some(Err(error)) = decoded {
+                self.link_failed(self.handoff.operation(), events::LinkFault::Decode(error));
                 out.estop = true;
             }
             if let Some(Ok(msg)) = decoded {
@@ -244,6 +256,10 @@ impl ControlLink {
                         out.sensor_count += 1;
                     }
                     out.estop |= estop_line;
+                    #[cfg(feature = "managed-runtime")]
+                    if estop_line {
+                        self.link_failed(self.handoff.operation(), events::LinkFault::PeerEstop);
+                    }
                 }
                 if let Msg::HeartbeatToPi { seq } = msg {
                     if out.heartbeat_count == RX_PER_POLL {
@@ -267,12 +283,8 @@ impl ControlLink {
                     self.link_loss_reported = true;
                 }
                 #[cfg(feature = "managed-runtime")]
-                if let Some(operation) = self.handoff.operation() {
-                    crate::bpf::installation::request_handoff_failure(
-                        operation,
-                        HandoffError::NotEstablished,
-                    );
-                }
+                self.link_failed(self.handoff.operation(), events::LinkFault::InboundTimeout);
+                #[cfg(not(feature = "managed-runtime"))]
                 self.queue_estop(true);
                 None
             }
@@ -387,6 +399,17 @@ impl ControlLink {
 
     #[cfg(feature = "managed-runtime")]
     fn handoff_failed(&mut self, operation: Option<u64>, error: HandoffError) {
+        self.link_failed(operation, events::LinkFault::Handoff(error));
+    }
+
+    #[cfg(feature = "managed-runtime")]
+    fn link_failed(&mut self, operation: Option<u64>, fault: events::LinkFault) {
+        events::link_fault(operation, fault);
+        crate::bpf::control::invalidate_sensor();
+        let error = match fault {
+            events::LinkFault::Handoff(error) => error,
+            _ => HandoffError::NotEstablished,
+        };
         if let Some(id) = operation {
             crate::bpf::installation::request_handoff_failure(id, error);
         } else {
@@ -539,7 +562,12 @@ pub fn service() {
     let now = now_ns();
     let Some(out) = with_link(|l| l.poll_decode(now)) else {
         #[cfg(feature = "managed-runtime")]
-        crate::bpf::control::invalidate_sensor();
+        {
+            events::link_fault(None, events::LinkFault::Unavailable);
+            crate::bpf::control::invalidate_sensor();
+            crate::bpf::installation::request_stop();
+            crate::actuation::trigger_estop(kernel_bpf::actuation::AuditSource::ManagedControl);
+        }
         #[cfg(not(feature = "managed-runtime"))]
         if !LINK_UNINITIALIZED_REPORTED.swap(true, Ordering::AcqRel) {
             #[cfg(feature = "trace-control-link")]

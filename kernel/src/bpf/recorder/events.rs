@@ -80,6 +80,7 @@ impl State {
             return;
         }
         if !report.safe_mode {
+            self.link_stop = None;
             self.window.leave_stopped_state();
         }
         let (failure, failure_detail) = failure_code(report.failure);
@@ -131,6 +132,12 @@ impl State {
     }
 
     fn trusted_stop(&mut self, source: AuditSource, ticks: u64) {
+        if source == AuditSource::ManagedControl {
+            if let Some((operation, reason, detail)) = self.link_stop {
+                self.link_fault(operation, reason, detail, ticks);
+                return;
+            }
+        }
         self.stop(
             ManagedAuditStopV1 {
                 category: 1,
@@ -174,14 +181,31 @@ impl State {
         );
     }
 
-    fn stop(&mut self, payload: ManagedAuditStopV1, generation: u64, ticks: u64) {
+    fn stop(&mut self, payload: ManagedAuditStopV1, correlation: u64, ticks: u64) {
+        self.link_stop =
+            (payload.category == 5).then_some((correlation, payload.reason, payload.detail));
         let _ = self.window.append(Record {
             ticks,
-            correlation: generation,
+            correlation,
             kind: MANAGED_AUDIT_STOP,
             payload: payload.as_bytes().try_into().expect("64-byte stop payload"),
             ..Record::EMPTY
         });
+    }
+
+    fn link_fault(&mut self, operation: u64, reason: u32, detail: u32, ticks: u64) {
+        self.stop(
+            ManagedAuditStopV1 {
+                category: 5,
+                source: source_code(AuditSource::ManagedControl),
+                flags: u32::from(operation != 0) * MANAGED_AUDIT_STOP_HAS_OPERATION,
+                reason,
+                detail,
+                ..Default::default()
+            },
+            operation,
+            ticks,
+        );
     }
 
     fn released(&mut self, source: AuditSource, ticks: u64) {
@@ -405,6 +429,41 @@ pub(crate) fn trusted_stop(source: AuditSource) {
     observe(|state, ticks| state.trusted_stop(source, ticks));
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinkFault {
+    Receive(u8),
+    Decode(shrike_link::LinkError),
+    Overflow(u32),
+    PeerEstop,
+    InboundTimeout,
+    Handoff(shrike_link::handoff::HandoffError),
+    Unavailable,
+}
+
+pub(crate) fn link_fault(operation: Option<u64>, fault: LinkFault) {
+    use shrike_link::LinkError;
+    let (reason, detail) = match fault {
+        LinkFault::Receive(bits) => (1, u32::from(bits)),
+        LinkFault::Decode(error) => (
+            2,
+            match error {
+                LinkError::BufTooSmall => 1,
+                LinkError::BadLen => 2,
+                LinkError::BadCrc => 3,
+                LinkError::BadVersion => 4,
+                LinkError::BadIdentity => 5,
+                LinkError::UnknownType => 6,
+            },
+        ),
+        LinkFault::Overflow(count) => (3, count),
+        LinkFault::PeerEstop => (4, 0),
+        LinkFault::InboundTimeout => (5, 0),
+        LinkFault::Handoff(error) => (6, failure_code(Some(CycleFailure::Handoff(error))).0),
+        LinkFault::Unavailable => (7, 0),
+    };
+    observe(|state, ticks| state.link_fault(operation.unwrap_or(0), reason, detail, ticks));
+}
+
 pub(crate) fn handoff(
     event: u32,
     operation: Option<u64>,
@@ -556,6 +615,54 @@ pub(crate) mod tests {
             records.extend_from_slice(&batch.records[..batch.count]);
         }
         records
+    }
+
+    #[test]
+    fn link_fault_preserves_cause_through_generic_stop_and_suppresses_repetition() {
+        use shrike_link::handoff::HandoffError;
+        use shrike_link::LinkError;
+        let faults = [
+            (LinkFault::Receive(15), 1, 15),
+            (LinkFault::Decode(LinkError::BadCrc), 2, 3),
+            (LinkFault::Overflow(2), 3, 2),
+            (LinkFault::PeerEstop, 4, 0),
+            (LinkFault::InboundTimeout, 5, 0),
+            (LinkFault::Handoff(HandoffError::TimedOut), 6, 2007),
+            (LinkFault::Unavailable, 7, 0),
+        ];
+        let records = capture_records(|| {
+            for (fault, _, _) in faults {
+                link_fault(Some(42), fault);
+                trusted_stop(AuditSource::ManagedControl);
+                link_fault(Some(42), fault);
+            }
+            CAPTURE.with(|capture| {
+                let state = capture.borrow();
+                let status = state.as_ref().unwrap().window.status();
+                assert_eq!(status.suppressed, 14);
+                let latest = status.latest_stop.unwrap().0;
+                assert_eq!(latest.correlation, 42);
+                assert_eq!(
+                    u32::from_le_bytes(latest.payload[40..44].try_into().unwrap()),
+                    7
+                );
+            });
+            // A different explicit cause must remain visible.
+            trusted_stop(AuditSource::Operator);
+            trusted_stop(AuditSource::ManagedControl);
+        });
+        assert_eq!(records.len(), 9);
+        for (record, (_, reason, detail)) in records.iter().zip(faults) {
+            assert_eq!(record.kind, MANAGED_AUDIT_STOP);
+            assert_eq!(record.correlation, 42);
+            let p = <ManagedAuditStopV1 as zerocopy::FromBytes>::read_from_bytes(&record.payload)
+                .unwrap();
+            assert_eq!(
+                (p.category, p.source, p.flags, p.reason, p.detail),
+                (5, 7, 4, reason, detail)
+            );
+        }
+        assert_eq!(records[8].correlation, 0);
     }
 
     #[test]
@@ -977,6 +1084,25 @@ pub(crate) mod tests {
         assert_eq!(
             payload.flags,
             MANAGED_AUDIT_STOP_HAS_CYCLE | MANAGED_AUDIT_STOP_HAS_ARTIFACT
+        );
+        state.link_fault(7, 1, 8, 22);
+        state.record_cycle(
+            release,
+            CycleReport {
+                failure: None,
+                submission: None,
+                requested: None,
+                ..report
+            },
+            23,
+        );
+        state.trusted_stop(AuditSource::ManagedControl, 24);
+        let latest = state.window.status().latest_stop.unwrap().0;
+        let p = ManagedAuditStopV1::read_from_bytes(&latest.payload).unwrap();
+        // An old link cause cannot be attributed to a later execution's stop.
+        assert_eq!(
+            (p.category, p.reason, p.flags, latest.correlation),
+            (1, 0, 0, 0)
         );
     }
 

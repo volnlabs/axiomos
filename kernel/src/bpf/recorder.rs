@@ -11,6 +11,9 @@ struct State {
     // No persistent boot identity is claimed. Link-session integration sets this
     // only after the existing explicit establishment procedure is connected.
     session: u64,
+    // Preserve a specific link cause through repeated generic managed stops.
+    // Cleared by another stop cause or by actual controller execution.
+    link_stop: Option<(u64, u32, u32)>,
 }
 
 impl State {
@@ -19,6 +22,7 @@ impl State {
             window: Recorder::new(),
             frequency: 0,
             session: 0,
+            link_stop: None,
         }
     }
 
