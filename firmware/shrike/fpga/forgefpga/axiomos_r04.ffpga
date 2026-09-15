@@ -628,7 +628,7 @@
         <settings>
             <generateBitstream>
                 <MAX_CPU>16</MAX_CPU>
-                <additionalArguments></additionalArguments>
+                <additionalArguments>-TIMING_DRIVEN_PACKING_THR 0.8</additionalArguments>
                 <clockConcurrentOptimization>true</clockConcurrentOptimization>
                 <compilerVersion>23</compilerVersion>
                 <highDensityIOPacking>false</highDensityIOPacking>
@@ -642,13 +642,14 @@
                 <wavedumpOutputFormat>1</wavedumpOutputFormat>
             </simulation>
             <synthesize>
-                <additionalArguments></additionalArguments>
-                <enableHardMultiplexerResources>true</enableHardMultiplexerResources>
+                <additionalArguments>; setattr -mod -unset keep_hierarchy; setattr -unset keep_hierarchy; flatten -noscopeinfo</additionalArguments>
+                <enableHardMultiplexerResources>false</enableHardMultiplexerResources>
                 <flatten>true</flatten>
                 <keep>false</keep>
                 <multiplexerResourcesNumber>5</multiplexerResourcesNumber>
                 <noDSP>true</noDSP>
-                <useABC9>true</useABC9>
+                <useABC9>false</useABC9>
+                <yosysVersion>59</yosysVersion>
             </synthesize>
         </settings>
         <openedTabs>
@@ -675,15 +676,17 @@
             <lib/>
             <sim/>
             <netlists/>
-            <timing-constraints/>
+            <timing-constraints>
+                <module filename="clk_50mhz.sdc"/>
+            </timing-constraints>
             <full-chip-simulation-models/>
             <placement-constraints/>
         </modules>
         <io-spec-tool>
-            <!-- SPI and GPIO18 bindings come from the pinned scaffold/R0.4 net.
-                 The hand-added GPIO17 xy[31:5] coordinate is PROVISIONAL until
-                 ForgeFPGA I/O-planner export confirms it. External GPIO7/8/9
-                 candidates and rst_n also remain deliberately unbound. -->
+            <!-- GPIO/OE resources: Vicharak gpio_extender_8pin at 763d0a7.
+                 Runtime rst_n is GPIO18/package 9; package 11 is PWR.
+                 Unused PWM inputs are deliberately unbound. Confirm the final
+                 Forge export and board continuity before hardware acceptance. -->
             <records filter="50">
                 <record id="CLK_t[0:0]_W_in0">
                     <port-name>clk</port-name>
@@ -707,11 +710,34 @@
                     <port-name>spi_sck</port-name>
                 </record>
                 <record id="IOB_t[0:0]_xy[31:4]_in0">
-                    <port-name>left_pwm_in</port-name>
+                    <port-name>rst_n</port-name>
                 </record>
-                <record id="IOB_t[0:0]_xy[31:5]_in0">
-                    <!-- PROVISIONAL: schematic proves GPIO17, not xy[31:5]. -->
-                    <port-name>right_pwm_in</port-name>
+                <record id="IOB_t[0:0]_xy[0:24]_in0">
+                    <port-name>estop_n</port-name>
+                </record>
+                <record id="IOB_t[0:0]_xy[31:27]_out0">
+                    <port-name>left_pwm_out</port-name>
+                </record>
+                <record id="IOB_t[0:0]_xy[31:27]_out1">
+                    <port-name>left_pwm_out_en</port-name>
+                </record>
+                <record id="IOB_t[0:0]_xy[31:26]_out0">
+                    <port-name>right_pwm_out</port-name>
+                </record>
+                <record id="IOB_t[0:0]_xy[31:26]_out1">
+                    <port-name>right_pwm_out_en</port-name>
+                </record>
+                <record id="IOB_t[0:0]_xy[31:25]_out0">
+                    <port-name>left_direction_out</port-name>
+                </record>
+                <record id="IOB_t[0:0]_xy[31:25]_out1">
+                    <port-name>left_direction_out_en</port-name>
+                </record>
+                <record id="IOB_t[0:0]_xy[31:24]_out0">
+                    <port-name>right_direction_out</port-name>
+                </record>
+                <record id="IOB_t[0:0]_xy[31:24]_out1">
+                    <port-name>right_direction_out_en</port-name>
                 </record>
             </records>
         </io-spec-tool>

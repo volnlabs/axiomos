@@ -1,0 +1,15 @@
+# Necessary mapping checks for the single ForgeFPGA-1K tile, not a fit/timing proof.
+# Run from repository root with the vendor-bundled Yosys.
+read_verilog -sv firmware/shrike/fpga/forgefpga/ffpga/src/spi_target.v firmware/shrike/fpga/forgefpga/ffpga/src/shrike_safety_gate.v firmware/shrike/fpga/forgefpga/ffpga/src/top.v
+hierarchy -check -top top
+flatten -noscopeinfo
+synth_xilinx -nobram -noiopad -nodsp
+# Preserve the control LUTs while mapping, then emit a flat Forge netlist.
+setattr -mod -unset keep_hierarchy
+setattr -unset keep_hierarchy
+flatten -noscopeinfo
+check -assert
+# Each CARRY4 consumes a CLB; the tile has only 140 logic CLBs in total.
+select -assert-max 140 t:CARRY4
+select -assert-none t:LDCE t:LDPE t:LDCPE
+stat

@@ -1,8 +1,7 @@
 `timescale 1ns/1ps
 // SPDX-License-Identifier: GPL-2.0-only
 
-module tb_axiomos_r04_top;
-    localparam integer WATCHDOG_CYCLES = 2048;
+module tb_axiomos_r04_top #(parameter integer WATCHDOG_CYCLES = 2048);
     localparam integer TIGHT_HALF_PERIOD_NS = 60;
     localparam integer PWM_PERIOD_CYCLES = 20;
 
@@ -25,7 +24,8 @@ module tb_axiomos_r04_top;
     wire right_direction_out, right_direction_out_en;
     reg [7:0] last_status;
     reg [7:0] accepted_sequence;
-    integer failures;
+    integer failures, release_order, range_value;
+    reg [3:0] range_check_parts;
 
     top #(.COMMAND_TIMEOUT_CYCLES(WATCHDOG_CYCLES),
           .CLOCK_HZ(1000), .PWM_CARRIER_HZ(50)) dut (
@@ -52,6 +52,33 @@ module tb_axiomos_r04_top;
 
     always #10 clk = ~clk;
 
+    // Count actual elapsed fabric edges from a committed command. This checks
+    // the timeout independently of the implementation's segmented counter.
+    integer command_age = 0;
+    reg tracking_command = 0;
+    always @(posedge clk) begin
+        #1;
+        if (!rst_n || !estop_n) tracking_command = 0;
+        else if (dut.command_accept) begin
+            tracking_command = 1;
+            command_age = 0;
+        end else if (tracking_command) begin
+            command_age = command_age + 1;
+            if (dut.watchdog_expired) begin
+                if (command_age != WATCHDOG_CYCLES || dut.command_valid)
+                    $fatal(1, "watchdog must expire at the exact elapsed command deadline");
+                tracking_command = 0;
+            end else if (!dut.command_valid) tracking_command = 0;
+            else if (command_age >= WATCHDOG_CYCLES)
+                $fatal(1, "valid command cannot outlive its watchdog deadline");
+        end
+    end
+
+    initial begin
+        #((4 * WATCHDOG_CYCLES + 100000) * 20);
+        $fatal(1, "runtime-link test exceeded its bounded simulation interval");
+    end
+
     task check;
         input condition;
         input [8*80-1:0] message;
@@ -62,6 +89,17 @@ module tb_axiomos_r04_top;
             end
         end
     endtask
+
+    always @(negedge clk) begin
+        if (rst_n) begin
+            check(!(dut.transaction_accepted && dut.transaction_end_pending
+                        && dut.transaction_length_valid)
+                    || (dut.transaction_selected && !dut.status_read_selected),
+                  "committing frame must remain a selected motor transaction");
+            check(dut.runtime_spi.byte_boundary === (dut.runtime_spi.bit_count == 0),
+                  "SPI byte-boundary prediction must match the counter");
+        end
+    end
 
     task read_runtime_status;
         output [7:0] status_byte;
@@ -210,7 +248,9 @@ module tb_axiomos_r04_top;
             transfer_byte(8'h00, TIGHT_HALF_PERIOD_NS, ignored);
             transfer_byte(crc_lo, TIGHT_HALF_PERIOD_NS, ignored);
             transfer_byte(crc_hi, TIGHT_HALF_PERIOD_NS, ignored);
-            #TIGHT_HALF_PERIOD_NS spi_ss_n = 1'b1;
+            // End CS immediately after the final physical falling edge. The
+            // synchronized final byte must still win over CS-end validation.
+            spi_ss_n = 1'b1;
             #(2 * TIGHT_HALF_PERIOD_NS);
         end
     endtask
@@ -225,6 +265,8 @@ module tb_axiomos_r04_top;
             check(left_pwm_out === 1'b0 && right_pwm_out === 1'b0,
                   "reset must force both PWM outputs low");
             check(spi_miso === 1'b0, "READY must be low during reset");
+            check(dut.sequence_valid === 1'b0 && dut.last_sequence === 8'h00,
+                  "power reset must clear the replay baseline");
             rst_n = 1'b1;
             #100;
             check(spi_miso === 1'b1 && spi_miso_en === 1'b1,
@@ -242,6 +284,13 @@ module tb_axiomos_r04_top;
         left_pwm_in = 1'b1;
         right_pwm_in = 1'b1;
         failures = 0;
+        for (range_value = -32768; range_value <= 32767; range_value = range_value + 1) begin
+            range_check_parts = dut.range_parts(range_value[15:0]);
+            check(((range_check_parts[3] && range_check_parts[1])
+                    || (range_check_parts[2] && range_check_parts[0]))
+                  === (range_value >= -800 && range_value <= 800),
+                  "range decoder must match signed bounds for every 16-bit value");
+        end
         last_status = 8'h00;
 
         reset_dut;
@@ -380,6 +429,11 @@ module tb_axiomos_r04_top;
         check(left_pwm_out === 1'b0 && right_pwm_out === 1'b0,
               "e-stop release without a fresh command must remain disabled");
 
+        send_command(8'h01, 8'h01, 8'h06, 8'h03, 16'd100, 16'd100,
+                     8'h00, 8'h36, 8'h0c);
+        check(dut.command_valid === 1'b0 && dut.last_sequence === 8'h03,
+              "e-stop must retain the replay baseline and reject the old command");
+
         send_command(8'h01, 8'h01, 8'h06, 8'h04, 16'd100, 16'd100,
                      8'h00, 8'h77, 8'hc4);
         check(dut.command_valid === 1'b1,
@@ -462,6 +516,21 @@ module tb_axiomos_r04_top;
               && dut.watchdog_expired === 1'b0,
               "expired status must be exposed and fresh frame must recover");
 
+        begin_frame;
+        send_byte(8'h7e); send_byte(8'h01); send_byte(8'h01); send_byte(8'h06);
+        send_byte(8'h0a); send_byte(8'h6e); send_byte(8'h00);
+        send_byte(8'h78); send_byte(8'h00); send_byte(8'h00);
+        send_byte(8'h78); send_byte(8'h34);
+        while (dut.watchdog_count < WATCHDOG_CYCLES - 4)
+            @(negedge clk);
+        spi_ss_n = 1'b1;
+        wait (dut.transaction_end_pending === 1'b1);
+        @(posedge clk); #1;
+        check(dut.command_valid === 1'b1 && dut.watchdog_expired === 1'b0
+              && dut.watchdog_count === 32'd0 && dut.command_accept === 1'b1
+              && dut.last_sequence === 8'h0a,
+              "fresh commit coincident with watchdog expiry must win and rearm");
+
         send_command(8'h01, 8'h01, 8'h06, 8'h0a, 16'd100, 16'd100,
                      8'h80, 8'h5c, 8'hd5);
         check(last_status === 8'hc0 && dut.command_valid === 1'b0,
@@ -479,6 +548,36 @@ module tb_axiomos_r04_top;
                      8'h00, 8'h44, 8'h1e);
         check(dut.command_valid === 1'b1, "zero command must be accepted");
         check_pwm_period(0, 0, "zero command must produce no PWM pulses");
+
+        send_command_tight(8'h0d, 16'h7fff, 16'h8000, 8'h48, 8'h8c);
+        check(dut.command_valid === 1'b0 && dut.last_sequence === 8'h0c,
+              "signed extreme outliers must fail closed without consuming sequence");
+        send_command_tight(8'h0d, 16'sd321, -16'sd123, 8'h3c, 8'h45);
+        check(dut.command_valid === 1'b1 && dut.last_sequence === 8'h0d
+              && dut.left_duty_permille === 12'sd321
+              && dut.right_duty_permille === -12'sd123,
+              "tight valid retry after range rejection must commit the same sequence");
+        send_command_tight(8'h0d, 16'sd321, -16'sd123, 8'h3c, 8'h45);
+        check(dut.command_valid === 1'b0 && dut.last_sequence === 8'h0d,
+              "tight replay after accepted retry must fail closed");
+
+        for (release_order = 0; release_order < 2; release_order = release_order + 1) begin
+            @(negedge clk); estop_n = 1'b0;
+            #1 rst_n = 1'b0;
+            #1;
+            if (release_order == 0) rst_n = 1'b1;
+            else estop_n = 1'b1;
+            check_pwm_period(0, 0, "partial reset release must keep PWM disabled");
+            check(dut.estop_release_sync === 2'b00,
+                  "either asserted reset must hold top release qualification clear");
+            @(negedge clk); rst_n = 1'b1; estop_n = 1'b1;
+            check_pwm_period(0, 0, "overlapping reset release alone must not rearm");
+            send_command(8'h01, 8'h01, 8'h06, 8'h03, 16'd100, 16'd100,
+                         8'h00, 8'h36, 8'h0c);
+            check(dut.command_valid === 1'b1,
+                  "fresh complete command after overlapping reset must recover");
+            check_pwm_period(2, 2, "fresh command must restore PWM after overlap");
+        end
 
         rst_n = 1'b0;
         #1;
