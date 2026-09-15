@@ -53,6 +53,10 @@ impl ByteIo for MockByteIo {
         self.output.extend_from_slice(bytes);
         Ok(bytes.len())
     }
+    fn tx_idle(&mut self) -> Result<bool, ()> {
+        // Captured bytes have reached this mock's wire, not a pending FIFO.
+        Ok(true)
+    }
     fn reset(&mut self) -> Result<(), ()> {
         self.resets += 1;
         if self.fail_reset {

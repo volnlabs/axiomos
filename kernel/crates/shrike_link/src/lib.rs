@@ -34,10 +34,12 @@ const T_ESTOP: u8 = 0x02;
 const T_HB_TO_SHRIKE: u8 = 0x03;
 const T_SESSION_OFFER: u8 = 0x04;
 const T_SAFE_BARRIER: u8 = 0x05;
+const T_REQUALIFY: u8 = 0x06;
 const T_SENSOR: u8 = 0x81;
 const T_HB_TO_PI: u8 = 0x82;
 const T_SESSION_READY: u8 = 0x83;
 const T_SAFE_ACK: u8 = 0x84;
+const T_PREPARED: u8 = 0x85;
 
 /// A decoded control-link message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +56,9 @@ pub enum Msg {
     /// Pi5 -> Shrike. Nonzero session identity, encoded as u32 LE.
     /// Callers establish identity freshness; reset requires a qualified drain.
     SessionOffer { session: u32 },
+    /// Pi5 -> Shrike. Explicit requalification request with a reserved nonzero
+    /// session (u32 LE). Receipt requires inhibition; it never authorizes motion.
+    Requalify { session: u32 },
     /// Pi5 -> Shrike. Safe barrier: u32 LE session, u64 LE correlation, u8 sequence.
     SafeBarrier {
         session: u32,
@@ -70,6 +75,9 @@ pub enum Msg {
     HeartbeatToPi { seq: u16 },
     /// Shrike -> Pi5. Nonzero session identity, encoded as u32 LE.
     SessionReady { session: u32 },
+    /// Shrike -> Pi5. MCU drained and FPGA configured in its reset state for
+    /// this nonzero session (u32 LE); not accepted zero or motion authority.
+    Prepared { session: u32 },
     /// Shrike -> Pi5. Safe acknowledgement with the barrier's field order.
     SafeAck {
         session: u32,
@@ -131,15 +139,19 @@ pub fn encode(msg: &Msg, out: &mut [u8]) -> Result<usize, LinkError> {
             payload[0..2].copy_from_slice(&seq.to_le_bytes());
             (T_HB_TO_SHRIKE, 2)
         }
-        Msg::SessionOffer { session } | Msg::SessionReady { session } => {
+        Msg::SessionOffer { session }
+        | Msg::SessionReady { session }
+        | Msg::Requalify { session }
+        | Msg::Prepared { session } => {
             if session == 0 {
                 return Err(LinkError::BadIdentity);
             }
             payload[..4].copy_from_slice(&session.to_le_bytes());
-            let ty = if matches!(msg, Msg::SessionOffer { .. }) {
-                T_SESSION_OFFER
-            } else {
-                T_SESSION_READY
+            let ty = match msg {
+                Msg::SessionOffer { .. } => T_SESSION_OFFER,
+                Msg::SessionReady { .. } => T_SESSION_READY,
+                Msg::Requalify { .. } => T_REQUALIFY,
+                _ => T_PREPARED,
             };
             (ty, 4)
         }
@@ -364,16 +376,17 @@ fn decode_msg(ty: u8, len: usize, p: &[u8]) -> Result<Msg, LinkError> {
                 seq: u16::from_le_bytes([p[0], p[1]]),
             })
         }
-        T_SESSION_OFFER | T_SESSION_READY => {
+        T_SESSION_OFFER | T_SESSION_READY | T_REQUALIFY | T_PREPARED => {
             need(4)?;
             let session = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
             if session == 0 {
                 return Err(LinkError::BadIdentity);
             }
-            Ok(if ty == T_SESSION_OFFER {
-                Msg::SessionOffer { session }
-            } else {
-                Msg::SessionReady { session }
+            Ok(match ty {
+                T_SESSION_OFFER => Msg::SessionOffer { session },
+                T_SESSION_READY => Msg::SessionReady { session },
+                T_REQUALIFY => Msg::Requalify { session },
+                _ => Msg::Prepared { session },
             })
         }
         T_SAFE_BARRIER | T_SAFE_ACK => {
@@ -439,7 +452,7 @@ mod tests {
         assert_eq!(got, vec![Ok(msg)], "roundtrip {:?}", msg);
     }
 
-    const HANDOFF_CASES: [(Msg, u8, &[u8]); 4] = [
+    const HANDOFF_CASES: [(Msg, u8, &[u8]); 6] = [
         (
             Msg::SessionOffer {
                 session: 0x4433227e,
@@ -463,6 +476,20 @@ mod tests {
                 session: 0x4433227e,
             },
             0x83,
+            &[0x7e, 0x22, 0x33, 0x44],
+        ),
+        (
+            Msg::Requalify {
+                session: 0x4433227e,
+            },
+            0x06,
+            &[0x7e, 0x22, 0x33, 0x44],
+        ),
+        (
+            Msg::Prepared {
+                session: 0x4433227e,
+            },
+            0x85,
             &[0x7e, 0x22, 0x33, 0x44],
         ),
         (
@@ -492,7 +519,7 @@ mod tests {
         for (msg, ty, payload) in HANDOFF_CASES {
             let mut buf = [0xa5; MAX_FRAME];
             let n = encode(&msg, &mut buf).unwrap();
-            assert_eq!(n, if matches!(ty, 0x04 | 0x83) { 10 } else { 19 });
+            assert_eq!(n, if matches!(ty, 0x05 | 0x84) { 19 } else { 10 });
             assert_eq!(&buf[..4], &[0x7e, 1, ty, payload.len() as u8]);
             assert_eq!(&buf[4..n - 2], payload);
             assert!(buf[n..].iter().all(|&b| b == 0xa5));
@@ -512,6 +539,8 @@ mod tests {
         for (session, correlation, sequence) in [(1, 1, 0), (u32::MAX, u64::MAX, u8::MAX)] {
             roundtrip(Msg::SessionOffer { session });
             roundtrip(Msg::SessionReady { session });
+            roundtrip(Msg::Requalify { session });
+            roundtrip(Msg::Prepared { session });
             roundtrip(Msg::SafeBarrier {
                 session,
                 correlation,
@@ -530,6 +559,8 @@ mod tests {
         for msg in [
             Msg::SessionOffer { session: 0 },
             Msg::SessionReady { session: 0 },
+            Msg::Requalify { session: 0 },
+            Msg::Prepared { session: 0 },
             Msg::SafeBarrier {
                 session: 0,
                 correlation: 1,

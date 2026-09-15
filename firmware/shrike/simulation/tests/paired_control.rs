@@ -988,3 +988,398 @@ fn failed_uart_write_reports_accepted_prefix_and_discards_partial_frame() {
     assert_eq!(motors.calls, [MotorPairCall::Inhibit]);
     assert_eq!(io.wire.len(), 3);
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExitFault {
+    None,
+    Read,
+    Write,
+    Idle,
+    Reset,
+    LateWrite,
+    LateIdle,
+    LateReset,
+    ReversedWrite,
+    ReversedReset,
+    StopWrite,
+    StopIdle,
+    StopReset,
+    FrozenBusy,
+    FrozenWrite,
+}
+
+struct ExitClock(Cell<u64>);
+impl MicrosClock for ExitClock {
+    fn now_us(&self) -> u64 {
+        self.0.get()
+    }
+}
+struct ExitEstop<'a>(&'a Cell<bool>);
+impl shrike_control::EstopLine for ExitEstop<'_> {
+    fn asserted(&mut self) -> bool {
+        self.0.get()
+    }
+}
+
+/// Existing wire mock, with one RX pause allowing an old reply to start before
+/// the request arrives. Faults occur only after the complete request is read.
+struct ExitIo<'a> {
+    inner: MockByteIo,
+    prefix_len: usize,
+    paused: bool,
+    first_budget: usize,
+    fault: ExitFault,
+    clock: &'a ExitClock,
+    stopped: &'a Cell<bool>,
+    idle_calls: usize,
+    idle_waits: usize,
+}
+impl ExitIo<'_> {
+    fn exiting(&self) -> bool {
+        self.inner.reads >= self.prefix_len + 10
+    }
+}
+impl shrike_control::ByteIo for ExitIo<'_> {
+    type Error = ();
+    fn read(&mut self) -> Result<Option<u8>, ()> {
+        if self.inner.reads == self.prefix_len && !self.paused {
+            self.paused = true;
+            return Ok(None);
+        }
+        if self.exiting() && self.fault == ExitFault::Read {
+            return Err(());
+        }
+        self.inner.read()
+    }
+    fn try_write(&mut self, bytes: &[u8]) -> Result<usize, ()> {
+        if !self.exiting() {
+            let n = bytes.len().min(self.first_budget);
+            self.first_budget -= n;
+            return self.inner.try_write(&bytes[..n]);
+        }
+        match self.fault {
+            ExitFault::Write => return Err(()),
+            ExitFault::FrozenWrite => return Ok(0),
+            ExitFault::LateWrite => self.clock.0.set(1_000_000),
+            ExitFault::ReversedWrite => self.clock.0.set(0),
+            ExitFault::StopWrite => self.stopped.set(true),
+            _ => {}
+        }
+        self.inner.try_write(bytes)
+    }
+    fn tx_idle(&mut self) -> Result<bool, ()> {
+        self.idle_calls += 1;
+        match self.fault {
+            ExitFault::Idle => return Err(()),
+            ExitFault::LateIdle => self.clock.0.set(1_000_000),
+            ExitFault::StopIdle => self.stopped.set(true),
+            ExitFault::FrozenBusy => return Ok(false),
+            _ => {}
+        }
+        Ok(self.idle_calls > self.idle_waits)
+    }
+    fn reset(&mut self) -> Result<(), ()> {
+        match self.fault {
+            ExitFault::Reset => self.inner.fail_reset = true,
+            ExitFault::LateReset => self.clock.0.set(1_000_000),
+            ExitFault::ReversedReset => self.clock.0.set(0),
+            ExitFault::StopReset => self.stopped.set(true),
+            _ => {}
+        }
+        self.inner.reset()
+    }
+}
+
+#[test]
+fn requalify_finishes_each_started_reply_offset_and_discards_pending_motion() {
+    let prefix = frames(&[
+        Msg::SessionOffer { session: 7 },
+        Msg::SafeBarrier {
+            session: 7,
+            correlation: 1,
+            sequence: 1,
+        },
+    ]);
+    let ready = frames(&[Msg::SessionReady { session: 7 }]);
+    let replies = frames(&[
+        Msg::SessionReady { session: 7 },
+        Msg::SafeAck {
+            session: 7,
+            correlation: 1,
+            sequence: 1,
+        },
+    ]);
+    for split in 0..=replies.len() {
+        let clock = ExitClock(Cell::new(0));
+        let stopped = Cell::new(false);
+        let mut input = prefix.clone();
+        input.extend(frames(&[
+            Msg::Requalify { session: 8 },
+            Msg::MotorSetpoint {
+                seq: 2,
+                left: 700,
+                right: 700,
+            },
+        ]));
+        let mut io = ExitIo {
+            inner: MockByteIo::new(input),
+            prefix_len: prefix.len(),
+            paused: false,
+            first_budget: split,
+            fault: ExitFault::None,
+            clock: &clock,
+            stopped: &stopped,
+            idle_calls: 0,
+            idle_waits: 2,
+        };
+        let mut motors = MockMotorPair::new();
+        let summary = run(
+            &mut io,
+            &clock,
+            &mut MockUltrasonic::new(vec![]),
+            &mut ExitEstop(&stopped),
+            &mut motors,
+            managed_config(100, 7),
+            Some(3),
+        )
+        .unwrap();
+        assert_eq!(
+            summary.termination,
+            RunTermination::Requalify {
+                session: core::num::NonZeroU32::new(8).unwrap()
+            },
+            "split {split}"
+        );
+        let expected = if split == 0 {
+            &[][..]
+        } else if split <= ready.len() {
+            &ready[..]
+        } else {
+            &replies[..]
+        };
+        assert_eq!(io.inner.output, expected, "split {split}");
+        assert_eq!(summary.bytes_written as usize, expected.len());
+        assert_eq!(
+            summary.telemetry_frames_dropped,
+            2 - decoded(expected).len() as u64
+        );
+        assert_eq!((io.idle_calls, io.inner.resets), (3, 1));
+        assert!(!summary.io_reset_failed);
+        assert_eq!(summary.motor_pairs_accepted, 2);
+        assert_eq!(
+            motors.calls,
+            [
+                MotorPairCall::Apply {
+                    seq: 0,
+                    left: 0,
+                    right: 0
+                },
+                MotorPairCall::Apply {
+                    seq: 1,
+                    left: 0,
+                    right: 0
+                },
+                MotorPairCall::Inhibit,
+                MotorPairCall::Inhibit,
+            ]
+        );
+        assert_eq!(shrike_control::ByteIo::read(&mut io.inner), Ok(None));
+    }
+}
+
+#[test]
+fn requalify_exit_faults_never_return_outer_owner_eligibility() {
+    use shrike_control::transport::TransportError;
+    for (fault, expected) in [
+        (ExitFault::Read, RunTermination::Fault(FaultReason::Io)),
+        (
+            ExitFault::Write,
+            RunTermination::Fault(FaultReason::Transport(TransportError::Io)),
+        ),
+        (ExitFault::Idle, RunTermination::Fault(FaultReason::Io)),
+        (ExitFault::Reset, RunTermination::Fault(FaultReason::Io)),
+        (
+            ExitFault::LateWrite,
+            RunTermination::Fault(FaultReason::Transport(TransportError::TimedOut)),
+        ),
+        (
+            ExitFault::LateIdle,
+            RunTermination::Fault(FaultReason::Transport(TransportError::TimedOut)),
+        ),
+        (
+            ExitFault::LateReset,
+            RunTermination::Fault(FaultReason::Transport(TransportError::TimedOut)),
+        ),
+        (
+            ExitFault::ReversedWrite,
+            RunTermination::Fault(FaultReason::Transport(TransportError::ClockRegression)),
+        ),
+        (
+            ExitFault::ReversedReset,
+            RunTermination::Fault(FaultReason::Transport(TransportError::ClockRegression)),
+        ),
+        (
+            ExitFault::StopWrite,
+            RunTermination::Stop(StopReason::HardwareEstop),
+        ),
+        (
+            ExitFault::StopIdle,
+            RunTermination::Stop(StopReason::HardwareEstop),
+        ),
+        (
+            ExitFault::StopReset,
+            RunTermination::Stop(StopReason::HardwareEstop),
+        ),
+        (
+            ExitFault::FrozenBusy,
+            RunTermination::Fault(FaultReason::Transport(TransportError::PollLimit)),
+        ),
+        (
+            ExitFault::FrozenWrite,
+            RunTermination::Fault(FaultReason::Transport(TransportError::PollLimit)),
+        ),
+    ] {
+        let start = u64::from(matches!(
+            fault,
+            ExitFault::ReversedWrite | ExitFault::ReversedReset
+        ));
+        let clock = ExitClock(Cell::new(start));
+        let stopped = Cell::new(false);
+        let prefix = frames(&[Msg::SessionOffer { session: 7 }]);
+        let mut input = prefix.clone();
+        input.extend(frames(&[
+            Msg::Requalify { session: 8 },
+            Msg::MotorSetpoint {
+                seq: 1,
+                left: 700,
+                right: 700,
+            },
+        ]));
+        let mut io = ExitIo {
+            inner: MockByteIo::new(input),
+            prefix_len: prefix.len(),
+            paused: false,
+            first_budget: 3,
+            fault,
+            clock: &clock,
+            stopped: &stopped,
+            idle_calls: 0,
+            idle_waits: 0,
+        };
+        let mut motors = MockMotorPair::new();
+        let mut cfg = managed_config(100, 7);
+        cfg.ping_period_us = u64::MAX;
+        cfg.peer_heartbeat_period_us = 0;
+        let summary = run(
+            &mut io,
+            &clock,
+            &mut MockUltrasonic::new(vec![]),
+            &mut ExitEstop(&stopped),
+            &mut motors,
+            cfg,
+            None,
+        )
+        .unwrap();
+        assert_eq!(summary.termination, expected, "{fault:?}");
+        assert_eq!(summary.io_reset_failed, fault == ExitFault::Reset);
+        assert_eq!(io.inner.resets, 1);
+        assert_eq!(summary.motor_pairs_accepted, 1);
+        assert_eq!(summary.motor_inhibit_calls, 2);
+        assert_eq!(summary.bytes_written as usize, io.inner.output.len());
+        assert!(motors
+            .calls
+            .iter()
+            .all(|call| !matches!(call, MotorPairCall::Apply { left: 700, .. })));
+        if fault == ExitFault::FrozenBusy {
+            assert_eq!(io.idle_calls, 65_536);
+        }
+    }
+}
+
+#[test]
+fn requalify_legacy_rejects_and_buffered_stop_cancels_managed_exit() {
+    for managed in [false, true] {
+        let mut input = frames(&[Msg::Requalify { session: 8 }]);
+        // A complete stop beyond the first bounded RX pass must be observed
+        // before reset, even though hardware TX is already idle.
+        input.extend(frames(&[Msg::HeartbeatToShrike { seq: 1 }; 10]));
+        input.extend(frames(&[
+            Msg::Estop { assert: true },
+            Msg::MotorSetpoint {
+                seq: 1,
+                left: 700,
+                right: 700,
+            },
+        ]));
+        let mut io = MockByteIo::new(input);
+        let mut motors = MockMotorPair::new();
+        let summary = run(
+            &mut io,
+            &MockClock::new(0),
+            &mut MockUltrasonic::new(vec![]),
+            &mut MockEstop::new(false),
+            &mut motors,
+            if managed {
+                managed_config(100, 7)
+            } else {
+                config(100)
+            },
+            Some(1),
+        )
+        .unwrap();
+        assert_eq!(
+            summary.termination,
+            if managed {
+                RunTermination::Stop(StopReason::SoftwareEstop)
+            } else {
+                RunTermination::Fault(FaultReason::UnexpectedMessage)
+            }
+        );
+        assert_eq!(summary.motor_pairs_accepted, 0);
+        assert!(io.output.is_empty());
+        assert_eq!(io.resets, 1);
+    }
+}
+
+#[test]
+fn requalify_exit_rejects_deadline_overflow_and_expired_old_command() {
+    use shrike_control::transport::TransportError;
+    let mut io = MockByteIo::new(frames(&[Msg::Requalify { session: 8 }]));
+    let mut motors = MockMotorPair::new();
+    let summary = run(
+        &mut io,
+        &ExitClock(Cell::new(u64::MAX - 999_999)),
+        &mut MockUltrasonic::new(vec![]),
+        &mut MockEstop::new(false),
+        &mut motors,
+        managed_config(100, 7),
+        Some(1),
+    )
+    .unwrap();
+    assert_eq!(
+        summary.termination,
+        RunTermination::Fault(FaultReason::Transport(TransportError::DeadlineOverflow))
+    );
+    assert_eq!(summary.motor_pairs_accepted, 0);
+    assert_eq!(io.resets, 1);
+
+    let mut io = MockByteIo::new(frames(&[
+        Msg::SessionOffer { session: 7 },
+        Msg::Requalify { session: 8 },
+    ]));
+    let summary = run(
+        &mut io,
+        &SequenceClock::new(vec![0, 0, 0, 0, 100]),
+        &mut MockUltrasonic::new(vec![]),
+        &mut MockEstop::new(false),
+        &mut MockMotorPair::new(),
+        managed_config(100, 7),
+        Some(1),
+    )
+    .unwrap();
+    assert_eq!(
+        summary.termination,
+        RunTermination::Stop(StopReason::WatchdogExpired)
+    );
+    assert!(io.output.is_empty());
+}

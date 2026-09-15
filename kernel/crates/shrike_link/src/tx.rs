@@ -156,7 +156,7 @@ impl TxState {
     pub fn start_handoff(&mut self, frame: HandoffFrame, now: u64) -> bool {
         if !matches!(
             frame.message,
-            Msg::SessionOffer { .. } | Msg::SafeBarrier { .. }
+            Msg::Requalify { .. } | Msg::SessionOffer { .. } | Msg::SafeBarrier { .. }
         ) || !self.start(&frame.message, now)
         {
             return false;

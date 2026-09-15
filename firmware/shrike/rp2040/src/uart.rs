@@ -71,6 +71,18 @@ impl<R: Registers> Uart<R> {
         Ok(accepted)
     }
 
+    /// Whole-frame reset may proceed only after both the FIFO and transmit
+    /// shift register have drained. Local FIFO acceptance alone is insufficient.
+    pub(crate) fn tx_idle(&mut self) -> Result<bool, Error> {
+        if !self.enabled {
+            return Err(Error::Disabled);
+        }
+        self.check_errors(0)?;
+        let flags = self.registers.flags();
+        self.check_errors(0)?;
+        Ok(flags & (TXFE | BUSY) == TXFE)
+    }
+
     pub(crate) fn reset(&mut self) -> Result<(), Error> {
         self.enabled = false;
         if !self.registers.held_in_reset() {
@@ -167,6 +179,9 @@ mod target {
         }
         fn try_write(&mut self, bytes: &[u8]) -> Result<usize, Error> {
             Uart::try_write(self, bytes)
+        }
+        fn tx_idle(&mut self) -> Result<bool, Error> {
+            Uart::tx_idle(self)
         }
         fn reset(&mut self) -> Result<(), Error> {
             Uart::reset(self)

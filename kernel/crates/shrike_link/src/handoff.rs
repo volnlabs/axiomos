@@ -78,13 +78,15 @@ struct Offer {
 #[derive(Clone, Copy)]
 enum Phase {
     Disarmed,
+    Requalifying(Offer),
+    Draining(Offer),
     Offering(Offer),
     Ready,
     Barrier(Barrier),
 }
 
-/// One session and one transaction. Times are in the caller's single monotonic
-/// tick domain; the Pi supplies an exact 80 ms timeout from its physical clock.
+/// One session and one transaction. Times use one caller-supplied monotonic
+/// tick domain, with separate requalification and offer/barrier deadlines.
 pub struct Handoff {
     phase: Phase,
     last_session: u32,
@@ -111,6 +113,14 @@ impl Handoff {
     /// IDs are unique only in this object's lifetime, never claimed across boot.
     /// `now` and `timeout` use the caller's monotonic physical-counter ticks.
     pub fn offer_after_drain(&mut self, now: u64, timeout: u64) -> Result<Msg, HandoffError> {
+        let offer = self.reserve_session(now, timeout)?;
+        self.phase = Phase::Offering(offer);
+        Ok(Msg::SessionOffer {
+            session: self.last_session,
+        })
+    }
+
+    fn reserve_session(&mut self, now: u64, timeout: u64) -> Result<Offer, HandoffError> {
         if !matches!(self.phase, Phase::Disarmed) {
             return Err(HandoffError::Busy);
         }
@@ -123,12 +133,60 @@ impl Handoff {
             .checked_add(1)
             .ok_or(HandoffError::Exhausted)?;
         self.last_session = session;
-        self.phase = Phase::Offering(Offer {
+        Ok(Offer {
             deadline,
             last_seen: now,
             tx: Transmission::Pending,
+        })
+    }
+
+    /// Start only on an explicit authorized rearm after local motion inhibition.
+    /// Reserve the same session through Requalify/Prepared and Offer/Ready.
+    /// The overall deadline includes peer configuration and both local drains;
+    /// it is separate from the 80 ms controller handoff/offer timeout.
+    pub fn requalify_on_transport(
+        &mut self,
+        now: u64,
+        timeout: u64,
+        tx: &mut TxState,
+    ) -> Result<(u32, MotorDiscards), HandoffError> {
+        let request = self.reserve_session(now, timeout)?;
+        self.phase = Phase::Requalifying(request);
+        let mut discarded = tx.clear_motor();
+        discarded.frame = tx.cancel_unsent().frame;
+        Ok((self.last_session, discarded))
+    }
+
+    /// A correlated Prepared permits the platform to start its fresh local
+    /// drain, never to send an offer or enable motion without that drain.
+    pub const fn needs_local_drain(&self) -> bool {
+        matches!(self.phase, Phase::Draining(_))
+    }
+
+    /// Caller has completed the actual local UART/FIFO/decoder reset and at
+    /// least 200 ms quiet after Prepared while the MCU remained silent. This
+    /// method consumes that phase; elapsed time alone is not drain evidence.
+    pub fn offer_after_requalification_drain(
+        &mut self,
+        now: u64,
+        timeout: u64,
+    ) -> Result<Msg, HandoffError> {
+        self.check(now)?;
+        let Phase::Draining(request) = self.phase else {
+            return Err(HandoffError::NotEstablished);
+        };
+        if timeout == 0 {
+            return Err(HandoffError::InvalidTimeout);
+        }
+        let deadline = now.checked_add(timeout).ok_or(HandoffError::Exhausted)?;
+        self.phase = Phase::Offering(Offer {
+            deadline: deadline.min(request.deadline),
+            last_seen: now,
+            tx: Transmission::Pending,
         });
-        Ok(Msg::SessionOffer { session })
+        Ok(Msg::SessionOffer {
+            session: self.last_session,
+        })
     }
 
     /// Stops/reset/cancellation drop all eligibility, retaining counters so
@@ -194,7 +252,9 @@ impl Handoff {
         timeout: u64,
     ) -> Result<BarrierIdentity, HandoffError> {
         match self.phase {
-            Phase::Disarmed | Phase::Offering(_) => return Err(HandoffError::NotEstablished),
+            Phase::Disarmed | Phase::Requalifying(_) | Phase::Draining(_) | Phase::Offering(_) => {
+                return Err(HandoffError::NotEstablished);
+            }
             Phase::Barrier(_) => return Err(HandoffError::Busy),
             Phase::Ready => {}
         }
@@ -229,6 +289,12 @@ impl Handoff {
     /// Complete message to prioritize after any already-started UART frame.
     pub fn outbound(&self) -> Option<Msg> {
         match self.phase {
+            Phase::Requalifying(Offer {
+                tx: Transmission::Pending,
+                ..
+            }) => Some(Msg::Requalify {
+                session: self.last_session,
+            }),
             Phase::Offering(Offer {
                 tx: Transmission::Pending,
                 ..
@@ -250,7 +316,7 @@ impl Handoff {
             return Err(HandoffError::Stale);
         }
         match &mut self.phase {
-            Phase::Offering(offer) => offer.tx = Transmission::Started,
+            Phase::Requalifying(offer) | Phase::Offering(offer) => offer.tx = Transmission::Started,
             Phase::Barrier(barrier) => barrier.tx = Transmission::Started,
             _ => return Err(HandoffError::Stale),
         }
@@ -264,6 +330,12 @@ impl Handoff {
     /// Eligible transaction's started message; TX owns completion independently.
     pub const fn started_frame(&self) -> Option<Msg> {
         match self.phase {
+            Phase::Requalifying(Offer {
+                tx: Transmission::Started,
+                ..
+            }) => Some(Msg::Requalify {
+                session: self.last_session,
+            }),
             Phase::Offering(Offer {
                 tx: Transmission::Started,
                 ..
@@ -283,7 +355,11 @@ impl Handoff {
     pub fn sent(&mut self, now: u64) -> Result<(), HandoffError> {
         self.check(now)?;
         match &mut self.phase {
-            Phase::Offering(Offer {
+            Phase::Requalifying(Offer {
+                tx: tx @ Transmission::Started,
+                ..
+            })
+            | Phase::Offering(Offer {
                 tx: tx @ Transmission::Started,
                 ..
             }) => *tx = Transmission::Sent,
@@ -299,6 +375,12 @@ impl Handoff {
     pub fn on_reply(&mut self, msg: Msg, received_at: u64) -> Result<bool, HandoffError> {
         self.check(received_at)?;
         match (&mut self.phase, msg) {
+            (Phase::Requalifying(request), Msg::Prepared { session })
+                if matches!(request.tx, Transmission::Sent) && session == self.last_session =>
+            {
+                self.phase = Phase::Draining(*request);
+                Ok(true)
+            }
             (
                 Phase::Offering(Offer {
                     tx: Transmission::Sent,
@@ -336,7 +418,9 @@ impl Handoff {
     /// eligible release is included in the operational timeout.
     pub fn check(&mut self, now: u64) -> Result<(), HandoffError> {
         let bound = match &mut self.phase {
-            Phase::Offering(offer) => Some((offer.deadline, &mut offer.last_seen)),
+            Phase::Requalifying(offer) | Phase::Draining(offer) | Phase::Offering(offer) => {
+                Some((offer.deadline, &mut offer.last_seen))
+            }
             Phase::Barrier(barrier) => Some((barrier.deadline, &mut barrier.last_seen)),
             Phase::Disarmed | Phase::Ready => None,
         };
@@ -406,6 +490,182 @@ mod tests {
             correlation: key.correlation,
             sequence: key.sequence,
         }
+    }
+
+    #[test]
+    fn requalification_requires_sent_request_prepared_local_drain_and_sent_offer() {
+        let mut h = Handoff::new();
+        let mut tx = TxState::new();
+        let (session, discarded) = h.requalify_on_transport(0, 1_000, &mut tx).unwrap();
+        assert_eq!(session, 1);
+        assert_eq!(discarded, MotorDiscards::default());
+        assert!(!h.motion_permitted());
+        assert!(!h.needs_local_drain());
+        assert_eq!(
+            h.offer_after_requalification_drain(0, 80),
+            Err(HandoffError::NotEstablished)
+        );
+        assert!(!h.on_reply(Msg::Prepared { session }, 1).unwrap());
+        let frame = h.enqueue(&mut tx, 1).unwrap().unwrap();
+        assert_eq!(frame.message, Msg::Requalify { session });
+        assert_eq!(frame.operation, None);
+        tx.next_byte();
+        assert!(!h.on_reply(Msg::Prepared { session }, 2).unwrap());
+        while tx.next_byte().is_some() {}
+        h.sent(3).unwrap();
+        assert!(!h.on_reply(Msg::Prepared { session: 2 }, 200).unwrap());
+        assert!(!h.on_reply(Msg::SessionReady { session }, 201).unwrap());
+        assert!(h.on_reply(Msg::Prepared { session }, 202).unwrap());
+        assert!(h.needs_local_drain());
+        assert!(!h.motion_permitted());
+        assert_eq!(h.outbound(), None);
+        assert!(!h.on_reply(Msg::Prepared { session }, 203).unwrap());
+        assert_eq!(h.begin(7, 1, 204, 80), Err(HandoffError::NotEstablished));
+        // The platform owns the physical >=200 ms quiet interval and calls
+        // this only after finishing its actual UART/software/decoder drain.
+        let offer = h.offer_after_requalification_drain(404, 80).unwrap();
+        assert_eq!(offer, Msg::SessionOffer { session });
+        assert!(!h.needs_local_drain());
+        assert!(!h.on_reply(Msg::SessionReady { session }, 405).unwrap());
+        h.enqueue(&mut tx, 405).unwrap().unwrap();
+        while tx.next_byte().is_some() {}
+        h.sent(406).unwrap();
+        assert!(h.on_reply(Msg::SessionReady { session }, 407).unwrap());
+        assert!(h.motion_permitted());
+    }
+
+    #[test]
+    fn requalification_deadline_spans_all_phases_and_cancellation_retains_session() {
+        for phase in 0..4 {
+            let mut h = Handoff::new();
+            let mut tx = TxState::new();
+            h.requalify_on_transport(100, 1_000, &mut tx).unwrap();
+            if phase > 0 {
+                h.enqueue(&mut tx, 101).unwrap().unwrap();
+                while tx.next_byte().is_some() {}
+                h.sent(102).unwrap();
+            }
+            if phase > 1 {
+                assert!(h.on_reply(Msg::Prepared { session: 1 }, 300).unwrap());
+            }
+            if phase > 2 {
+                h.offer_after_requalification_drain(1_050, 80).unwrap();
+            }
+            assert_eq!(h.check(1_100), Err(HandoffError::TimedOut), "phase {phase}");
+            assert!(!h.motion_permitted());
+            assert!(!h.needs_local_drain());
+            assert!(!h.on_reply(Msg::Prepared { session: 1 }, 1_101).unwrap());
+            assert!(!h.on_reply(Msg::SessionReady { session: 1 }, 1_101).unwrap());
+            assert_eq!(
+                h.requalify_on_transport(1_200, 1_000, &mut tx).unwrap().0,
+                2
+            );
+            h.disarm();
+            assert_eq!(
+                h.offer_after_requalification_drain(1_201, 80),
+                Err(HandoffError::NotEstablished)
+            );
+        }
+    }
+
+    #[test]
+    fn requalification_preserves_started_frames_at_every_offset() {
+        use crate::tx::FrameCompletion;
+        let old = Msg::MotorSetpoint {
+            seq: 3,
+            left: 100,
+            right: 200,
+        };
+        let mut bytes = [0; crate::MAX_FRAME];
+        let len = crate::encode(&old, &mut bytes).unwrap();
+        for split in 0..=len {
+            let mut h = Handoff::new();
+            let mut tx = TxState::new();
+            assert!(tx.start(&old, 0));
+            let mut wire = std::vec::Vec::new();
+            for _ in 0..split {
+                wire.push(tx.next_byte().unwrap());
+            }
+            tx.replace_motor(300, 400, 1);
+            let (session, discarded) = h.requalify_on_transport(1, 1_000, &mut tx).unwrap();
+            assert!(discarded.pending.is_some());
+            assert_eq!(discarded.frame.is_some(), split == 0);
+            while let Some(byte) = tx.next_byte() {
+                wire.push(byte);
+            }
+            let request = h.enqueue(&mut tx, 2).unwrap().unwrap();
+            let mut completed = None;
+            while let Some((byte, completion)) = tx.next_byte_with_completion() {
+                wire.push(byte);
+                if completion.is_some() {
+                    completed = completion;
+                }
+            }
+            assert_eq!(completed, Some(FrameCompletion::Handoff(request)));
+            h.sent(3).unwrap();
+            let mut dec = crate::Decoder::new();
+            let messages: std::vec::Vec<_> =
+                wire.into_iter().filter_map(|byte| dec.push(byte)).collect();
+            let mut expected = std::vec::Vec::new();
+            if split != 0 {
+                expected.push(Ok(old));
+            }
+            expected.push(Ok(Msg::Requalify { session }));
+            assert_eq!(messages, expected);
+        }
+        let request = Msg::Requalify { session: 1 };
+        let len = crate::encode(&request, &mut bytes).unwrap();
+        for split in 0..=len {
+            let mut h = Handoff::new();
+            let mut tx = TxState::new();
+            h.requalify_on_transport(0, 1_000, &mut tx).unwrap();
+            let frame = h.enqueue(&mut tx, 0).unwrap().unwrap();
+            let mut completion = None;
+            for _ in 0..split {
+                let (_, done) = tx.next_byte_with_completion().unwrap();
+                completion = done.or(completion);
+            }
+            h.disarm();
+            tx.cancel_unsent();
+            while let Some((_, done)) = tx.next_byte_with_completion() {
+                completion = done.or(completion);
+            }
+            assert_eq!(
+                completion,
+                (split != 0).then_some(FrameCompletion::Handoff(frame))
+            );
+            assert!(!h.on_reply(Msg::Prepared { session: 1 }, 1).unwrap());
+        }
+    }
+
+    #[test]
+    fn invalid_requalification_keeps_transport_and_clock_failure_disarms() {
+        let mut h = Handoff::new();
+        let mut tx = TxState::new();
+        tx.replace_motor(100, 200, 0);
+        for (now, timeout, error) in [
+            (0, 0, HandoffError::InvalidTimeout),
+            (u64::MAX, 1, HandoffError::Exhausted),
+        ] {
+            assert_eq!(h.requalify_on_transport(now, timeout, &mut tx), Err(error));
+            assert!(tx.pending_motor().is_some());
+            assert_eq!(h.last_session, 0);
+        }
+        h.last_session = u32::MAX;
+        assert_eq!(
+            h.requalify_on_transport(0, 1_000, &mut tx),
+            Err(HandoffError::Exhausted)
+        );
+        assert!(tx.pending_motor().is_some());
+        let mut h = Handoff::new();
+        h.requalify_on_transport(100, 1_000, &mut tx).unwrap();
+        assert_eq!(
+            h.requalify_on_transport(101, 1_000, &mut tx),
+            Err(HandoffError::Busy)
+        );
+        assert_eq!(h.check(99), Err(HandoffError::ClockReversed));
+        assert_eq!(h.outbound(), None);
+        assert_eq!(h.last_session, 1);
     }
 
     #[test]

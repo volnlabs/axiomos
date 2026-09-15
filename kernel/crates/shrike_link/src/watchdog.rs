@@ -119,6 +119,8 @@ impl Watchdog {
             | Msg::SessionOffer { .. }
             | Msg::SessionReady { .. }
             | Msg::SafeBarrier { .. }
+            | Msg::Requalify { .. }
+            | Msg::Prepared { .. }
             | Msg::SafeAck { .. } => false,
         }
     }

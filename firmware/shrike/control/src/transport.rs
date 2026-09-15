@@ -14,6 +14,7 @@ pub enum TransportError {
     ClockRegression,
     DeadlineOverflow,
     TimedOut,
+    PollLimit,
 }
 
 /// One active frame and one pending frame. Priority replies may replace
@@ -128,6 +129,17 @@ impl TelemetryTx {
         u64::from(!self.frame.is_idle()) + u64::from(self.pending.is_some())
     }
 
+    /// Discard every unsent frame, including replies, but retain the exact
+    /// started frame. The caller accounts this loss once in its exit summary.
+    pub fn discard_unsent(&mut self) -> u64 {
+        let mut dropped = u64::from(self.pending.take().is_some());
+        if !self.active_started {
+            self.frame.cancel_unsent();
+            dropped += u64::from(self.active.take().is_some());
+        }
+        dropped
+    }
+
     fn promote(&mut self) {
         if self.frame.is_idle() {
             if let Some(msg) = self.pending.take() {
@@ -163,7 +175,10 @@ impl TelemetryTx {
 }
 
 const fn is_priority(msg: Msg) -> bool {
-    matches!(msg, Msg::SessionReady { .. } | Msg::SafeAck { .. })
+    matches!(
+        msg,
+        Msg::SessionReady { .. } | Msg::SafeAck { .. } | Msg::Prepared { .. }
+    )
 }
 
 const fn is_telemetry(msg: Msg) -> bool {
@@ -424,33 +439,37 @@ mod tests {
 
     #[test]
     fn priority_capacity_is_exact_and_acknowledgements_are_idempotent_not_evicted() {
-        let ready = Msg::SessionReady { session: 11 };
-        let ack = Msg::SafeAck {
-            session: 11,
-            correlation: 29,
-            sequence: 3,
-        };
-        let other = Msg::SafeAck {
-            session: 11,
-            correlation: 30,
-            sequence: 3,
-        };
-        let mut tx = TelemetryTx::new();
-        assert!(tx.queue_priority(ready));
-        assert!(tx.queue_priority(ready));
-        assert!(tx.queue_priority(ack));
-        assert!(tx.queue_priority(ack));
-        assert!(!tx.queue_priority(other));
-        assert!(!tx.queue(Msg::HeartbeatToPi { seq: 1 }));
-        assert_eq!(tx.pending_frames(), 2);
-        assert_eq!(tx.dropped_telemetry(), 0);
+        for ready in [
+            Msg::SessionReady { session: 11 },
+            Msg::Prepared { session: 11 },
+        ] {
+            let ack = Msg::SafeAck {
+                session: 11,
+                correlation: 29,
+                sequence: 3,
+            };
+            let other = Msg::SafeAck {
+                session: 11,
+                correlation: 30,
+                sequence: 3,
+            };
+            let mut tx = TelemetryTx::new();
+            assert!(tx.queue_priority(ready));
+            assert!(tx.queue_priority(ready));
+            assert!(tx.queue_priority(ack));
+            assert!(tx.queue_priority(ack));
+            assert!(!tx.queue_priority(other));
+            assert!(!tx.queue(Msg::HeartbeatToPi { seq: 1 }));
+            assert_eq!(tx.pending_frames(), 2);
+            assert_eq!(tx.dropped_telemetry(), 0);
 
-        let mut io = Io {
-            quota: usize::MAX,
-            ..Io::default()
-        };
-        tx.service(&mut io).unwrap();
-        assert_eq!(messages(&io.wire), [ready, ack]);
+            let mut io = Io {
+                quota: usize::MAX,
+                ..Io::default()
+            };
+            tx.service(&mut io).unwrap();
+            assert_eq!(messages(&io.wire), [ready, ack]);
+        }
     }
 
     #[test]
@@ -488,6 +507,7 @@ mod tests {
 
         for invalid in [
             Msg::SessionReady { session: 0 },
+            Msg::Prepared { session: 0 },
             Msg::SafeAck {
                 session: 0,
                 correlation: 1,
@@ -710,6 +730,34 @@ mod tests {
         assert_eq!(drain.poll(&mut io, &clock), Ok(false));
         clock.set(200_050 + 1);
         assert_eq!(drain.poll(&mut io, &clock), Ok(true));
+    }
+
+    #[test]
+    fn orderly_exit_discards_unsent_frames_but_finishes_started_telemetry() {
+        let sensor = Msg::Sensor {
+            ultrasonic_echo_us: 123,
+            estop_line: false,
+            flags: 0,
+        };
+        let pending = Msg::HeartbeatToPi { seq: 8 };
+        let mut encoded = [0; MAX_FRAME];
+        let n = shrike_link::encode(&sensor, &mut encoded).unwrap();
+        for split in 0..n {
+            let mut tx = TelemetryTx::new();
+            assert!(tx.queue(sensor));
+            assert!(tx.queue(pending));
+            let mut io = Io {
+                quota: split,
+                ..Io::default()
+            };
+            tx.service(&mut io).unwrap();
+            assert_eq!(tx.discard_unsent(), 1 + u64::from(split == 0));
+            assert_eq!(tx.discard_unsent(), 0, "loss must be accounted once");
+            io.quota = MAX_FRAME;
+            tx.service(&mut io).unwrap();
+            assert_eq!(io.wire, if split == 0 { &[][..] } else { &encoded[..n] });
+            assert_eq!(tx.pending_frames(), 0);
+        }
     }
 
     #[test]

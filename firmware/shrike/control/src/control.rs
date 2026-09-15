@@ -9,7 +9,7 @@ use shrike_link::{encode, MAX_FRAME};
 use shrike_link::{Decoder, Msg};
 
 use crate::fpga::{FpgaLifecycle, FpgaPlatform, LifecycleError};
-use crate::transport::TelemetryTx;
+use crate::transport::{LinkQuiescence, TelemetryTx, TransportError};
 
 /// Keep serial input from monopolizing one control-loop iteration when the
 /// UART is continuously ready; watchdog, motors, and telemetry get service.
@@ -24,6 +24,11 @@ pub trait ByteIo {
     fn read(&mut self) -> Result<Option<u8>, Self::Error>;
     /// Try to transmit a prefix. `Ok(0)` is backpressure.
     fn try_write(&mut self, bytes: &[u8]) -> Result<usize, Self::Error>;
+    /// True only when no locally accepted byte remains in a FIFO or shifter.
+    /// Unknown completion fails closed; orderly requalification then times out.
+    fn tx_idle(&mut self) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
     /// Clear software and hardware receive/transmit state.
     fn reset(&mut self) -> Result<(), Self::Error>;
 }
@@ -97,6 +102,7 @@ pub enum FaultReason {
     UnexpectedMessage,
     MotorSink,
     Io,
+    Transport(TransportError),
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +111,10 @@ pub enum RunTermination {
     IterationLimit,
     Stop(StopReason),
     Fault(FaultReason),
+    /// Orderly local exit only; the outer owner must still drain/requalify.
+    Requalify {
+        session: core::num::NonZeroU32,
+    },
 }
 
 /// Result of a bounded run or terminal stop/fault. Borrowed peripherals remain
@@ -145,6 +155,117 @@ fn terminate<IO: ByteIo, S: MotorPairSink>(
         .saturating_add(tx.dropped_telemetry());
     summary.io_reset_failed = io.reset().is_err();
     Some(summary)
+}
+
+/// Preserve a started reverse frame while inhibited. No following RX command
+/// is applied, and no requalification request survives failed completion/reset.
+fn finish_requalification<IO: ByteIo, CK: MicrosClock, ES: EstopLine, S: MotorPairSink>(
+    io: &mut IO,
+    clock: &CK,
+    estop: &mut ES,
+    motors: &mut S,
+    mut summary: RunSummary,
+    tx: &mut TelemetryTx,
+    request: (core::num::NonZeroU32, u64),
+) -> Option<RunSummary> {
+    let (session, started) = request;
+    motors.inhibit();
+    summary.motor_inhibit_calls = summary.motor_inhibit_calls.saturating_add(1);
+    summary.telemetry_frames_dropped = summary
+        .telemetry_frames_dropped
+        .saturating_add(tx.discard_unsent());
+    let mut previous = started;
+    let deadline = started.checked_add(LinkQuiescence::TIMEOUT_US);
+    let outcome = (|| {
+        let deadline = deadline.ok_or(RunTermination::Fault(FaultReason::Transport(
+            TransportError::DeadlineOverflow,
+        )))?;
+        let mut check = || {
+            let now = clock.now_us();
+            let fault = if now < previous {
+                Some(TransportError::ClockRegression)
+            } else if now >= deadline {
+                Some(TransportError::TimedOut)
+            } else {
+                None
+            };
+            if let Some(fault) = fault {
+                return Err(RunTermination::Fault(FaultReason::Transport(fault)));
+            }
+            previous = now;
+            if estop.asserted() {
+                summary.estop_asserts = summary.estop_asserts.saturating_add(1);
+                return Err(RunTermination::Stop(StopReason::HardwareEstop));
+            }
+            Ok(())
+        };
+        let mut decoder = Decoder::new();
+        // A broken/frozen clock cannot turn backpressure into an infinite exit.
+        for _ in 0..65_536 {
+            check()?;
+            let mut rx_idle = false;
+            for _ in 0..RX_BYTES_PER_ITERATION {
+                let Some(byte) = io
+                    .read()
+                    .map_err(|_| RunTermination::Fault(FaultReason::Io))?
+                else {
+                    rx_idle = true;
+                    break;
+                };
+                match decoder.push(byte) {
+                    Some(Ok(Msg::Estop { .. })) => {
+                        return Err(RunTermination::Stop(StopReason::SoftwareEstop));
+                    }
+                    Some(Err(_)) => return Err(RunTermination::Fault(FaultReason::Decode)),
+                    _ => {} // Discard all subsequent commands and offers.
+                }
+            }
+            check()?;
+            tx.service(io)
+                .map_err(|error| RunTermination::Fault(FaultReason::Transport(error)))?;
+            check()?;
+            if !rx_idle || tx.pending_frames() != 0 {
+                continue;
+            }
+            let idle = io
+                .tx_idle()
+                .map_err(|_| RunTermination::Fault(FaultReason::Io))?;
+            check()?;
+            if idle {
+                return Ok(());
+            }
+        }
+        Err(RunTermination::Fault(FaultReason::Transport(
+            TransportError::PollLimit,
+        )))
+    })();
+    let mut finished = terminate(
+        io,
+        motors,
+        summary,
+        outcome
+            .err()
+            .unwrap_or(RunTermination::Requalify { session }),
+        tx,
+    )?;
+    if outcome.is_ok() {
+        // Reset and the final inhibition are part of the same absolute bound.
+        let hardware_stop = estop.asserted();
+        let now = clock.now_us();
+        finished.termination = if finished.io_reset_failed {
+            RunTermination::Fault(FaultReason::Io)
+        } else if now < previous {
+            RunTermination::Fault(FaultReason::Transport(TransportError::ClockRegression))
+        } else if deadline.is_none_or(|deadline| now >= deadline) {
+            RunTermination::Fault(FaultReason::Transport(TransportError::TimedOut))
+        } else if hardware_stop {
+            finished.estop_asserts = finished.estop_asserts.saturating_add(1);
+            RunTermination::Stop(StopReason::HardwareEstop)
+        } else {
+            RunTermination::Requalify { session }
+        };
+    }
+    Some(finished)
 }
 
 /// Run until the iteration bound or a terminal stop/fault. Motor commands are
@@ -310,6 +431,37 @@ where
                 other => (other, None),
             };
             match msg {
+                Msg::Requalify { session } if cfg.expected_session.is_some() => {
+                    if command_applied && wd.output(now) == Output::SafeStop {
+                        return terminate(
+                            io,
+                            motors,
+                            summary,
+                            RunTermination::Stop(StopReason::WatchdogExpired),
+                            &tx,
+                        );
+                    }
+                    // Codec validation already rejects zero; retain the exact
+                    // requested identity for the inhibited outer owner.
+                    let Some(session) = core::num::NonZeroU32::new(session) else {
+                        return terminate(
+                            io,
+                            motors,
+                            summary,
+                            RunTermination::Fault(FaultReason::UnexpectedMessage),
+                            &tx,
+                        );
+                    };
+                    return finish_requalification(
+                        io,
+                        clock,
+                        estop,
+                        motors,
+                        summary,
+                        &mut tx,
+                        (session, now),
+                    );
+                }
                 Msg::MotorSetpoint { seq, left, right } => {
                     // Session establishment consumes sequence zero in both the
                     // software watchdog and the FPGA. The first subsequent
@@ -451,6 +603,8 @@ where
                 | Msg::SessionOffer { .. }
                 | Msg::SessionReady { .. }
                 | Msg::SafeBarrier { .. }
+                | Msg::Requalify { .. }
+                | Msg::Prepared { .. }
                 | Msg::SafeAck { .. } => {
                     return terminate(
                         io,

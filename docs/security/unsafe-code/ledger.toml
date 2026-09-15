@@ -1,6 +1,9 @@
 version = 1
 baseline_sites = 720
-baseline_fingerprint = "sha256:21711903c50aadef6e7807c099da073d0129be83bf4ea88b3d53c28ade1d29a1"
+baseline_fingerprint = "sha256:eadf077cf18a7ad6e7cfd32590c910fc2f3ab785754cefa0583780743f2bb303"
+
+# 2026-09-16: RP2040 TX-idle uses existing UART register accessors;
+# their unsafe PAC sites moved without adding raw access or ownership.
 
 # 2026-09-16: local PL011 quiescence reuses the existing exclusive MMIO
 # owner and counter access. No new unsafe site; bounded passes disable TX,

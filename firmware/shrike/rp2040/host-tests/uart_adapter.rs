@@ -75,6 +75,27 @@ impl Registers for &RefCell<Model> {
 }
 
 #[test]
+fn tx_idle_requires_empty_fifo_and_shift_register_and_preserves_rx_errors() {
+    let model = RefCell::new(Model::default());
+    let mut io = Uart::from_registers(&model);
+    assert_eq!(io.tx_idle(), Err(Error::Disabled));
+    io.reset().unwrap();
+    for (fifo_nonempty, busy) in [(true, true), (true, false), (false, true), (false, false)] {
+        let mut m = model.borrow_mut();
+        m.tx_nonempty = fifo_nonempty;
+        m.busy = busy;
+        drop(m);
+        assert_eq!(io.tx_idle(), Ok(!fifo_nonempty && !busy));
+    }
+    // A receive fault at the empty-TX observation still invalidates the link.
+    model.borrow_mut().error_on_flags = 8;
+    assert_eq!(io.tx_idle(), Err(Error::Receive(8)));
+    assert_eq!(io.tx_idle(), Err(Error::Disabled));
+    assert!(!model.borrow().enabled);
+    assert_eq!(model.borrow().reads, 0);
+}
+
+#[test]
 fn receive_faults_even_when_empty_invalidate_until_explicit_reset() {
     for (sticky, word, late, expected) in [(8, None, 0, 8), (0, Some(0x141), 0, 1), (0, None, 4, 4)]
     {
