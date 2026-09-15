@@ -546,3 +546,104 @@ fn invalid_runtime_command_fails_safe_before_spi() {
         );
     }
 }
+
+#[test]
+fn bitstream_image_verifies_exact_immutable_payload_and_binding() {
+    use shrike_control::fpga::BitstreamImage;
+    // FIPS SHA-256 example, independently known digest of ASCII "abc".
+    let bytes = b"abc";
+    let manifest = BitstreamManifest {
+        offset: FPGA_STORAGE_START,
+        length: 3,
+        sha256: [
+            0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae,
+            0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61,
+            0xf2, 0x00, 0x15, 0xad,
+        ],
+    };
+    // Changing any retained digest byte or source byte must fail, not merely
+    // changing a prefix which an incomplete loader might happen to inspect.
+    for i in 0..manifest.sha256.len() {
+        let mut changed = manifest;
+        changed.sha256[i] ^= 1;
+        assert_eq!(
+            BitstreamImage::verify(changed, bytes).err(),
+            Some(shrike_control::fpga::BitstreamError::HashMismatch)
+        );
+    }
+    for i in 0..bytes.len() {
+        let mut changed = *bytes;
+        changed[i] ^= 1;
+        assert_eq!(
+            BitstreamImage::verify(manifest, &changed).err(),
+            Some(shrike_control::fpga::BitstreamError::HashMismatch)
+        );
+    }
+    let image = BitstreamImage::verify(manifest, bytes).unwrap();
+    assert_eq!(image.manifest(), manifest);
+    let payload = image.bytes_for(manifest.offset, manifest.length).unwrap();
+    assert_eq!(payload, bytes);
+    assert_eq!(
+        payload.as_ptr(),
+        bytes.as_ptr(),
+        "retain immutable source, never copy it"
+    );
+    assert_eq!(image.bytes_for(manifest.offset + 1, manifest.length), None);
+    assert_eq!(image.bytes_for(manifest.offset, manifest.length - 1), None);
+    assert!(core::mem::size_of::<BitstreamImage<'_>>() <= 64);
+}
+
+#[test]
+fn bitstream_image_rejects_range_length_and_digest_before_retention() {
+    use shrike_control::fpga::{BitstreamError, BitstreamImage, FPGA_STORAGE_END};
+    let manifest = BitstreamManifest {
+        length: 3,
+        ..manifest()
+    };
+    for wrong in [
+        BitstreamManifest {
+            offset: FPGA_STORAGE_START - 1,
+            ..manifest
+        },
+        BitstreamManifest {
+            offset: FPGA_STORAGE_END,
+            ..manifest
+        },
+        BitstreamManifest {
+            length: 0,
+            ..manifest
+        },
+        BitstreamManifest {
+            length: FPGA_STORAGE_END - FPGA_STORAGE_START + 1,
+            ..manifest
+        },
+        BitstreamManifest {
+            length: u32::MAX,
+            ..manifest
+        },
+        BitstreamManifest {
+            sha256: [0; 32],
+            ..manifest
+        },
+    ] {
+        assert_eq!(
+            BitstreamImage::verify(wrong, b"abc").err(),
+            Some(BitstreamError::InvalidManifest)
+        );
+    }
+    for bytes in [b"ab".as_slice(), b"abcd".as_slice()] {
+        assert_eq!(
+            BitstreamImage::verify(manifest, bytes).err(),
+            Some(BitstreamError::LengthMismatch)
+        );
+    }
+    assert_eq!(
+        BitstreamImage::verify(manifest, b"abc").err(),
+        Some(BitstreamError::HashMismatch)
+    );
+    let maximum = BitstreamManifest {
+        length: FPGA_STORAGE_END - FPGA_STORAGE_START,
+        ..manifest
+    };
+    assert!(maximum.valid(), "the inclusive storage endpoint is valid");
+}

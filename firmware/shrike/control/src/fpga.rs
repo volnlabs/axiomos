@@ -17,7 +17,9 @@ pub struct BitstreamManifest {
 }
 
 impl BitstreamManifest {
-    fn valid(self) -> bool {
+    /// Checked before reading the reserved flash range or hashing any bytes.
+    #[must_use]
+    pub fn valid(self) -> bool {
         self.offset == FPGA_STORAGE_START
             && self.length != 0
             && self
@@ -25,6 +27,50 @@ impl BitstreamManifest {
                 .checked_add(self.length)
                 .is_some_and(|end| end <= FPGA_STORAGE_END)
             && self.sha256 != [0; 32]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BitstreamError {
+    InvalidManifest,
+    LengthMismatch,
+    HashMismatch,
+}
+
+/// Verified immutable FPGA source. Borrows the source without allocating or
+/// copying it. The target must keep mapped flash immutable for this lifetime.
+pub struct BitstreamImage<'a> {
+    manifest: BitstreamManifest,
+    bytes: &'a [u8],
+}
+
+impl<'a> BitstreamImage<'a> {
+    pub fn verify(manifest: BitstreamManifest, bytes: &'a [u8]) -> Result<Self, BitstreamError> {
+        use sha2::{Digest, Sha256};
+        if !manifest.valid() {
+            return Err(BitstreamError::InvalidManifest);
+        }
+        if bytes.len() != manifest.length as usize {
+            return Err(BitstreamError::LengthMismatch);
+        }
+        // Existing no_std software SHA-256: fixed working state, no heap,
+        // at most the reserved 2 MiB. Configuration runs with outputs inhibited.
+        let actual: [u8; 32] = Sha256::digest(bytes).into();
+        if actual != manifest.sha256 {
+            return Err(BitstreamError::HashMismatch);
+        }
+        Ok(Self { manifest, bytes })
+    }
+
+    #[must_use]
+    pub const fn manifest(&self) -> BitstreamManifest {
+        self.manifest
+    }
+
+    /// Streaming must use the exact range which passed verification.
+    #[must_use]
+    pub fn bytes_for(&self, offset: u32, length: u32) -> Option<&'a [u8]> {
+        (offset == self.manifest.offset && length == self.manifest.length).then_some(self.bytes)
     }
 }
 

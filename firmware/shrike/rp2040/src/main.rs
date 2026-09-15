@@ -25,7 +25,8 @@ use hal::pac;
 use panic_halt as _;
 use rp2040_hal as hal;
 use shrike_control::fpga::{
-    BitstreamManifest, FpgaLifecycle, FpgaPlatform, RUNTIME_STATUS_REQUEST,
+    BitstreamError, BitstreamImage, BitstreamManifest, FpgaLifecycle, FpgaPlatform,
+    RUNTIME_STATUS_REQUEST,
 };
 use shrike_control::transport::{LinkQuiescence, TelemetryTx};
 use shrike_control::MicrosClock;
@@ -48,6 +49,7 @@ const VALIDATED_FPGA_ARTIFACT: Option<(BitstreamManifest, u64)> = None;
 enum PlatformError {
     MissingValidatedArtifact,
     Spi(spi::Error),
+    Bitstream(BitstreamError),
 }
 
 /// Owns every safety-relevant R0.4 output. Unsupported operations return an
@@ -59,6 +61,7 @@ struct R04Platform<'a, PWR, EN, RESET, RIGHT, SPI> {
     right_pwm: RIGHT,
     spi: RuntimeSpi<SPI>,
     clock: &'a TimerClock,
+    image: Option<BitstreamImage<'static>>,
 }
 
 impl<PWR, EN, RESET, RIGHT, SPI> FpgaPlatform for R04Platform<'_, PWR, EN, RESET, RIGHT, SPI>
@@ -72,6 +75,7 @@ where
     type Error = PlatformError;
 
     fn force_safe(&mut self) {
+        self.image = None;
         let _ = self.reset.set_low();
         let _ = self.right_pwm.set_duty_cycle(0);
         let _ = self.en.set_low();
@@ -83,8 +87,23 @@ where
         self.clock.now_us()
     }
 
-    fn bitstream_sha256(&mut self, _: u32, _: u32) -> Result<[u8; 32], Self::Error> {
-        Err(PlatformError::MissingValidatedArtifact)
+    fn bitstream_sha256(&mut self, offset: u32, length: u32) -> Result<[u8; 32], Self::Error> {
+        self.image = None;
+        let (manifest, _) =
+            VALIDATED_FPGA_ARTIFACT.ok_or(PlatformError::MissingValidatedArtifact)?;
+        if !manifest.valid() || offset != manifest.offset || length != manifest.length {
+            return Err(PlatformError::Bitstream(BitstreamError::InvalidManifest));
+        }
+        // SAFETY: the checked R0.4 manifest lies wholly within the memory-mapped
+        // upper 2 MiB of its 4 MiB flash. u8 needs alignment 1; every bit pattern
+        // is valid. This firmware never writes flash or disables XIP, and no
+        // other core/DMA/programmer may mutate it while this reference lives.
+        // A manifest must be provisioned with its exact raw image, not a file
+        // offset inside the factory filesystem. The default None reads nothing.
+        let bytes = unsafe { core::slice::from_raw_parts(offset as *const u8, length as usize) };
+        let image = BitstreamImage::verify(manifest, bytes).map_err(PlatformError::Bitstream)?;
+        self.image = Some(image);
+        Ok(manifest.sha256)
     }
 
     fn begin_configuration(&mut self) -> Result<(), Self::Error> {
@@ -170,6 +189,7 @@ fn main() -> ! {
         right_pwm: pwm_slices.pwm7.channel_b,
         spi,
         clock: &clock,
+        image: None,
     };
     let mut lifecycle = FpgaLifecycle::new(platform);
 
