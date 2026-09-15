@@ -158,12 +158,16 @@ its new instance starts zeroed. The actual permanent-worker dispatch and CPU0
 synchronization remain integration work.
 
 The asynchronous worker and global upload/verifier-workspace reservation are
-implemented below. Timing admission remains integration work. Kernel dispatch
+implemented below. The private slot reserves the retained artifact's verified
+model cost at 100 Hz through the existing utilization ledger. It holds the larger
+of active and prepared costs alongside legacy contributions; the installation's
+active charge changes at publication and its opaque ticket settles only after
+worker cleanup. Rejection and cancellation preserve the old charge. Kernel dispatch
 must also discard captured
 requests on later deadline/policy/queue failure. The internal installation
 boundary tests cover fresh generations, ownership moves, cancellation, stop and
 100,000 transitions with bounded retained resources. No production caller can
-activate this slot yet; authority/admission checks, physical eligibility, timer
+activate this slot yet; authority checks, physical eligibility, timer
 scheduling and UART handoff remain unresolved. Helper costs remain uncalibrated
 model values.
 

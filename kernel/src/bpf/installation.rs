@@ -1,9 +1,10 @@
-//! Exclusive fixed-slot ownership. Kernel-private until authority, admission and
-//! correlated physical handoff are wired. No timer/global-lock protocol here.
+//! Exclusive fixed-slot ownership. Kernel-private until authority and correlated
+//! physical handoff are wired. No timer/global-lock protocol here.
 use alloc::sync::Arc;
 
 use kernel_abi::ManagedControlContextV1;
 use kernel_bpf::execution::{BpfError, ManagedInvocationResult};
+use kernel_bpf::verifier::admission::{ManagedAdmissionError, ManagedAdmissionReservation};
 use kernel_bpf::verifier::BehaviorArtifact;
 
 use super::managed::{
@@ -20,6 +21,7 @@ struct ArtifactRef {
 struct Installation {
     generation: u64,
     instance_id: u64,
+    active_charge_ns_per_s: u64,
     instance: Arc<BehaviorInstance>,
     // Prepared before publication, later moved into Previous.
     artifact: ArtifactRef,
@@ -39,6 +41,7 @@ struct Pending {
 pub(crate) struct SlotSnapshot {
     pub generation: u64,
     pub active: Option<u32>,
+    pub active_charge_ns_per_s: Option<u64>,
     pub previous: Option<u32>,
     pub pending: Option<u64>,
     pub inhibited: bool,
@@ -54,6 +57,7 @@ pub(crate) struct ControlSlot {
     previous: Option<ArtifactRef>,
     staged: Option<Installation>,
     pending: Option<Pending>,
+    admission: Option<ManagedAdmissionReservation>,
     retire: Option<RetireBatch>,
     retiring: Option<u64>,
     generation: u64,
@@ -64,12 +68,14 @@ pub(crate) struct InstallationPreparation {
     pending: Pending,
     artifact: ArtifactRef,
     instance: InstancePreparation,
+    active_charge_ns_per_s: u64,
 }
 
 pub(crate) struct BuiltInstallation {
     pending: Pending,
     artifact: ArtifactRef,
     instance: PreparedInstance,
+    active_charge_ns_per_s: u64,
 }
 
 impl InstallationPreparation {
@@ -78,6 +84,7 @@ impl InstallationPreparation {
             pending: self.pending,
             artifact: self.artifact,
             instance: self.instance.build(),
+            active_charge_ns_per_s: self.active_charge_ns_per_s,
         }
     }
 
@@ -87,6 +94,7 @@ impl InstallationPreparation {
             pending: self.pending,
             artifact: self.artifact,
             instance: self.instance.cancel(),
+            active_charge_ns_per_s: self.active_charge_ns_per_s,
         }
     }
 }
@@ -98,6 +106,7 @@ impl ControlSlot {
             previous: None,
             staged: None,
             pending: None,
+            admission: None,
             retire: None,
             retiring: None,
             generation: 0,
@@ -109,6 +118,7 @@ impl ControlSlot {
         SlotSnapshot {
             generation: self.generation,
             active: self.active.as_ref().map(|a| a.artifact.handle),
+            active_charge_ns_per_s: self.active.as_ref().map(|a| a.active_charge_ns_per_s),
             previous: self.previous.as_ref().map(|a| a.handle),
             pending: self.pending.map(|p| p.id),
             inhibited: self.inhibited,
@@ -143,7 +153,21 @@ impl ControlSlot {
             handle,
             code: manager.managed_artifact(handle)?.clone(),
         };
-        let instance = manager.begin_managed_instance(handle)?;
+        let admission = manager
+            .admission
+            .prepare_managed(artifact.code.wcet_cycles())
+            .map_err(map_admission_error)?;
+        let active_charge_ns_per_s = admission.contribution_ns_per_s();
+        let instance = match manager.begin_managed_instance(handle) {
+            Ok(instance) => instance,
+            Err(error) => {
+                manager
+                    .admission
+                    .finish_managed(admission, false)
+                    .map_err(map_admission_error)?;
+                return Err(error);
+            }
+        };
         let pending = Pending {
             id: instance.id(),
             expected,
@@ -153,11 +177,13 @@ impl ControlSlot {
             handoff: false,
         };
         self.pending = Some(pending);
+        self.admission = Some(admission);
         manager.managed_slot_busy = true;
         Ok(InstallationPreparation {
             pending,
             artifact,
             instance,
+            active_charge_ns_per_s,
         })
     }
 
@@ -181,6 +207,7 @@ impl ControlSlot {
                 let installation = Installation {
                     generation: built.pending.generation,
                     instance_id: built.pending.id,
+                    active_charge_ns_per_s: built.active_charge_ns_per_s,
                     instance,
                     artifact: built.artifact,
                 };
@@ -198,6 +225,11 @@ impl ControlSlot {
                 self.retiring = Some(built.pending.id);
                 self.retire = Some(RetireBatch {
                     id: built.pending.id,
+                    admission: self
+                        .admission
+                        .take()
+                        .expect("accepted build retains admission custody"),
+                    committed: false,
                     instance: None,
                     artifact: Some(built.artifact),
                     evict_artifact: false,
@@ -243,8 +275,9 @@ impl ControlSlot {
     }
 
     /// Only for the future validated handoff caller. No public safety boolean.
-    /// Correlated sink acknowledgement, authority and admission are unresolved;
-    /// production has no caller. Tests explicitly supply this internal boundary.
+    /// Modeled admission is reserved; authority, correlated sink acknowledgement,
+    /// CPU0/global worker ownership and calibrated physical timing eligibility
+    /// remain unresolved. Production has no caller; tests supply this boundary.
     pub(crate) fn commit_validated_handoff(&mut self, id: u64) -> Result<u64, BpfError> {
         let pending = self
             .pending
@@ -277,6 +310,11 @@ impl ControlSlot {
         self.retiring = Some(id);
         self.retire = Some(RetireBatch {
             id,
+            admission: self
+                .admission
+                .take()
+                .expect("accepted build retains admission custody"),
+            committed: true,
             instance,
             artifact,
             evict_artifact,
@@ -297,6 +335,11 @@ impl ControlSlot {
         self.retiring = Some(pending.id);
         self.retire = Some(RetireBatch {
             id: pending.id,
+            admission: self
+                .admission
+                .take()
+                .expect("accepted build retains admission custody"),
+            committed: false,
             instance: Some((staged.instance_id, staged.instance)),
             artifact: Some(staged.artifact),
             evict_artifact: false,
@@ -337,6 +380,12 @@ impl ControlSlot {
             if manager.preparation.candidate != Some(handle) {
                 return Err(BpfError::NotLoaded);
             }
+        }
+        manager
+            .admission
+            .finish_managed(receipt.admission, receipt.committed)
+            .map_err(map_admission_error)?;
+        if receipt.consumed_candidate.is_some() {
             manager.preparation.candidate = None;
         }
         manager.managed_slot_busy = false;
@@ -349,6 +398,8 @@ impl ControlSlot {
 /// by the worker. Even an empty first-activation batch needs a completion receipt.
 pub(crate) struct RetireBatch {
     id: u64,
+    admission: ManagedAdmissionReservation,
+    committed: bool,
     instance: Option<(u64, Arc<BehaviorInstance>)>,
     artifact: Option<ArtifactRef>,
     evict_artifact: bool,
@@ -358,6 +409,8 @@ pub(crate) struct RetireBatch {
 
 pub(crate) struct Retirement {
     id: u64,
+    admission: ManagedAdmissionReservation,
+    committed: bool,
     instance: Option<u64>,
     artifact: Option<u32>,
     failed: Option<super::managed::FailedInstanceReceipt>,
@@ -367,6 +420,8 @@ pub(crate) struct Retirement {
 
 pub(crate) struct Retired {
     id: u64,
+    admission: ManagedAdmissionReservation,
+    committed: bool,
     consumed_candidate: Option<u32>,
 }
 
@@ -385,6 +440,8 @@ impl RetireBatch {
         });
         Retirement {
             id: self.id,
+            admission: self.admission,
+            committed: self.committed,
             instance,
             artifact,
             failed: self.failed.and_then(ManagedInstanceFinishError::release),
@@ -449,8 +506,19 @@ impl Retirement {
         }
         Ok(Retired {
             id: self.id,
+            admission: self.admission,
+            committed: self.committed,
             consumed_candidate: self.consumed_candidate,
         })
+    }
+}
+
+fn map_admission_error(error: ManagedAdmissionError) -> BpfError {
+    match error {
+        ManagedAdmissionError::Busy => BpfError::ObjectBusy,
+        ManagedAdmissionError::Stale => BpfError::NotLoaded,
+        ManagedAdmissionError::Budget { .. } => BpfError::AdmissionRejected,
+        ManagedAdmissionError::Overflow => BpfError::ResourceLimit,
     }
 }
 

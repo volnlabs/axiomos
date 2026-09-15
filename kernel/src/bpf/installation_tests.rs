@@ -1,5 +1,6 @@
 extern crate std;
 use kernel_bpf::signing::managed::{PrivateArray, EFFECT_MOTOR_PAIR};
+use kernel_bpf::verifier::admission::AdmissionLedger;
 
 use super::*;
 use crate::bpf::managed::tests::{artifact, artifact_from_program, stateful_managed_program};
@@ -35,6 +36,15 @@ fn stage(slot: &mut ControlSlot, manager: &mut BpfManager, previous: Option<u32>
 fn commit(slot: &mut ControlSlot, id: u64) -> u64 {
     slot.enter_handoff(id).unwrap();
     slot.commit_validated_handoff(id).unwrap()
+}
+
+fn costlier_artifact(revision: u64) -> BehaviorArtifact {
+    let mut program = std::vec::Vec::new();
+    for value in 0..32 {
+        program.push(kernel_bpf::bytecode::insn::BpfInsn::mov64_imm(0, value));
+    }
+    program.push(kernel_bpf::bytecode::insn::BpfInsn::exit());
+    artifact_from_program(revision, true, 0, None, &program)
 }
 
 #[test]
@@ -414,4 +424,145 @@ fn installation_duplicate_active_artifact_does_not_evict_new_previous() {
     drain(&mut slot, &mut manager);
     assert_eq!(slot.snapshot().previous, Some(a));
     assert!(manager.managed_artifact(a).is_ok());
+}
+
+#[test]
+fn installation_admission_tracks_publication_then_worker_settlement() {
+    let mut manager = BpfManager::new();
+    let mut slot = ControlSlot::new();
+    let artifact = artifact(1);
+    let a_wcet = artifact.wcet_cycles();
+    manager.admission = AdmissionLedger::new(u64::MAX, 1);
+    let a = manager.register_managed_artifact(artifact).unwrap();
+    manager.preparation.candidate = Some(a);
+
+    let id = stage(&mut slot, &mut manager, None);
+    assert_eq!(manager.admission.committed_ns_per_s(), 0);
+    assert_eq!(manager.admission.reserved_ns_per_s(), a_wcet * 100);
+    commit(&mut slot, id);
+    assert_eq!(slot.snapshot().active_charge_ns_per_s, Some(a_wcet * 100));
+    assert_eq!(manager.admission.committed_ns_per_s(), 0);
+    drain(&mut slot, &mut manager);
+    assert_eq!(manager.admission.committed_ns_per_s(), a_wcet * 100);
+
+    let legacy_charge = 70;
+    manager.admission.admit(91, 92, 7, 10).unwrap();
+    let artifact = costlier_artifact(2);
+    let b_wcet = artifact.wcet_cycles();
+    assert!(b_wcet > a_wcet);
+    let b = manager.register_managed_artifact(artifact).unwrap();
+    manager.preparation.candidate = Some(b);
+    let id = stage(&mut slot, &mut manager, None);
+    assert_eq!(
+        manager.admission.reserved_ns_per_s(),
+        legacy_charge + b_wcet * 100
+    );
+    commit(&mut slot, id);
+    assert_eq!(slot.snapshot().active_charge_ns_per_s, Some(b_wcet * 100));
+    assert_eq!(
+        manager.admission.committed_ns_per_s(),
+        legacy_charge + a_wcet * 100
+    );
+    assert_eq!(
+        manager.admission.reserved_ns_per_s(),
+        legacy_charge + b_wcet * 100
+    );
+    drain(&mut slot, &mut manager);
+    assert_eq!(
+        manager.admission.committed_ns_per_s(),
+        legacy_charge + b_wcet * 100
+    );
+
+    let id = stage(&mut slot, &mut manager, Some(a));
+    assert_eq!(
+        manager.admission.reserved_ns_per_s(),
+        legacy_charge + b_wcet * 100,
+        "rollback keeps the larger active charge reserved"
+    );
+    commit(&mut slot, id);
+    assert_eq!(slot.snapshot().active_charge_ns_per_s, Some(a_wcet * 100));
+    drain(&mut slot, &mut manager);
+    assert_eq!(
+        manager.admission.committed_ns_per_s(),
+        legacy_charge + a_wcet * 100
+    );
+    slot.stop();
+    assert_eq!(slot.snapshot().active_charge_ns_per_s, Some(a_wcet * 100));
+    assert_eq!(
+        manager.admission.committed_ns_per_s(),
+        legacy_charge + a_wcet * 100
+    );
+}
+
+#[test]
+fn installation_admission_rejects_overbudget_candidate_without_touching_active() {
+    let artifact = artifact(1);
+    let a_wcet = artifact.wcet_cycles();
+    let mut manager = BpfManager::new();
+    manager.admission = AdmissionLedger::new(a_wcet * 100, 1);
+    let mut slot = ControlSlot::new();
+    let a = manager.register_managed_artifact(artifact).unwrap();
+    manager.preparation.candidate = Some(a);
+    let id = stage(&mut slot, &mut manager, None);
+    commit(&mut slot, id);
+    drain(&mut slot, &mut manager);
+
+    let b = manager
+        .register_managed_artifact(costlier_artifact(2))
+        .unwrap();
+    manager.preparation.candidate = Some(b);
+    let before = slot.snapshot();
+    assert!(matches!(
+        slot.begin(&mut manager, before.generation, None),
+        Err(BpfError::AdmissionRejected)
+    ));
+    assert_eq!(slot.snapshot(), before);
+    assert_eq!(manager.admission.committed_ns_per_s(), a_wcet * 100);
+    assert_eq!(manager.admission.reserved_ns_per_s(), a_wcet * 100);
+    assert!(!manager.managed_slot_busy);
+    assert!(manager.managed_instance_preparation.is_none());
+}
+
+#[test]
+fn installation_admission_cancels_failed_construction_and_staged_work() {
+    let artifact = artifact(1);
+    let a_wcet = artifact.wcet_cycles();
+    let mut manager = BpfManager::new();
+    manager.admission = AdmissionLedger::new(u64::MAX, 1);
+    let mut slot = ControlSlot::new();
+    let a = manager.register_managed_artifact(artifact).unwrap();
+    manager.preparation.candidate = Some(a);
+    let id = stage(&mut slot, &mut manager, None);
+    commit(&mut slot, id);
+    drain(&mut slot, &mut manager);
+
+    let artifact = costlier_artifact(2);
+    let b_wcet = artifact.wcet_cycles();
+    let b = manager.register_managed_artifact(artifact).unwrap();
+    manager.preparation.candidate = Some(b);
+    let before = slot.snapshot();
+    let max_program_bytes = manager.limits.max_program_bytes;
+    manager.limits.max_program_bytes = manager.resource_usage().program_bytes;
+    assert!(matches!(
+        slot.begin(&mut manager, before.generation, None),
+        Err(BpfError::ResourceLimit)
+    ));
+    assert_eq!(slot.snapshot(), before);
+    assert_eq!(manager.admission.committed_ns_per_s(), a_wcet * 100);
+    assert_eq!(manager.admission.reserved_ns_per_s(), a_wcet * 100);
+    assert!(!manager.managed_slot_busy);
+    manager.limits.max_program_bytes = max_program_bytes;
+
+    let token = slot.begin(&mut manager, before.generation, None).unwrap();
+    let id = slot.snapshot().pending.unwrap();
+    slot.finish_build(&mut manager, token.build()).unwrap();
+    slot.cancel(id).unwrap();
+    slot.abort_staged().unwrap();
+    assert_eq!(slot.snapshot().active_charge_ns_per_s, Some(a_wcet * 100));
+    assert_eq!(manager.admission.committed_ns_per_s(), a_wcet * 100);
+    assert_eq!(manager.admission.reserved_ns_per_s(), b_wcet * 100);
+    drain(&mut slot, &mut manager);
+    assert_eq!(slot.snapshot(), before);
+    assert_eq!(manager.admission.committed_ns_per_s(), a_wcet * 100);
+    assert_eq!(manager.admission.reserved_ns_per_s(), a_wcet * 100);
 }
