@@ -824,6 +824,19 @@ impl ControlSlot {
             self.inhibited,
             MANAGED_OPERATION_COMMITTED,
         );
+        let identity = receipt.identity();
+        super::recorder::events::handoff(
+            MANAGED_AUDIT_HANDOFF_RECEIPT_COMMITTED,
+            Some(id),
+            shrike_link::Msg::SafeAck {
+                session: identity.session,
+                correlation: identity.correlation,
+                sequence: identity.sequence,
+            },
+            None,
+            Some(self.generation),
+            None,
+        );
         Ok(self.generation)
     }
 
@@ -878,7 +891,7 @@ impl ControlSlot {
                     self.enter_handoff(pending.id)
                         .map_err(|_| HandoffError::Busy)?;
                     let sequence = motor_sequence.wrapping_add(1);
-                    let (_, discarded) = handoff.begin_on_transport(
+                    let (identity, discarded) = handoff.begin_on_transport(
                         pending.id,
                         sequence,
                         release.actual,
@@ -886,6 +899,14 @@ impl ControlSlot {
                         tx,
                     )?;
                     *motor_sequence = sequence;
+                    super::recorder::events::handoff(
+                        MANAGED_AUDIT_BARRIER_BEGIN,
+                        Some(pending.id),
+                        identity.message(),
+                        Some(release.actual),
+                        None,
+                        None,
+                    );
                     super::recorder::events::motor_discard(
                         discarded,
                         MANAGED_AUDIT_DISCARD_HANDOFF,

@@ -159,8 +159,8 @@ fn decode(input: impl Read) -> Result<Value> {
                 );
                 state.break_identity(cursor, "identity interrupted by recorder overwrite");
                 state.missing_mapping_allowed = true;
-                for (_, _, seen) in state.lifecycles.values_mut() {
-                    *seen |= 1 << 15;
+                for trace in state.lifecycles.values_mut() {
+                    trace.seen |= 1 << 15;
                 }
                 cursor = next;
                 lost += gap;
@@ -362,10 +362,18 @@ struct PendingIdentity {
     next: u32,
     bytes: [u8; 224],
 }
+struct LifecycleTrace {
+    public: u64,
+    accepted: ManagedAuditLifecycleV1,
+    // Lifecycle events 1..8; barrier begin/frame/complete/ack/receipt 9..13;
+    // failed handoff 14; interrupted retained history 15.
+    seen: u16,
+    barrier: Option<(u32, u64, u32)>,
+}
 #[derive(Default)]
 struct DecodeState {
     artifacts: BTreeMap<u32, Value>,
-    lifecycles: BTreeMap<u64, (u64, ManagedAuditLifecycleV1, u16)>,
+    lifecycles: BTreeMap<u64, LifecycleTrace>,
     pending: Option<PendingIdentity>,
     gaps: Vec<Value>,
     missing_mapping_allowed: bool,
@@ -624,7 +632,8 @@ impl DecodeState {
             MANAGED_AUDIT_LINK => {
                 let subtype = u32::from_le_bytes(r.payload[..4].try_into().unwrap());
                 ensure!(
-                    subtype == MANAGED_AUDIT_MOTOR_TX || r.correlation == 0,
+                    matches!(subtype, MANAGED_AUDIT_MOTOR_TX | MANAGED_AUDIT_HANDOFF_LINK)
+                        || r.correlation == 0,
                     "unexpected global link correlation"
                 );
                 let source = u32::from_le_bytes(r.payload[4..8].try_into().unwrap());
@@ -709,12 +718,143 @@ impl DecodeState {
                             "sink_acceptance": null
                         }))
                     }
+                    MANAGED_AUDIT_HANDOFF_LINK => self.handoff_link(r),
                     _ => bail!("unsupported link payload"),
                 }
             }
             _ => bail!("unsupported record kind"),
         }
     }
+    fn handoff_link(&mut self, r: &ManagedAuditRecordV1) -> Result<Value> {
+        let p = ManagedAuditHandoffV1::read_from_bytes(&r.payload).unwrap();
+        let has_op = p.flags & MANAGED_AUDIT_HANDOFF_HAS_OPERATION != 0;
+        let has_generation = p.flags & MANAGED_AUDIT_HANDOFF_HAS_GENERATION != 0;
+        let barrier = matches!(p.message_kind, 3 | 4);
+        ensure!(
+            (1..=7).contains(&p.event)
+                && (1..=4).contains(&p.message_kind)
+                && p.session != 0
+                && p.command_sequence <= 255
+                && p.reserved == [0; 12]
+                && p.flags & !3 == 0
+                && has_op == (r.correlation != 0)
+                && has_generation == (p.event == MANAGED_AUDIT_HANDOFF_RECEIPT_COMMITTED)
+                && if has_generation {
+                    p.generation != 0
+                } else {
+                    p.generation == 0
+                }
+                && p.observed_ticks <= r.ticks
+                && if barrier {
+                    p.wire_correlation != 0
+                } else {
+                    p.wire_correlation == 0 && p.command_sequence == 0
+                },
+            "invalid handoff fields"
+        );
+        let shape = match p.event {
+            1 => p.message_kind == 3 && has_op && p.error == 0,
+            2 | 3 => {
+                matches!(p.message_kind, 1 | 3)
+                    && has_op == barrier
+                    && (p.error == 0 || (p.event == 3 && (2006..=2008).contains(&p.error)))
+            }
+            4 => matches!(p.message_kind, 2 | 4) && has_op == barrier && p.error == 0,
+            5 => matches!(p.message_kind, 2 | 4) && p.error == 0,
+            6 => matches!(p.message_kind, 2 | 4) && matches!(p.error, 2007 | 2008),
+            7 => p.message_kind == 4 && has_op && p.error == 0,
+            _ => false,
+        };
+        ensure!(shape, "invalid handoff event custody");
+        let mut public = None;
+        if has_op {
+            if let Some(trace) = self.lifecycles.get_mut(&r.correlation) {
+                public = Some(trace.public);
+                let progress = match p.event {
+                    1 => Some((9, 4)),
+                    2 if barrier => Some((10, 9)),
+                    3 if barrier => Some((11, 10)),
+                    4 if barrier => Some((12, 11)),
+                    7 => Some((13, 12)),
+                    _ => None,
+                };
+                if let Some((bit, prerequisite)) = progress {
+                    ensure!(
+                        trace.seen & (1 << bit) == 0
+                            && ((bit + 1)..=13).all(|later| trace.seen & (1 << later) == 0),
+                        "repeated or reordered handoff observation"
+                    );
+                    if p.error == 0 {
+                        ensure!(trace.seen & (1 << 14) == 0, "failed handoff cannot advance");
+                    }
+                    // Slot cancellation precedes link disarm at the next
+                    // release. A transport match in that interval is valid
+                    // evidence, but cannot begin or commit an installation.
+                    if matches!(p.event, 1 | 7) {
+                        ensure!(
+                            trace.seen & ((1 << 6) | (1 << 8)) == 0,
+                            "cancelled or retired operation cannot begin or commit"
+                        );
+                    }
+                    if p.event != 7 && p.error == 0 {
+                        ensure!(
+                            trace.seen & (1 << 5) == 0,
+                            "handoff observation after commit"
+                        );
+                    }
+                    for required in [Some(prerequisite), (p.event == 7).then_some(5)]
+                        .into_iter()
+                        .flatten()
+                    {
+                        if trace.seen & (1 << required) == 0 {
+                            ensure!(
+                                trace.seen & (1 << 15) != 0,
+                                "handoff observation missing prerequisite"
+                            );
+                            self.gaps.push(json!({"sequence":r.sequence,"reason":"handoff prerequisite lost in transport gap"}));
+                        }
+                    }
+                    let identity = (p.session, p.wire_correlation, p.command_sequence);
+                    if let Some(expected) = trace.barrier {
+                        ensure!(identity == expected, "handoff wire identity mismatch");
+                    } else {
+                        trace.barrier = Some(identity);
+                    }
+                    if p.event == 7 {
+                        ensure!(
+                            p.generation == trace.accepted.target_generation,
+                            "receipt generation mismatch"
+                        );
+                    }
+                    trace.seen |= 1 << bit;
+                }
+                if p.error != 0 {
+                    trace.seen |= 1 << 14;
+                }
+            } else {
+                ensure!(
+                    self.missing_mapping_allowed,
+                    "handoff has no operation acceptance in complete window"
+                );
+                self.gap(
+                    r.sequence,
+                    "handoff operation mapping is outside the retained context",
+                );
+            }
+        }
+        Ok(json!({
+            "event": (["barrier_begin", "handoff_frame_created", "handoff_frame_local_uart_complete", "handoff_reply_accepted", "handoff_reply_ignored", "handoff_reply_rejected", "handoff_receipt_committed"][p.event as usize - 1]),
+            "message": (["session_offer", "session_ready", "safe_barrier", "safe_ack"][p.message_kind as usize - 1]),
+            "session": p.session, "wire_correlation": barrier.then_some(p.wire_correlation),
+            "command_sequence": barrier.then_some(p.command_sequence),
+            "instance_id": has_op.then_some(r.correlation), "public_operation_id": public,
+            "generation": has_generation.then_some(p.generation), "observed_ticks": p.observed_ticks,
+            "failure": failure(p.error, 0)?,
+            "peer_reports_safe": (p.event == 4 && p.message_kind == 4 || p.event == 7).then_some(true),
+            "physical_output_observed": false
+        }))
+    }
+
     fn lifecycle(&mut self, r: &ManagedAuditRecordV1) -> Result<Value> {
         let p = ManagedAuditLifecycleV1::read_from_bytes(&r.payload).unwrap();
         ensure!(
@@ -778,12 +918,25 @@ impl DecodeState {
             );
             ensure!(
                 self.lifecycles
-                    .insert(p.instance_id, (r.correlation, p, 0))
+                    .insert(
+                        p.instance_id,
+                        LifecycleTrace {
+                            public: r.correlation,
+                            accepted: p,
+                            seen: 0,
+                            barrier: None
+                        }
+                    )
                     .is_none(),
                 "duplicate internal lifecycle identity"
             );
         }
-        let public = if let Some((public, accepted, seen)) = self.lifecycles.get_mut(&p.instance_id)
+        let public = if let Some(LifecycleTrace {
+            public,
+            accepted,
+            seen,
+            ..
+        }) = self.lifecycles.get_mut(&p.instance_id)
         {
             ensure!(
                 (
@@ -1105,6 +1258,153 @@ mod tests {
             ..Default::default()
         });
         records
+    }
+
+    fn handoff_trace() -> Vec<ManagedAuditRecordV1> {
+        let mut records = Vec::new();
+        for (i, record) in identity_and_lifecycle().into_iter().enumerate() {
+            records.push(record);
+            let events: &[u32] = match i {
+                8 => &[1, 2, 3, 5, 4, 5],
+                9 => &[7],
+                _ => &[],
+            };
+            for &event in events {
+                let p = ManagedAuditHandoffV1 {
+                    link_kind: MANAGED_AUDIT_HANDOFF_LINK,
+                    event,
+                    session: 7,
+                    command_sequence: 255,
+                    wire_correlation: (1 << 40) + 9,
+                    generation: u64::from(event == 7),
+                    message_kind: if event <= 3 { 3 } else { 4 },
+                    flags: if event == 7 { 3 } else { 1 },
+                    ..Default::default()
+                };
+                records.push(ManagedAuditRecordV1 {
+                    kind: MANAGED_AUDIT_LINK,
+                    correlation: 7,
+                    payload: p.as_bytes().try_into().unwrap(),
+                    ..Default::default()
+                });
+            }
+        }
+        records
+    }
+
+    #[test]
+    fn handoff_decode_joins_real_wire_identity_and_requires_ordered_receipt() {
+        let records = handoff_trace();
+        let decoded = decode(export(&records).as_bytes()).unwrap();
+        let links: Vec<_> = decoded["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["kind"] == MANAGED_AUDIT_LINK)
+            .collect();
+        assert_eq!(links.len(), 7);
+        assert_eq!(links[0]["decoded"]["public_operation_id"], 42);
+        assert_eq!(links[0]["decoded"]["instance_id"], 7);
+        assert_eq!(links[0]["decoded"]["session"], 7);
+        assert_eq!(links[0]["decoded"]["wire_correlation"], (1u64 << 40) + 9);
+        assert_eq!(links[0]["decoded"]["command_sequence"], 255);
+        assert_eq!(links[4]["decoded"]["event"], "handoff_reply_accepted");
+        assert_eq!(links[4]["decoded"]["peer_reports_safe"], true);
+        assert!(links[3]["decoded"]["peer_reports_safe"].is_null());
+        assert_eq!(links[6]["decoded"]["event"], "handoff_receipt_committed");
+        assert_eq!(links[6]["decoded"]["generation"], 1);
+        assert_eq!(links[6]["decoded"]["physical_output_observed"], false);
+        assert!(decoded["semantic_gaps"].as_array().unwrap().is_empty());
+        assert_eq!(decoded["qualification_evaluated"], false);
+
+        let indices: Vec<_> = records
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.kind == MANAGED_AUDIT_LINK)
+            .map(|(i, _)| i)
+            .collect();
+        // Every matched/owned identity must agree with begin; ignored packets
+        // retain their own identity and cannot grant eligibility.
+        for &slot in &[1, 2, 4, 6] {
+            for byte in [8, 12, 16] {
+                let mut bad = records.clone();
+                bad[indices[slot]].payload[byte] ^= 1;
+                assert!(
+                    decode(export(&bad).as_bytes()).is_err(),
+                    "slot {slot} byte {byte}"
+                );
+            }
+        }
+        let mut wrong_ignored = records.clone();
+        wrong_ignored[indices[3]].payload[16] ^= 1;
+        assert!(decode(export(&wrong_ignored).as_bytes()).is_ok());
+        for byte in [24, 32, 40, 44, 48, 52] {
+            let mut bad = records.clone();
+            bad[indices[6]].payload[byte] ^= 1;
+            assert!(
+                decode(export(&bad).as_bytes()).is_err(),
+                "receipt byte {byte}"
+            );
+        }
+        let mut reordered = records.clone();
+        reordered.swap(indices[1], indices[2]);
+        assert!(decode(export(&reordered).as_bytes()).is_err());
+        let mut repeated = records.clone();
+        repeated.insert(indices[4], records[indices[4]]);
+        assert!(decode(export(&repeated).as_bytes()).is_err());
+        // Missing protocol prerequisites and a missing public/internal mapping
+        // are separately visible gaps, never manufactured acceptance proof.
+        for (start, end) in [(9, 12), (5, 12)] {
+            let mut lines: Vec<Value> = export(&records)
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            lines.splice(
+                start + 1..end + 1,
+                [json!({"type":"gap", "start":start, "end":end, "count":end-start})],
+            );
+            let terminal = lines.last_mut().unwrap();
+            terminal["records"] = json!(records.len() - (end - start));
+            terminal["gaps"] = json!(end - start);
+            let raw: String = lines.iter().map(|v| v.to_string() + "\n").collect();
+            let decoded = decode(raw.as_bytes()).unwrap();
+            assert!(!decoded["semantic_gaps"].as_array().unwrap().is_empty());
+            assert_eq!(decoded["qualification_evaluated"], false);
+        }
+        let mut failed = records.clone();
+        let mut p = ManagedAuditHandoffV1::read_from_bytes(&failed[indices[2]].payload).unwrap();
+        p.error = 2007;
+        failed[indices[2]].payload = p.as_bytes().try_into().unwrap();
+        assert!(decode(export(&failed).as_bytes()).is_err());
+    }
+
+    #[test]
+    fn handoff_reply_can_match_after_admin_cancel_without_authorizing_publication() {
+        let original = handoff_trace();
+        let mut records = original[..15].to_vec();
+        let mut cancelled = ManagedAuditLifecycleV1::read_from_bytes(&records[5].payload).unwrap();
+        cancelled.event = MANAGED_AUDIT_CANCELLED;
+        cancelled.phase = MANAGED_OPERATION_CLEANUP;
+        cancelled.error = i32::from(ECANCELED) as u32;
+        cancelled.flags = MANAGED_AUDIT_LIFECYCLE_INHIBITED;
+        records.insert(
+            13,
+            ManagedAuditRecordV1 {
+                kind: MANAGED_AUDIT_OPERATION,
+                payload: cancelled.as_bytes().try_into().unwrap(),
+                ..Default::default()
+            },
+        );
+        // SYS_BPF cancellation updates the slot; the independent link mailbox
+        // can still match a peer reply before the next release disarms it.
+        let decoded = decode(export(&records).as_bytes()).unwrap();
+        assert_eq!(
+            decoded["events"][14]["decoded"]["event"],
+            "handoff_reply_accepted"
+        );
+        assert!(decoded["events"][14]["decoded"]["generation"].is_null());
+        records.push(original[16]); // A matching wire receipt cannot undo cancel.
+        assert!(decode(export(&records).as_bytes()).is_err());
     }
 
     #[test]

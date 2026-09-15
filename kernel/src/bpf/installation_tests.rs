@@ -507,7 +507,10 @@ fn real_boundary_records_discarded_originals_for_handoff_and_failure() {
             });
             let drops: alloc::vec::Vec<_> = records
                 .iter()
-                .filter(|r| r.kind == MANAGED_AUDIT_LINK)
+                .filter(|r| {
+                    r.kind == MANAGED_AUDIT_LINK
+                        && r.payload[..4] == MANAGED_AUDIT_MOTOR_TX.to_le_bytes()
+                })
                 .map(|r| {
                     (
                         r.correlation,
@@ -548,74 +551,116 @@ fn real_boundary_records_discarded_originals_for_handoff_and_failure() {
 
 #[test]
 fn real_boundary_commits_only_matching_ack_at_next_release_and_keeps_retirement_owned() {
-    let mut manager = BpfManager::new();
-    let mut slot = ControlSlot::new();
-    let mut handoff = peer_ready();
-    let mut tx = TxState::new();
-    let mut seq = 0;
-    let a = candidate(&mut manager, 1);
-    stage(&mut slot, &mut manager, None);
-    assert_eq!(
-        slot.handoff_boundary(release(1, 100, 100), 1000, &mut handoff, &mut tx, &mut seq),
-        Ok(None)
-    );
-    assert!(slot.snapshot().inhibited);
-    assert_eq!(slot.snapshot().generation, 0);
-    acknowledge(&mut handoff, &mut tx, 101, 102);
-    assert_eq!(
-        slot.handoff_boundary(release(1, 100, 103), 1000, &mut handoff, &mut tx, &mut seq),
-        Ok(None)
-    );
-    assert_eq!(
-        slot.handoff_boundary(release(2, 110, 110), 1000, &mut handoff, &mut tx, &mut seq),
-        Ok(Some(1))
-    );
-    assert_eq!(slot.snapshot().active, Some(a));
-    assert!(!slot.snapshot().inhibited);
-    assert!(slot.snapshot().retiring);
-    drain(&mut slot, &mut manager);
-    let b = candidate(&mut manager, 2);
-    stage(&mut slot, &mut manager, None);
-    let charge = slot.snapshot().active_charge_ns_per_s;
-    assert_eq!(
-        slot.handoff_boundary(release(3, 120, 120), 1000, &mut handoff, &mut tx, &mut seq),
-        Ok(None)
-    );
-    assert_eq!(slot.snapshot().active, Some(a));
-    assert_eq!(slot.snapshot().active_charge_ns_per_s, charge);
-    acknowledge(&mut handoff, &mut tx, 121, 129);
-    assert_eq!(
-        slot.handoff_boundary(release(4, 130, 130), 1000, &mut handoff, &mut tx, &mut seq),
-        Ok(Some(2))
-    );
-    assert_eq!(
-        (slot.snapshot().active, slot.snapshot().previous),
-        (Some(b), Some(a))
-    );
-    drain(&mut slot, &mut manager);
-    stage(&mut slot, &mut manager, Some(a));
-    assert_eq!(
-        slot.handoff_boundary(release(5, 140, 140), 1000, &mut handoff, &mut tx, &mut seq),
-        Ok(None)
-    );
-    acknowledge(&mut handoff, &mut tx, 141, 149);
-    assert_eq!(
-        slot.handoff_boundary(release(6, 150, 150), 1000, &mut handoff, &mut tx, &mut seq),
-        Ok(Some(3))
-    );
-    assert_eq!(
-        (slot.snapshot().active, slot.snapshot().previous),
-        (Some(a), Some(b))
-    );
-    slot.stop();
-    assert_eq!(
-        slot.handoff_boundary(release(7, 160, 160), 1000, &mut handoff, &mut tx, &mut seq),
-        Ok(None)
-    );
-    assert!(
-        slot.snapshot().inhibited,
-        "postcommit stop cannot implicitly resume"
-    );
+    let records = super::super::recorder::events::tests::capture_records(|| {
+        let mut manager = BpfManager::new();
+        let mut slot = ControlSlot::new();
+        let mut handoff = peer_ready();
+        let mut tx = TxState::new();
+        let mut seq = 0;
+        let a = candidate(&mut manager, 1);
+        stage(&mut slot, &mut manager, None);
+        assert_eq!(
+            slot.handoff_boundary(release(1, 100, 100), 1000, &mut handoff, &mut tx, &mut seq),
+            Ok(None)
+        );
+        assert!(slot.snapshot().inhibited);
+        assert_eq!(slot.snapshot().generation, 0);
+        acknowledge(&mut handoff, &mut tx, 101, 102);
+        assert_eq!(
+            slot.handoff_boundary(release(1, 100, 103), 1000, &mut handoff, &mut tx, &mut seq),
+            Ok(None)
+        );
+        assert_eq!(
+            slot.handoff_boundary(release(2, 110, 110), 1000, &mut handoff, &mut tx, &mut seq),
+            Ok(Some(1))
+        );
+        assert_eq!(slot.snapshot().active, Some(a));
+        assert!(!slot.snapshot().inhibited);
+        assert!(slot.snapshot().retiring);
+        drain(&mut slot, &mut manager);
+        let b = candidate(&mut manager, 2);
+        stage(&mut slot, &mut manager, None);
+        let charge = slot.snapshot().active_charge_ns_per_s;
+        assert_eq!(
+            slot.handoff_boundary(release(3, 120, 120), 1000, &mut handoff, &mut tx, &mut seq),
+            Ok(None)
+        );
+        assert_eq!(slot.snapshot().active, Some(a));
+        assert_eq!(slot.snapshot().active_charge_ns_per_s, charge);
+        acknowledge(&mut handoff, &mut tx, 121, 129);
+        assert_eq!(
+            slot.handoff_boundary(release(4, 130, 130), 1000, &mut handoff, &mut tx, &mut seq),
+            Ok(Some(2))
+        );
+        assert_eq!(
+            (slot.snapshot().active, slot.snapshot().previous),
+            (Some(b), Some(a))
+        );
+        drain(&mut slot, &mut manager);
+        stage(&mut slot, &mut manager, Some(a));
+        assert_eq!(
+            slot.handoff_boundary(release(5, 140, 140), 1000, &mut handoff, &mut tx, &mut seq),
+            Ok(None)
+        );
+        acknowledge(&mut handoff, &mut tx, 141, 149);
+        assert_eq!(
+            slot.handoff_boundary(release(6, 150, 150), 1000, &mut handoff, &mut tx, &mut seq),
+            Ok(Some(3))
+        );
+        assert_eq!(
+            (slot.snapshot().active, slot.snapshot().previous),
+            (Some(a), Some(b))
+        );
+        slot.stop();
+        assert_eq!(
+            slot.handoff_boundary(release(7, 160, 160), 1000, &mut handoff, &mut tx, &mut seq),
+            Ok(None)
+        );
+        assert!(
+            slot.snapshot().inhibited,
+            "postcommit stop cannot implicitly resume"
+        );
+    });
+    use zerocopy::FromBytes;
+    let links: alloc::vec::Vec<_> = records
+        .iter()
+        .filter(|r| {
+            r.kind == MANAGED_AUDIT_LINK
+                && r.payload[..4] == MANAGED_AUDIT_HANDOFF_LINK.to_le_bytes()
+        })
+        .map(|r| {
+            (
+                r.correlation,
+                ManagedAuditHandoffV1::read_from_bytes(&r.payload).unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(links.len(), 6);
+    for (i, pair) in links.chunks_exact(2).enumerate() {
+        let (begin_id, begin) = pair[0];
+        let (commit_id, commit) = pair[1];
+        assert_eq!(begin.event, MANAGED_AUDIT_BARRIER_BEGIN);
+        assert_eq!(commit.event, MANAGED_AUDIT_HANDOFF_RECEIPT_COMMITTED);
+        assert_eq!(begin_id, commit_id);
+        assert_ne!(begin_id, 0);
+        assert_eq!(
+            (
+                begin.session,
+                begin.wire_correlation,
+                begin.command_sequence
+            ),
+            (
+                commit.session,
+                commit.wire_correlation,
+                commit.command_sequence
+            )
+        );
+        assert_eq!((begin.flags, commit.flags), (1, 3));
+        assert_eq!((begin.message_kind, commit.message_kind), (3, 4));
+        assert_eq!(begin.generation, 0);
+        assert_eq!(commit.generation, i as u64 + 1);
+        assert_eq!((begin.error, commit.error), (0, 0));
+    }
 }
 
 #[test]

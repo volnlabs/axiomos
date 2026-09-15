@@ -1,6 +1,6 @@
 version = 1
 baseline_sites = 718
-baseline_fingerprint = "sha256:485e10d6ea1a28ae5866f104c353c31c7ce3a434dd7beaa19cf9a97cdd384786"
+baseline_fingerprint = "sha256:743d80ac4fa40a7fa60e333939da2f911e6c8d1430b036ec142a4705757ea483"
 
 # 2026-09-15: bounded retained-artifact queries reuse existing locks and user
 # copies. No new unsafe syntax, kinds or obligations; the worker and minilib

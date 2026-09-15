@@ -19,6 +19,43 @@ pub const MANAGED_AUDIT_CYCLE: u32 = 3;
 pub const MANAGED_AUDIT_STOP: u32 = 4;
 pub const MANAGED_AUDIT_LINK: u32 = 5;
 
+pub const MANAGED_AUDIT_HANDOFF_LINK: u32 = 4;
+pub const MANAGED_AUDIT_BARRIER_BEGIN: u32 = 1;
+pub const MANAGED_AUDIT_HANDOFF_FRAMED: u32 = 2;
+pub const MANAGED_AUDIT_HANDOFF_LOCAL_COMPLETE: u32 = 3;
+pub const MANAGED_AUDIT_HANDOFF_REPLY_ACCEPTED: u32 = 4;
+pub const MANAGED_AUDIT_HANDOFF_REPLY_IGNORED: u32 = 5;
+pub const MANAGED_AUDIT_HANDOFF_REPLY_REJECTED: u32 = 6;
+pub const MANAGED_AUDIT_HANDOFF_RECEIPT_COMMITTED: u32 = 7;
+pub const MANAGED_AUDIT_HANDOFF_HAS_OPERATION: u32 = 1;
+pub const MANAGED_AUDIT_HANDOFF_HAS_GENERATION: u32 = 2;
+
+/// LINK subtype 4. Envelope correlation is the pending internal instance ID
+/// when HAS_OPERATION, never an inferred public ID. Wire identity comes from
+/// the actual message/receipt; an ignored reply may name a different session.
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable,
+)]
+pub struct ManagedAuditHandoffV1 {
+    pub link_kind: u32,
+    pub event: u32,
+    pub session: u32,
+    pub command_sequence: u32,
+    pub wire_correlation: u64,
+    /// Physical counter sampled for the state transition / reply processing.
+    pub observed_ticks: u64,
+    pub generation: u64,
+    /// 1 SessionOffer, 2 SessionReady, 3 SafeBarrier, 4 SafeAck.
+    pub message_kind: u32,
+    /// Zero or existing handoff failure code 2001..2009.
+    pub error: u32,
+    pub flags: u32,
+    pub reserved: [u8; 12],
+}
+
+const _: () = assert!(core::mem::size_of::<ManagedAuditHandoffV1>() == 64);
+
 pub const MANAGED_AUDIT_MOTOR_TX: u32 = 3;
 pub const MANAGED_AUDIT_MOTOR_FRAMED: u32 = 1;
 pub const MANAGED_AUDIT_MOTOR_LOCAL_COMPLETE: u32 = 2;

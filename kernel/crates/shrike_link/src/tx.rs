@@ -26,6 +26,19 @@ pub struct MotorFrame {
     pub intermediate_zero: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HandoffFrame {
+    pub message: Msg,
+    /// Internal pending installation ID, absent for session establishment.
+    pub operation: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameCompletion {
+    Motor(MotorFrame),
+    Handoff(HandoffFrame),
+}
+
 /// Observed removals returned directly by a mutation, never queued or retained.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MotorDiscards {
@@ -41,6 +54,7 @@ struct Frame {
     len: u8,
     sent: u8,
     motor: Option<MotorFrame>,
+    handoff: Option<HandoffFrame>,
     clears_motor: bool,
     queued_at: u64,
 }
@@ -91,11 +105,25 @@ impl TxState {
     /// Advance only after UART acceptance. Completion means all frame bytes
     /// entered the local UART; it is not a peer/FPGA acknowledgement.
     pub fn next_byte_with_motor_completion(&mut self) -> Option<(u8, Option<MotorFrame>)> {
+        self.next_byte_with_completion().map(|(byte, completion)| {
+            (
+                byte,
+                match completion {
+                    Some(FrameCompletion::Motor(frame)) => Some(frame),
+                    _ => None,
+                },
+            )
+        })
+    }
+
+    /// Return the completed owner's identity even if its transaction is cancelled.
+    pub fn next_byte_with_completion(&mut self) -> Option<(u8, Option<FrameCompletion>)> {
         let frame = self.active.as_mut()?;
         let byte = frame.bytes[frame.sent as usize];
         frame.sent += 1;
         let complete = if frame.sent == frame.len {
             let motor = frame.motor;
+            let handoff = frame.handoff;
             if let Some(motor) = motor {
                 self.last_motor_on_wire = (motor.request.left, motor.request.right);
             } else if frame.clears_motor {
@@ -103,6 +131,8 @@ impl TxState {
             }
             self.active = None;
             motor
+                .map(FrameCompletion::Motor)
+                .or_else(|| handoff.map(FrameCompletion::Handoff))
         } else {
             None
         };
@@ -123,6 +153,21 @@ impl TxState {
         }
     }
 
+    pub fn start_handoff(&mut self, frame: HandoffFrame, now: u64) -> bool {
+        if !matches!(
+            frame.message,
+            Msg::SessionOffer { .. } | Msg::SafeBarrier { .. }
+        ) || !self.start(&frame.message, now)
+        {
+            return false;
+        }
+        self.active
+            .as_mut()
+            .expect("successful start owns frame")
+            .handoff = Some(frame);
+        true
+    }
+
     pub fn start(&mut self, msg: &Msg, now: u64) -> bool {
         if self.active.is_some() {
             return false;
@@ -135,6 +180,7 @@ impl TxState {
             bytes,
             len: len as u8,
             sent: 0,
+            handoff: None,
             motor: match *msg {
                 Msg::MotorSetpoint { seq, left, right } => Some(MotorFrame {
                     request: MotorRequest {

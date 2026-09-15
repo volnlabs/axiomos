@@ -405,6 +405,84 @@ pub(crate) fn trusted_stop(source: AuditSource) {
     observe(|state, ticks| state.trusted_stop(source, ticks));
 }
 
+pub(crate) fn handoff(
+    event: u32,
+    operation: Option<u64>,
+    message: shrike_link::Msg,
+    observed_ticks: Option<u64>,
+    generation: Option<u64>,
+    error: Option<shrike_link::handoff::HandoffError>,
+) {
+    use shrike_link::Msg;
+    let (message_kind, session, wire_correlation, command_sequence) = match message {
+        Msg::SessionOffer { session } => (1, session, 0, 0),
+        Msg::SessionReady { session } => (2, session, 0, 0),
+        Msg::SafeBarrier {
+            session,
+            correlation,
+            sequence,
+        } => (3, session, correlation, u32::from(sequence)),
+        Msg::SafeAck {
+            session,
+            correlation,
+            sequence,
+        } => (4, session, correlation, u32::from(sequence)),
+        _ => return,
+    };
+    observe(|state, ticks| {
+        let payload = ManagedAuditHandoffV1 {
+            link_kind: MANAGED_AUDIT_HANDOFF_LINK,
+            event,
+            session,
+            wire_correlation,
+            command_sequence,
+            observed_ticks: observed_ticks.unwrap_or(ticks),
+            generation: generation.unwrap_or(0),
+            message_kind,
+            error: failure_code(error.map(CycleFailure::Handoff)).0,
+            flags: (u32::from(operation.is_some()) * MANAGED_AUDIT_HANDOFF_HAS_OPERATION)
+                | (u32::from(generation.is_some()) * MANAGED_AUDIT_HANDOFF_HAS_GENERATION),
+            ..Default::default()
+        };
+        let _ = state.window.append(Record {
+            ticks,
+            correlation: operation.unwrap_or(0),
+            kind: MANAGED_AUDIT_LINK,
+            payload: payload
+                .as_bytes()
+                .try_into()
+                .expect("64-byte handoff payload"),
+            ..Record::EMPTY
+        });
+    });
+}
+
+pub(crate) fn handoff_reply(
+    operation: Option<u64>,
+    message: shrike_link::Msg,
+    observed_ticks: u64,
+    result: Result<bool, shrike_link::handoff::HandoffError>,
+) {
+    if !matches!(
+        message,
+        shrike_link::Msg::SessionReady { .. } | shrike_link::Msg::SafeAck { .. }
+    ) {
+        return;
+    }
+    handoff(
+        match result {
+            Ok(true) => MANAGED_AUDIT_HANDOFF_REPLY_ACCEPTED,
+            Ok(false) => MANAGED_AUDIT_HANDOFF_REPLY_IGNORED,
+            Err(_) => MANAGED_AUDIT_HANDOFF_REPLY_REJECTED,
+        },
+        operation,
+        message,
+        Some(observed_ticks),
+        None,
+        result.err(),
+    );
+}
+
 pub(crate) fn released(source: AuditSource) {
     observe(|state, ticks| state.released(source, ticks));
 }
@@ -478,6 +556,120 @@ pub(crate) mod tests {
             records.extend_from_slice(&batch.records[..batch.count]);
         }
         records
+    }
+
+    #[test]
+    fn handoff_records_actual_transmission_and_reply_outcomes() {
+        use shrike_link::handoff::Handoff;
+        use shrike_link::tx::{FrameCompletion, TxState};
+        use shrike_link::Msg;
+        let mut h = Handoff::new();
+        let mut tx = TxState::new();
+        let records = capture_records(|| {
+            h.offer_after_drain(0, 80).unwrap();
+            let frame = h.enqueue(&mut tx, 0).unwrap().unwrap();
+            handoff(
+                MANAGED_AUDIT_HANDOFF_FRAMED,
+                frame.operation,
+                frame.message,
+                None,
+                None,
+                None,
+            );
+            assert_eq!(h.enqueue(&mut tx, 0).unwrap(), None);
+            while let Some((_, complete)) = tx.next_byte_with_completion() {
+                if let Some(FrameCompletion::Handoff(frame)) = complete {
+                    let result = h.sent(0);
+                    handoff(
+                        MANAGED_AUDIT_HANDOFF_LOCAL_COMPLETE,
+                        frame.operation,
+                        frame.message,
+                        None,
+                        None,
+                        result.err(),
+                    );
+                }
+            }
+            for session in [2, 1] {
+                let msg = Msg::SessionReady { session };
+                let op = h.operation();
+                let result = h.on_reply(msg, 0);
+                handoff_reply(op, msg, 0, result);
+            }
+            let (identity, _) = h.begin_on_transport(42, 255, 0, 80, &mut tx).unwrap();
+            handoff(
+                MANAGED_AUDIT_BARRIER_BEGIN,
+                Some(42),
+                identity.message(),
+                None,
+                None,
+                None,
+            );
+            let frame = h.enqueue(&mut tx, 0).unwrap().unwrap();
+            handoff(
+                MANAGED_AUDIT_HANDOFF_FRAMED,
+                frame.operation,
+                frame.message,
+                None,
+                None,
+                None,
+            );
+            let ack = Msg::SafeAck {
+                session: identity.session,
+                correlation: identity.correlation,
+                sequence: identity.sequence,
+            };
+            let result = h.on_reply(ack, 0);
+            assert_eq!(result, Ok(false)); // Not sent yet.
+            handoff_reply(h.operation(), ack, 0, result);
+            while let Some((_, complete)) = tx.next_byte_with_completion() {
+                if let Some(FrameCompletion::Handoff(frame)) = complete {
+                    let result = h.sent(0);
+                    handoff(
+                        MANAGED_AUDIT_HANDOFF_LOCAL_COMPLETE,
+                        frame.operation,
+                        frame.message,
+                        None,
+                        None,
+                        result.err(),
+                    );
+                }
+            }
+            let result = h.on_reply(ack, 0);
+            assert_eq!(result, Ok(true));
+            handoff_reply(h.operation(), ack, 0, result);
+            let duplicate = h.on_reply(ack, 0);
+            assert_eq!(duplicate, Ok(false));
+            handoff_reply(h.operation(), ack, 0, duplicate);
+            // Timeout clears eligibility; retain the pre-call operation ID.
+            let op = h.operation();
+            let late = h.on_reply(ack, 80);
+            assert!(late.is_err());
+            assert_eq!(h.operation(), None);
+            handoff_reply(op, ack, 80, late);
+            // Heartbeat/sensor traffic must not become acknowledgement records.
+            handoff_reply(None, Msg::HeartbeatToPi { seq: 9 }, 80, Ok(false));
+        });
+        let events: Vec<_> = records
+            .iter()
+            .map(|r| ManagedAuditHandoffV1::read_from_bytes(&r.payload).unwrap())
+            .collect();
+        assert_eq!(
+            events.iter().map(|p| p.event).collect::<Vec<_>>(),
+            [2, 3, 5, 4, 1, 2, 5, 3, 4, 5, 6]
+        );
+        for (i, p) in events.iter().enumerate() {
+            assert_eq!(p.link_kind, MANAGED_AUDIT_HANDOFF_LINK);
+            assert_eq!(p.generation, 0);
+            assert_eq!(p.reserved, [0; 12]);
+            assert_eq!(p.flags, u32::from(i >= 4));
+            assert_eq!(records[i].correlation, if i >= 4 { 42 } else { 0 });
+            assert_eq!(p.wire_correlation, if i >= 4 { 1 } else { 0 });
+            assert_eq!(p.command_sequence, if i >= 4 { 255 } else { 0 });
+            assert_eq!(p.error, if i == 10 { 2007 } else { 0 });
+        }
+        assert_eq!(events[2].session, 2); // Preserve wrong reply, don't relabel it.
+        assert_eq!(events[10].observed_ticks, 80);
     }
 
     #[test]

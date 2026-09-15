@@ -27,6 +27,8 @@ use kernel_abi::{
     MANAGED_AUDIT_DISCARD_SUPERSEDED,
 };
 #[cfg(feature = "managed-runtime")]
+use kernel_abi::{MANAGED_AUDIT_HANDOFF_FRAMED, MANAGED_AUDIT_HANDOFF_LOCAL_COMPLETE};
+#[cfg(feature = "managed-runtime")]
 use shrike_link::handoff::{Handoff, HandoffError};
 use shrike_link::motor::MotorSide;
 use shrike_link::ring::RingBuf;
@@ -37,6 +39,8 @@ use spin::Mutex;
 
 use super::memory_map::RP1_UART0_BASE;
 use super::pl011::{InitError, Pl011, DEFAULT_UART_CLK_HZ};
+#[cfg(feature = "managed-runtime")]
+use crate::bpf::recorder::events;
 use crate::bpf::recorder::events::motor_discard;
 
 /// RX ring capacity.
@@ -204,10 +208,10 @@ impl ControlLink {
                 #[cfg(feature = "managed-runtime")]
                 {
                     let operation = self.handoff.operation();
-                    if let Err(error) = self
-                        .handoff
-                        .on_reply(msg, crate::arch::aarch64::interrupts::physical_counter())
-                    {
+                    let observed = crate::arch::aarch64::interrupts::physical_counter();
+                    let result = self.handoff.on_reply(msg, observed);
+                    events::handoff_reply(operation, msg, observed, result);
+                    if let Err(error) = result {
                         self.handoff_failed(operation, error);
                         out.estop = true;
                     }
@@ -303,9 +307,20 @@ impl ControlLink {
         }
         #[cfg(feature = "managed-runtime")]
         if estop_queue_empty {
-            if let Err(error) = self.handoff.enqueue(&mut self.tx, now) {
-                self.handoff_failed(self.handoff.operation(), error);
-                out.estop = true;
+            match self.handoff.enqueue(&mut self.tx, now) {
+                Ok(Some(frame)) => events::handoff(
+                    MANAGED_AUDIT_HANDOFF_FRAMED,
+                    frame.operation,
+                    frame.message,
+                    None,
+                    None,
+                    None,
+                ),
+                Ok(None) => {}
+                Err(error) => {
+                    self.handoff_failed(self.handoff.operation(), error);
+                    out.estop = true;
+                }
             }
         }
         if estop_queue_empty && self.tx.is_idle() {
@@ -326,25 +341,40 @@ impl ControlLink {
             if !self.uart.try_write_byte(byte) {
                 break;
             }
-            let accepted = self.tx.next_byte_with_motor_completion();
+            let accepted = self.tx.next_byte_with_completion();
             #[cfg(feature = "managed-runtime")]
-            if let Some((_, Some(frame))) = accepted {
-                crate::bpf::recorder::events::motor_tx(frame, true);
+            if let Some((_, Some(completion))) = accepted {
+                match completion {
+                    shrike_link::tx::FrameCompletion::Motor(frame) => events::motor_tx(frame, true),
+                    shrike_link::tx::FrameCompletion::Handoff(frame) => {
+                        let observed = crate::arch::aarch64::interrupts::physical_counter();
+                        let current = self.handoff.operation() == frame.operation
+                            && self.handoff.started_frame() == Some(frame.message);
+                        let result = if current {
+                            self.handoff.sent(observed)
+                        } else {
+                            Err(HandoffError::Stale)
+                        };
+                        events::handoff(
+                            MANAGED_AUDIT_HANDOFF_LOCAL_COMPLETE,
+                            frame.operation,
+                            frame.message,
+                            Some(observed),
+                            None,
+                            result.err(),
+                        );
+                        if current {
+                            if let Err(error) = result {
+                                self.handoff_failed(frame.operation, error);
+                                out.estop = true;
+                            }
+                        }
+                    }
+                }
             }
             #[cfg(not(feature = "managed-runtime"))]
             let _ = accepted;
             sent += 1;
-        }
-        #[cfg(feature = "managed-runtime")]
-        if self.tx.is_idle() && self.handoff.has_started_frame() {
-            let operation = self.handoff.operation();
-            if let Err(error) = self
-                .handoff
-                .sent(crate::arch::aarch64::interrupts::physical_counter())
-            {
-                self.handoff_failed(operation, error);
-                out.estop = true;
-            }
         }
         out
     }

@@ -288,8 +288,8 @@ Event 8 settles the operation's retirement batch; it does not mean the named
 target artifact was unloaded (a newly activated target remains active).
 
 These records describe software lifecycle boundaries. The existing transport
-receipt guards publication, but detailed sink command/acknowledgement records,
-physical output observation, session qualification and acceptance reduction
+receipt guards publication. Protocol command/acknowledgement records are now
+correlated; physical output observation, session qualification and acceptance reduction
 are still required. Offline decoding covers the current producer schemas.
 
 LINK subtype 1 has its u32 subtype at byte 0 and the physical counter frequency
@@ -344,6 +344,54 @@ do not establish MCU receipt, FPGA acceptance or movement. Queue nanoseconds
 must not be compared directly with recording CNTPCT ticks. A wire sequence alone
 is not a unique command identity, and current decoding does not prove complete
 frame/discard/sink ordering; that belongs to the acceptance reducer.
+
+LINK subtype 4 is `ManagedAuditHandoffV1`. It records the actual protocol message
+or consumed `SafeReceipt`; it does not create publication eligibility. Envelope
+correlation is the internal pending installation ID when flag 1 is set. The
+existing lifecycle acceptance maps that ID to the public operation ID.
+
+| Byte | Field / type | Meaning |
+|---|---|---|
+| 0 | link_kind / u32 | 4, handoff protocol observation |
+| 4 | event / u32 | 1 barrier begun, 2 framed, 3 local UART complete, 4 reply matched, 5 reply ignored, 6 reply rejected, 7 receipt committed |
+| 8 | session / u32 | Actual message's nonzero protocol session |
+| 12 | command_sequence / u32 | Actual u8 barrier/ack sequence; zero and absent for session messages |
+| 16 | wire_correlation / u64 | Nonzero barrier/ack correlation; zero for session messages |
+| 24 | observed_ticks / u64 | CNTPCT sample used for reply/transition processing, or recording sample after mutation |
+| 32 | generation / u64 | New committed generation for event 7; zero otherwise |
+| 40 | message_kind / u32 | 1 SessionOffer, 2 SessionReady, 3 SafeBarrier, 4 SafeAck |
+| 44 | error / u32 | Zero or the existing 2001..2009 handoff error vocabulary |
+| 48 | flags / u32 | Bit 0 internal operation present; bit 1 committed generation present |
+| 52 | reserved / 12 bytes | Zero |
+
+Framing returns the actual owner from `Handoff::enqueue`. Session-offer/barrier
+metadata stays inside the existing TX frame through cancellation and partial
+transmission. Completion consumes that exact frame's identity; it can report
+stale eligibility after cancellation without affecting a different operation.
+No motor/stop/heartbeat frame can fabricate handoff transmission completion.
+A local-complete record permits error 2006 (stale), 2007 (timeout) or 2008
+(reversed clock), since bytes may complete after eligibility is lost. Reply
+rejection permits timeout/reversed clock; ignored replies retain their received
+identity, including a wrong session/correlation/sequence. Ordinary sensor and
+heartbeat traffic do not create reply records.
+
+The shared publication path records event 7 only after committing with a genuine
+receipt, alongside the authoritative generation. The decoder reuses its bounded
+per-operation context to require begin/frame/completion/matching-ack/receipt
+order and wire-identity agreement. It checks the lifecycle commit and target
+generation, rejects duplicate progress and failed-transaction revival, and marks
+lost prerequisites or mappings as gaps. An administrative cancellation can
+precede link disarm at the next release: later local transmission and a matching
+peer reply remain valid observations, but cannot authorize publication of that
+cancelled operation. Ignored/rejected packet identities never replace the
+expected transaction identity.
+
+`peer_reports_safe` is true only for a matching SafeAck or its committed receipt;
+`physical_output_observed` remains false. Protocol session observations do not
+promote the export header to a qualified physical session. Bilateral drain,
+requalification/rearm, dedicated reset records and physical sink measurements
+remain necessary. Current decoding checks this retained protocol trace, not the
+complete release campaign or physical timing acceptance.
 
 CYCLE correlation is the installation generation captured with the artifact
 handle under the control-slot lock, after the handoff boundary and before the
@@ -413,6 +461,6 @@ reversed clock and invalid release; their details are zero.
 STOP category 1 reason/detail are zero. Category 3 reasons 1 through 8 are timer
 busy, not started, already started, invalid period, reversed clock, exhaustion,
 stopped and managed-control boundary failure. Category 4 reason is 5 (deadline).
-These timer details are zero. Correlated sink acknowledgements, dedicated
-link/reset events and measured acceptance reduction
-remain required before the trace can satisfy the release acceptance gate.
+These timer details are zero. Dedicated link/reset events, real sink
+qualification and measured acceptance reduction remain required before the
+trace can satisfy the release acceptance gate.

@@ -1,7 +1,7 @@
 //! Bounded Pi-side session and safe-barrier correlation. The platform owns
 //! drain/requalification and physical I/O; these states never assert motion.
 
-use crate::tx::{MotorDiscards, TxState};
+use crate::tx::{HandoffFrame, MotorDiscards, TxState};
 use crate::Msg;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12,7 +12,7 @@ pub struct BarrierIdentity {
 }
 
 impl BarrierIdentity {
-    fn message(self) -> Msg {
+    pub const fn message(self) -> Msg {
         Msg::SafeBarrier {
             session: self.session,
             correlation: self.correlation,
@@ -168,13 +168,22 @@ impl Handoff {
     /// existing TxState owns bytes; this mailbox only tracks their correlation.
     /// `transport_now` belongs to TxState's transport timestamp domain and is
     /// deliberately not compared with this handoff's physical-counter deadline.
-    pub fn enqueue(&mut self, tx: &mut TxState, transport_now: u64) -> Result<(), HandoffError> {
+    pub fn enqueue(
+        &mut self,
+        tx: &mut TxState,
+        transport_now: u64,
+    ) -> Result<Option<HandoffFrame>, HandoffError> {
         if let Some(message) = self.outbound() {
-            if tx.start(&message, transport_now) {
+            let frame = HandoffFrame {
+                message,
+                operation: self.operation(),
+            };
+            if tx.start_handoff(frame, transport_now) {
                 self.started(message)?;
+                return Ok(Some(frame));
             }
         }
-        Ok(())
+        Ok(None)
     }
 
     pub fn begin(
@@ -249,16 +258,25 @@ impl Handoff {
     }
 
     pub const fn has_started_frame(&self) -> bool {
-        matches!(
-            self.phase,
+        self.started_frame().is_some()
+    }
+
+    /// Eligible transaction's started message; TX owns completion independently.
+    pub const fn started_frame(&self) -> Option<Msg> {
+        match self.phase {
             Phase::Offering(Offer {
                 tx: Transmission::Started,
                 ..
-            }) | Phase::Barrier(Barrier {
+            }) => Some(Msg::SessionOffer {
+                session: self.last_session,
+            }),
+            Phase::Barrier(Barrier {
                 tx: Transmission::Started,
+                identity,
                 ..
-            })
-        )
+            }) => Some(identity.message()),
+            _ => None,
+        }
     }
 
     /// All frame bytes accepted by local UART, not remote delivery/sink safety.
@@ -551,6 +569,58 @@ mod tests {
         assert_eq!(h.offer_after_drain(200, 80), Err(HandoffError::Exhausted));
         assert_eq!(h.last_session, u32::MAX);
         assert_eq!(h.outbound(), None);
+    }
+
+    #[test]
+    fn cancelled_handoff_frame_keeps_completion_identity_at_every_byte_offset() {
+        use crate::tx::FrameCompletion;
+        for offering in [false, true] {
+            let mut base = if offering { Handoff::new() } else { ready() };
+            if offering {
+                base.offer_after_drain(0, 80).unwrap();
+            } else {
+                base.begin(42, 255, 0, 80).unwrap();
+            }
+            let message = base.outbound().unwrap();
+            let mut bytes = [0; crate::MAX_FRAME];
+            let len = crate::encode(&message, &mut bytes).unwrap();
+            for offset in 0..=len {
+                let mut h = if offering { Handoff::new() } else { ready() };
+                if offering {
+                    h.offer_after_drain(0, 80).unwrap();
+                } else {
+                    h.begin(42, 255, 0, 80).unwrap();
+                }
+                let mut tx = TxState::new();
+                let frame = h.enqueue(&mut tx, 0).unwrap().unwrap();
+                assert_eq!(frame.message, message);
+                assert_eq!(frame.operation, (!offering).then_some(42));
+                assert_eq!(h.started_frame(), Some(message));
+                assert_eq!(h.enqueue(&mut tx, 0).unwrap(), None);
+                let mut completed = None;
+                for _ in 0..offset {
+                    let (_, done) = tx.next_byte_with_completion().unwrap();
+                    if done.is_some() {
+                        completed = done;
+                    }
+                }
+                h.disarm();
+                assert_eq!(h.operation(), None);
+                assert_eq!(h.started_frame(), None);
+                tx.cancel_unsent();
+                while let Some((_, done)) = tx.next_byte_with_completion() {
+                    if done.is_some() {
+                        assert!(completed.is_none());
+                        completed = done;
+                    }
+                }
+                assert_eq!(
+                    completed,
+                    (offset > 0).then_some(FrameCompletion::Handoff(frame))
+                );
+                assert_eq!(tx.next_byte_with_completion(), None);
+            }
+        }
     }
 
     #[test]
