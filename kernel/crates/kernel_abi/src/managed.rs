@@ -10,12 +10,14 @@ pub const BPF_MANAGED_ACTIVATE: u32 = 261;
 pub const BPF_MANAGED_ROLLBACK: u32 = 262;
 pub const BPF_MANAGED_SLOT_QUERY: u32 = 263;
 pub const BPF_MANAGED_INSTALLATION_CANCEL: u32 = 264;
+pub const BPF_MANAGED_DEACTIVATE: u32 = 265;
 pub const MANAGED_ADMIN_VERSION: u32 = 1;
 pub const MANAGED_UPLOAD_CHUNK_BYTES: usize = 256;
 pub const MANAGED_TERMINAL_RECEIPTS: usize = 4;
 
 pub const MANAGED_TARGET_CANDIDATE: u32 = 1;
 pub const MANAGED_TARGET_PREVIOUS: u32 = 2;
+pub const MANAGED_TARGET_DEACTIVATE: u32 = 3;
 pub const MANAGED_SLOT_HAS_ACTIVE: u32 = 1 << 0;
 pub const MANAGED_SLOT_HAS_PREVIOUS: u32 = 1 << 1;
 pub const MANAGED_SLOT_HAS_CANDIDATE: u32 = 1 << 2;
@@ -73,7 +75,8 @@ pub struct ManagedOperationRequestV1 {
 }
 
 /// Activate selects the exact resident candidate; rollback selects the exact
-/// previous artifact. Acceptance returns a public operation ID, not a commit.
+/// previous artifact; deactivate selects the exact current active artifact.
+/// Acceptance returns a public operation ID, not a commit.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct ManagedInstallationRequestV1 {
@@ -86,7 +89,8 @@ pub struct ManagedInstallationRequestV1 {
 }
 
 /// Cancel one exact lifecycle request. The original upload cancel ABI remains
-/// separate; target_kind is MANAGED_TARGET_CANDIDATE or MANAGED_TARGET_PREVIOUS.
+/// separate; target_kind is MANAGED_TARGET_CANDIDATE, MANAGED_TARGET_PREVIOUS,
+/// or MANAGED_TARGET_DEACTIVATE.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct ManagedInstallationCancelV1 {
@@ -164,6 +168,8 @@ mod tests {
         assert!(BPF_MANAGED_UPLOAD_BEGIN > super::super::BPF_OBJ_UNPIN);
         assert_eq!(BPF_MANAGED_CANCEL, 260);
         assert_eq!(BPF_MANAGED_INSTALLATION_CANCEL, 264);
+        assert_eq!(BPF_MANAGED_DEACTIVATE, 265);
+        assert_eq!(MANAGED_TARGET_DEACTIVATE, 3);
         assert_eq!(core::mem::offset_of!(ManagedSlotV1, pending_id), 24);
         assert_eq!(core::mem::offset_of!(ManagedSlotV1, flags), 52);
         let slot = ManagedSlotV1 {

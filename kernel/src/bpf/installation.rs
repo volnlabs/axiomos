@@ -14,6 +14,7 @@ use super::managed::{
     BehaviorInstance, InstancePreparation, ManagedInstanceFinishError, ManagedReclamation,
     PreparedInstance, ReclamationReceipt,
 };
+use super::preparation::LifecycleTarget;
 use super::BpfManager;
 
 /// One slot, separate from manager storage. Combined paths always lock this
@@ -144,14 +145,17 @@ pub(crate) fn try_release_boundary<R>(
         }
         let mut slot = CONTROL_SLOT.try_lock().ok_or(BpfError::ObjectBusy)?;
         apply_requested_stop(&mut slot, &STOP_REQUESTED);
-        // Ownership persists through inhibition. Only acknowledged safe
-        // deactivation may release it; that production path is not enabled yet.
+        // Ownership persists through inhibition; only a committed empty slot
+        // may release it after the acknowledged boundary below.
         if slot.active.is_some() || slot.pending.is_some_and(|pending| pending.handoff) {
             crate::actuation::set_managed_motor_pair_owner(true);
         }
+        let generation = slot.generation;
         let result = boundary(&mut slot);
         if slot.active.is_some() || slot.pending.is_some_and(|pending| pending.handoff) {
             crate::actuation::set_managed_motor_pair_owner(true);
+        } else if slot.generation != generation {
+            crate::actuation::set_managed_motor_pair_owner(false);
         }
         if slot.retire.is_some()
             || slot
@@ -185,7 +189,8 @@ struct Pending {
     id: u64,
     expected: u64,
     generation: u64,
-    candidate: bool,
+    target: LifecycleTarget,
+    retained_candidate: Option<u32>,
     cancelled: bool,
     error: Option<kernel_abi::Errno>,
     handoff: bool,
@@ -302,7 +307,7 @@ impl ControlSlot {
             MANAGED_OPERATION_CLEANUP
         } else if pending.handoff {
             MANAGED_OPERATION_HANDOFF
-        } else if self.staged.is_some() {
+        } else if self.has_prepared_change() {
             MANAGED_OPERATION_STAGED
         } else {
             MANAGED_OPERATION_PREPARING
@@ -316,12 +321,20 @@ impl ControlSlot {
     }
 
     pub(crate) fn needs_handoff_transport(&self) -> bool {
-        self.pending
-            .is_some_and(|pending| pending.handoff || (!pending.cancelled && self.staged.is_some()))
+        self.pending.is_some_and(|pending| {
+            pending.handoff || (!pending.cancelled && self.has_prepared_change())
+        })
+    }
+
+    fn has_prepared_change(&self) -> bool {
+        self.staged.is_some()
+            || self
+                .pending
+                .is_some_and(|pending| matches!(pending.target, LifecycleTarget::Deactivate(_)))
     }
 
     pub(super) fn abort_cancelled(&mut self) {
-        if self.pending.is_some_and(|pending| pending.cancelled) && self.staged.is_some() {
+        if self.pending.is_some_and(|pending| pending.cancelled) && self.has_prepared_change() {
             self.abort_staged()
                 .expect("cancelled staged installation retains retirement capacity");
         }
@@ -373,7 +386,12 @@ impl ControlSlot {
             id: instance.id(),
             expected,
             generation,
-            candidate: previous.is_none(),
+            target: if previous.is_some() {
+                LifecycleTarget::Previous(handle)
+            } else {
+                LifecycleTarget::Candidate(handle)
+            },
+            retained_candidate: manager.preparation.candidate,
             cancelled: false,
             error: None,
             handoff: false,
@@ -387,6 +405,57 @@ impl ControlSlot {
             instance,
             active_charge_ns_per_s,
         })
+    }
+
+    /// No instance is allocated for deactivation. Reserve the same zero-cost
+    /// admission transaction and retirement batch while the active code runs.
+    pub(crate) fn begin_deactivation(
+        &mut self,
+        manager: &mut BpfManager,
+        expected: u64,
+        active: u32,
+    ) -> Result<u64, BpfError> {
+        if expected != self.generation
+            || self.active.as_ref().map(|a| a.artifact.handle) != Some(active)
+        {
+            return Err(BpfError::NotLoaded);
+        }
+        if self.pending.is_some()
+            || self.retiring.is_some()
+            || manager.managed_slot_busy
+            || manager.managed_instance_preparation.is_some()
+            || manager.managed_reclamation.is_some()
+            || manager.preparation.upload_accepted()
+        {
+            return Err(BpfError::ObjectBusy);
+        }
+        let generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(BpfError::ResourceLimit)?;
+        let id = manager
+            .next_managed_preparation
+            .checked_add(1)
+            .ok_or(BpfError::ResourceLimit)?;
+        let admission = manager
+            .admission
+            .prepare_managed(0)
+            .map_err(map_admission_error)?;
+        // No fallible work follows the first reservation mutation.
+        manager.next_managed_preparation = id;
+        manager.managed_slot_busy = true;
+        self.admission = Some(admission);
+        self.pending = Some(Pending {
+            id,
+            expected,
+            generation,
+            target: LifecycleTarget::Deactivate(active),
+            retained_candidate: manager.preparation.candidate,
+            cancelled: false,
+            error: None,
+            handoff: false,
+        });
+        Ok(id)
     }
 
     /// Manager registration may fail, but rejected ownership always moves into
@@ -480,12 +549,13 @@ impl ControlSlot {
     /// Internal entry into trusted safe mode, after the old invocation returns.
     /// This does not assert sink safety or grant publication eligibility.
     pub(crate) fn enter_handoff(&mut self, id: u64) -> Result<(), BpfError> {
+        let prepared = self.has_prepared_change();
         let pending = self
             .pending
             .as_mut()
             .filter(|p| p.id == id)
             .ok_or(BpfError::NotLoaded)?;
-        if pending.cancelled || self.staged.is_none() {
+        if pending.cancelled || !prepared {
             return Err(BpfError::ObjectBusy);
         }
         pending.handoff = true;
@@ -504,27 +574,46 @@ impl ControlSlot {
         if pending.expected != self.generation {
             return Err(BpfError::NotLoaded);
         }
-        if pending.cancelled || !pending.handoff || self.retiring.is_some() || self.staged.is_none()
+        if pending.cancelled
+            || !pending.handoff
+            || self.retiring.is_some()
+            || !self.has_prepared_change()
         {
             return Err(BpfError::ObjectBusy);
         }
+        if let LifecycleTarget::Deactivate(handle) = pending.target {
+            if self.active.as_ref().map(|a| a.artifact.handle) != Some(handle)
+                || self.staged.is_some()
+            {
+                return Err(BpfError::NotLoaded);
+            }
+        }
         // All checks precede mutation. Only owned Option/scalar moves follow.
-        let next = self.staged.take().unwrap();
+        let next = self.staged.take();
         let evict_artifact = self.previous.as_ref().is_some_and(|a| {
-            a.handle != next.artifact.handle
+            Some(a.handle) != next.as_ref().map(|next| next.artifact.handle)
                 && self.active.as_ref().map(|old| old.artifact.handle) != Some(a.handle)
+                && pending.retained_candidate != Some(a.handle)
         });
-        let consumed_candidate = pending.candidate.then_some(next.artifact.handle);
-        let artifact = self.previous.take();
+        let consumed_candidate = match pending.target {
+            LifecycleTarget::Candidate(handle) => Some(handle),
+            _ => None,
+        };
         let displaced = self.active.take();
+        // Activation from an empty slot preserves its retained previous artifact.
+        // Only a displaced active installation replaces that role.
+        let artifact = displaced.as_ref().and_then(|_| self.previous.take());
         let instance = displaced.map(|old| {
             self.previous = Some(old.artifact);
             (old.instance_id, old.instance)
         });
-        self.active = Some(next);
-        self.generation = self.active.as_ref().unwrap().generation;
+        self.active = next;
+        self.generation = self
+            .active
+            .as_ref()
+            .map_or(pending.generation, |active| active.generation);
         self.pending = None;
-        self.inhibited = false;
+        self.inhibited = self.active.is_none();
         self.retiring = Some(id);
         self.retire = Some(RetireBatch {
             id,
@@ -583,7 +672,7 @@ impl ControlSlot {
                 if pending.handoff {
                     return Err(HandoffError::NotEstablished);
                 }
-                if self.staged.is_some() {
+                if self.has_prepared_change() {
                     // Reject unrepresentable 80 ms rather than round a timeout.
                     let timeout = frequency
                         .checked_mul(80)
@@ -646,13 +735,19 @@ impl ControlSlot {
         self.commit_validated_handoff(handoff.take_ready(0, 0).unwrap().unwrap())
     }
 
-    /// Worker discards a staged cancellation/failure without destroying state.
+    /// Worker discards a prepared cancellation/failure without destroying state.
+    /// Deactivation has no new instance, but still settles its reserved batch.
     pub(crate) fn abort_staged(&mut self) -> Result<(), BpfError> {
         let pending = self.pending.ok_or(BpfError::NotLoaded)?;
-        if self.retiring.is_some() || self.staged.is_none() {
+        if self.retiring.is_some() || !self.has_prepared_change() {
             return Err(BpfError::ObjectBusy);
         }
-        let staged = self.staged.take().unwrap();
+        let (instance, artifact) = self.staged.take().map_or((None, None), |staged| {
+            (
+                Some((staged.instance_id, staged.instance)),
+                Some(staged.artifact),
+            )
+        });
         self.pending = None;
         self.retiring = Some(pending.id);
         self.retire = Some(RetireBatch {
@@ -662,8 +757,8 @@ impl ControlSlot {
                 .take()
                 .expect("accepted build retains admission custody"),
             committed: false,
-            instance: Some((staged.instance_id, staged.instance)),
-            artifact: Some(staged.artifact),
+            instance,
+            artifact,
             evict_artifact: false,
             failed: None,
             consumed_candidate: None,

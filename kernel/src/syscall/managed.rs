@@ -8,7 +8,7 @@ use crate::bpf::preparation::LifecycleTarget;
 use crate::bpf::{installation, BpfManager};
 
 pub(super) fn is_command(cmd: u32) -> bool {
-    (BPF_MANAGED_UPLOAD_BEGIN..=BPF_MANAGED_INSTALLATION_CANCEL).contains(&cmd)
+    (BPF_MANAGED_UPLOAD_BEGIN..=BPF_MANAGED_DEACTIVATE).contains(&cmd)
 }
 
 fn request_size(cmd: u32) -> Result<usize, Errno> {
@@ -19,7 +19,7 @@ fn request_size(cmd: u32) -> Result<usize, Errno> {
             Ok(size_of::<ManagedOperationRequestV1>())
         }
         BPF_MANAGED_OPERATION_QUERY => Ok(size_of::<ManagedOperationV1>()),
-        BPF_MANAGED_ACTIVATE | BPF_MANAGED_ROLLBACK => {
+        BPF_MANAGED_ACTIVATE | BPF_MANAGED_ROLLBACK | BPF_MANAGED_DEACTIVATE => {
             Ok(size_of::<ManagedInstallationRequestV1>())
         }
         BPF_MANAGED_SLOT_QUERY => Ok(size_of::<ManagedSlotV1>()),
@@ -47,16 +47,17 @@ fn validate_header(cmd: u32, bytes: &[u8]) -> Result<(), Errno> {
 fn lifecycle_request(cmd: u32, bytes: &[u8]) -> Result<(u64, u64, LifecycleTarget), Errno> {
     validate_header(cmd, bytes)?;
     match cmd {
-        BPF_MANAGED_ACTIVATE | BPF_MANAGED_ROLLBACK => {
+        BPF_MANAGED_ACTIVATE | BPF_MANAGED_ROLLBACK | BPF_MANAGED_DEACTIVATE => {
             let request =
                 ManagedInstallationRequestV1::read_from_bytes(bytes).map_err(|_| EINVAL)?;
             if request.reserved != 0 {
                 return Err(EINVAL);
             }
-            let target = if cmd == BPF_MANAGED_ACTIVATE {
-                LifecycleTarget::Candidate(request.artifact_handle)
-            } else {
-                LifecycleTarget::Previous(request.artifact_handle)
+            let target = match cmd {
+                BPF_MANAGED_ACTIVATE => LifecycleTarget::Candidate(request.artifact_handle),
+                BPF_MANAGED_ROLLBACK => LifecycleTarget::Previous(request.artifact_handle),
+                BPF_MANAGED_DEACTIVATE => LifecycleTarget::Deactivate(request.artifact_handle),
+                _ => return Err(ENOTSUP),
             };
             Ok((
                 request.expected_last_id,
@@ -73,6 +74,7 @@ fn lifecycle_request(cmd: u32, bytes: &[u8]) -> Result<(u64, u64, LifecycleTarge
             let target = match request.target_kind {
                 MANAGED_TARGET_CANDIDATE => LifecycleTarget::Candidate(request.artifact_handle),
                 MANAGED_TARGET_PREVIOUS => LifecycleTarget::Previous(request.artifact_handle),
+                MANAGED_TARGET_DEACTIVATE => LifecycleTarget::Deactivate(request.artifact_handle),
                 _ => return Err(EINVAL),
             };
             Ok((request.id, request.expected_generation, target))
@@ -175,7 +177,7 @@ pub(super) fn dispatch(owner: u64, cmd: u32, ptr: usize, size: usize) -> isize {
         // These wrappers take slot then manager, with IRQs masked. Never enter
         // them from the manager-only upload critical section below.
         match cmd {
-            BPF_MANAGED_ACTIVATE | BPF_MANAGED_ROLLBACK => {
+            BPF_MANAGED_ACTIVATE | BPF_MANAGED_ROLLBACK | BPF_MANAGED_DEACTIVATE => {
                 let (last_id, generation, target) = lifecycle_request(cmd, bytes)?;
                 return installation::request_installation(last_id, generation, target)
                     .map(|id| id as usize);
@@ -255,6 +257,12 @@ mod tests {
                 LifecycleTarget::Previous(0),
             ),
             (
+                BPF_MANAGED_DEACTIVATE,
+                install.as_bytes(),
+                28,
+                LifecycleTarget::Deactivate(0),
+            ),
+            (
                 BPF_MANAGED_INSTALLATION_CANCEL,
                 cancel.as_bytes(),
                 32,
@@ -289,7 +297,12 @@ mod tests {
             lifecycle_request(BPF_MANAGED_INSTALLATION_CANCEL, cancel.as_bytes()),
             Ok((1 << 40, 1 << 41, LifecycleTarget::Previous(0)))
         );
-        for kind in [0, MANAGED_TARGET_PREVIOUS + 1, u32::MAX] {
+        cancel.target_kind = MANAGED_TARGET_DEACTIVATE;
+        assert_eq!(
+            lifecycle_request(BPF_MANAGED_INSTALLATION_CANCEL, cancel.as_bytes()),
+            Ok((1 << 40, 1 << 41, LifecycleTarget::Deactivate(0)))
+        );
+        for kind in [0, MANAGED_TARGET_DEACTIVATE + 1, u32::MAX] {
             cancel.target_kind = kind;
             assert_eq!(
                 lifecycle_request(BPF_MANAGED_INSTALLATION_CANCEL, cancel.as_bytes()),
@@ -303,6 +316,7 @@ mod tests {
             Err(EINVAL)
         );
         assert_eq!(request_size(BPF_MANAGED_CANCEL), Ok(24));
+        assert_eq!(request_size(BPF_MANAGED_DEACTIVATE), Ok(32));
         assert_eq!(request_size(BPF_MANAGED_INSTALLATION_CANCEL), Ok(40));
         // A lifecycle cancellation cannot be smuggled into the old upload shape.
         assert_eq!(
@@ -354,7 +368,7 @@ mod tests {
 
     #[test]
     fn lifecycle_commands_reject_wrong_syscall_size_before_user_copy() {
-        for cmd in BPF_MANAGED_ACTIVATE..=BPF_MANAGED_INSTALLATION_CANCEL {
+        for cmd in BPF_MANAGED_ACTIVATE..=BPF_MANAGED_DEACTIVATE {
             assert!(is_command(cmd));
             for size in [0, request_size(cmd).unwrap() - 1, usize::MAX] {
                 let error = if cfg!(feature = "managed-runtime") {
@@ -366,7 +380,7 @@ mod tests {
             }
         }
         assert!(!is_command(BPF_MANAGED_UPLOAD_BEGIN - 1));
-        assert!(!is_command(BPF_MANAGED_INSTALLATION_CANCEL + 1));
+        assert!(!is_command(BPF_MANAGED_DEACTIVATE + 1));
     }
 
     #[test]

@@ -1,6 +1,11 @@
 version = 1
 baseline_sites = 708
-baseline_fingerprint = "sha256:b69b04339464e79b2f6dff63644e17a2ecec82dfe0d1dd86726e99f2b8f53903"
+baseline_fingerprint = "sha256:a20b93830bc84e8ebc143cfd1b9b41ae714aa2d107b5c17c77985a1efde8d7ab"
+
+# 2026-09-15: deactivation reuses the acknowledged slot boundary and worker
+# retirement. Reviewed line relocation only: 708 sites, unchanged kinds and
+# obligations. Host churn/cancellation, focused safe-ack Miri and Pi5 compile
+# checks pass; physical output and timing qualification remain open.
 
 # 2026-09-15: bounded lifecycle administration and failure receipts move existing
 # source sites without changing unsafe syntax, counts, kinds or obligations.

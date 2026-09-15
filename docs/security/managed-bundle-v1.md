@@ -208,7 +208,7 @@ zeroing/copying and verifier work are outside that scope. This does not establis
 a timing bound for the linked-list allocator's fragmentation-dependent traversal;
 the qualified workload still needs IRQ-off and deadline measurements.
 
-Nine commands use independently versioned, padding-free native ABI structures
+Ten commands use independently versioned, padding-free native ABI structures
 through `SYS_BPF`, dispatched before the legacy `BpfAttr` size check. All require
 `BEHAVIOR_ADMIN`, exact version 1 and structure length, and zero reserved fields.
 Ordinary init children have no administration capability. Dedicated installer
@@ -225,6 +225,7 @@ provisioning and debug-UART transport remain integration work.
 | Rollback | 262 | `ManagedInstallationRequestV1` / 32 | Accepted operation ID |
 | Slot query | 263 | `ManagedSlotV1` / 64 | Consistent slot/candidate/operation status |
 | Cancel installation | 264 | `ManagedInstallationCancelV1` / 40 | Lifecycle cancellation requested |
+| Deactivate | 265 | `ManagedInstallationRequestV1` / 32 | Accepted operation ID |
 
 Activate and rollback compare both the last issued operation ID and current
 installation generation. Their artifact handle must exactly identify the resident
@@ -233,8 +234,24 @@ state through the existing worker; neither grants physical rearm or bypasses
 SafeAck. Query the original/latest operation after a lost response; repeating
 an accepted activation with its old expected ID returns `ESTALE`.
 
+Deactivate supplies the same expected last operation ID and slot generation,
+with the exact active artifact handle. It prepares no instance, reserves a zero
+replacement admission charge, and follows the same SafeBarrier/SafeAck boundary.
+Commit advances the slot generation, removes the active instance and keeps the
+slot inhibited. The active artifact becomes previous; the displaced previous
+artifact is evicted unless the candidate still retains it. Activation from an
+empty slot preserves its previous artifact, allowing an explicit later rollback.
+The worker releases old state and any evicted artifact before settling admission;
+held readers keep the operation and its charges busy. Cancellation also settles
+its reservation through the worker, even though no new instance was built.
+Failure before commitment preserves active/previous identity and admission; once
+handoff has started, the old installation remains stopped. Shared wheel ownership
+is released only by a committed empty-slot boundary, without an e-stop release or
+automatic resumption. Deactivation consumes a generation even though it creates
+no installation, so stale requests cannot match a later activation.
+
 Lifecycle cancellation specifies the operation ID, expected current generation,
-artifact handle and target kind (1 candidate, 2 previous). It cannot undo a
+artifact handle and target kind (1 candidate, 2 previous, 3 deactivate). It cannot undo a
 committed installation. The original 24-byte upload cancellation remains unchanged.
 Slot queries return the latest public operation ID, generation, active charge,
 artifact handles and presence/inhibited/retiring flags. A present artifact may
@@ -250,7 +267,7 @@ cannot replace it with `ECANCELED`. Timeout uses the existing kernel errno numbe
 74 (`ETIMEDEOUT`); missing link uses `ENOLINK`, protocol/clock failures `EPROTO`,
 and exhausted counters `EOVERFLOW`. An earlier explicit stop/cancel remains a
 cancellation. Stale transport operation IDs cannot assign errors to a newer
-operation. Deactivation/retirement administration remains integration work.
+operation. Explicit retirement of inactive artifacts remains integration work.
 
 Begin compares `expected_last_id` with the latest issued ID. IDs increase without
 wrapping or entering the syscall error range. Query ID 0 returns the latest ID;

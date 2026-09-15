@@ -103,12 +103,13 @@ struct Lifecycle {
 pub(crate) enum LifecycleTarget {
     Candidate(u32),
     Previous(u32),
+    Deactivate(u32),
 }
 
 impl LifecycleTarget {
     fn handle(self) -> u32 {
         match self {
-            Self::Candidate(handle) | Self::Previous(handle) => handle,
+            Self::Candidate(handle) | Self::Previous(handle) | Self::Deactivate(handle) => handle,
         }
     }
 }
@@ -375,6 +376,7 @@ impl BpfManager {
         let exact = match target {
             LifecycleTarget::Candidate(handle) => self.preparation.candidate == Some(handle),
             LifecycleTarget::Previous(handle) => snapshot.previous == Some(handle),
+            LifecycleTarget::Deactivate(handle) => snapshot.active == Some(handle),
         };
         if !exact {
             return Err(ESTALE);
@@ -388,20 +390,34 @@ impl BpfManager {
             .checked_add(1)
             .filter(|id| *id <= isize::MAX as u64)
             .ok_or(EOVERFLOW)?;
-        let previous = match target {
-            LifecycleTarget::Candidate(_) => None,
-            LifecycleTarget::Previous(handle) => Some(handle),
-        };
+        let generation = expected_generation.checked_add(1).ok_or(EOVERFLOW)?;
+        self.next_managed_preparation
+            .checked_add(1)
+            .ok_or(EOVERFLOW)?;
         let identity = self
             .managed_artifact(target.handle())
             .map_err(resource_error)?
             .identity();
-        let preparation = slot
-            .begin(self, expected_generation, previous)
-            .map_err(resource_error)?;
+        let (instance_id, preparation) = match target {
+            LifecycleTarget::Deactivate(handle) => (
+                slot.begin_deactivation(self, expected_generation, handle)
+                    .map_err(resource_error)?,
+                None,
+            ),
+            LifecycleTarget::Candidate(_) | LifecycleTarget::Previous(_) => {
+                let previous = match target {
+                    LifecycleTarget::Previous(handle) => Some(handle),
+                    _ => None,
+                };
+                let preparation = slot
+                    .begin(self, expected_generation, previous)
+                    .map_err(resource_error)?;
+                (preparation.instance_id(), Some(preparation))
+            }
+        };
         let lifecycle = Lifecycle {
-            instance_id: preparation.instance_id(),
-            generation: expected_generation + 1,
+            instance_id,
+            generation,
             target,
         };
         let state = &mut self.preparation;
@@ -409,7 +425,11 @@ impl BpfManager {
             version: MANAGED_ADMIN_VERSION,
             size: core::mem::size_of::<ManagedOperationV1>() as u32,
             id,
-            phase: MANAGED_OPERATION_QUEUED,
+            phase: if preparation.is_some() {
+                MANAGED_OPERATION_QUEUED
+            } else {
+                MANAGED_OPERATION_STAGED
+            },
             artifact_handle: target.handle(),
             ..Default::default()
         };
@@ -418,7 +438,7 @@ impl BpfManager {
         state.owner = 0;
         state.cancelled = false;
         state.lifecycle = Some(lifecycle);
-        state.installation = Some(preparation);
+        state.installation = preparation;
         state.phase = Phase::Lifecycle;
         Ok(id)
     }
@@ -488,6 +508,7 @@ impl BpfManager {
             pending_target_kind: lifecycle.map_or(0, |operation| match operation.target {
                 LifecycleTarget::Candidate(_) => MANAGED_TARGET_CANDIDATE,
                 LifecycleTarget::Previous(_) => MANAGED_TARGET_PREVIOUS,
+                LifecycleTarget::Deactivate(_) => MANAGED_TARGET_DEACTIVATE,
             }),
             reserved: 0,
         }

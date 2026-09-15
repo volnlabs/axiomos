@@ -95,6 +95,157 @@ fn acknowledge(handoff: &mut Handoff, tx: &mut TxState, sent: u64, ack: u64) {
 }
 
 #[test]
+fn deactivation_requires_safe_ack_and_retires_state_before_refunding_admission() {
+    let mut manager = BpfManager::new();
+    let mut slot = ControlSlot::new();
+    let a = candidate(&mut manager, 1);
+    let id = stage(&mut slot, &mut manager, None);
+    commit(&mut slot, id);
+    drain(&mut slot, &mut manager);
+    let b = candidate(&mut manager, 2);
+    let id = stage(&mut slot, &mut manager, None);
+    commit(&mut slot, id);
+    drain(&mut slot, &mut manager);
+    let charged = manager.admission.reserved_ns_per_s();
+    let private_bytes = manager.map_bytes;
+    let resources = manager.resource_usage();
+    let old_instance = slot.active.as_ref().unwrap().instance_id;
+    let old_reader = slot.active.as_ref().unwrap().instance.clone();
+    let id = slot.begin_deactivation(&mut manager, 2, b).unwrap();
+    assert_ne!(id, old_instance);
+    assert!(slot.staged.is_none());
+    assert_eq!(manager.resource_usage(), resources);
+    assert!(!slot.snapshot().inhibited);
+    assert_eq!(manager.admission.reserved_ns_per_s(), charged);
+    let mut handoff = peer_ready();
+    let mut tx = TxState::new();
+    let mut sequence = 0;
+    assert_eq!(
+        slot.handoff_boundary(
+            release(1, 100, 100),
+            1000,
+            &mut handoff,
+            &mut tx,
+            &mut sequence
+        ),
+        Ok(None)
+    );
+    assert_eq!(slot.snapshot().active, Some(b));
+    assert!(slot.snapshot().inhibited);
+    assert_eq!(slot.snapshot().previous, Some(a));
+    assert_eq!(slot.snapshot().generation, 2);
+    acknowledge(&mut handoff, &mut tx, 101, 105);
+    assert_eq!(
+        slot.handoff_boundary(
+            release(2, 110, 110),
+            1000,
+            &mut handoff,
+            &mut tx,
+            &mut sequence
+        ),
+        Ok(Some(3))
+    );
+    assert_eq!(slot.snapshot().active, None);
+    assert_eq!(slot.snapshot().previous, Some(b));
+    assert!(slot.snapshot().inhibited);
+    assert_eq!(manager.admission.reserved_ns_per_s(), charged);
+    assert_eq!(manager.map_bytes, private_bytes);
+    let mut retirement = slot.take_retirement().unwrap().release_references();
+    assert!(matches!(
+        retirement.begin_release(&mut manager),
+        Err(BpfError::ObjectBusy)
+    ));
+    assert!(matches!(
+        slot.begin(&mut manager, 3, Some(b)),
+        Err(BpfError::ObjectBusy)
+    ));
+    drop(old_reader);
+    while let Some(release) = retirement.begin_release(&mut manager).unwrap() {
+        let receipt = release.release();
+        retirement.finish_release(&mut manager, receipt).unwrap();
+    }
+    slot.finish_retirement(&mut manager, retirement.complete().ok().unwrap())
+        .unwrap();
+    assert_eq!(manager.admission.reserved_ns_per_s(), 0);
+    assert!(manager.managed_artifact(a).is_err());
+    assert!(manager.managed_artifact(b).is_ok());
+    assert!(manager.managed_instances.iter().all(Option::is_none));
+    let fresh = stage(&mut slot, &mut manager, Some(b));
+    assert_ne!(fresh, id);
+    assert_eq!(commit(&mut slot, fresh), 4);
+    drain(&mut slot, &mut manager);
+}
+
+#[test]
+fn deactivation_preserves_candidate_alias_and_activation_from_empty_keeps_previous() {
+    let mut manager = BpfManager::new();
+    let mut slot = ControlSlot::new();
+    let a = candidate(&mut manager, 1);
+    let id = stage(&mut slot, &mut manager, None);
+    commit(&mut slot, id);
+    drain(&mut slot, &mut manager);
+    let b = candidate(&mut manager, 2);
+    let id = stage(&mut slot, &mut manager, None);
+    commit(&mut slot, id);
+    drain(&mut slot, &mut manager);
+    // A duplicate upload may retain the previous artifact as its candidate.
+    assert_eq!(candidate(&mut manager, 1), a);
+    let id = slot.begin_deactivation(&mut manager, 2, b).unwrap();
+    commit(&mut slot, id);
+    assert!(!slot.retire.as_ref().unwrap().evict_artifact);
+    drain(&mut slot, &mut manager);
+    assert_eq!(slot.snapshot().previous, Some(b));
+    assert_eq!(manager.preparation.candidate, Some(a));
+    assert!(manager.managed_artifact(a).is_ok());
+    let id = stage(&mut slot, &mut manager, None);
+    assert_eq!(commit(&mut slot, id), 4);
+    drain(&mut slot, &mut manager);
+    assert_eq!(slot.snapshot().active, Some(a));
+    assert_eq!(slot.snapshot().previous, Some(b));
+    assert!(manager.preparation.candidate.is_none());
+    let id = stage(&mut slot, &mut manager, Some(b));
+    assert_eq!(commit(&mut slot, id), 5);
+    drain(&mut slot, &mut manager);
+    assert_eq!(slot.snapshot().previous, Some(a));
+}
+
+#[test]
+fn deactivation_100000_transitions_keep_retained_code_and_zero_instance_floor() {
+    let mut manager = BpfManager::new();
+    let mut slot = ControlSlot::new();
+    let a = candidate(&mut manager, 1);
+    let floor = manager.resource_usage();
+    let mut high_water = None;
+    for generation in (1..100_000).step_by(2) {
+        let previous = slot.snapshot().previous;
+        let id = stage(&mut slot, &mut manager, previous);
+        commit(&mut slot, id);
+        drain(&mut slot, &mut manager);
+        let full = manager.resource_usage();
+        if let Some(high_water) = high_water {
+            assert_eq!(full, high_water);
+        }
+        high_water = Some(full);
+        assert_eq!(slot.snapshot().generation, generation);
+        let id = slot
+            .begin_deactivation(&mut manager, generation, a)
+            .unwrap();
+        assert_eq!(manager.resource_usage(), full);
+        assert_eq!(commit(&mut slot, id), generation + 1);
+        assert_eq!(manager.resource_usage(), full);
+        drain(&mut slot, &mut manager);
+        assert_eq!(manager.resource_usage(), floor);
+        assert_eq!(manager.admission.reserved_ns_per_s(), 0);
+        assert!(slot.snapshot().inhibited);
+        assert_eq!(slot.snapshot().active, None);
+        assert_eq!(slot.snapshot().previous, Some(a));
+        assert!(manager.managed_instances.iter().all(Option::is_none));
+        assert_eq!(Arc::strong_count(manager.managed_artifact(a).unwrap()), 2);
+    }
+    std::println!("deactivation 100000: floor={floor:?}, high_water={high_water:?}");
+}
+
+#[test]
 fn real_boundary_commits_only_matching_ack_at_next_release_and_keeps_retirement_owned() {
     let mut manager = BpfManager::new();
     let mut slot = ControlSlot::new();
@@ -426,6 +577,17 @@ fn installation_stale_exhaustion_and_failed_build_preserve_active() {
         slot.begin(&mut manager, u64::MAX, None),
         Err(BpfError::ResourceLimit)
     ));
+    assert_eq!(
+        manager.request_installation(
+            &mut slot,
+            0,
+            u64::MAX,
+            LifecycleTarget::Deactivate(before.active.unwrap()),
+        ),
+        Err(kernel_abi::EOVERFLOW)
+    );
+    assert_eq!(manager.resource_usage(), usage);
+    assert!(!manager.managed_slot_busy);
     slot.generation = 1;
     let token = slot.begin(&mut manager, 1, None).unwrap();
     assert_eq!(
