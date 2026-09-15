@@ -899,6 +899,77 @@ fn worker_deactivation_rejects_stale_targets_and_exhaustion_without_reserving() 
 }
 
 #[test]
+fn lifecycle_reserves_counter_space_for_both_retirement_members_before_acceptance() {
+    let (mut worker, slot, manager) = fixture_worker();
+    let mut last = 0;
+    let mut handles = [0; 2];
+    for revision in 1..=2 {
+        let (uploaded, target) = resident_via_worker(&mut worker, &slot, &manager, last, revision);
+        handles[(revision - 1) as usize] = target.handle();
+        last = manager
+            .lock()
+            .request_installation(&mut slot.lock(), uploaded, revision - 1, target)
+            .unwrap();
+        assert!(service_worker(&mut worker, &slot, &manager));
+        host_commit(&slot);
+        assert!(service_worker(&mut worker, &slot, &manager));
+    }
+    let (uploaded, candidate) = resident_via_worker(&mut worker, &slot, &manager, last, 3);
+    let before = slot.lock().snapshot();
+    let usage = manager.lock().resource_usage();
+    let private = manager.lock().next_managed_preparation;
+    manager.lock().next_managed_reclamation = u64::MAX - 1;
+    for target in [
+        candidate,
+        LifecycleTarget::Previous(handles[0]),
+        LifecycleTarget::Deactivate(handles[1]),
+    ] {
+        assert_eq!(
+            manager
+                .lock()
+                .request_installation(&mut slot.lock(), uploaded, 2, target),
+            Err(EOVERFLOW)
+        );
+        assert_eq!(slot.lock().snapshot(), before);
+        assert_eq!(manager.lock().resource_usage(), usage);
+        assert_eq!(manager.lock().preparation.last_id, uploaded);
+        assert_eq!(manager.lock().next_managed_preparation, private);
+        assert_eq!(manager.lock().next_managed_reclamation, u64::MAX - 1);
+        assert!(!manager.lock().managed_slot_busy);
+    }
+    manager.lock().next_managed_reclamation = u64::MAX - 2;
+    let operation = manager
+        .lock()
+        .request_installation(
+            &mut slot.lock(),
+            uploaded,
+            2,
+            LifecycleTarget::Deactivate(handles[1]),
+        )
+        .unwrap();
+    host_commit(&slot);
+    assert!(service_worker(&mut worker, &slot, &manager));
+    assert_eq!(manager.lock().next_managed_reclamation, u64::MAX);
+    assert_eq!(
+        manager
+            .lock()
+            .managed_operation_query(operation)
+            .unwrap()
+            .phase,
+        MANAGED_OPERATION_COMMITTED
+    );
+    assert_eq!(slot.lock().snapshot().active, None);
+    assert_eq!(slot.lock().snapshot().previous, Some(handles[1]));
+    assert_eq!(
+        manager.lock().preparation.candidate,
+        Some(candidate.handle())
+    );
+    assert!(manager.lock().managed_artifact(handles[0]).is_err());
+    assert_eq!(manager.lock().admission.reserved_ns_per_s(), 0);
+    assert!(!manager.lock().managed_slot_busy);
+}
+
+#[test]
 fn handoff_failure_retains_its_errno_through_query_worker_cleanup_and_receipt() {
     use shrike_link::handoff::HandoffError;
     for (fault, expected) in [

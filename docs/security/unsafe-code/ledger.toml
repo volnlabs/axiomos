@@ -1,6 +1,9 @@
 version = 1
 baseline_sites = 708
-baseline_fingerprint = "sha256:a20b93830bc84e8ebc143cfd1b9b41ae714aa2d107b5c17c77985a1efde8d7ab"
+baseline_fingerprint = "sha256:8d5eb40330bc62cb1d3ad0e043202cfda1f07fcd85be61137b929c5f21fef88c"
+
+# 2026-09-15: cleanup-counter preflight moves the worker source by five lines;
+# all 708 site/file/kind/obligation entries remain identical after normalization.
 
 # 2026-09-15: deactivation reuses the acknowledged slot boundary and worker
 # retirement. Reviewed line relocation only: 708 sites, unchanged kinds and

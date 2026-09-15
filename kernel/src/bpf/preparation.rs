@@ -394,6 +394,11 @@ impl BpfManager {
         self.next_managed_preparation
             .checked_add(1)
             .ok_or(EOVERFLOW)?;
+        // The sole batch may release one instance and one evicted artifact.
+        // managed_slot_busy excludes unrelated reclamation until both settle.
+        self.next_managed_reclamation
+            .checked_add(2)
+            .ok_or(EOVERFLOW)?;
         let identity = self
             .managed_artifact(target.handle())
             .map_err(resource_error)?

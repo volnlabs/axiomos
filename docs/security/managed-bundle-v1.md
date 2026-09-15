@@ -249,6 +249,10 @@ handoff has started, the old installation remains stopped. Shared wheel ownershi
 is released only by a committed empty-slot boundary, without an e-stop release or
 automatic resumption. Deactivation consumes a generation even though it creates
 no installation, so stale requests cannot match a later activation.
+Activation, rollback and deactivation require space for two cleanup IDs before
+acceptance: one displaced instance and one evicted artifact. Counter exhaustion
+returns `EOVERFLOW` before changing the slot, IDs or reservations. The accepted
+operation excludes unrelated reclamation until its batch finishes.
 
 Lifecycle cancellation specifies the operation ID, expected current generation,
 artifact handle and target kind (1 candidate, 2 previous, 3 deactivate). It cannot undo a
