@@ -1,7 +1,7 @@
-//! Fallible verifier buffer accounting. Counts element storage, including old
-//! and replacement buffers during growth, not allocator metadata/fragmentation.
-//! `try_reserve_exact` uses the requested layout with Rust's global allocator;
-//! allocator rounding and linked-list heap bookkeeping need separate headroom.
+//! Fallible verifier buffer accounting. Counts retained allocation capacity,
+//! including old and replacement buffers during growth. The default policy is
+//! byte-exact; bounded workers can select the pinned allocator's minimum and
+//! size quantum without coupling this crate to that allocator.
 use alloc::vec::Vec;
 use core::cell::Cell;
 use core::mem::size_of;
@@ -18,6 +18,8 @@ pub struct VerificationBudget {
     limit: usize,
     used: Cell<usize>,
     peak: Cell<usize>,
+    minimum_allocation: usize,
+    allocation_quantum: usize,
     #[cfg(test)]
     attempts: Cell<usize>,
     #[cfg(test)]
@@ -29,11 +31,48 @@ impl VerificationBudget {
             limit,
             used: Cell::new(0),
             peak: Cell::new(0),
+            minimum_allocation: 0,
+            allocation_quantum: 1,
             #[cfg(test)]
             attempts: Cell::new(0),
             #[cfg(test)]
             fail_at: Cell::new(None),
         }
+    }
+    /// Construct a budget whose nonempty buffers are raised to `minimum_allocation`
+    /// and rounded up to `allocation_quantum` bytes.
+    pub fn with_allocator_policy(
+        limit: usize,
+        minimum_allocation: usize,
+        allocation_quantum: usize,
+    ) -> VerifyResult<Self> {
+        if !allocation_quantum.is_power_of_two()
+            || !minimum_allocation.is_multiple_of(allocation_quantum)
+        {
+            return Err(VerifyError::ResourceExhausted);
+        }
+        Ok(Self {
+            limit,
+            used: Cell::new(0),
+            peak: Cell::new(0),
+            minimum_allocation,
+            allocation_quantum,
+            #[cfg(test)]
+            attempts: Cell::new(0),
+            #[cfg(test)]
+            fail_at: Cell::new(None),
+        })
+    }
+    /// Charge for one buffer request under this budget's allocator policy.
+    pub fn allocation_charge(&self, bytes: usize) -> VerifyResult<usize> {
+        if bytes == 0 {
+            return Ok(0);
+        }
+        let bytes = bytes.max(self.minimum_allocation);
+        bytes
+            .checked_add(self.allocation_quantum - 1)
+            .map(|rounded| rounded & !(self.allocation_quantum - 1))
+            .ok_or(VerifyError::ResourceExhausted)
     }
     pub fn used(&self) -> usize {
         self.used.get()
@@ -91,10 +130,15 @@ impl<'a, T> BudgetVec<'a, T> {
         if capacity <= self.data.capacity() {
             return Ok(());
         }
-        let bytes = capacity
+        let requested_bytes = capacity
             .checked_mul(size_of::<T>())
             .filter(|&n| n <= isize::MAX as usize)
             .ok_or(VerifyError::ResourceExhausted)?;
+        let bytes = if let Some(b) = self.budget {
+            b.allocation_charge(requested_bytes)?
+        } else {
+            requested_bytes
+        };
         if let Some(b) = self.budget {
             b.charge(bytes)?;
         }
@@ -126,10 +170,13 @@ impl<'a, T> BudgetVec<'a, T> {
         }
         replacement.append(&mut self.data); // reserved above; moves, never clones
         let old = core::mem::replace(&mut self.data, replacement);
-        let old_bytes = old.capacity().saturating_mul(size_of::<T>());
+        let old_requested_bytes = old.capacity().saturating_mul(size_of::<T>());
         drop(old);
         if let Some(b) = self.budget {
-            b.refund(old_bytes);
+            b.refund(
+                b.allocation_charge(old_requested_bytes)
+                    .expect("a previously charged capacity remains representable"),
+            );
         }
         Ok(())
     }
@@ -229,11 +276,14 @@ impl<T> DerefMut for BudgetVec<'_, T> {
 }
 impl<T> Drop for BudgetVec<'_, T> {
     fn drop(&mut self) {
-        let bytes = self.data.capacity().saturating_mul(size_of::<T>());
+        let requested_bytes = self.data.capacity().saturating_mul(size_of::<T>());
         let data = core::mem::take(&mut self.data);
         drop(data);
         if let Some(b) = self.budget {
-            b.refund(bytes);
+            b.refund(
+                b.allocation_charge(requested_bytes)
+                    .expect("a previously charged capacity remains representable"),
+            );
         }
     }
 }
@@ -372,6 +422,52 @@ mod tests {
         budget.charge(usize::MAX).unwrap();
         assert_eq!(budget.charge(1), Err(VerifyError::ResourceExhausted));
         budget.refund(usize::MAX);
+    }
+
+    #[test]
+    fn allocator_policy_charges_small_buffers_growth_overlap_and_exact_refunds() {
+        assert!(VerificationBudget::with_allocator_policy(64, 16, 0).is_err());
+        assert!(VerificationBudget::with_allocator_policy(64, 15, 8).is_err());
+        assert!(VerificationBudget::with_allocator_policy(64, 16, 3).is_err());
+        let budget = VerificationBudget::with_allocator_policy(80, 16, 8).unwrap();
+        assert_eq!(budget.allocation_charge(0), Ok(0));
+        assert_eq!(budget.allocation_charge(1), Ok(16));
+        assert_eq!(budget.allocation_charge(17), Ok(24));
+        assert_eq!(
+            budget.allocation_charge(usize::MAX),
+            Err(VerifyError::ResourceExhausted)
+        );
+
+        let mut first = BudgetVec::new(Some(&budget));
+        let mut second = BudgetVec::new(Some(&budget));
+        let mut third = BudgetVec::new(Some(&budget));
+        first.push(1u8).unwrap();
+        second.push(2u8).unwrap();
+        third.push(3u8).unwrap();
+        assert_eq!(budget.used(), 48);
+        first.reserve(17).unwrap();
+        assert_eq!(budget.used(), 56);
+        assert_eq!(budget.high_water(), 72); // old 16 + new 24 + two other buffers
+        drop(first);
+        assert_eq!(budget.used(), 32);
+        drop(second);
+        drop(third);
+        assert_eq!(budget.used(), 0);
+
+        let budget = VerificationBudget::with_allocator_policy(64, 16, 8).unwrap();
+        budget.fail_at.set(Some(0));
+        let mut failed = BudgetVec::<u8>::new(Some(&budget));
+        assert_eq!(failed.reserve(1), Err(VerifyError::ResourceExhausted));
+        assert_eq!(budget.used(), 0);
+
+        let budget = VerificationBudget::with_allocator_policy(31, 16, 8).unwrap();
+        let mut values = BudgetVec::new(Some(&budget));
+        values.push(1u8).unwrap();
+        assert_eq!(values.reserve(17), Err(VerifyError::ResourceExhausted));
+        assert_eq!(budget.used(), 16);
+        assert_eq!(&*values, [1]);
+        drop(values);
+        assert_eq!(budget.used(), 0);
     }
 
     #[test]

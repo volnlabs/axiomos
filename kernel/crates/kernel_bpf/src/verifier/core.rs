@@ -292,6 +292,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
         drop(verifier);
         let code = BudgetVec::copy_from(budget, insns)?;
         let code_bytes = core::mem::size_of_val(&*code);
+        let code_charge = budget.map_or(Ok(code_bytes), |b| b.allocation_charge(code_bytes))?;
 
         // Build the verified program
         let prog = BpfProgram::from_verified_parts(
@@ -303,7 +304,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
         .map_err(|e| {
             // Construction consumes the code vector even on rejection.
             if let Some(b) = budget {
-                b.refund(code_bytes);
+                b.refund(code_charge);
             }
             match e {
                 crate::bytecode::program::ProgramError::StackSizeExceeded { required, limit } => {

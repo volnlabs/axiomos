@@ -88,8 +88,9 @@ impl<P: PhysicalProfile> ManagedProgram<P> {
 /// Immutable authenticated and verified managed behavior.
 ///
 /// Admission, installation, mutable state and actuation are separate manager
-/// responsibilities. `code_bytes` is the retained verifier-output allocation
-/// charge that the eventual owner must release after the artifact is dropped.
+/// responsibilities. `code_bytes` is the code Vec's raw retained capacity;
+/// `output_charge` is what the originating allocator-aware budget must release
+/// after the artifact is dropped or its ownership transfers.
 #[derive(Debug)]
 pub struct BehaviorArtifact<P: PhysicalProfile = ActiveProfile> {
     identity: ArtifactIdentity,
@@ -97,6 +98,7 @@ pub struct BehaviorArtifact<P: PhysicalProfile = ActiveProfile> {
     wcet_cycles: u64,
     states_explored: usize,
     code_bytes: usize,
+    output_charge: usize,
 }
 
 impl<P: PhysicalProfile> BehaviorArtifact<P> {
@@ -130,6 +132,7 @@ impl<P: PhysicalProfile> BehaviorArtifact<P> {
         let Some(handle_bytes) = referenced_map_handles
             .capacity()
             .checked_mul(core::mem::size_of::<u32>())
+            .and_then(|bytes| budget.allocation_charge(bytes).ok())
             .filter(|bytes| *bytes <= outputs)
         else {
             drop((program, referenced_map_handles));
@@ -142,7 +145,22 @@ impl<P: PhysicalProfile> BehaviorArtifact<P> {
             budget.release_output(outputs)?;
             return Err(VerifyError::ResourceExhausted);
         }
-        let code_bytes = outputs - handle_bytes;
+        let output_charge = outputs - handle_bytes;
+        let Some(code_bytes) = program
+            .program()
+            .instructions()
+            .len()
+            .checked_mul(core::mem::size_of::<BpfInsn>())
+        else {
+            drop(program);
+            budget.release_output(output_charge)?;
+            return Err(VerifyError::ResourceExhausted);
+        };
+        if budget.allocation_charge(code_bytes).ok() != Some(output_charge) {
+            drop(program);
+            budget.release_output(output_charge)?;
+            return Err(VerifyError::ResourceExhausted);
+        }
 
         Ok(Self {
             identity: bundle.identity(),
@@ -150,6 +168,7 @@ impl<P: PhysicalProfile> BehaviorArtifact<P> {
             wcet_cycles,
             states_explored,
             code_bytes,
+            output_charge,
         })
     }
 
@@ -175,6 +194,11 @@ impl<P: PhysicalProfile> BehaviorArtifact<P> {
 
     pub const fn code_bytes(&self) -> usize {
         self.code_bytes
+    }
+
+    /// Retained code allocation charge in the originating verification budget.
+    pub const fn output_charge(&self) -> usize {
+        self.output_charge
     }
 }
 
@@ -472,12 +496,31 @@ mod tests {
         assert!(artifact.wcet_cycles() > 0);
         assert!(artifact.states_explored() > 0);
         assert_eq!(artifact.code_bytes(), insns.len() * BpfInsn::SIZE);
+        assert_eq!(artifact.output_charge(), artifact.code_bytes());
         assert_eq!(budget.used() - baseline, artifact.code_bytes());
 
         let charge = artifact.code_bytes();
         drop(artifact);
         budget.release_output(charge).unwrap();
         assert_eq!(budget.used(), baseline);
+    }
+
+    #[test]
+    fn behavior_artifact_retains_code_with_originating_allocator_policy() {
+        let insns = lookup(0);
+        let (bytes, verifier) = signed_bundle(manifest(), &insns);
+        let bundle = verifier.authenticate_managed(&bytes).unwrap();
+        let mut budget = VerificationBudget::with_allocator_policy(512 * 1024, 64, 8).unwrap();
+        let artifact = BehaviorArtifact::<ActiveProfile>::prepare(&bundle, 1, 1, &mut budget)
+            .expect("allocator-aware artifact");
+
+        assert_eq!(artifact.code_bytes(), insns.len() * BpfInsn::SIZE);
+        assert_eq!(artifact.output_charge(), 64);
+        assert_eq!(budget.used(), artifact.output_charge());
+        let charge = artifact.output_charge();
+        drop(artifact);
+        budget.release_output(charge).unwrap();
+        assert_eq!(budget.used(), 0);
     }
 
     #[test]
