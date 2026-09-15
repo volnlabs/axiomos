@@ -43,6 +43,8 @@ SECTIONS
         __bss_end = .;
     } :data
 
+    __kernel_end = .;
+
     /DISCARD/ : {
         *(.eh_frame*)
         *(.note .note.*)
