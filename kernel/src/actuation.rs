@@ -364,20 +364,25 @@ fn decide_and_queue_motor_pair(
     result
 }
 
-fn queue_motor_pair(decision: MotorPairDecision) -> bool {
+fn queue_motor_pair(
+    decision: MotorPairDecision,
+    origin: Option<shrike_link::tx::MotorOrigin>,
+) -> bool {
     #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
     {
         use crate::arch::aarch64::platform::rpi5::control_link;
         match decision {
-            MotorPairDecision::Safe { .. } => control_link::send_safe_motor_pair(),
+            MotorPairDecision::Safe { .. } => {
+                control_link::send_safe_motor_pair_with_origin(origin)
+            }
             MotorPairDecision::Allow { left, right } | MotorPairDecision::Clamp { left, right } => {
-                control_link::send_motor_pair(left, right)
+                control_link::send_motor_pair_with_origin(left, right, origin)
             }
         }
     }
     #[cfg(not(all(target_arch = "aarch64", feature = "rpi5")))]
     {
-        let _ = decision;
+        let _ = (decision, origin);
         false
     }
 }
@@ -388,11 +393,18 @@ fn queue_motor_pair(decision: MotorPairDecision) -> bool {
 /// A failed submission requires the caller's independent stop path.
 pub(crate) fn submit_managed_motor_pair(
     pair: ManagedMotorPair,
+    origin: Option<shrike_link::tx::MotorOrigin>,
     now_ns: u64,
     not_before_ticks: u64,
     deadline_ticks: u64,
     read_ticks: impl FnMut() -> u64,
 ) -> MotorPairSubmission {
+    let Some(origin) = origin else {
+        return MotorPairSubmission {
+            decision: None,
+            outcome: MotorPairSubmissionOutcome::OwnershipRejected,
+        };
+    };
     with_apply_lock(|managed_owned| {
         decide_and_queue_motor_pair(
             &ACTUATION_MONITOR,
@@ -404,7 +416,7 @@ pub(crate) fn submit_managed_motor_pair(
             },
             || now_ns,
             read_ticks,
-            queue_motor_pair,
+            |decision| queue_motor_pair(decision, Some(origin)),
         )
     })
 }
@@ -428,7 +440,7 @@ pub fn guard_motor_pair_with(
             |decision| {
                 #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
                 {
-                    queue_motor_pair(decision)
+                    queue_motor_pair(decision, None)
                 }
                 #[cfg(not(all(target_arch = "aarch64", feature = "rpi5")))]
                 {

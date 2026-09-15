@@ -226,14 +226,30 @@ fn private_entry_requires_owner_legacy_cannot_claim_it_and_trusted_stop_remains_
         right: -100,
     };
     assert_eq!(
-        submit_managed_motor_pair(pair, NOW_NS, 1, DEADLINE, || panic!(
-            "unowned entry read clock"
-        ))
+        submit_managed_motor_pair(
+            pair,
+            Some(shrike_link::tx::MotorOrigin {
+                cycle: 1,
+                generation: 1,
+                artifact_handle: 0
+            }),
+            NOW_NS,
+            1,
+            DEADLINE,
+            || panic!("unowned entry read clock")
+        )
         .outcome,
         MotorPairSubmissionOutcome::OwnershipRejected
     );
     set_managed_motor_pair_owner(true);
     assert!(managed_motor_pair_owned());
+    assert_eq!(
+        submit_managed_motor_pair(pair, None, NOW_NS, 1, DEADLINE, || {
+            panic!("missing origin read clock")
+        })
+        .outcome,
+        MotorPairSubmissionOutcome::OwnershipRejected
+    );
     assert_eq!(
         guard_motor_pair_with(100, -100, Authority::Learned, AuditSource::ManagedControl),
         -1
@@ -247,7 +263,19 @@ fn private_entry_requires_owner_legacy_cannot_claim_it_and_trusted_stop_remains_
     // Host has no real link; the managed wrapper must not fabricate a queue ack.
     #[cfg(not(all(target_arch = "aarch64", feature = "rpi5")))]
     assert_eq!(
-        submit_managed_motor_pair(pair, NOW_NS, 1, DEADLINE, || 1).outcome,
+        submit_managed_motor_pair(
+            pair,
+            Some(shrike_link::tx::MotorOrigin {
+                cycle: 1,
+                generation: 1,
+                artifact_handle: 0
+            }),
+            NOW_NS,
+            1,
+            DEADLINE,
+            || 1
+        )
+        .outcome,
         MotorPairSubmissionOutcome::QueueFailed
     );
     assert_eq!(

@@ -25,7 +25,7 @@ use shrike_link::handoff::{Handoff, HandoffError};
 use shrike_link::motor::MotorSide;
 use shrike_link::ring::RingBuf;
 use shrike_link::session::{LinkAction, LinkSession};
-use shrike_link::tx::TxState;
+use shrike_link::tx::{MotorOrigin, MotorRequest, TxState};
 use shrike_link::{Decoder, Msg};
 use spin::Mutex;
 
@@ -406,7 +406,13 @@ impl ControlLink {
         )
     }
 
-    fn set_motor_pair(&mut self, left: i16, right: i16, now: u64) -> bool {
+    fn set_motor_pair(
+        &mut self,
+        left: i16,
+        right: i16,
+        now: u64,
+        origin: Option<MotorOrigin>,
+    ) -> bool {
         #[cfg(feature = "managed-runtime")]
         if !self.handoff.motion_permitted() {
             return false;
@@ -414,16 +420,26 @@ impl ControlLink {
         if self.has_pending_estop_assert() && (left != 0 || right != 0) {
             return false;
         }
-        self.tx.replace_motor(left, right, now);
+        self.tx.replace_motor_request(MotorRequest {
+            left,
+            right,
+            queued_at: now,
+            origin,
+        });
         true
     }
 
-    fn set_safe_motor_pair(&mut self, now: u64) -> bool {
+    fn set_safe_motor_pair(&mut self, now: u64, origin: Option<MotorOrigin>) -> bool {
         #[cfg(feature = "managed-runtime")]
         if !self.handoff.motion_permitted() {
             return false;
         }
-        self.tx.prioritize_motor(0, 0, now);
+        self.tx.prioritize_motor_request(MotorRequest {
+            left: 0,
+            right: 0,
+            queued_at: now,
+            origin,
+        });
         true
     }
 
@@ -433,12 +449,11 @@ impl ControlLink {
             self.tx.clear_motor();
             return true;
         }
-        let Some((left, right, queued_at)) = self.tx.take_motor() else {
+        if self.tx.pending_motor().is_none() {
             return true;
-        };
+        }
         let seq = self.motor_seq.wrapping_add(1);
-        if !self.enqueue(&Msg::MotorSetpoint { seq, left, right }, queued_at) {
-            self.tx.replace_motor(left, right, queued_at);
+        if self.tx.start_pending_motor(seq).is_none() {
             return false;
         }
         self.motor_seq = seq;
@@ -649,15 +664,24 @@ pub fn link_alive() -> bool {
 /// Retain the latest monitor-approved complete pair for `MotorSetpoint` TX.
 /// `true` means queued locally; the Shrike/FPGA has not acknowledged application.
 pub fn send_motor_pair(left: i16, right: i16) -> bool {
+    send_motor_pair_with_origin(left, right, None)
+}
+
+pub fn send_motor_pair_with_origin(left: i16, right: i16, origin: Option<MotorOrigin>) -> bool {
     let now = now_ns();
-    with_link(|l| l.session.alive(now) && l.set_motor_pair(left, right, now)).unwrap_or(false)
+    with_link(|l| l.session.alive(now) && l.set_motor_pair(left, right, now, origin))
+        .unwrap_or(false)
 }
 
 /// Put a fresh zero pair ahead of obsolete unsent motion without changing the
 /// peer e-stop latch. A partially transmitted frame still finishes first.
 pub fn send_safe_motor_pair() -> bool {
+    send_safe_motor_pair_with_origin(None)
+}
+
+pub fn send_safe_motor_pair_with_origin(origin: Option<MotorOrigin>) -> bool {
     let now = now_ns();
-    with_link(|l| l.session.alive(now) && l.set_safe_motor_pair(now)).unwrap_or(false)
+    with_link(|l| l.session.alive(now) && l.set_safe_motor_pair(now, origin)).unwrap_or(false)
 }
 
 pub fn report_motor_queued(left: i16, right: i16) {

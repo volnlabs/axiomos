@@ -210,6 +210,16 @@ pub(crate) fn on_release(
         if handoff.is_err() {
             slot.stop();
         }
+        // Same post-handoff slot snapshot used by run_release; never look up
+        // current installation identity later when a queued command is framed.
+        let snapshot = slot.snapshot();
+        let origin = snapshot
+            .active
+            .map(|artifact_handle| shrike_link::tx::MotorOrigin {
+                cycle: release.sequence,
+                generation: snapshot.generation,
+                artifact_handle,
+            });
         let mut report = slot.run_release(
             release,
             frequency,
@@ -219,6 +229,7 @@ pub(crate) fn on_release(
             |pair, not_before, deadline, clock| {
                 crate::actuation::submit_managed_motor_pair(
                     pair,
+                    origin,
                     crate::time::get_kernel_time_ns(),
                     not_before,
                     deadline,

@@ -2,23 +2,107 @@
 
 use crate::{encode, Msg, MAX_FRAME};
 
+/// Captured by the managed executor. Correlation only; never actuation authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MotorOrigin {
+    pub cycle: u64,
+    pub generation: u64,
+    pub artifact_handle: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MotorRequest {
+    pub left: i16,
+    pub right: i16,
+    pub queued_at: u64,
+    pub origin: Option<MotorOrigin>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MotorFrame {
+    pub request: MotorRequest,
+    pub sequence: u8,
+    /// A zero crossing inserted by TX while the original target remains pending.
+    pub intermediate_zero: bool,
+}
+
 #[derive(Clone, Copy)]
 struct Frame {
     bytes: [u8; MAX_FRAME],
     len: u8,
     sent: u8,
-    motor_pair: Option<(i16, i16)>,
+    motor: Option<MotorFrame>,
     clears_motor: bool,
     queued_at: u64,
 }
 
 pub struct TxState {
     active: Option<Frame>,
-    pending_motor: Option<(i16, i16, u64)>,
+    pending_motor: Option<MotorRequest>,
     last_motor_on_wire: (i16, i16),
 }
 
+const _: () = assert!(core::mem::size_of::<TxState>() <= 256);
+
 impl TxState {
+    pub fn replace_motor_request(&mut self, request: MotorRequest) {
+        self.pending_motor = Some(request);
+    }
+    /// Busy/encode failure preserves the exact pending request, including a
+    /// reversal target. The sequence is consumed only when Some is returned.
+    pub fn start_pending_motor(&mut self, sequence: u8) -> Option<MotorFrame> {
+        let (request, intermediate_zero) = self.next_motor()?;
+        if !self.start(
+            &Msg::MotorSetpoint {
+                seq: sequence,
+                left: request.left,
+                right: request.right,
+            },
+            request.queued_at,
+        ) {
+            return None;
+        }
+        let motor = MotorFrame {
+            request,
+            sequence,
+            intermediate_zero,
+        };
+        self.active
+            .as_mut()
+            .expect("successful start owns active frame")
+            .motor = Some(motor);
+        if !intermediate_zero {
+            self.pending_motor = None;
+        }
+        Some(motor)
+    }
+    /// Advance only after UART acceptance. Completion means all frame bytes
+    /// entered the local UART; it is not a peer/FPGA acknowledgement.
+    pub fn next_byte_with_motor_completion(&mut self) -> Option<(u8, Option<MotorFrame>)> {
+        let frame = self.active.as_mut()?;
+        let byte = frame.bytes[frame.sent as usize];
+        frame.sent += 1;
+        let complete = if frame.sent == frame.len {
+            let motor = frame.motor;
+            if let Some(motor) = motor {
+                self.last_motor_on_wire = (motor.request.left, motor.request.right);
+            } else if frame.clears_motor {
+                self.last_motor_on_wire = (0, 0);
+            }
+            self.active = None;
+            motor
+        } else {
+            None
+        };
+        Some((byte, complete))
+    }
+
+    pub fn pending_motor(&self) -> Option<MotorRequest> {
+        self.pending_motor
+    }
+    pub fn active_motor(&self) -> Option<MotorFrame> {
+        self.active.as_ref()?.motor
+    }
     pub const fn new() -> Self {
         Self {
             active: None,
@@ -39,8 +123,17 @@ impl TxState {
             bytes,
             len: len as u8,
             sent: 0,
-            motor_pair: match *msg {
-                Msg::MotorSetpoint { left, right, .. } => Some((left, right)),
+            motor: match *msg {
+                Msg::MotorSetpoint { seq, left, right } => Some(MotorFrame {
+                    request: MotorRequest {
+                        left,
+                        right,
+                        queued_at: now,
+                        origin: None,
+                    },
+                    sequence: seq,
+                    intermediate_zero: false,
+                }),
                 _ => None,
             },
             clears_motor: matches!(
@@ -60,18 +153,7 @@ impl TxState {
     }
 
     pub fn next_byte(&mut self) -> Option<u8> {
-        let frame = self.active.as_mut()?;
-        let byte = frame.bytes[frame.sent as usize];
-        frame.sent += 1;
-        if frame.sent == frame.len {
-            if let Some(pair) = frame.motor_pair {
-                self.last_motor_on_wire = pair;
-            } else if frame.clears_motor {
-                self.last_motor_on_wire = (0, 0);
-            }
-            self.active = None;
-        }
-        Some(byte)
+        self.next_byte_with_motor_completion().map(|(byte, _)| byte)
     }
 
     pub fn cancel_unsent(&mut self) {
@@ -84,32 +166,67 @@ impl TxState {
         self.active.is_none()
     }
     pub fn replace_motor(&mut self, left: i16, right: i16, now: u64) {
-        self.pending_motor = Some((left, right, now));
+        self.replace_motor_request(MotorRequest {
+            left,
+            right,
+            queued_at: now,
+            origin: None,
+        });
     }
     /// Supersede obsolete unsent motion with a safe pair. A partial frame must
     /// finish, after which this pair is next.
     pub fn prioritize_motor(&mut self, left: i16, right: i16, now: u64) {
+        self.prioritize_motor_request(MotorRequest {
+            left,
+            right,
+            queued_at: now,
+            origin: None,
+        });
+    }
+
+    pub fn prioritize_motor_request(&mut self, request: MotorRequest) {
         // A safe motor value cannot cancel a queued e-stop or its release.
         if self
             .active
-            .is_some_and(|frame| frame.motor_pair.is_some() && frame.sent == 0)
+            .is_some_and(|frame| frame.motor.is_some() && frame.sent == 0)
         {
             self.active = None;
         }
-        self.pending_motor = Some((left, right, now));
+        self.replace_motor_request(request);
     }
     pub fn clear_motor(&mut self) {
         self.pending_motor = None;
     }
     pub fn take_motor(&mut self) -> Option<(i16, i16, u64)> {
-        let (left, right, queued_at) = self.pending_motor?;
+        // Legacy tuple callers cannot accidentally strip a managed origin.
+        if self.pending_motor?.origin.is_some() {
+            return None;
+        }
+        let (request, intermediate) = self.next_motor()?;
+        if !intermediate {
+            self.pending_motor = None;
+        }
+        Some((request.left, request.right, request.queued_at))
+    }
+
+    fn next_motor(&self) -> Option<(MotorRequest, bool)> {
+        let request = self.pending_motor?;
         let reverses = |current: i16, target: i16| {
             current != 0 && target != 0 && current.signum() != target.signum()
         };
-        if reverses(self.last_motor_on_wire.0, left) || reverses(self.last_motor_on_wire.1, right) {
-            Some((0, 0, queued_at))
+        if reverses(self.last_motor_on_wire.0, request.left)
+            || reverses(self.last_motor_on_wire.1, request.right)
+        {
+            Some((
+                MotorRequest {
+                    left: 0,
+                    right: 0,
+                    ..request
+                },
+                true,
+            ))
         } else {
-            self.pending_motor.take()
+            Some((request, false))
         }
     }
 
@@ -118,12 +235,12 @@ impl TxState {
     pub fn discard_expired_motor(&mut self, now: u64, timeout: u64) {
         if self
             .pending_motor
-            .is_some_and(|(_, _, at)| now.saturating_sub(at) >= timeout)
+            .is_some_and(|request| now.saturating_sub(request.queued_at) >= timeout)
         {
             self.pending_motor = None;
         }
         if self.active.is_some_and(|frame| {
-            frame.motor_pair.is_some()
+            frame.motor.is_some()
                 && frame.sent == 0
                 && now.saturating_sub(frame.queued_at) >= timeout
         }) {
@@ -142,6 +259,138 @@ impl Default for TxState {
 mod tests {
     use super::*;
     use crate::Decoder;
+
+    #[test]
+    fn tagged_motor_origin_survives_busy_reversal_and_complete_frame() {
+        let mut tx = TxState::new();
+        let origin = MotorOrigin {
+            cycle: 1 << 40,
+            generation: 1 << 41,
+            artifact_handle: 0,
+        };
+        let request = MotorRequest {
+            left: 200,
+            right: 200,
+            queued_at: 10,
+            origin: Some(origin),
+        };
+        tx.replace_motor_request(request);
+        assert_eq!(tx.take_motor(), None); // Legacy tuple API cannot strip origin.
+        let first = tx.start_pending_motor(255).unwrap();
+        assert_eq!(first.request, request);
+        assert!(!first.intermediate_zero);
+        while let Some((_, complete)) = tx.next_byte_with_motor_completion() {
+            assert_eq!(complete, tx.is_idle().then_some(first));
+        }
+        let reverse = MotorRequest {
+            left: -200,
+            right: -200,
+            queued_at: 11,
+            origin: Some(MotorOrigin {
+                cycle: origin.cycle + 1,
+                ..origin
+            }),
+        };
+        tx.replace_motor_request(reverse);
+        assert!(tx.start(&Msg::HeartbeatToShrike { seq: 7 }, 11));
+        assert_eq!(tx.start_pending_motor(0), None);
+        while tx.next_byte().is_some() {}
+        let zero = tx.start_pending_motor(0).unwrap();
+        assert_eq!(zero.request.origin, reverse.origin);
+        assert_eq!((zero.request.left, zero.request.right), (0, 0));
+        assert!(zero.intermediate_zero);
+        // A pending newer cycle cannot relabel the already-started zero frame.
+        tx.next_byte();
+        let newer = MotorRequest {
+            queued_at: 12,
+            origin: Some(MotorOrigin {
+                cycle: origin.cycle + 2,
+                ..origin
+            }),
+            ..reverse
+        };
+        tx.replace_motor_request(newer);
+        while let Some((_, complete)) = tx.next_byte_with_motor_completion() {
+            assert_eq!(complete, tx.is_idle().then_some(zero));
+        }
+        let framed = tx.start_pending_motor(1).unwrap();
+        assert_eq!(framed.request, newer);
+        assert!(!framed.intermediate_zero);
+        let mut decoder = Decoder::new();
+        let mut decoded = None;
+        while let Some((byte, complete)) = tx.next_byte_with_motor_completion() {
+            decoded = decoder.push(byte).or(decoded);
+            assert_eq!(complete, tx.is_idle().then_some(framed));
+        }
+        assert_eq!(
+            decoded,
+            Some(Ok(Msg::MotorSetpoint {
+                seq: 1,
+                left: -200,
+                right: -200
+            }))
+        );
+        assert_eq!(tx.start_pending_motor(2), None);
+    }
+
+    #[test]
+    fn tagged_origin_expires_or_retires_with_its_own_frame_at_every_byte_offset() {
+        let request = MotorRequest {
+            left: 300,
+            right: -400,
+            queued_at: 1,
+            origin: Some(MotorOrigin {
+                cycle: 9,
+                generation: 2,
+                artifact_handle: 17,
+            }),
+        };
+        let mut encoded = [0; MAX_FRAME];
+        let len = encode(
+            &Msg::MotorSetpoint {
+                seq: 3,
+                left: request.left,
+                right: request.right,
+            },
+            &mut encoded,
+        )
+        .unwrap();
+        for offset in 0..=len {
+            let mut tx = TxState::new();
+            tx.replace_motor_request(request);
+            let frame = tx.start_pending_motor(3).unwrap();
+            for _ in 0..offset {
+                tx.next_byte();
+            }
+            tx.replace_motor_request(MotorRequest {
+                queued_at: 2,
+                ..request
+            });
+            tx.discard_expired_motor(100, 50);
+            tx.cancel_unsent();
+            assert_eq!(tx.pending_motor(), None);
+            assert_eq!(
+                tx.active_motor(),
+                (offset > 0 && offset < len).then_some(frame)
+            );
+            let mut completed = None;
+            while let Some((_, completion)) = tx.next_byte_with_motor_completion() {
+                if completion.is_some() {
+                    assert!(completed.is_none());
+                    completed = completion;
+                }
+            }
+            assert_eq!(completed, (offset > 0 && offset < len).then_some(frame));
+            assert_eq!(tx.active_motor(), None);
+            tx.replace_motor_request(request);
+            tx.prioritize_motor(0, 0, 101);
+            let safe = tx.start_pending_motor(4).unwrap();
+            assert_eq!(safe.request.origin, None);
+            assert_eq!((safe.request.left, safe.request.right), (0, 0));
+            tx.clear_motor();
+            assert_eq!(tx.pending_motor(), None);
+        }
+    }
 
     #[test]
     fn a_backpressured_writer_keeps_the_same_byte_until_accepted() {
