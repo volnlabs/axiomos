@@ -149,6 +149,9 @@ pub const BPF_CAP_OBJECT_PIN: u32 = 1 << 7;
 pub const BPF_CAP_ACTUATE: u32 = 1 << 8;
 pub const BPF_CAP_PRIVILEGED_VERIFY: u32 = 1 << 9;
 pub const BPF_CAP_OBJECT_ADMIN: u32 = 1 << 10;
+/// Manage signed controller deployments. Grants no direct actuation or legacy
+/// BPF load, attachment, map mutation, or privileged-verifier authority.
+pub const BPF_CAP_BEHAVIOR_ADMIN: u32 = 1 << 11;
 pub const BPF_CAP_ALL: u32 = BPF_CAP_PROGRAM_LOAD
     | BPF_CAP_MAP_CREATE
     | BPF_CAP_MAP_READ
@@ -159,7 +162,8 @@ pub const BPF_CAP_ALL: u32 = BPF_CAP_PROGRAM_LOAD
     | BPF_CAP_OBJECT_PIN
     | BPF_CAP_ACTUATE
     | BPF_CAP_PRIVILEGED_VERIFY
-    | BPF_CAP_OBJECT_ADMIN;
+    | BPF_CAP_OBJECT_ADMIN
+    | BPF_CAP_BEHAVIOR_ADMIN;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, FromBytes, KnownLayout, Immutable)]
@@ -242,6 +246,7 @@ mod tests {
             BPF_CAP_ACTUATE,
             BPF_CAP_PRIVILEGED_VERIFY,
             BPF_CAP_OBJECT_ADMIN,
+            BPF_CAP_BEHAVIOR_ADMIN,
         ];
 
         for (index, capability) in capabilities.iter().enumerate() {

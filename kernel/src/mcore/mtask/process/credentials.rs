@@ -17,6 +17,7 @@ impl BpfCapabilities {
     pub const ACTUATE: Self = Self(kernel_abi::BPF_CAP_ACTUATE);
     pub const PRIVILEGED_VERIFY: Self = Self(kernel_abi::BPF_CAP_PRIVILEGED_VERIFY);
     pub const OBJECT_ADMIN: Self = Self(kernel_abi::BPF_CAP_OBJECT_ADMIN);
+    pub const BEHAVIOR_ADMIN: Self = Self(kernel_abi::BPF_CAP_BEHAVIOR_ADMIN);
 
     pub const MAP_ACCESS: Self = Self(Self::MAP_READ.0 | Self::MAP_WRITE.0);
     pub const PROGRAM_ATTACH: Self =
@@ -24,7 +25,7 @@ impl BpfCapabilities {
 
     /// Authority assigned to the first userspace process. Init can run the
     /// lifecycle probes and delegate the shipped scheduler demos, but it has no
-    /// device attach or actuation authority.
+    /// device attach, actuation or managed deployment authority.
     pub const USERSPACE_INIT: Self = Self(
         Self::PROGRAM_LOAD.0
             | Self::MAP_CREATE.0
@@ -47,7 +48,8 @@ impl BpfCapabilities {
             | Self::OBJECT_PIN.0
             | Self::ACTUATE.0
             | Self::PRIVILEGED_VERIFY.0
-            | Self::OBJECT_ADMIN.0,
+            | Self::OBJECT_ADMIN.0
+            | Self::BEHAVIOR_ADMIN.0,
     );
 
     #[must_use]
@@ -164,7 +166,21 @@ mod tests {
             BpfCapabilities::ATTACH_DEVICE
                 | BpfCapabilities::ATTACH_TRACE
                 | BpfCapabilities::ACTUATE
+                | BpfCapabilities::BEHAVIOR_ADMIN
         ));
+    }
+
+    #[test]
+    fn behavior_admin_is_narrow_and_cannot_be_regained_after_restriction() {
+        let mut credentials = Credentials::kernel();
+        credentials.restrict_bpf_capabilities(BpfCapabilities::BEHAVIOR_ADMIN);
+        let child = Credentials::inherit(credentials);
+        assert_eq!(child.bpf_capabilities(), BpfCapabilities::BEHAVIOR_ADMIN);
+        assert!(!child.has_bpf_capabilities(BpfCapabilities::ACTUATE));
+        assert!(!child.has_bpf_capabilities(BpfCapabilities::PRIVILEGED_VERIFY));
+        credentials.drop_bpf_capabilities(BpfCapabilities::BEHAVIOR_ADMIN);
+        credentials.restrict_bpf_capabilities(BpfCapabilities::ALL);
+        assert_eq!(credentials.bpf_capabilities(), BpfCapabilities::NONE);
     }
 
     #[test]

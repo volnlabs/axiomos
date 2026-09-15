@@ -852,6 +852,10 @@ mod tests {
     #[test]
     fn verifier_authority_is_derived_from_credentials() {
         assert_eq!(
+            load_authorization(BpfCapabilities::BEHAVIOR_ADMIN),
+            BpfLoadAuthorization::new(LoadCaller::Unprivileged, false, MapAccess::NONE)
+        );
+        assert_eq!(
             load_authorization(BpfCapabilities::PROGRAM_LOAD),
             BpfLoadAuthorization::new(LoadCaller::Unprivileged, false, MapAccess::NONE)
         );
@@ -863,6 +867,27 @@ mod tests {
             ),
             BpfLoadAuthorization::new(LoadCaller::Privileged, true, MapAccess::NONE)
         );
+    }
+
+    #[test]
+    fn behavior_admin_does_not_authorize_legacy_bpf_mutation() {
+        for command in [
+            BPF_PROG_LOAD,
+            BPF_PROG_LOAD_ELF,
+            BPF_PROG_UNLOAD,
+            BPF_PROG_ATTACH,
+            BPF_PROG_DETACH,
+            BPF_MAP_CREATE,
+            BPF_MAP_UPDATE_ELEM,
+            BPF_MAP_DESTROY,
+            BPF_OBJ_PIN,
+            kernel_abi::BPF_BENCH_EXEC,
+        ] {
+            assert!(!has_bpf_command_capability(
+                command,
+                BpfCapabilities::BEHAVIOR_ADMIN
+            ));
+        }
     }
 
     #[test]
