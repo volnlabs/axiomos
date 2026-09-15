@@ -50,6 +50,14 @@ enum PlatformError {
     MissingValidatedArtifact,
     Spi(spi::Error),
     Bitstream(BitstreamError),
+    RuntimeStatus,
+}
+
+#[derive(Clone, Copy)]
+struct FpgaProfile {
+    startup: spi::Startup,
+    runtime: spi::RuntimeEntry,
+    configuration_timeout_us: u64,
 }
 
 /// Owns every safety-relevant R0.4 output. Unsupported operations return an
@@ -62,8 +70,8 @@ struct R04Platform<'a, PWR, EN, RESET, RIGHT, SPI> {
     spi: RuntimeSpi<SPI>,
     clock: &'a TimerClock,
     image: Option<BitstreamImage<'static>>,
-    // Separate from the post-stream READY interval; supplied by qualification.
-    configuration_timeout_us: Option<u64>,
+    // Supplied by candidate qualification; no default enables the interface.
+    profile: Option<FpgaProfile>,
 }
 
 impl<PWR, EN, RESET, RIGHT, SPI> FpgaPlatform for R04Platform<'_, PWR, EN, RESET, RIGHT, SPI>
@@ -109,13 +117,31 @@ where
     }
 
     fn begin_configuration(&mut self) -> Result<(), Self::Error> {
-        Err(PlatformError::MissingValidatedArtifact)
+        let profile = self
+            .profile
+            .ok_or(PlatformError::MissingValidatedArtifact)?;
+        if self.image.is_none() {
+            return Err(PlatformError::MissingValidatedArtifact);
+        }
+        let (reset, en, pwr) = (&mut self.reset, &mut self.en, &mut self.pwr);
+        self.spi
+            .begin_configuration(profile.startup, |on| {
+                // Attempt every safety write even if a preceding pin reports an
+                // error. Runtime reset remains asserted throughout configuration.
+                let reset_ok = reset.set_low().is_ok();
+                let state = if on { PinState::High } else { PinState::Low };
+                let en_ok = en.set_state(state).is_ok();
+                let pwr_ok = pwr.set_state(state).is_ok();
+                reset_ok && en_ok && pwr_ok
+            })
+            .map_err(PlatformError::Spi)
     }
 
     fn stream_bitstream(&mut self, offset: u32, length: u32) -> Result<(), Self::Error> {
         let timeout = self
-            .configuration_timeout_us
-            .ok_or(PlatformError::MissingValidatedArtifact)?;
+            .profile
+            .ok_or(PlatformError::MissingValidatedArtifact)?
+            .configuration_timeout_us;
         let bytes = self
             .image
             .as_ref()
@@ -137,7 +163,28 @@ where
     }
 
     fn handoff_to_runtime(&mut self) -> Result<(), Self::Error> {
-        Err(PlatformError::MissingValidatedArtifact)
+        let profile = self
+            .profile
+            .ok_or(PlatformError::MissingValidatedArtifact)?;
+        let reset = &mut self.reset;
+        self.spi
+            .enter_runtime(profile.runtime, |released| {
+                reset
+                    .set_state(if released {
+                        PinState::High
+                    } else {
+                        PinState::Low
+                    })
+                    .is_ok()
+            })
+            .map_err(PlatformError::Spi)?;
+        // CONFIG proves loading completed; a separate functional transaction
+        // must report READY with no old command or sequence after runtime reset.
+        // FpgaLifecycle checks its outer deadline and forces safe on any error.
+        if self.read_runtime_status()? != [STATUS_READY, 0] {
+            return Err(PlatformError::RuntimeStatus);
+        }
+        Ok(())
     }
 
     fn runtime_transfer(&mut self, frame: &[u8; 12]) -> Result<u8, Self::Error> {
@@ -199,8 +246,6 @@ fn main() -> ! {
     // device timing. The pin tuple still compile-checks the exact SPI0 map.
     let spi = hal::spi::Spi::<_, _, _, 8>::new(pac.SPI0, spi_pins);
     let clock = TimerClock::new(pac.TIMER, &mut pac.RESETS).unwrap_or_else(|_| stopped());
-    let spi = RuntimeSpi::from_disabled(spi, fpga_cs, &clock, &mut pac.RESETS)
-        .unwrap_or_else(|_| stopped());
 
     let mut pwm_slices = hal::pwm::Slices::new(pac.PWM, &mut pac.RESETS);
     let pwm = &mut pwm_slices.pwm7;
@@ -208,6 +253,17 @@ fn main() -> ! {
     let _ = pwm.channel_b.set_duty_cycle(0);
     let _right_pwm_pin = pwm.channel_b.output_to(pins.gpio15);
     pwm.enable();
+
+    // Finish exclusive HAL initialization before sharing reset-register access
+    // between the two sequential peripheral owners (no IRQ/core mutates it).
+    let spi = RuntimeSpi::from_disabled(
+        spi,
+        fpga_cs,
+        &clock,
+        &pac.RESETS,
+        clocks.peripheral_clock.freq().to_Hz(),
+    )
+    .unwrap_or_else(|_| stopped());
 
     let platform = R04Platform {
         pwr: fpga_pwr,
@@ -217,7 +273,7 @@ fn main() -> ! {
         spi,
         clock: &clock,
         image: None,
-        configuration_timeout_us: None,
+        profile: None,
     };
     let mut lifecycle = FpgaLifecycle::new(platform);
 
@@ -236,7 +292,7 @@ fn main() -> ! {
     let mut io = UartByteIo::new(
         pac.UART0,
         uart_pins,
-        &mut pac.RESETS,
+        &pac.RESETS,
         clocks.peripheral_clock.freq().to_Hz(),
     )
     .unwrap_or_else(|_| stopped());

@@ -127,7 +127,7 @@ mod target {
     pub(crate) struct Uart0<'a> {
         uart: pac::UART0,
         _pins: Pins,
-        resets: &'a mut pac::RESETS,
+        resets: &'a pac::RESETS,
         divisor: u32,
     }
 
@@ -137,7 +137,7 @@ mod target {
         pub(crate) fn new(
             uart: pac::UART0,
             pins: Pins,
-            resets: &'a mut pac::RESETS,
+            resets: &'a pac::RESETS,
             frequency_hz: u32,
         ) -> Result<Self, Error> {
             // RP2040 section 4.2.7.1: rounded 64ths of clock/(16*baud).
@@ -206,6 +206,8 @@ mod target {
             self.uart.uartcr().write(|w| unsafe { w.bits(0) });
         }
         fn reset_hardware(&mut self) -> bool {
+            // Serialized with SPI0 on the sole main context; distinct reset
+            // bits, with no IRQ or other core modifying this shared register.
             self.resets.reset().modify(|_, w| w.uart0().set_bit());
             self.resets.reset().modify(|_, w| w.uart0().clear_bit());
             for _ in 0..RESET_CHECKS {

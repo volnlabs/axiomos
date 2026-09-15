@@ -5,7 +5,7 @@ mod spi;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 
-use spi::{Error, Registers, RuntimeSpi, Timing};
+use spi::{Error, Registers, RuntimeEntry, RuntimeSpi, Startup, Timing};
 
 const TIMING: Timing = Timing {
     setup_us: 4,
@@ -34,6 +34,12 @@ struct Model {
     config_after: Option<usize>,
     high_z: bool,
     high_z_delay: u64,
+    power: bool,
+    reset_asserted: bool,
+    reset_fails: bool,
+    frequency_hz: u32,
+    power_events: Vec<(u64, bool)>,
+    dividers: Vec<(u8, u8)>,
 }
 impl Default for Model {
     fn default() -> Self {
@@ -57,6 +63,12 @@ impl Default for Model {
             config_after: None,
             high_z: false,
             high_z_delay: 0,
+            power: false,
+            reset_asserted: true,
+            reset_fails: false,
+            frequency_hz: 125_000_000,
+            power_events: vec![],
+            dividers: vec![],
         }
     }
 }
@@ -115,6 +127,23 @@ impl Registers for &RefCell<Model> {
         }
         m.selected = selected;
         !m.select_fails
+    }
+    fn frequency_hz(&self) -> u32 {
+        self.borrow().frequency_hz
+    }
+    fn reset_hardware(&mut self) -> bool {
+        let mut m = self.borrow_mut();
+        m.enabled = false;
+        m.rx.clear();
+        m.busy = 0;
+        m.overrun = false;
+        !m.reset_fails
+    }
+    fn configure(&mut self, prescale: u8, postdivide: u8) {
+        let mut m = self.borrow_mut();
+        m.dividers.push((prescale, postdivide));
+        m.high_z = false;
+        m.enabled = true;
     }
     fn configuration_high(&mut self) -> bool {
         let m = self.borrow();
@@ -391,4 +420,327 @@ fn configuration_image_larger_than_runtime_poll_budget_is_still_bounded() {
         }
         assert!(model.borrow().high_z);
     }
+}
+
+const STARTUP: Startup = Startup {
+    prescale: 10,
+    postdivide: 7,
+    power_off_us: 500,
+    power_on_us: 3_000,
+    cs_high_us: 3,
+    timeout_us: 6_000,
+};
+const ENTRY: RuntimeEntry = RuntimeEntry {
+    prescale: 10,
+    postdivide: 7,
+    high_z_us: 4,
+    reset_us: 4,
+    timeout_us: 100,
+    transfer: TIMING,
+};
+fn power(model: &RefCell<Model>, on: bool) -> bool {
+    let mut m = model.borrow_mut();
+    m.power = on;
+    m.reset_asserted = true;
+    let time = m.time;
+    m.power_events.push((time, on));
+    true
+}
+
+#[test]
+fn startup_then_configuration_then_runtime_entry_preserves_safe_order() {
+    let model = RefCell::new(Model::default());
+    let mut bus = RuntimeSpi::new(&model);
+    bus.begin_configuration(STARTUP, |on| power(&model, on))
+        .unwrap();
+    {
+        let m = model.borrow();
+        let on = m.power_events.iter().find(|v| v.1).unwrap().0;
+        assert!(on - m.power_events[0].0 >= STARTUP.power_off_us);
+        let pulse = m.edges.iter().find(|v| !v.1 && v.0 > on).unwrap().0;
+        assert!(pulse - on >= STARTUP.power_on_us);
+        assert!(m.time - pulse >= STARTUP.cs_high_us);
+        assert!(m.selected && m.power && m.reset_asserted);
+        assert!(m.sent.is_empty());
+        assert_eq!(m.dividers, [(10, 7)]);
+    }
+    model.borrow_mut().config_after = Some(127);
+    bus.stream_configuration(&[0x5a; 127], 5_000).unwrap();
+    let completed = model.borrow().time;
+    bus.enter_runtime(ENTRY, |released| {
+        let mut m = model.borrow_mut();
+        if released {
+            assert!(!m.high_z && m.enabled && m.time - completed >= ENTRY.high_z_us);
+        }
+        m.reset_asserted = !released;
+        true
+    })
+    .unwrap();
+    assert!(
+        !bus.configuration_complete(),
+        "runtime entry consumes the CONFIG latch"
+    );
+    assert!(!model.borrow().reset_asserted);
+    assert!(bus.transfer(&[0xa5, 0]).is_ok());
+}
+
+#[test]
+fn startup_rejects_invalid_timings_rates_and_failed_reset_without_powering_on() {
+    for startup in [
+        Startup {
+            power_off_us: 499,
+            ..STARTUP
+        },
+        Startup {
+            power_on_us: 2_999,
+            ..STARTUP
+        },
+        Startup {
+            cs_high_us: 2,
+            ..STARTUP
+        },
+        Startup {
+            timeout_us: 3_503,
+            ..STARTUP
+        },
+        Startup {
+            prescale: 3,
+            ..STARTUP
+        },
+        Startup {
+            prescale: 2,
+            postdivide: 0,
+            ..STARTUP
+        },
+    ] {
+        let model = RefCell::new(Model::default());
+        let mut bus = RuntimeSpi::new(&model);
+        assert_eq!(
+            bus.begin_configuration(startup, |on| power(&model, on)),
+            Err(Error::InvalidTiming)
+        );
+        assert!(!model.borrow().power && model.borrow().reset_asserted);
+        assert!(model.borrow().power_events.iter().all(|v| !v.1));
+    }
+    let model = RefCell::new(Model {
+        reset_fails: true,
+        ..Model::default()
+    });
+    let mut bus = RuntimeSpi::new(&model);
+    assert_eq!(
+        bus.begin_configuration(STARTUP, |on| power(&model, on)),
+        Err(Error::ResetNotReady)
+    );
+    assert!(!model.borrow().power && !model.borrow().enabled);
+}
+
+#[test]
+fn failed_startup_or_runtime_entry_never_leaves_power_or_reset_released() {
+    for fail_on in [false, true] {
+        let model = RefCell::new(Model::default());
+        let mut bus = RuntimeSpi::new(&model);
+        assert_eq!(
+            bus.begin_configuration(STARTUP, |on| {
+                power(&model, on);
+                on != fail_on
+            }),
+            Err(Error::ControlPin)
+        );
+        assert!(!model.borrow().power && !model.borrow().enabled);
+    }
+    for delay in [0, 1_000] {
+        let model = RefCell::new(Model {
+            config_after: Some(127),
+            ..Model::default()
+        });
+        let mut bus = RuntimeSpi::new(&model);
+        bus.stream_configuration(&[1; 127], 5_000).unwrap();
+        let result = bus.enter_runtime(ENTRY, |released| {
+            let mut m = model.borrow_mut();
+            m.reset_asserted = !released;
+            if released {
+                m.time += delay;
+            }
+            delay != 0 || !released
+        });
+        assert_eq!(
+            result,
+            Err(if delay == 0 {
+                Error::ControlPin
+            } else {
+                Error::Timeout
+            })
+        );
+        assert!(model.borrow().reset_asserted && !model.borrow().enabled);
+    }
+    let model = RefCell::new(Model::default());
+    let mut bus = RuntimeSpi::new(&model);
+    assert_eq!(
+        bus.enter_runtime(ENTRY, |_| true),
+        Err(Error::ConfigurationState)
+    );
+    assert!(model.borrow().sent.is_empty());
+}
+
+#[test]
+fn initial_control_pin_io_counts_against_the_whole_operation_deadline() {
+    let model = RefCell::new(Model::default());
+    let mut bus = RuntimeSpi::new(&model);
+    assert_eq!(
+        bus.begin_configuration(STARTUP, |on| {
+            power(&model, on);
+            if !on {
+                model.borrow_mut().time += STARTUP.timeout_us;
+            }
+            true
+        }),
+        Err(Error::Timeout)
+    );
+    assert!(model.borrow().power_events.iter().all(|v| !v.1));
+    assert!(
+        model.borrow().dividers.is_empty(),
+        "expired callback cannot enable SPI"
+    );
+
+    let model = RefCell::new(Model {
+        config_after: Some(12),
+        ..Model::default()
+    });
+    let mut bus = RuntimeSpi::new(&model);
+    bus.stream_configuration(&[1; 12], 1_000).unwrap();
+    assert_eq!(
+        bus.enter_runtime(ENTRY, |released| {
+            let mut m = model.borrow_mut();
+            assert!(!released, "expired reset callback cannot release runtime");
+            m.reset_asserted = true;
+            m.time += ENTRY.timeout_us;
+            true
+        }),
+        Err(Error::Timeout)
+    );
+    assert!(model.borrow().reset_asserted && !model.borrow().enabled);
+}
+
+#[test]
+fn qualification_clock_faults_are_bounded_and_never_release_the_next_phase() {
+    for (time, step, expected) in [
+        (0, 0, Error::PollLimit),
+        (u64::MAX - 1, 1, Error::InvalidTiming),
+    ] {
+        let model = RefCell::new(Model {
+            time,
+            step,
+            ..Model::default()
+        });
+        let mut bus = RuntimeSpi::new(&model);
+        assert_eq!(
+            bus.begin_configuration(STARTUP, |on| power(&model, on)),
+            Err(expected)
+        );
+        assert!(!model.borrow().power && !model.borrow().enabled);
+    }
+    for (injected, expected) in [(0, Error::ClockRegression), (10_000, Error::Timeout)] {
+        let model = RefCell::new(Model::default());
+        let mut bus = RuntimeSpi::new(&model);
+        assert_eq!(
+            bus.begin_configuration(STARTUP, |on| {
+                power(&model, on);
+                if on {
+                    model.borrow_mut().time = injected;
+                }
+                true
+            }),
+            Err(expected)
+        );
+        assert!(!model.borrow().power && !model.borrow().enabled);
+    }
+    let model = RefCell::new(Model {
+        config_after: Some(12),
+        ..Model::default()
+    });
+    let mut bus = RuntimeSpi::new(&model);
+    bus.stream_configuration(&[1; 12], 1_000).unwrap();
+    model.borrow_mut().step = 0;
+    assert_eq!(
+        bus.enter_runtime(ENTRY, |released| {
+            assert!(!released);
+            true
+        }),
+        Err(Error::PollLimit)
+    );
+    assert!(!bus.configuration_complete() && !model.borrow().enabled);
+}
+
+#[test]
+fn loading_clock_limit_uses_exact_ratio_and_runtime_entry_consumes_one_completion() {
+    for (hz, expected) in [
+        (128_000_000, Ok(())),
+        (128_000_001, Err(Error::InvalidTiming)),
+        (0, Err(Error::InvalidTiming)),
+    ] {
+        let model = RefCell::new(Model {
+            frequency_hz: hz,
+            ..Model::default()
+        });
+        let mut bus = RuntimeSpi::new(&model);
+        assert_eq!(
+            bus.begin_configuration(
+                Startup {
+                    prescale: 8,
+                    postdivide: 0,
+                    ..STARTUP
+                },
+                |on| power(&model, on)
+            ),
+            expected
+        );
+    }
+    for entry in [
+        RuntimeEntry {
+            high_z_us: 0,
+            ..ENTRY
+        },
+        RuntimeEntry {
+            reset_us: u64::MAX,
+            ..ENTRY
+        },
+        RuntimeEntry {
+            prescale: 1,
+            ..ENTRY
+        },
+        RuntimeEntry {
+            transfer: Timing {
+                setup_us: 0,
+                ..TIMING
+            },
+            ..ENTRY
+        },
+    ] {
+        let model = RefCell::new(Model {
+            config_after: Some(12),
+            ..Model::default()
+        });
+        let mut bus = RuntimeSpi::new(&model);
+        bus.stream_configuration(&[1; 12], 1_000).unwrap();
+        assert_eq!(
+            bus.enter_runtime(entry, |released| {
+                assert!(!released);
+                true
+            }),
+            Err(Error::InvalidTiming)
+        );
+        assert!(!bus.configuration_complete() && !model.borrow().enabled);
+    }
+    let model = RefCell::new(Model {
+        config_after: Some(12),
+        ..Model::default()
+    });
+    let mut bus = RuntimeSpi::new(&model);
+    bus.stream_configuration(&[1; 12], 1_000).unwrap();
+    bus.enter_runtime(ENTRY, |_| true).unwrap();
+    assert_eq!(
+        bus.enter_runtime(ENTRY, |_| true),
+        Err(Error::ConfigurationState)
+    );
+    assert!(!model.borrow().enabled);
 }

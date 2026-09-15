@@ -1,6 +1,12 @@
 version = 1
 baseline_sites = 720
-baseline_fingerprint = "sha256:c4f9bcdec7a312bfff7415a964c812305cca305d5a6be67cf238fb2564c1ed54"
+baseline_fingerprint = "sha256:b5dc22fa37f972748bcf8f9cb3604f5f7bc8fae185d9ec538556529cda3bb60c"
+
+# 2026-09-16: bounded power/startup and runtime entry move existing SPI PAC
+# writes into the same register seam. Shared RESETS accesses modify distinct
+# UART0/SPI0 bits sequentially on the sole main context, with no IRQ/core writer.
+# Failed reset leaves SPI in reset; disable/enabled guard peripheral access.
+# No new unsafe syntax or raw pointer; mapped-flash and PAC obligations persist.
 
 # 2026-09-16: configuration streaming reuses existing PAC blocks and HAL pin
 # ownership. GPIO input observation and Hi-Z use safe HAL methods with pulls

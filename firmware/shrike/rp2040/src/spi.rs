@@ -24,6 +24,7 @@ pub(crate) enum Error {
     ConfigurationState,
     ConfigurationIncomplete,
     HandoffTimeout,
+    ControlPin,
 }
 
 #[derive(Clone, Copy)]
@@ -32,6 +33,26 @@ pub(crate) struct Timing {
     pub hold_us: u64,
     pub high_us: u64,
     pub timeout_us: u64,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Startup {
+    pub prescale: u8,
+    pub postdivide: u8,
+    pub power_off_us: u64,
+    pub power_on_us: u64,
+    pub cs_high_us: u64,
+    pub timeout_us: u64,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct RuntimeEntry {
+    pub prescale: u8,
+    pub postdivide: u8,
+    pub high_z_us: u64,
+    pub reset_us: u64,
+    pub timeout_us: u64,
+    pub transfer: Timing,
 }
 
 // Private register seam, shared with the host model, as in the UART adapter.
@@ -46,6 +67,9 @@ pub(crate) trait Registers {
     fn disable(&mut self);
     fn configuration_high(&mut self) -> bool;
     fn high_impedance(&mut self);
+    fn frequency_hz(&self) -> u32;
+    fn reset_hardware(&mut self) -> bool;
+    fn configure(&mut self, prescale: u8, postdivide: u8);
 }
 
 pub(crate) struct RuntimeSpi<R> {
@@ -61,6 +85,17 @@ struct Budget {
     same_tick: u32,
 }
 impl Budget {
+    fn timed(registers: &mut impl Registers, timeout_us: u64) -> Result<Self, Error> {
+        let now = registers.now_us();
+        Ok(Self {
+            last: now,
+            deadline: now.checked_add(timeout_us).ok_or(Error::InvalidTiming)?,
+            remaining: timeout_us
+                .checked_mul(u64::from(MAX_POLLS))
+                .ok_or(Error::InvalidTiming)?,
+            same_tick: 0,
+        })
+    }
     fn sample(&mut self, registers: &mut impl Registers) -> Result<u64, Error> {
         if self.remaining == 0 || self.same_tick == MAX_POLLS {
             return Err(Error::PollLimit);
@@ -129,6 +164,126 @@ impl<R: Registers> RuntimeSpi<R> {
         // also asserts runtime reset and PWR/EN safe. No command is retried.
         let _ = self.registers.select(false);
         self.registers.disable();
+    }
+
+    /// SLG47910 MCU startup, configuration guide Rev.2.5 section 8.1.
+    /// The owner holds runtime reset low in both power callback states. These
+    /// documented minima do not replace candidate timing qualification.
+    pub(crate) fn begin_configuration(
+        &mut self,
+        startup: Startup,
+        mut power: impl FnMut(bool) -> bool,
+    ) -> Result<(), Error> {
+        let result = (|| {
+            let mut budget = Budget::timed(&mut self.registers, startup.timeout_us)?;
+            if !power(false) {
+                return Err(Error::ControlPin);
+            }
+            if startup.power_off_us < 500
+                || startup.power_on_us < 3_000
+                || startup.cs_high_us < 3
+                || startup
+                    .power_off_us
+                    .checked_add(startup.power_on_us)
+                    .and_then(|v| v.checked_add(startup.cs_high_us))
+                    .and_then(|v| v.checked_add(3))
+                    .is_none_or(|v| v >= startup.timeout_us)
+                || self.registers.frequency_hz() == 0
+                || u64::from(self.registers.frequency_hz())
+                    > 16_000_000 * u64::from(startup.prescale) * (u64::from(startup.postdivide) + 1)
+            {
+                return Err(Error::InvalidTiming);
+            }
+            budget.sample(&mut self.registers)?;
+            self.configure(startup.prescale, startup.postdivide)?;
+            if !self.registers.select(true) {
+                return Err(Error::ChipSelect);
+            }
+            budget.wait(&mut self.registers, startup.power_off_us)?;
+            if !power(true) {
+                return Err(Error::ControlPin);
+            }
+            budget.wait(&mut self.registers, startup.power_on_us)?;
+            if !self.registers.select(false) {
+                return Err(Error::ChipSelect);
+            }
+            budget.wait(&mut self.registers, startup.cs_high_us)?;
+            if !self.registers.select(true) {
+                return Err(Error::ChipSelect);
+            }
+            budget.sample(&mut self.registers)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = power(false);
+            self.inhibit();
+            self.registers.high_impedance();
+        }
+        result
+    }
+
+    /// Reclaim the configured design's SPI pins while its runtime reset is
+    /// asserted. This reset pin is distinct from operator e-stop permission.
+    pub(crate) fn enter_runtime(
+        &mut self,
+        entry: RuntimeEntry,
+        mut reset: impl FnMut(bool) -> bool,
+    ) -> Result<(), Error> {
+        let result = (|| {
+            let mut budget = Budget::timed(&mut self.registers, entry.timeout_us)?;
+            if !self.configuration_complete {
+                return Err(Error::ConfigurationState);
+            }
+            if !reset(false) {
+                return Err(Error::ControlPin);
+            }
+            if entry.high_z_us == 0
+                || entry.reset_us == 0
+                || entry
+                    .high_z_us
+                    .checked_add(entry.reset_us)
+                    .and_then(|v| v.checked_add(2))
+                    .is_none_or(|v| v >= entry.timeout_us)
+            {
+                return Err(Error::InvalidTiming);
+            }
+            // Validate transfer timing before enabling pads or releasing reset.
+            self.set_timing(entry.transfer)?;
+            self.timing = None;
+            budget.wait(&mut self.registers, entry.high_z_us)?;
+            self.configure(entry.prescale, entry.postdivide)?;
+            budget.sample(&mut self.registers)?;
+            if !reset(true) {
+                return Err(Error::ControlPin);
+            }
+            budget.wait(&mut self.registers, entry.reset_us)?;
+            self.timing = Some(entry.transfer);
+            budget.sample(&mut self.registers)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = reset(false);
+            self.inhibit();
+            self.registers.high_impedance();
+        }
+        result
+    }
+
+    fn configure(&mut self, prescale: u8, postdivide: u8) -> Result<(), Error> {
+        self.inhibit();
+        if prescale < 2 || prescale & 1 != 0 || self.registers.frequency_hz() == 0 {
+            return Err(Error::InvalidTiming);
+        }
+        // A new qualification may recover a poisoned FIFO only while the
+        // owner holds the FPGA reset/power safe. Never retry a runtime command.
+        if !self.registers.reset_hardware() {
+            return Err(Error::ResetNotReady);
+        }
+        if self.registers.flags() & (TFE | RNE | BSY) != TFE || self.registers.overrun() {
+            return Err(Error::DirtyBus);
+        }
+        self.registers.configure(prescale, postdivide);
+        Ok(())
     }
 
     pub(crate) fn transfer<const N: usize>(&mut self, bytes: &[u8; N]) -> Result<[u8; N], Error> {
@@ -319,7 +474,7 @@ mod target {
     use rp2040_hal::spi::{Disabled, Spi};
     use shrike_control::MicrosClock;
 
-    use super::{Error, Registers, RuntimeSpi, Timing};
+    use super::{Error, Registers, RuntimeSpi};
     use crate::uart::TimerClock;
 
     type Pins = (
@@ -334,6 +489,8 @@ mod target {
         pins: Pins,
         cs: ChipSelect,
         clock: &'a TimerClock,
+        resets: &'a pac::RESETS,
+        frequency_hz: u32,
     }
 
     impl<'a> RuntimeSpi<Spi0<'a>> {
@@ -341,61 +498,47 @@ mod target {
             spi: Spi<Disabled, pac::SPI0, Pins, 8>,
             mut cs: ChipSelect,
             clock: &'a TimerClock,
-            resets: &mut pac::RESETS,
+            resets: &'a pac::RESETS,
+            frequency_hz: u32,
         ) -> Result<Self, Error> {
             cs.set_high().map_err(|_| Error::ChipSelect)?;
             let (peripheral, pins) = spi.free();
-            // Both frame engines/FIFOs must start empty. Bounded reset replaces
-            // HAL init's unbounded wait; SSE stays clear and sends no clocks.
-            resets.reset().modify(|_, w| w.spi0().set_bit());
-            resets.reset().modify(|_, w| w.spi0().clear_bit());
+            let mut registers = Spi0 {
+                peripheral,
+                pins,
+                cs,
+                clock,
+                resets,
+                frequency_hz,
+            };
+            // Bounded reset replaces HAL init's unbounded wait. SSE stays
+            // disabled; constructor never clocks bytes or releases FPGA reset.
+            if !registers.reset_hardware() {
+                return Err(Error::ResetNotReady);
+            }
+            Ok(Self::new(registers))
+        }
+    }
+
+    impl Registers for Spi0<'_> {
+        fn frequency_hz(&self) -> u32 {
+            self.frequency_hz
+        }
+        fn reset_hardware(&mut self) -> bool {
+            // Shared RESETS access is serialized on the sole MCU main context;
+            // UART0 and SPI0 modify distinct bits. No IRQ/core changes RESETS.
+            self.resets.reset().modify(|_, w| w.spi0().set_bit());
+            self.resets.reset().modify(|_, w| w.spi0().clear_bit());
             for _ in 0..16 {
-                if resets.reset_done().read().spi0().bit_is_set() {
-                    return Ok(Self::new(Spi0 {
-                        peripheral,
-                        pins,
-                        cs,
-                        clock,
-                    }));
+                if self.resets.reset_done().read().spi0().bit_is_set() {
+                    return true;
                 }
             }
-            resets.reset().modify(|_, w| w.spi0().set_bit());
-            Err(Error::ResetNotReady)
+            self.resets.reset().modify(|_, w| w.spi0().set_bit());
+            false
         }
-
-        /// Configuration owner only, after a qualified FPGA image is ready.
-        /// SPI Hz = peripheral Hz / (prescale * (postdivide + 1)). No default
-        /// rate or timings are qualified here. Never clears FPGA reset/e-stop.
-        pub(crate) fn configure_runtime(
-            &mut self,
-            prescale: u8,
-            postdivide: u8,
-            timing: Timing,
-        ) -> Result<(), Error> {
-            if !self.configuration_complete {
-                self.inhibit();
-                return Err(Error::ConfigurationState);
-            }
-            self.configure_for_loading(prescale, postdivide)?;
-            self.set_timing(timing)
-        }
-
-        /// Clocks only; the lifecycle owner supplies the power/reset sequence.
-        pub(crate) fn configure_for_loading(
-            &mut self,
-            prescale: u8,
-            postdivide: u8,
-        ) -> Result<(), Error> {
-            self.inhibit();
-            if prescale < 2 || prescale & 1 != 0 {
-                return Err(Error::InvalidTiming);
-            }
-            if self.registers.flags() & (super::TFE | super::RNE | super::BSY) != super::TFE
-                || self.registers.overrun()
-            {
-                return Err(Error::DirtyBus);
-            }
-            let spi = &self.registers.peripheral;
+        fn configure(&mut self, prescale: u8, postdivide: u8) {
+            let spi = &self.peripheral;
             // SAFETY: exclusive SPI0 owner, SSE clear; mode 0 Motorola, 8-bit
             // words, checked even prescale 2..254 and u8 postdivide. No reserved
             // bits, DMA requests, interrupts, slave or loopback modes enabled.
@@ -407,31 +550,25 @@ mod target {
                 spi.sspcpsr().write(|w| w.bits(u32::from(prescale)));
             }
             spi.sspcr1().write(|w| w.sse().set_bit());
-            self.registers
-                .pins
+            self.pins
                 .0
                 .set_output_enable_override(OutputEnableOverride::Normal);
-            self.registers
-                .pins
+            self.pins
                 .1
                 .set_output_enable_override(OutputEnableOverride::Normal);
-            self.registers
-                .pins
+            self.pins
                 .2
                 .set_output_enable_override(OutputEnableOverride::Normal);
-            self.registers
-                .cs
+            self.cs
                 .set_output_enable_override(OutputEnableOverride::Normal);
-            Ok(())
         }
-    }
 
-    impl Registers for Spi0<'_> {
         fn now_us(&mut self) -> u64 {
             self.clock.now_us()
         }
         fn enabled(&mut self) -> bool {
-            self.peripheral.sspcr1().read().sse().bit_is_set()
+            !self.resets.reset().read().spi0().bit_is_set()
+                && self.peripheral.sspcr1().read().sse().bit_is_set()
         }
         fn flags(&mut self) -> u32 {
             self.peripheral.sspsr().read().bits()
@@ -475,7 +612,9 @@ mod target {
                 .set_output_enable_override(OutputEnableOverride::Disable);
         }
         fn disable(&mut self) {
-            self.peripheral.sspcr1().modify(|_, w| w.sse().clear_bit());
+            if !self.resets.reset().read().spi0().bit_is_set() {
+                self.peripheral.sspcr1().modify(|_, w| w.sse().clear_bit());
+            }
         }
     }
 }
