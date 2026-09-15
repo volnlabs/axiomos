@@ -48,6 +48,7 @@ enum BootError {
     InitPathInvalid,
     InitExecutableMissing,
     InitProcessCreationFailed,
+    TimerInitialization,
 }
 
 impl BootError {
@@ -64,6 +65,7 @@ impl BootError {
             Self::InitPathInvalid => "init-path-invalid",
             Self::InitExecutableMissing => "init-executable-missing",
             Self::InitProcessCreationFailed => "init-process-creation-failed",
+            Self::TimerInitialization => "timer-initialization",
         }
     }
 
@@ -209,6 +211,9 @@ unsafe extern "C" fn main() -> ! {
     dbg_mark(0x41); // 'A'
 
     info!("About to enable interrupts...");
+    if kernel::arch::aarch64::interrupts::init_timer().is_err() {
+        boot_fatal(BootError::TimerInitialization);
+    }
     // Enable interrupts
     kernel::arch::aarch64::Aarch64::enable_interrupts();
     dbg_mark(0x42); // 'B'

@@ -4,6 +4,8 @@
 
 extern crate alloc;
 
+pub mod periodic;
+
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 

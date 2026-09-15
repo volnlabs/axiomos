@@ -1,6 +1,6 @@
 version = 1
-baseline_sites = 705
-baseline_fingerprint = "sha256:6ce132b9f6a708eb19bbc191e028e4b9983d5900a6539084c47b5c8c85670efa"
+baseline_sites = 708
+baseline_fingerprint = "sha256:f7d6201ef4442a67d0b9dfaa67eeb6cddc657e6981702eb5adc907d2b450824b"
 
 # 2026-09-09: reviewed prerequisite delta: seven motor-pair no_mangle
 # attributes (production helper and isolated test/fuzz stubs), minus one
@@ -175,11 +175,11 @@ id = "AARCH64-EXCEPTION-CONTEXT"
 paths = ["kernel/src/arch/aarch64/*"]
 scope = "production"
 owner = "AArch64 architecture maintainers"
-invariant = "Assembly context layouts match Rust repr(C) types, exception vectors preserve all required registers, and interrupt-controller state is CPU-local and initialized."
+invariant = "Assembly layouts and saved registers match exception ABI; interrupt state is initialized and CPU-local. EL1 physical timer reads/compares share CNTPCT ticks, control writes are synchronized with ISB, and IRQ-masked boot/snapshot access plus IRQ try_lock serialize the absolute schedule. CPU0 context precedes its sole timer start; sticky faults cannot rearm."
 callers = "AArch64 boot, exception vectors, scheduler, syscall entry"
-tests = "AArch64 compile and QEMU boot/exception smoke; nested exception and SMP interrupt stress remain missing."
+tests = "AArch64 target checks; fake-clock absolute release, missed/late accounting, completion-boundary and exhaustion tests. The current virtual boot emits no boot markers and is not passing runtime evidence. Physical timing, nested exceptions and SMP interrupt stress remain unqualified."
 priority = "P0"
-reviewed = "2026-07-12"
+reviewed = "2026-09-15"
 
 [[obligation]]
 id = "X86-INTERRUPT-CONTEXT"
@@ -252,11 +252,11 @@ id = "BPF-KERNEL-INTEGRATION"
 paths = ["kernel/src/bpf/*", "kernel/crates/kernel_bpf/src/*", "kernel/crates/kernel_bpf/src/concurrency/*"]
 scope = "production"
 owner = "BPF runtime/security maintainers"
-invariant = "Verifier, profile, attach, scheduler, signing, and kernel registry boundaries preserve program, context, credential, quota, and lifetime invariants."
+invariant = "Verifier, profile, attach, signing and registry boundaries preserve context, credentials, quotas and lifetime. Managed worker scheduler transitions hold no slot/manager locks and keep IRQs masked; exact operation/instance IDs and retirement tokens retain ownership and charges until unlocked destruction and refund."
 callers = "bpf syscall, device hooks, scheduler hooks, actuation"
-tests = "cloud/embedded complete BPF suites, epoch-snapshot concurrency tests, SMP attach/fire/detach QEMU stress, and kernel checks; model-checked reclamation remains missing."
+tests = "Cloud/embedded BPF and kernel suites, epoch-snapshot concurrency tests, managed worker cancellation/reader retirement tests and actual upload-install-cleanup Miri; existing SMP attach/fire/detach QEMU stress and target checks. Model-checked managed publication and physical handoff remain missing."
 priority = "P0"
-reviewed = "2026-07-13"
+reviewed = "2026-09-15"
 
 [[obligation]]
 id = "DMA-MMIO-DRIVERS"

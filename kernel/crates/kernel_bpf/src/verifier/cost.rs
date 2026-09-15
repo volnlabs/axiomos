@@ -2,18 +2,14 @@
 //!
 //! Assigns each instruction a static cycle cost and computes a program's
 //! worst-case execution cost as the longest path through its (loop-free) CFG.
-//! This turns the verifier from one that bounds *how many* instructions run
-//! into one that bounds *how long* they take — the basis for schedulability
+//! This supplements instruction limits with a modeled execution cost for
 //! admission (`docs/security/verifier-assurance.md`, RTSS track).
 //!
-//! Costs are in *relative cycle units*. Calibrated against measured Cortex-A76
-//! (Pi5) JIT cycles on 2026-06-11 (`docs/performance/current-results.md §12`): the per-helper and
-//! memory weights are conservative upper bounds on the measured ratios, `div`
-//! was retuned 4→2 (measured ~1.1× a default op, not 4×), and a per-invocation
-//! `COST_INVOCATION_BASE` was added to cover the fixed ~0.55 µs JIT entry cost
-//! that a pure-slope model otherwise under-predicts. The model stays
-//! deliberately conservative: every instruction is charged its worst case, and
-//! the program is charged its most expensive path.
+//! Costs are in relative cycle units. Historical JIT measurements informed the
+//! retained weights (`docs/performance/current-results.md §12`); they do not
+//! qualify the shipped interpreter. Managed admission remains a model until
+//! interpreter, helper, private-state, request and recorder costs are measured.
+//! The most expensive CFG path is charged, including a fixed invocation term.
 
 use super::budget::{BudgetVec, VerificationBudget};
 use super::error::VerifyResult;
@@ -26,15 +22,12 @@ use crate::verifier::{ControlFlowGraph, HelperId};
 const COST_CALL: u32 = 8;
 /// Cost of a memory load/store — touches the data cache.
 const COST_MEMORY: u32 = 2;
-/// Cost of an expensive ALU op (division / remainder) on the A76. Measured at
-/// ~1.1× a default op on the Pi5 JIT (2026-06-11); held at 2 for headroom.
+/// Modeled division/remainder cost; requires interpreter calibration.
 const COST_ALU_EXPENSIVE: u32 = 2;
 /// Cost of any other instruction (cheap ALU, jump, mov, exit).
 const COST_DEFAULT: u32 = 1;
-/// Fixed per-invocation cost (JIT trampoline entry + dispatch), charged once per
-/// program. Calibrated from the straight-line series' intercept: ~0.55 µs ≈ 95
-/// cycle units on the Pi5 (`docs/performance/current-results.md §12`). Without it a pure
-/// longest-path sum under-predicts measured per-run cost by the entry overhead.
+/// Retained modeled entry/dispatch cost, charged once per program. This is not
+/// a measured bound for the shipped interpreter.
 const COST_INVOCATION_BASE: u64 = 95;
 
 // Per-helper cost classes. Relative cycle units pending A76 calibration
@@ -43,13 +36,10 @@ const COST_INVOCATION_BASE: u64 = 95;
 /// A register/counter read with no memory walk (ktime, cpu id, prandom, …).
 const COST_HELPER_READ: u32 = 4;
 /// A bounded copy or single device-register access (probe_read, comm, GPIO/PWM/IIO/CAN).
-/// Pi5 `bpf_gpio_get` shape measured 2.54 cyc/op ≈ 8.2× a default op
-/// (`docs/performance/current-results.md §12`); 10 is the conservative bound kept.
+/// Retained model weight; the managed capture helper requires calibration too.
 const COST_HELPER_COPY: u32 = 10;
 /// A ring-buffer reserve/commit/output (bookkeeping + memcpy under the manager
-/// lock). Pi5 `bpf_ringbuf_output` shape measured 3.24 cyc/op ≈ 10.5× a default
-/// op (cost is lock-dominated, so stable even when the buffer fills mid-run); 12
-/// is the conservative bound kept.
+/// lock). Retained model weight; these helpers are not permitted in managed code.
 const COST_HELPER_RINGBUF: u32 = 12;
 /// A map operation that walks/hashes a table (lookup/update/delete, timeseries push).
 const COST_HELPER_MAP: u32 = 16;
@@ -92,7 +82,7 @@ pub fn helper_cost(helper_id: i32) -> u32 {
         | HelperId::GpioGet
         | HelperId::PwmWrite
         | HelperId::MotorPairV1
-        // Uncalibrated capture-only bookkeeping; use the conservative copy class.
+        // Uncalibrated capture-only bookkeeping; retain the copy class.
         | HelperId::ManagedMotorPairV1
         | HelperId::IioRead
         | HelperId::CanSend => COST_HELPER_COPY,

@@ -76,12 +76,14 @@ pub fn cpu_id() -> usize {
 /// Called from the timer interrupt handler.
 pub fn timer_tick() {
     if let Some(ctx) = try_current() {
+        #[cfg(not(feature = "managed-runtime"))]
         log::trace!(
             "timer_tick: setting need_reschedule for CPU {}",
             ctx.cpu_id()
         );
         ctx.set_need_reschedule();
     } else {
+        #[cfg(not(feature = "managed-runtime"))]
         log::warn!("timer_tick: no context for current CPU");
     }
 }

@@ -566,3 +566,146 @@ fn installation_admission_cancels_failed_construction_and_staged_work() {
     assert_eq!(manager.admission.committed_ns_per_s(), a_wcet * 100);
     assert_eq!(manager.admission.reserved_ns_per_s(), a_wcet * 100);
 }
+
+#[test]
+fn installation_permanent_worker_retries_exact_retirement_until_readers_and_weak_release() {
+    use kernel_abi::*;
+
+    use crate::bpf::preparation::{LifecycleTarget, WorkerAction, WorkerState};
+    let slot = spin::Mutex::new(ControlSlot::new());
+    let manager = spin::Mutex::new(BpfManager::new());
+    let mut worker = WorkerState::default();
+    let service = |worker: &mut WorkerState| {
+        for _ in 0..8 {
+            let action = worker.take(&mut slot.lock(), &mut manager.lock());
+            match action {
+                WorkerAction::Wait => return true,
+                WorkerAction::Retry => return false,
+                action => worker.perform(action, &slot, &manager),
+            }
+        }
+        panic!("bounded worker batch");
+    };
+    let mut last = 0;
+    let mut handles = [0; 3];
+    for revision in 1..=2 {
+        let handle = candidate(&mut manager.lock(), revision);
+        handles[revision as usize - 1] = handle;
+        last = manager
+            .lock()
+            .request_installation(
+                &mut slot.lock(),
+                last,
+                revision - 1,
+                LifecycleTarget::Candidate(handle),
+            )
+            .unwrap();
+        assert!(service(&mut worker));
+        let id = slot.lock().snapshot().pending.unwrap();
+        commit(&mut slot.lock(), id);
+        assert!(service(&mut worker));
+    }
+    let reader = slot.lock().active.as_ref().unwrap().instance.clone();
+    let weak_instance = Arc::downgrade(&reader);
+    let weak_code = Arc::downgrade(manager.lock().managed_artifact(handles[0]).unwrap());
+    let old_instance_id = slot.lock().active.as_ref().unwrap().instance_id;
+    handles[2] = candidate(&mut manager.lock(), 3);
+    last = manager
+        .lock()
+        .request_installation(
+            &mut slot.lock(),
+            last,
+            2,
+            LifecycleTarget::Candidate(handles[2]),
+        )
+        .unwrap();
+    assert!(service(&mut worker));
+    let private_id = slot.lock().snapshot().pending.unwrap();
+    commit(&mut slot.lock(), private_id);
+    let charged = manager.lock().resource_usage();
+    assert!(!service(&mut worker));
+    for _ in 0..3 {
+        assert!(!service(&mut worker));
+        assert_eq!(manager.lock().resource_usage(), charged);
+        assert!(manager.lock().managed_slot_busy);
+        assert_eq!(slot.lock().snapshot().active, Some(handles[2]));
+        assert_eq!(
+            manager.lock().request_installation(
+                &mut slot.lock(),
+                last,
+                3,
+                LifecycleTarget::Previous(handles[1])
+            ),
+            Err(EBUSY)
+        );
+        assert!(matches!(
+            manager
+                .lock()
+                .begin_managed_instance_reclamation_for(old_instance_id),
+            Err(BpfError::ObjectBusy)
+        ));
+    }
+    drop(reader);
+    assert!(!service(&mut worker));
+    assert_eq!(manager.lock().resource_usage(), charged);
+    drop(weak_instance);
+    assert!(
+        !service(&mut worker),
+        "instance refund leaves artifact Weak outstanding"
+    );
+    let after_instance = manager.lock().resource_usage();
+    assert!(after_instance.program_bytes < charged.program_bytes);
+    assert!(slot.lock().snapshot().retiring);
+    assert!(manager.lock().managed_slot_busy);
+    assert_eq!(manager.lock().managed_instances.iter().flatten().count(), 1);
+    assert!(!service(&mut worker));
+    assert_eq!(manager.lock().resource_usage(), after_instance);
+    drop(weak_code);
+    assert!(service(&mut worker));
+    assert!(manager.lock().managed_artifact(handles[0]).is_err());
+    assert!(!slot.lock().snapshot().retiring);
+    assert!(!manager.lock().managed_slot_busy);
+    assert_eq!(
+        manager.lock().managed_operation_query(last).unwrap().phase,
+        MANAGED_OPERATION_COMMITTED
+    );
+    assert!(manager
+        .lock()
+        .request_installation(
+            &mut slot.lock(),
+            last,
+            3,
+            LifecycleTarget::Previous(handles[1])
+        )
+        .is_ok());
+    let id = manager.lock().managed_operation_query(0).unwrap().id;
+    manager
+        .lock()
+        .cancel_installation(
+            &mut slot.lock(),
+            id,
+            3,
+            LifecycleTarget::Previous(handles[1]),
+        )
+        .unwrap();
+    assert!(service(&mut worker));
+}
+
+#[test]
+fn installation_global_entries_reject_unqualified_host_without_cpu_mmio() {
+    use crate::bpf::preparation::LifecycleTarget;
+    assert!(!qualified_topology());
+    assert_eq!(
+        request_installation(0, 0, LifecycleTarget::Candidate(1)),
+        Err(kernel_abi::ENOTSUP)
+    );
+    assert_eq!(query_installation(0), Err(kernel_abi::ENOTSUP));
+    assert_eq!(
+        cancel_installation(1, 0, LifecycleTarget::Candidate(1)),
+        Err(kernel_abi::ENOTSUP)
+    );
+    assert!(matches!(
+        try_release_boundary(|_| panic!("unqualified boundary must not run")),
+        Err(BpfError::PermissionDenied)
+    ));
+}

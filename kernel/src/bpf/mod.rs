@@ -518,7 +518,7 @@ pub struct BpfManager {
 }
 
 /// Default fire frequency assumed for a hook, in Hz. Every hook is assumed to
-/// fire at the control-loop rate (`1e9 / RT_PERIOD_NS` = 1 kHz on embedded);
+/// fire at the control-loop rate (`1e9 / RT_PERIOD_NS` = 100 Hz on embedded);
 /// per-hook-type and caller-declared frequencies are future work. On the cloud
 /// profile `RT_PERIOD_NS` is unbounded so this is 0 — combined with the
 /// unbounded utilization budget, admission never rejects there.

@@ -1382,6 +1382,11 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
         // edges rejected above), so the bound is meaningful. Relative cycle
         // units pending A76 calibration.
         let cycles = super::cost::try_wcet_cycles(insns, cfg, self.budget)?;
+        Self::verify_wcet_budget(cycles)
+    }
+
+    #[cfg(feature = "embedded-profile")]
+    fn verify_wcet_budget(cycles: u64) -> VerifyResult<()> {
         if cycles > P::WCET_CYCLE_BUDGET {
             return Err(VerifyError::WcetExceeded {
                 cycles,
@@ -2839,32 +2844,26 @@ mod tests {
         );
     }
 
-    /// Embedded profile enforces the per-program WCET budget (#43): a program
-    /// whose static worst-case cycle bound exceeds `WCET_CYCLE_BUDGET` is
-    /// rejected at verification with `WcetExceeded` — the first time that
-    /// error is actually produced.
+    /// Exercise the same cost boundary used after CFG analysis. With the 10 ms
+    /// period and current uncalibrated weights, the instruction/state caps can
+    /// reject large programs before this bound; do not inflate those caps just
+    /// to construct an over-budget fixture.
     #[cfg(feature = "embedded-profile")]
     #[test]
     fn embedded_rejects_program_over_wcet_budget() {
         use crate::cost_corpus::div_heavy;
         use crate::profile::PhysicalProfile;
 
-        // 90k div instructions × COST_ALU_EXPENSIVE(2) ≈ 180k cycle units,
-        // comfortably over the ~166k embedded budget (one 1 kHz control-loop
-        // period); the same shape at calibration size is well under it.
-        let (big, _) = div_heavy(90_000);
-        let result = Verifier::<ActiveProfile>::verify_with_config(
-            BpfProgType::SocketFilter,
-            &big,
-            VerifyConfig::default(),
-        );
+        let budget = ActiveProfile::WCET_CYCLE_BUDGET;
+        Verifier::<ActiveProfile>::verify_wcet_budget(budget).unwrap();
+        let result = Verifier::<ActiveProfile>::verify_wcet_budget(budget + 1);
         assert!(
             matches!(
                 result,
                 Err(VerifyError::WcetExceeded { cycles, budget })
                     if cycles > budget && budget == ActiveProfile::WCET_CYCLE_BUDGET
             ),
-            "a 50k-div program must exceed the embedded WCET budget, got {:?}",
+            "one cost unit above the configured budget must reject, got {:?}",
             result.err()
         );
 

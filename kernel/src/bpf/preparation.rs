@@ -1,4 +1,4 @@
-//! One bounded upload and accepted worker operation. No activation or actuation.
+//! One bounded upload and accepted upload/lifecycle operation on one worker.
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -10,6 +10,8 @@ use kernel_bpf::signing::managed::{
 use kernel_bpf::signing::SignatureVerifier;
 use kernel_bpf::verifier::{BehaviorArtifact, VerificationBudget, VerifyError};
 
+use super::installation::{ControlSlot, InstallationPreparation, RetireBatch, Retirement};
+use super::managed::ManagedReclamation;
 use super::{managed_allocation as charge, BpfManager};
 
 const WORKSPACE_BYTES: usize = 512 * 1024;
@@ -21,6 +23,7 @@ enum Phase {
     Queued,
     Preparing,
     Finishing,
+    Lifecycle,
 }
 
 pub(super) struct PreparationState {
@@ -34,10 +37,12 @@ pub(super) struct PreparationState {
     workspace: usize,
     cancelled: bool,
     pub(super) candidate: Option<u32>,
+    installation: Option<InstallationPreparation>,
+    lifecycle: Option<Lifecycle>,
 }
 
 impl PreparationState {
-    pub(super) fn accepted(&self) -> bool {
+    pub(super) fn upload_accepted(&self) -> bool {
         matches!(
             self.phase,
             Phase::Queued | Phase::Preparing | Phase::Finishing
@@ -56,6 +61,8 @@ impl PreparationState {
             workspace: 0,
             cancelled: false,
             candidate: None,
+            installation: None,
+            lifecycle: None,
         }
     }
 
@@ -63,6 +70,7 @@ impl PreparationState {
         self.receipts[self.receipt_next] = Some(self.active);
         self.receipt_next = (self.receipt_next + 1) % MANAGED_TERMINAL_RECEIPTS;
         self.phase = Phase::Idle;
+        self.lifecycle = None;
     }
 
     pub(super) fn cancel_upload_owner(&mut self, owner: u64) {
@@ -70,6 +78,28 @@ impl PreparationState {
             self.active.phase = MANAGED_OPERATION_CANCELLED;
             self.active.error = i32::from(ECANCELED) as u32;
             self.complete();
+        }
+    }
+}
+
+/// The upload operation ID and the instance cleanup ID are independent counters.
+#[derive(Clone, Copy)]
+struct Lifecycle {
+    instance_id: u64,
+    generation: u64,
+    target: LifecycleTarget,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LifecycleTarget {
+    Candidate(u32),
+    Previous(u32),
+}
+
+impl LifecycleTarget {
+    fn handle(self) -> u32 {
+        match self {
+            Self::Candidate(handle) | Self::Previous(handle) => handle,
         }
     }
 }
@@ -269,6 +299,9 @@ impl BpfManager {
         if state.active.id != id || id == 0 {
             return Err(ESTALE);
         }
+        if state.phase == Phase::Lifecycle {
+            return Err(ENOTSUP);
+        }
         if state.phase != Phase::Uploading {
             // A lost finalize response is recovered by query or an exact retry.
             return if state.phase != Phase::Idle {
@@ -315,6 +348,123 @@ impl BpfManager {
         Ok(id)
     }
 
+    /// Bounded acceptance: scalar receipt, table reservation and reference clones.
+    /// The preallocated worker slot takes custody before the caller can exit.
+    pub(crate) fn request_installation(
+        &mut self,
+        slot: &mut ControlSlot,
+        expected_last_id: u64,
+        expected_generation: u64,
+        target: LifecycleTarget,
+    ) -> Result<u64, Errno> {
+        if expected_last_id != self.preparation.last_id
+            || expected_generation != slot.snapshot().generation
+        {
+            return Err(ESTALE);
+        }
+        let snapshot = slot.snapshot();
+        let exact = match target {
+            LifecycleTarget::Candidate(handle) => self.preparation.candidate == Some(handle),
+            LifecycleTarget::Previous(handle) => snapshot.previous == Some(handle),
+        };
+        if !exact {
+            return Err(ESTALE);
+        }
+        if self.preparation.phase != Phase::Idle {
+            return Err(EBUSY);
+        }
+        let id = self
+            .preparation
+            .last_id
+            .checked_add(1)
+            .filter(|id| *id <= isize::MAX as u64)
+            .ok_or(EOVERFLOW)?;
+        let previous = match target {
+            LifecycleTarget::Candidate(_) => None,
+            LifecycleTarget::Previous(handle) => Some(handle),
+        };
+        let preparation = slot
+            .begin(self, expected_generation, previous)
+            .map_err(resource_error)?;
+        let lifecycle = Lifecycle {
+            instance_id: preparation.instance_id(),
+            generation: expected_generation + 1,
+            target,
+        };
+        let state = &mut self.preparation;
+        state.active = ManagedOperationV1 {
+            version: MANAGED_ADMIN_VERSION,
+            size: core::mem::size_of::<ManagedOperationV1>() as u32,
+            id,
+            phase: MANAGED_OPERATION_QUEUED,
+            artifact_handle: target.handle(),
+            ..Default::default()
+        };
+        state.last_id = id;
+        state.owner = 0;
+        state.cancelled = false;
+        state.lifecycle = Some(lifecycle);
+        state.installation = Some(preparation);
+        state.phase = Phase::Lifecycle;
+        Ok(id)
+    }
+
+    pub(crate) fn query_installation(
+        &self,
+        slot: &ControlSlot,
+        id: u64,
+    ) -> Result<ManagedOperationV1, Errno> {
+        let mut operation = self.managed_operation_query(id)?;
+        if let Some(lifecycle) = self
+            .preparation
+            .lifecycle
+            .filter(|_| operation.id == self.preparation.active.id)
+        {
+            if slot.snapshot().generation == lifecycle.generation {
+                operation.phase = MANAGED_OPERATION_COMMITTED;
+            } else if let Some(phase) =
+                slot.operation_phase(lifecycle.instance_id).filter(|phase| {
+                    *phase == MANAGED_OPERATION_CLEANUP
+                        || self.preparation.installation.is_none()
+                        || self.preparation.cancelled
+                })
+            {
+                operation.phase = phase;
+                if phase == MANAGED_OPERATION_CLEANUP {
+                    operation.error = i32::from(ECANCELED) as u32;
+                }
+            }
+        }
+        Ok(operation)
+    }
+
+    pub(crate) fn cancel_installation(
+        &mut self,
+        slot: &mut ControlSlot,
+        id: u64,
+        expected_generation: u64,
+        target: LifecycleTarget,
+    ) -> Result<(), Errno> {
+        if id == 0 || self.preparation.active.id != id {
+            return Err(ESTALE);
+        }
+        let lifecycle = self.preparation.lifecycle.ok_or(EALREADY)?;
+        if lifecycle.target != target || lifecycle.generation - 1 != expected_generation {
+            return Err(ESTALE);
+        }
+        if slot.snapshot().generation == lifecycle.generation {
+            return Err(EALREADY);
+        }
+        if self.preparation.cancelled {
+            return Ok(());
+        }
+        slot.cancel(lifecycle.instance_id).map_err(resource_error)?;
+        self.preparation.cancelled = true;
+        self.preparation.active.phase = MANAGED_OPERATION_CLEANUP;
+        self.preparation.active.error = i32::from(ECANCELED) as u32;
+        Ok(())
+    }
+
     pub fn managed_operation_query(&self, id: u64) -> Result<ManagedOperationV1, Errno> {
         let state = &self.preparation;
         let id = if id == 0 { state.last_id } else { id };
@@ -350,6 +500,8 @@ impl BpfManager {
                 state.cancel_upload_owner(owner);
             }
             Phase::Queued | Phase::Preparing => state.cancelled = true,
+            // Lifecycle cancellation also needs the slot lock and exact target.
+            Phase::Lifecycle => return Err(ENOTSUP),
             Phase::Idle | Phase::Finishing => return Err(EALREADY),
         }
         Ok(())
@@ -437,6 +589,157 @@ impl BpfManager {
     }
 }
 
+/// Fixed custody owned by the one permanent task, including reader-Busy retries.
+#[derive(Default)]
+pub(super) struct WorkerState {
+    retirement: Option<Retirement>,
+}
+
+pub(super) enum WorkerAction {
+    Upload(Work),
+    Install(InstallationPreparation, bool),
+    Retire(RetireBatch),
+    Release(ManagedReclamation),
+    Wait,
+    Retry,
+}
+
+impl WorkerState {
+    /// Called with slot-before-manager locks and IRQs masked. Only moves owners.
+    pub(super) fn take(
+        &mut self,
+        slot: &mut ControlSlot,
+        manager: &mut BpfManager,
+    ) -> WorkerAction {
+        if let Some(work) = manager.take_managed_work() {
+            return WorkerAction::Upload(work);
+        }
+        if let Some(lifecycle) = manager.preparation.lifecycle {
+            if slot.operation_phase(lifecycle.instance_id) == Some(MANAGED_OPERATION_CLEANUP) {
+                manager.preparation.cancelled = true;
+                manager.preparation.active.phase = MANAGED_OPERATION_CLEANUP;
+                manager.preparation.active.error = i32::from(ECANCELED) as u32;
+            }
+        }
+        if let Some(preparation) = manager.preparation.installation.take() {
+            if !manager.preparation.cancelled {
+                manager.preparation.active.phase = MANAGED_OPERATION_PREPARING;
+            }
+            return WorkerAction::Install(preparation, manager.preparation.cancelled);
+        }
+        if manager.preparation.lifecycle.is_some() {
+            slot.abort_cancelled();
+            let operation = manager
+                .query_installation(slot, manager.preparation.active.id)
+                .unwrap();
+            manager.preparation.active.phase = operation.phase;
+        }
+        if let Some(batch) = slot.take_retirement() {
+            assert!(self.retirement.is_none());
+            return WorkerAction::Retire(batch);
+        }
+        if let Some(retirement) = &mut self.retirement {
+            match retirement.begin_release(manager) {
+                Ok(Some(release)) => return WorkerAction::Release(release),
+                Err(BpfError::ObjectBusy) => return WorkerAction::Retry,
+                Err(error) => {
+                    panic!("accepted retirement must retain its exact reservation: {error:?}")
+                }
+                Ok(None) => {}
+            }
+            let retirement = self.retirement.take().unwrap();
+            let receipt = retirement
+                .complete()
+                .ok()
+                .expect("no outstanding retirement member");
+            slot.finish_retirement(manager, receipt)
+                .expect("worker settles reserved admission after actual release");
+            let state = &mut manager.preparation;
+            if let Some(lifecycle) = state.lifecycle {
+                state.active.phase = if slot.snapshot().generation == lifecycle.generation {
+                    MANAGED_OPERATION_COMMITTED
+                } else if state.cancelled {
+                    MANAGED_OPERATION_CANCELLED
+                } else {
+                    MANAGED_OPERATION_FAILED
+                };
+                state.complete();
+            }
+        }
+        WorkerAction::Wait
+    }
+
+    /// Shared by the real task and host tests. Allocations/destruction occur
+    /// before entering these short registration/refund critical sections.
+    pub(super) fn perform(
+        &mut self,
+        action: WorkerAction,
+        slot: &spin::Mutex<ControlSlot>,
+        manager: &spin::Mutex<BpfManager>,
+    ) {
+        use crate::mcore::context::with_interrupts_masked;
+        match action {
+            WorkerAction::Upload(work) => {
+                let mut prepared = work.prepare();
+                with_interrupts_masked(|| manager.lock().commit_managed_work(&prepared))
+                    .expect("single accepted upload retains its ID");
+                drop(prepared.artifact.take());
+                with_interrupts_masked(|| {
+                    manager
+                        .lock()
+                        .finish_managed_work(prepared.id, prepared.buffer)
+                })
+                .expect("worker returns its sole upload backing");
+            }
+            WorkerAction::Install(preparation, cancelled) => {
+                let built = if cancelled {
+                    preparation.cancel()
+                } else {
+                    preparation.build()
+                };
+                with_interrupts_masked(|| {
+                    let mut slot = slot.lock();
+                    let mut manager = manager.lock();
+                    if slot.operation_phase(manager.preparation.lifecycle.unwrap().instance_id)
+                        == Some(MANAGED_OPERATION_CLEANUP)
+                    {
+                        manager.preparation.cancelled = true;
+                    }
+                    let result = slot.finish_build(&mut manager, built);
+                    manager.preparation.active.phase = if result.is_ok() {
+                        MANAGED_OPERATION_STAGED
+                    } else {
+                        MANAGED_OPERATION_CLEANUP
+                    };
+                    if let Err(error) = result {
+                        manager.preparation.active.error =
+                            i32::from(if manager.preparation.cancelled {
+                                ECANCELED
+                            } else {
+                                resource_error(error)
+                            }) as u32;
+                    }
+                });
+            }
+            WorkerAction::Retire(batch) => {
+                assert!(self.retirement.is_none());
+                self.retirement = Some(batch.release_references());
+            }
+            WorkerAction::Release(release) => {
+                let receipt = release.release();
+                with_interrupts_masked(|| {
+                    self.retirement
+                        .as_mut()
+                        .unwrap()
+                        .finish_release(&mut manager.lock(), receipt)
+                })
+                .expect("worker refunds only its released batch member");
+            }
+            WorkerAction::Wait | WorkerAction::Retry => unreachable!("scheduler handles waiting"),
+        }
+    }
+}
+
 #[cfg(feature = "managed-runtime")]
 mod worker {
     use alloc::boxed::Box;
@@ -469,32 +772,52 @@ mod worker {
     }
 
     extern "C" fn run(_: *mut core::ffi::c_void) {
+        use super::{WorkerAction, WorkerState};
+        use crate::bpf::installation::CONTROL_SLOT;
+        use crate::mcore::context::ExecutionContext;
         let manager = BPF_MANAGER.get().expect("managed worker after BPF init");
         let channel = READY.get().expect("managed worker channel initialized");
+        let mut worker = WorkerState::default();
         loop {
-            let work = with_interrupts_masked(|| {
+            let action = with_interrupts_masked(|| {
+                let mut slot = CONTROL_SLOT.lock();
                 let mut manager = manager.lock();
-                if let Some(work) = manager.take_managed_work() {
-                    return Some(work);
+                let action = worker.take(&mut slot, &mut manager);
+                if matches!(action, WorkerAction::Wait) {
+                    TaskWait::block_current(channel, || {
+                        drop(manager);
+                        drop(slot);
+                    });
                 }
-                TaskWait::block_current(channel, || drop(manager));
-                None
+                action
             });
-            let Some(work) = work else {
-                continue;
-            };
-            let mut prepared = work.prepare();
-            with_interrupts_masked(|| manager.lock().commit_managed_work(&prepared))
-                .expect("single accepted preparation retains its ID");
-            // Reject/dedup may own the last code reference. Drop with IRQs
-            // enabled before refunding the operation's remaining allowance.
-            drop(prepared.artifact.take());
-            with_interrupts_masked(|| {
-                manager
-                    .lock()
-                    .finish_managed_work(prepared.id, prepared.buffer)
-            })
-            .expect("worker returns its sole upload backing");
+            match action {
+                WorkerAction::Wait => {}
+                WorkerAction::Retry => {
+                    // Reader/Weak release has no notification contract. Retain
+                    // the exact batch and retry using the existing sleep queue.
+                    let deadline = crate::time::get_monotonic_time_ns().saturating_add(1_000_000);
+                    let context = ExecutionContext::load();
+                    let switched = context.with_interrupts_masked(|| {
+                        context.with_current_task(|task| task.begin_sleep(deadline));
+                        // SAFETY: all slot/manager locks were released; IRQs are masked.
+                        let switched = unsafe { context.reschedule() };
+                        if !switched {
+                            context.with_current_task(Task::abort_sleep_before_switch);
+                        }
+                        switched
+                    });
+                    if !switched {
+                        // No runnable peer: yield to the next interrupt instead
+                        // of repeatedly inspecting the same retained reader.
+                        #[cfg(target_arch = "x86_64")]
+                        x86_64::instructions::hlt();
+                        #[cfg(target_arch = "aarch64")]
+                        <crate::arch::aarch64::Aarch64 as crate::arch::traits::Architecture>::wait_for_interrupt();
+                    }
+                }
+                action => worker.perform(action, &CONTROL_SLOT, manager),
+            }
         }
     }
 }

@@ -545,3 +545,401 @@ fn managed_uploaded_candidate_transfers_only_after_actual_slot_commit_and_cleanu
         .managed_upload_begin(7, id, bytes.len() as u32)
         .is_ok());
 }
+
+// Exercise exactly the actions and lock scopes used by the permanent task.
+fn service_worker(
+    worker: &mut WorkerState,
+    slot: &spin::Mutex<ControlSlot>,
+    manager: &spin::Mutex<BpfManager>,
+) -> bool {
+    for _ in 0..8 {
+        let action = crate::mcore::context::with_interrupts_masked(|| {
+            worker.take(&mut slot.lock(), &mut manager.lock())
+        });
+        match action {
+            WorkerAction::Wait => return true,
+            WorkerAction::Retry => return false,
+            action => worker.perform(action, slot, manager),
+        }
+        assert!(!crate::mcore::context::interrupts_masked_for_test());
+    }
+    panic!("bounded batch should finish or return Busy");
+}
+
+fn resident_via_worker(
+    worker: &mut WorkerState,
+    slot: &spin::Mutex<ControlSlot>,
+    manager: &spin::Mutex<BpfManager>,
+    expected: u64,
+    revision: u64,
+) -> (u64, LifecycleTarget) {
+    let bytes = signed_bundle(revision, &[BpfInsn::mov64_imm(0, 0), BpfInsn::exit()]).0;
+    let id = upload(&mut manager.lock(), 7, expected, &bytes);
+    manager.lock().managed_upload_finalize(7, id).unwrap();
+    assert!(service_worker(worker, slot, manager));
+    let operation = manager.lock().managed_operation_query(id).unwrap();
+    assert_eq!(operation.phase, MANAGED_OPERATION_RESIDENT);
+    (id, LifecycleTarget::Candidate(operation.artifact_handle))
+}
+
+fn fixture_worker() -> (
+    WorkerState,
+    spin::Mutex<ControlSlot>,
+    spin::Mutex<BpfManager>,
+) {
+    let trust = signed_bundle(1, &[BpfInsn::mov64_imm(0, 0), BpfInsn::exit()]).1;
+    (
+        WorkerState::default(),
+        spin::Mutex::new(ControlSlot::new()),
+        spin::Mutex::new(manager_with_upload(trust)),
+    )
+}
+
+fn host_commit(slot: &spin::Mutex<ControlSlot>) {
+    let mut slot = slot.lock();
+    let private_id = slot.snapshot().pending.unwrap();
+    slot.enter_handoff(private_id).unwrap();
+    slot.commit_validated_handoff(private_id).unwrap();
+}
+
+#[test]
+fn worker_signed_upload_install_commit_cleanup_and_next_operation_share_ids_and_custody() {
+    let (mut worker, slot, manager) = fixture_worker();
+    let (upload_id, target) = resident_via_worker(&mut worker, &slot, &manager, 0, 1);
+    let id = manager
+        .lock()
+        .request_installation(&mut slot.lock(), upload_id, 0, target)
+        .unwrap();
+    assert_eq!(id, upload_id + 1);
+    assert_ne!(
+        id,
+        slot.lock().snapshot().pending.unwrap(),
+        "user operation ID is not instance cleanup ID"
+    );
+    assert_eq!(
+        manager
+            .lock()
+            .query_installation(&slot.lock(), id)
+            .unwrap()
+            .phase,
+        MANAGED_OPERATION_QUEUED
+    );
+    assert!(manager.lock().reclaim_owner(7));
+    assert!(service_worker(&mut worker, &slot, &manager));
+    assert_eq!(
+        manager
+            .lock()
+            .query_installation(&slot.lock(), id)
+            .unwrap()
+            .phase,
+        MANAGED_OPERATION_STAGED
+    );
+    assert!(slot.lock().snapshot().inhibited);
+    assert_eq!(slot.lock().snapshot().generation, 0);
+    let private_id = slot.lock().snapshot().pending.unwrap();
+    slot.lock().enter_handoff(private_id).unwrap();
+    assert_eq!(
+        manager
+            .lock()
+            .query_installation(&slot.lock(), id)
+            .unwrap()
+            .phase,
+        MANAGED_OPERATION_HANDOFF
+    );
+    slot.lock().commit_validated_handoff(private_id).unwrap();
+    let charged = manager.lock().resource_usage();
+    assert_eq!(
+        manager
+            .lock()
+            .query_installation(&slot.lock(), id)
+            .unwrap()
+            .phase,
+        MANAGED_OPERATION_COMMITTED
+    );
+    assert_eq!(
+        manager
+            .lock()
+            .cancel_installation(&mut slot.lock(), id, 0, target),
+        Err(EALREADY)
+    );
+    assert!(manager.lock().managed_slot_busy);
+    assert!(service_worker(&mut worker, &slot, &manager));
+    assert_eq!(manager.lock().resource_usage(), charged);
+    assert!(!manager.lock().managed_slot_busy);
+    assert_eq!(
+        manager.lock().managed_operation_query(id).unwrap().phase,
+        MANAGED_OPERATION_COMMITTED
+    );
+    assert_eq!(
+        manager
+            .lock()
+            .cancel_installation(&mut slot.lock(), id, 0, target),
+        Err(EALREADY)
+    );
+    let (next, _) = resident_via_worker(&mut worker, &slot, &manager, id, 2);
+    assert_eq!(next, id + 1);
+}
+
+#[test]
+fn worker_cancellation_at_each_build_and_handoff_boundary_preserves_old_active() {
+    for ordering in 0..4 {
+        let (mut worker, slot, manager) = fixture_worker();
+        let (uploaded, first) = resident_via_worker(&mut worker, &slot, &manager, 0, 1);
+        let active_op = manager
+            .lock()
+            .request_installation(&mut slot.lock(), uploaded, 0, first)
+            .unwrap();
+        assert!(service_worker(&mut worker, &slot, &manager));
+        host_commit(&slot);
+        assert!(service_worker(&mut worker, &slot, &manager));
+        let (uploaded, target) = resident_via_worker(&mut worker, &slot, &manager, active_op, 2);
+        let floor = manager.lock().resource_usage();
+        let id = manager
+            .lock()
+            .request_installation(&mut slot.lock(), uploaded, 1, target)
+            .unwrap();
+        let action = if ordering == 1 {
+            Some(worker.take(&mut slot.lock(), &mut manager.lock()))
+        } else {
+            None
+        };
+        if ordering >= 2 {
+            assert!(service_worker(&mut worker, &slot, &manager));
+        }
+        if ordering == 3 {
+            let private_id = slot.lock().snapshot().pending.unwrap();
+            slot.lock().enter_handoff(private_id).unwrap();
+        }
+        assert!(manager.lock().reclaim_owner(7));
+        manager
+            .lock()
+            .cancel_installation(&mut slot.lock(), id, 1, target)
+            .unwrap();
+        manager
+            .lock()
+            .cancel_installation(&mut slot.lock(), id, 1, target)
+            .unwrap();
+        assert_eq!(
+            manager
+                .lock()
+                .query_installation(&slot.lock(), id)
+                .unwrap()
+                .phase,
+            MANAGED_OPERATION_CLEANUP
+        );
+        if let Some(action) = action {
+            worker.perform(action, &slot, &manager);
+        }
+        assert!(service_worker(&mut worker, &slot, &manager));
+        assert_eq!(manager.lock().resource_usage(), floor);
+        let state = slot.lock().snapshot();
+        assert_eq!(state.active, Some(first.handle()));
+        assert_eq!(state.generation, 1);
+        assert_eq!(state.inhibited, ordering == 3);
+        let receipt = manager.lock().managed_operation_query(id).unwrap();
+        assert_eq!(receipt.phase, MANAGED_OPERATION_CANCELLED);
+        assert_eq!(receipt.error, i32::from(ECANCELED) as u32);
+        assert_eq!(
+            manager
+                .lock()
+                .request_installation(&mut slot.lock(), id, 1, target),
+            Ok(id + 1)
+        );
+        manager
+            .lock()
+            .cancel_installation(&mut slot.lock(), id + 1, 1, target)
+            .unwrap();
+        assert!(service_worker(&mut worker, &slot, &manager));
+    }
+}
+
+#[test]
+fn worker_lifecycle_stale_checks_exclusion_receipt_bound_and_id_exhaustion() {
+    let (mut worker, slot, manager) = fixture_worker();
+    let (uploaded, target) = resident_via_worker(&mut worker, &slot, &manager, 0, 1);
+    let floor = manager.lock().resource_usage();
+    for (last, generation, target) in [
+        (uploaded - 1, 0, target),
+        (uploaded, 1, target),
+        (uploaded, 0, LifecycleTarget::Candidate(target.handle() + 1)),
+        (uploaded, 0, LifecycleTarget::Previous(target.handle())),
+    ] {
+        assert_eq!(
+            manager
+                .lock()
+                .request_installation(&mut slot.lock(), last, generation, target),
+            Err(ESTALE)
+        );
+        assert_eq!(manager.lock().resource_usage(), floor);
+        assert!(slot.lock().snapshot().pending.is_none());
+    }
+    let mut last = uploaded;
+    let mut ids = Vec::new();
+    for _ in 0..=MANAGED_TERMINAL_RECEIPTS {
+        let id = manager
+            .lock()
+            .request_installation(&mut slot.lock(), last, 0, target)
+            .unwrap();
+        ids.push(id);
+        assert_eq!(
+            manager
+                .lock()
+                .request_installation(&mut slot.lock(), id, 0, target),
+            Err(EBUSY)
+        );
+        assert_eq!(manager.lock().managed_upload_begin(7, id, 8), Err(EBUSY));
+        assert!(matches!(
+            manager.lock().begin_managed_instance(target.handle()),
+            Err(BpfError::ObjectBusy)
+        ));
+        assert!(matches!(
+            manager
+                .lock()
+                .begin_managed_artifact_reclamation(target.handle()),
+            Err(BpfError::ObjectBusy)
+        ));
+        assert_eq!(
+            manager
+                .lock()
+                .cancel_installation(&mut slot.lock(), id + 1, 0, target),
+            Err(ESTALE)
+        );
+        assert_eq!(
+            manager
+                .lock()
+                .cancel_installation(&mut slot.lock(), id, 1, target),
+            Err(ESTALE)
+        );
+        assert_eq!(
+            manager.lock().cancel_installation(
+                &mut slot.lock(),
+                id,
+                0,
+                LifecycleTarget::Previous(target.handle())
+            ),
+            Err(ESTALE)
+        );
+        manager
+            .lock()
+            .cancel_installation(&mut slot.lock(), id, 0, target)
+            .unwrap();
+        assert!(service_worker(&mut worker, &slot, &manager));
+        assert_eq!(manager.lock().resource_usage(), floor);
+        last = id;
+    }
+    assert_eq!(manager.lock().managed_operation_query(ids[0]), Err(ESTALE));
+    for id in &ids[1..] {
+        assert_eq!(
+            manager.lock().managed_operation_query(*id).unwrap().phase,
+            MANAGED_OPERATION_CANCELLED
+        );
+    }
+    manager.lock().preparation.last_id = isize::MAX as u64;
+    assert_eq!(
+        manager
+            .lock()
+            .request_installation(&mut slot.lock(), isize::MAX as u64, 0, target),
+        Err(EOVERFLOW)
+    );
+    assert_eq!(manager.lock().resource_usage(), floor);
+    assert!(slot.lock().snapshot().pending.is_none());
+}
+
+#[test]
+fn worker_failed_build_and_stop_keep_cleanup_custody() {
+    for stop in [false, true] {
+        let (mut worker, slot, manager) = fixture_worker();
+        let (uploaded, target) = resident_via_worker(&mut worker, &slot, &manager, 0, 1);
+        let floor = manager.lock().resource_usage();
+        let id = manager
+            .lock()
+            .request_installation(&mut slot.lock(), uploaded, 0, target)
+            .unwrap();
+        let action = worker.take(&mut slot.lock(), &mut manager.lock());
+        if stop {
+            slot.lock().stop();
+        }
+        let action = if let WorkerAction::Install(preparation, _) = action {
+            WorkerAction::Install(preparation, true)
+        } else {
+            panic!("expected fresh build")
+        };
+        worker.perform(action, &slot, &manager);
+        assert_eq!(
+            manager
+                .lock()
+                .query_installation(&slot.lock(), id)
+                .unwrap()
+                .phase,
+            MANAGED_OPERATION_CLEANUP
+        );
+        assert!(manager.lock().managed_slot_busy);
+        assert!(service_worker(&mut worker, &slot, &manager));
+        assert_eq!(
+            manager.lock().managed_operation_query(id).unwrap().phase,
+            if stop {
+                MANAGED_OPERATION_CANCELLED
+            } else {
+                MANAGED_OPERATION_FAILED
+            }
+        );
+        assert_eq!(manager.lock().resource_usage(), floor);
+        assert!(slot.lock().snapshot().inhibited);
+    }
+}
+
+#[test]
+fn worker_queued_stop_projects_cancellation_before_take_without_releasing_custody() {
+    let (mut worker, slot, manager) = fixture_worker();
+    let (uploaded, first) = resident_via_worker(&mut worker, &slot, &manager, 0, 1);
+    let active_op = manager
+        .lock()
+        .request_installation(&mut slot.lock(), uploaded, 0, first)
+        .unwrap();
+    assert!(service_worker(&mut worker, &slot, &manager));
+    host_commit(&slot);
+    assert!(service_worker(&mut worker, &slot, &manager));
+    let (uploaded, target) = resident_via_worker(&mut worker, &slot, &manager, active_op, 2);
+    let floor = manager.lock().resource_usage();
+    let id = manager
+        .lock()
+        .request_installation(&mut slot.lock(), uploaded, 1, target)
+        .unwrap();
+    let charged = manager.lock().resource_usage();
+    assert_eq!(
+        manager
+            .lock()
+            .query_installation(&slot.lock(), id)
+            .unwrap()
+            .phase,
+        MANAGED_OPERATION_QUEUED
+    );
+
+    slot.lock().stop();
+    let stopped = slot.lock().snapshot();
+    let operation = manager.lock().query_installation(&slot.lock(), id).unwrap();
+    assert_eq!(operation.phase, MANAGED_OPERATION_CLEANUP);
+    assert_eq!(operation.error, i32::from(ECANCELED) as u32);
+    assert_eq!(slot.lock().snapshot(), stopped);
+    assert_eq!(manager.lock().resource_usage(), charged);
+    assert!(manager.lock().preparation.installation.is_some());
+    assert!(!manager.lock().preparation.cancelled);
+    assert!(manager.lock().managed_slot_busy);
+    assert!(manager.lock().managed_instance_preparation.is_some());
+    assert_eq!(stopped.active, Some(first.handle()));
+    assert_eq!(stopped.generation, 1);
+    assert!(stopped.inhibited);
+
+    assert!(service_worker(&mut worker, &slot, &manager));
+    let receipt = manager.lock().managed_operation_query(id).unwrap();
+    assert_eq!(receipt.phase, MANAGED_OPERATION_CANCELLED);
+    assert_eq!(receipt.error, i32::from(ECANCELED) as u32);
+    assert_eq!(manager.lock().resource_usage(), floor);
+    assert!(!manager.lock().managed_slot_busy);
+    let settled = slot.lock().snapshot();
+    assert_eq!(settled.active, stopped.active);
+    assert_eq!(settled.generation, stopped.generation);
+    assert!(settled.inhibited);
+    assert!(settled.pending.is_none());
+    assert!(!settled.retiring);
+}

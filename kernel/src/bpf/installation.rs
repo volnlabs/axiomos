@@ -1,5 +1,5 @@
 //! Exclusive fixed-slot ownership. Kernel-private until authority and correlated
-//! physical handoff are wired. No timer/global-lock protocol here.
+//! physical handoff are wired. CPU0 access and worker custody remain separate.
 use alloc::sync::Arc;
 
 use kernel_abi::ManagedControlContextV1;
@@ -12,6 +12,101 @@ use super::managed::{
     PreparedInstance, ReclamationReceipt,
 };
 use super::BpfManager;
+
+/// One slot, separate from manager storage. Combined paths always lock this
+/// first, with local IRQs masked; the release boundary only uses try_lock.
+pub(super) static CONTROL_SLOT: spin::Mutex<ControlSlot> = spin::Mutex::new(ControlSlot::new());
+
+pub(crate) fn qualified_topology() -> bool {
+    #[cfg(all(target_arch = "aarch64", feature = "rpi5", feature = "managed-runtime"))]
+    {
+        crate::mcore::context::online_cpu_mask() == 1
+            && crate::mcore::context::ExecutionContext::try_load()
+                .is_some_and(|context| context.cpu_id() == 0)
+    }
+    #[cfg(not(all(target_arch = "aarch64", feature = "rpi5", feature = "managed-runtime")))]
+    {
+        false
+    }
+}
+
+/// Kernel-private management entry. Boot initialization does not require a CPU
+/// context; accepting lifecycle work does. Physical eligibility stays pending.
+pub(crate) fn request_installation(
+    expected_last_id: u64,
+    expected_generation: u64,
+    target: super::preparation::LifecycleTarget,
+) -> Result<u64, kernel_abi::Errno> {
+    let result = crate::mcore::context::with_interrupts_masked(|| {
+        if !qualified_topology() {
+            return Err(kernel_abi::ENOTSUP);
+        }
+        let mut slot = CONTROL_SLOT.lock();
+        let mut manager = crate::BPF_MANAGER.get().ok_or(kernel_abi::ENODEV)?.lock();
+        manager.request_installation(&mut slot, expected_last_id, expected_generation, target)
+    });
+    if result.is_ok() {
+        super::preparation::wake();
+    }
+    result
+}
+
+pub(crate) fn query_installation(
+    id: u64,
+) -> Result<kernel_abi::ManagedOperationV1, kernel_abi::Errno> {
+    crate::mcore::context::with_interrupts_masked(|| {
+        if !qualified_topology() {
+            return Err(kernel_abi::ENOTSUP);
+        }
+        let slot = CONTROL_SLOT.lock();
+        let manager = crate::BPF_MANAGER.get().ok_or(kernel_abi::ENODEV)?.lock();
+        manager.query_installation(&slot, id)
+    })
+}
+
+pub(crate) fn cancel_installation(
+    id: u64,
+    expected_generation: u64,
+    target: super::preparation::LifecycleTarget,
+) -> Result<(), kernel_abi::Errno> {
+    let result = crate::mcore::context::with_interrupts_masked(|| {
+        if !qualified_topology() {
+            return Err(kernel_abi::ENOTSUP);
+        }
+        let mut slot = CONTROL_SLOT.lock();
+        let mut manager = crate::BPF_MANAGER.get().ok_or(kernel_abi::ENODEV)?.lock();
+        manager.cancel_installation(&mut slot, id, expected_generation, target)
+    });
+    if result.is_ok() {
+        super::preparation::wake();
+    }
+    result
+}
+
+/// Future CPU0 boundary access: no manager, allocation, waiting or physical
+/// safety assertion. Failure requires the caller to keep its sink inhibited.
+/// The callback must remain bounded and must not retain instance references.
+pub(crate) fn try_release_boundary<R>(
+    boundary: impl FnOnce(&mut ControlSlot) -> R,
+) -> Result<R, BpfError> {
+    crate::mcore::context::with_interrupts_masked(|| {
+        if !qualified_topology() {
+            return Err(BpfError::PermissionDenied);
+        }
+        let mut slot = CONTROL_SLOT.try_lock().ok_or(BpfError::ObjectBusy)?;
+        let result = boundary(&mut slot);
+        if slot.retire.is_some()
+            || slot
+                .pending
+                .is_some_and(|pending| pending.cancelled || pending.handoff)
+        {
+            // READY has exactly one permanent waiter. Under qualified CPU0 IRQ
+            // masking no publisher can race this bounded wake operation.
+            super::preparation::wake();
+        }
+        Ok(result)
+    })
+}
 
 struct ArtifactRef {
     handle: u32,
@@ -49,7 +144,7 @@ pub(crate) struct SlotSnapshot {
 }
 
 /// Separately owned from BPF_MANAGER. Exclusive borrowing prevents an invocation
-/// from spanning publication; the eventual CPU0 owner must enforce IRQ scope.
+/// from spanning publication; the global CPU0 wrapper enforces IRQ scope.
 /// Resident upload custody is the preparation state's single candidate handle;
 /// begin() borrows that role while its fresh instance is built by the worker.
 pub(crate) struct ControlSlot {
@@ -79,6 +174,19 @@ pub(crate) struct BuiltInstallation {
 }
 
 impl InstallationPreparation {
+    pub(super) fn instance_id(&self) -> u64 {
+        self.pending.id
+    }
+
+    pub(super) fn cancel(self) -> BuiltInstallation {
+        BuiltInstallation {
+            pending: self.pending,
+            artifact: self.artifact,
+            instance: self.instance.cancel(),
+            active_charge_ns_per_s: self.active_charge_ns_per_s,
+        }
+    }
+
     pub(crate) fn build(self) -> BuiltInstallation {
         BuiltInstallation {
             pending: self.pending,
@@ -123,6 +231,27 @@ impl ControlSlot {
             pending: self.pending.map(|p| p.id),
             inhibited: self.inhibited,
             retiring: self.retiring.is_some(),
+        }
+    }
+
+    pub(super) fn operation_phase(&self, id: u64) -> Option<u32> {
+        use kernel_abi::*;
+        let pending = self.pending.filter(|pending| pending.id == id)?;
+        Some(if pending.cancelled {
+            MANAGED_OPERATION_CLEANUP
+        } else if pending.handoff {
+            MANAGED_OPERATION_HANDOFF
+        } else if self.staged.is_some() {
+            MANAGED_OPERATION_STAGED
+        } else {
+            MANAGED_OPERATION_PREPARING
+        })
+    }
+
+    pub(super) fn abort_cancelled(&mut self) {
+        if self.pending.is_some_and(|pending| pending.cancelled) && self.staged.is_some() {
+            self.abort_staged()
+                .expect("cancelled staged installation retains retirement capacity");
         }
     }
 
@@ -275,8 +404,8 @@ impl ControlSlot {
     }
 
     /// Only for the future validated handoff caller. No public safety boolean.
-    /// Modeled admission is reserved; authority, correlated sink acknowledgement,
-    /// CPU0/global worker ownership and calibrated physical timing eligibility
+    /// Modeled admission, CPU0 ownership and worker custody are connected.
+    /// Authority, correlated sink acknowledgement and calibrated physical timing
     /// remain unresolved. Production has no caller; tests supply this boundary.
     pub(crate) fn commit_validated_handoff(&mut self, id: u64) -> Result<u64, BpfError> {
         let pending = self
@@ -452,6 +581,14 @@ impl RetireBatch {
 }
 
 impl Retirement {
+    pub(super) fn permits_instance(&self, id: u64) -> bool {
+        !self.releasing && self.instance == Some(id)
+    }
+
+    pub(super) fn permits_artifact(&self, handle: u32) -> bool {
+        !self.releasing && self.instance.is_none() && self.artifact == Some(handle)
+    }
+
     /// Bounded worker attempt. Busy retains exact outstanding IDs and charges;
     /// no second extraction is possible until the first release is refunded.
     pub(super) fn begin_release(
@@ -468,9 +605,9 @@ impl Retirement {
             self.releasing = false;
         }
         let release = if let Some(id) = self.instance {
-            manager.begin_managed_instance_reclamation_for(id)?
+            manager.begin_retiring_instance(self, id)?
         } else if let Some(handle) = self.artifact {
-            manager.begin_managed_artifact_reclamation(handle)?
+            manager.begin_retiring_artifact(self, handle)?
         } else {
             return Ok(None);
         };

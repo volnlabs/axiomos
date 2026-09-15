@@ -11,6 +11,7 @@ pub enum AuditSource {
     LearnedBehavior,
     Mission,
     SyscallPwm,
+    ManagedControl,
 }
 
 /// Audit reason code shape shared by governance and ARM-A decisions.

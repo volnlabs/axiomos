@@ -17,6 +17,11 @@ pub const MANAGED_OPERATION_PREPARING: u32 = 3;
 pub const MANAGED_OPERATION_RESIDENT: u32 = 4;
 pub const MANAGED_OPERATION_FAILED: u32 = 5;
 pub const MANAGED_OPERATION_CANCELLED: u32 = 6;
+pub const MANAGED_OPERATION_STAGED: u32 = 7;
+pub const MANAGED_OPERATION_HANDOFF: u32 = 8;
+pub const MANAGED_OPERATION_COMMITTED: u32 = 9;
+/// Cancellation/failure still owns cleanup work; this is not a terminal receipt.
+pub const MANAGED_OPERATION_CLEANUP: u32 = 10;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, FromBytes, IntoBytes, KnownLayout, Immutable)]

@@ -394,7 +394,7 @@ impl BpfManager {
         if self.managed_slot_busy
             || self.managed_instance_preparation.is_some()
             || self.managed_reclamation.is_some()
-            || self.preparation.accepted()
+            || self.preparation.upload_accepted()
         {
             return Err(BpfError::ObjectBusy);
         }
@@ -591,10 +591,11 @@ impl BpfManager {
         }
     }
 
-    fn next_reclamation_id(&self) -> Result<u64, BpfError> {
-        if self.managed_reclamation.is_some()
+    fn next_reclamation_id(&self, retirement: bool) -> Result<u64, BpfError> {
+        if (self.managed_slot_busy && !retirement)
+            || self.managed_reclamation.is_some()
             || self.managed_instance_preparation.is_some()
-            || self.preparation.accepted()
+            || self.preparation.upload_accepted()
         {
             return Err(BpfError::ObjectBusy);
         }
@@ -629,7 +630,26 @@ impl BpfManager {
         &mut self,
         id: u64,
     ) -> Result<ManagedReclamation, BpfError> {
-        let reclamation_id = self.next_reclamation_id()?;
+        self.extract_managed_instance(id, false)
+    }
+
+    pub(super) fn begin_retiring_instance(
+        &mut self,
+        retirement: &super::installation::Retirement,
+        id: u64,
+    ) -> Result<ManagedReclamation, BpfError> {
+        if !retirement.permits_instance(id) {
+            return Err(BpfError::NotLoaded);
+        }
+        self.extract_managed_instance(id, true)
+    }
+
+    fn extract_managed_instance(
+        &mut self,
+        id: u64,
+        retirement: bool,
+    ) -> Result<ManagedReclamation, BpfError> {
+        let reclamation_id = self.next_reclamation_id(retirement)?;
         let slot = self
             .managed_instances
             .iter_mut()
@@ -713,7 +733,26 @@ impl BpfManager {
         &mut self,
         artifact_id: u32,
     ) -> Result<ManagedReclamation, BpfError> {
-        let reclamation_id = self.next_reclamation_id()?;
+        self.extract_managed_artifact(artifact_id, false)
+    }
+
+    pub(super) fn begin_retiring_artifact(
+        &mut self,
+        retirement: &super::installation::Retirement,
+        artifact_id: u32,
+    ) -> Result<ManagedReclamation, BpfError> {
+        if !retirement.permits_artifact(artifact_id) {
+            return Err(BpfError::NotLoaded);
+        }
+        self.extract_managed_artifact(artifact_id, true)
+    }
+
+    fn extract_managed_artifact(
+        &mut self,
+        artifact_id: u32,
+        retirement: bool,
+    ) -> Result<ManagedReclamation, BpfError> {
+        let reclamation_id = self.next_reclamation_id(retirement)?;
         if self.preparation.candidate == Some(artifact_id) {
             return Err(BpfError::ObjectBusy);
         }

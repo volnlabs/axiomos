@@ -11,24 +11,99 @@
 //! Therefore IO_BANK0 arrives at GIC SPI 128, interrupt ID 160. The PCIe2
 //! legacy INTA mapping (SPI 229 / ID 261) is not the RP1 MSI-X GPIO path.
 
-#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
-use core::sync::atomic::{AtomicBool, Ordering};
+#[cfg(all(
+    feature = "rpi5",
+    feature = "bringup-diagnostics",
+    not(feature = "managed-runtime")
+))]
+use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicU8, Ordering};
+
+use kernel_time::periodic::{PeriodicRelease, PeriodicSchedule, ReleaseError, ReleaseStats};
+use spin::Mutex;
 
 use super::gic;
 
 /// Non-secure physical timer IRQ number (PPI 14 = IRQ 30)
 const TIMER_IRQ: u32 = gic::irq::TIMER_PHYS;
 
+struct TimerState {
+    schedule: PeriodicSchedule,
+    last_release: Option<PeriodicRelease>,
+    completion_misses: u64,
+}
+
+static TIMER: Mutex<Option<TimerState>> = Mutex::new(None);
+// Sticky first failure, including a failed try_lock where TIMER cannot be written.
+static TIMER_FAULT: AtomicU8 = AtomicU8::new(0);
+
+#[derive(Clone, Copy, Debug)]
+#[repr(u8)]
+pub enum TimerFault {
+    Busy = 1,
+    NotStarted,
+    AlreadyStarted,
+    InvalidPeriod,
+    ClockReversed,
+    Exhausted,
+    Stopped,
+}
+
+impl From<ReleaseError> for TimerFault {
+    fn from(error: ReleaseError) -> Self {
+        match error {
+            ReleaseError::InvalidPeriod => Self::InvalidPeriod,
+            ReleaseError::ClockReversed => Self::ClockReversed,
+            ReleaseError::Exhausted => Self::Exhausted,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TimerSnapshot {
+    pub releases: ReleaseStats,
+    pub last_release: Option<PeriodicRelease>,
+    /// Completion covers timer work before EOI and scheduler dispatch.
+    pub completion_misses: u64,
+    /// Zero is healthy; otherwise the first TimerFault discriminant.
+    pub fault_code: u8,
+}
+
+pub fn timer_snapshot() -> Option<TimerSnapshot> {
+    crate::mcore::context::with_interrupts_masked(|| {
+        let timer = TIMER.try_lock()?;
+        let state = timer.as_ref()?;
+        Some(TimerSnapshot {
+            releases: state.schedule.stats(),
+            last_release: state.last_release,
+            completion_misses: state.completion_misses,
+            fault_code: TIMER_FAULT.load(Ordering::Relaxed),
+        })
+    })
+}
+
 /// RP1 IO_BANK0 MSI-X vector 0: MIP0 SPI 128 + the GIC SPI base of 32.
 #[cfg(feature = "rpi5")]
 const RP1_GPIO_IRQ: u32 = 160;
 
-#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
+#[cfg(all(
+    feature = "rpi5",
+    feature = "bringup-diagnostics",
+    not(feature = "managed-runtime")
+))]
 static TIMER_IRQ_MARKER_SENT: AtomicBool = AtomicBool::new(false);
-#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
+#[cfg(all(
+    feature = "rpi5",
+    feature = "bringup-diagnostics",
+    not(feature = "managed-runtime")
+))]
 static FIRST_IRQ_MARKER_SENT: AtomicBool = AtomicBool::new(false);
 
-#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
+#[cfg(all(
+    feature = "rpi5",
+    feature = "bringup-diagnostics",
+    not(feature = "managed-runtime")
+))]
 #[inline(always)]
 fn dbg_mark(_ch: u32) {
     // SAFETY: Write to Pi 5 debug UART10 data register.
@@ -37,7 +112,11 @@ fn dbg_mark(_ch: u32) {
     }
 }
 
-#[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
+#[cfg(all(
+    feature = "rpi5",
+    feature = "bringup-diagnostics",
+    not(feature = "managed-runtime")
+))]
 #[inline(always)]
 fn dbg_hex_nibble(v: u32) -> u32 {
     match v & 0xF {
@@ -63,8 +142,9 @@ pub fn init() {
         gic::set_priority(RP1_GPIO_IRQ, 0x80);
     }
 
-    // Initialize and start the timer
-    init_timer();
+    // The release schedule starts after CPU0 context exists, immediately before
+    // main enables IRQs. Early boot initialization is not a running executor.
+    clear_timer_interrupt();
 
     #[cfg(feature = "rpi5")]
     log::info!(
@@ -97,7 +177,11 @@ pub extern "C" fn handle_irq(_ctx: &mut ExceptionContext) {
         return;
     }
 
-    #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
+    #[cfg(all(
+        feature = "rpi5",
+        feature = "bringup-diagnostics",
+        not(feature = "managed-runtime")
+    ))]
     if !FIRST_IRQ_MARKER_SENT.swap(true, Ordering::Relaxed) {
         // Emit "M" + 3 hex nibbles of IRQ ID once (e.g., M01E for IRQ 30).
         dbg_mark(b'M' as u32);
@@ -110,12 +194,16 @@ pub extern "C" fn handle_irq(_ctx: &mut ExceptionContext) {
 
     // Dispatch based on IRQ number
     if irq == TIMER_IRQ {
-        #[cfg(all(feature = "rpi5", feature = "bringup-diagnostics"))]
+        #[cfg(all(
+            feature = "rpi5",
+            feature = "bringup-diagnostics",
+            not(feature = "managed-runtime")
+        ))]
         if !TIMER_IRQ_MARKER_SENT.swap(true, Ordering::Relaxed) {
             dbg_mark(b't' as u32);
         }
 
-        handle_timer_interrupt(_ctx);
+        let serviced = handle_timer_interrupt(_ctx);
         // Signal end of interrupt for timer
         gic::end_of_interrupt(iar);
 
@@ -124,8 +212,11 @@ pub extern "C" fn handle_irq(_ctx: &mut ExceptionContext) {
 
         // Trigger scheduler tick (may cause context switch)
         // We do this AFTER EOI so that new tasks don't inherit the active interrupt state
-        log::trace!("Calling timer_tick");
-        super::cpu::timer_tick();
+        if serviced {
+            #[cfg(not(feature = "managed-runtime"))]
+            log::trace!("Calling timer_tick");
+            super::cpu::timer_tick();
+        }
     } else {
         match irq {
             #[cfg(feature = "rpi5")]
@@ -133,6 +224,7 @@ pub extern "C" fn handle_irq(_ctx: &mut ExceptionContext) {
                 crate::arch::aarch64::platform::rpi5::gpio::handle_interrupt();
             }
             _ => {
+                #[cfg(not(feature = "managed-runtime"))]
                 log::warn!("Unhandled IRQ: {}", irq);
             }
         }
@@ -142,11 +234,16 @@ pub extern "C" fn handle_irq(_ctx: &mut ExceptionContext) {
 }
 
 /// Handle timer interrupt (without rescheduling)
-fn handle_timer_interrupt(ctx: &ExceptionContext) {
-    // log::info!("Timer interrupt started");
-    // Clear and reset timer for next interrupt
+fn handle_timer_interrupt(_ctx: &ExceptionContext) -> bool {
     clear_timer_interrupt();
-    set_next_timer();
+    let release = match set_next_timer() {
+        Ok(Some(release)) => release,
+        Ok(None) => return false,
+        Err(error) => {
+            timer_failed(error);
+            return false;
+        }
+    };
 
     crate::mcore::mtask::scheduler::sleep::TaskSleep::wake_expired(
         crate::time::get_monotonic_time_ns(),
@@ -154,6 +251,7 @@ fn handle_timer_interrupt(ctx: &ExceptionContext) {
 
     // Build the timer context, then resolve the bounded hook snapshot without
     // allocating while the interrupt is active.
+    #[cfg(not(feature = "managed-runtime"))]
     {
         // Calculate interrupt latency from vector entry to now
         let mut bpf_ctx = kernel_bpf::execution::BpfContext::empty();
@@ -170,7 +268,7 @@ fn handle_timer_interrupt(ctx: &ExceptionContext) {
         unsafe {
             let now: u64;
             core::arch::asm!("mrs {}, cntvct_el0", out(reg) now);
-            let latency_ticks = now.saturating_sub(ctx.vector_entry_timestamp);
+            let latency_ticks = now.saturating_sub(_ctx.vector_entry_timestamp);
 
             // Convert ticks to nanoseconds: ns = ticks * 1,000,000,000 / freq
             let freq: u64;
@@ -186,8 +284,27 @@ fn handle_timer_interrupt(ctx: &ExceptionContext) {
             "timer",
         );
     }
-    #[cfg(all(feature = "rpi5", feature = "bench"))]
+    #[cfg(all(feature = "rpi5", feature = "bench", not(feature = "managed-runtime")))]
     crate::serial::drain_bench_buffer();
+
+    if !release.completed_in_time(physical_counter()) {
+        let Some(mut timer) = TIMER.try_lock() else {
+            timer_failed(TimerFault::Busy);
+            return false;
+        };
+        let Some(state) = timer.as_mut() else {
+            drop(timer);
+            timer_failed(TimerFault::NotStarted);
+            return false;
+        };
+        let Some(misses) = state.completion_misses.checked_add(1) else {
+            drop(timer);
+            timer_failed(TimerFault::Exhausted);
+            return false;
+        };
+        state.completion_misses = misses;
+    }
+    true
 }
 
 /// Clear timer interrupt
@@ -195,39 +312,79 @@ fn clear_timer_interrupt() {
     // SAFETY: Writing to CNTP_CTL_EL0 is safe in EL1/EL0. Disabling the timer clears the interrupt.
     unsafe {
         // Disable timer to clear interrupt
-        core::arch::asm!("msr cntp_ctl_el0, {}", in(reg) 0u64);
+        core::arch::asm!("msr cntp_ctl_el0, {}", "isb", in(reg) 0u64);
     }
 }
 
-/// Set next timer interrupt
-fn set_next_timer() {
-    // SAFETY: Accessing timer registers (CNTP_*) is safe in EL1. We are configuring the
-    // non-secure physical timer for the next scheduler tick.
+fn physical_counter() -> u64 {
+    let count: u64;
+    // SAFETY: EL1 can read CNTPCT; it uses the same counter as CNTP_CVAL.
     unsafe {
-        // Read timer frequency
-        let cntfrq: u64;
-        core::arch::asm!("mrs {}, cntfrq_el0", out(reg) cntfrq);
+        core::arch::asm!("isb", "mrs {}, cntpct_el0", out(reg) count);
+    }
+    count
+}
 
-        // Read current physical counter value. This must match CNTP_* timer state.
-        let cntpct: u64;
-        core::arch::asm!("mrs {}, cntpct_el0", out(reg) cntpct);
-
-        // Set timer to fire in 10ms (100 Hz)
-        let interval = cntfrq / 100;
-        let next = cntpct + interval;
-
-        // Write compare value
+fn arm_timer(next: u64) {
+    // SAFETY: EL1 owns this CPU's physical timer. The caller serializes updates
+    // with IRQs masked; the compare uses the physical counter's tick domain.
+    unsafe {
         core::arch::asm!("msr cntp_cval_el0, {}", in(reg) next);
-
-        // Enable timer (bit 0 = enable, bit 1 = mask output)
-        core::arch::asm!("msr cntp_ctl_el0, {}", in(reg) 1u64);
+        core::arch::asm!("msr cntp_ctl_el0, {}", "isb", in(reg) 1u64);
     }
 }
 
-/// Initialize timer
-pub fn init_timer() {
-    set_next_timer();
-    log::debug!("ARM generic timer initialized (100 Hz)");
+/// No allocation, manager lock, waiting or deadline rebasing in the IRQ.
+fn set_next_timer() -> Result<Option<PeriodicRelease>, TimerFault> {
+    if TIMER_FAULT.load(Ordering::Relaxed) != 0 {
+        return Err(TimerFault::Stopped);
+    }
+    let mut timer = TIMER.try_lock().ok_or(TimerFault::Busy)?;
+    let state = timer.as_mut().ok_or(TimerFault::NotStarted)?;
+    let release = state.schedule.release(physical_counter())?;
+    if release.is_some() {
+        state.last_release = release;
+    }
+    arm_timer(state.schedule.next_deadline());
+    Ok(release)
+}
+
+fn timer_failed(error: TimerFault) {
+    let first = TIMER_FAULT
+        .compare_exchange(0, error as u8, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok();
+    clear_timer_interrupt();
+    // Bounded trusted stop; local enqueue is not remote sink acknowledgement.
+    if first {
+        crate::actuation::trigger_estop(kernel_bpf::actuation::AuditSource::ManagedControl);
+    }
+}
+
+/// Start once, after CPU0 initialization and immediately before enabling IRQs.
+pub fn init_timer() -> Result<(), TimerFault> {
+    crate::mcore::context::with_interrupts_masked(|| {
+        let mut timer = TIMER.try_lock().ok_or(TimerFault::Busy)?;
+        if timer.is_some() || TIMER_FAULT.load(Ordering::Relaxed) != 0 {
+            return Err(TimerFault::AlreadyStarted);
+        }
+        let frequency: u64;
+        // SAFETY: EL1 may read the architectural counter frequency.
+        unsafe {
+            core::arch::asm!("mrs {}, cntfrq_el0", out(reg) frequency);
+        }
+        // Refuse clocks that cannot represent exactly 10 ms in whole ticks.
+        if frequency == 0 || frequency % 100 != 0 {
+            return Err(TimerFault::InvalidPeriod);
+        }
+        let schedule = PeriodicSchedule::new(physical_counter(), frequency / 100)?;
+        arm_timer(schedule.next_deadline());
+        *timer = Some(TimerState {
+            schedule,
+            last_release: None,
+            completion_misses: 0,
+        });
+        Ok(())
+    })
 }
 
 /// End of interrupt (public wrapper)

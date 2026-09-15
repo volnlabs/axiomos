@@ -93,15 +93,14 @@ pub trait PhysicalProfile: sealed::Sealed + 'static {
     ///   load regardless of admission.
     const WCET_CYCLE_BUDGET: u64;
 
-    /// Calibrated cost of one WCET cycle unit, in nanoseconds, on this profile's
-    /// target. The Pi5 A76 JIT measured ~5.74 ns/unit (`docs/performance/current-results.md §12`,
-    /// straight-line baseline); rounded up to 6 for a conservative bound. Used
-    /// to convert a program's `wcet_cycles` into wall-clock time for the
-    /// utilization admission test.
+    /// Modeled nanoseconds per WCET cycle unit for utilization admission.
+    /// This coefficient is not a measured interpreter bound. Qualification must
+    /// recalibrate the shipped interpreter, permitted helpers, private state,
+    /// request handling and recorder overhead before making a timing claim.
     ///
     /// - Cloud: 1 (timing is not a contract; the value never bites because the
     ///   utilization budget is unbounded)
-    /// - Embedded: 6 ns/unit
+    /// - Embedded: 6 ns/unit (unqualified model value)
     const CYCLE_UNIT_NS: u64;
 
     /// The control-loop period this profile schedules hooks against, in
@@ -109,7 +108,7 @@ pub trait PhysicalProfile: sealed::Sealed + 'static {
     /// period) and the default hook fire frequency for admission.
     ///
     /// - Cloud: effectively unbounded
-    /// - Embedded: 1_000_000 ns (a 1 kHz control loop)
+    /// - Embedded: 10_000_000 ns (a 100 Hz control loop)
     const RT_PERIOD_NS: u64;
 
     /// CPU-time budget for *all* admitted BPF hooks, in nanoseconds of execution
@@ -135,7 +134,7 @@ pub trait PhysicalProfile: sealed::Sealed + 'static {
 
     /// Slew-rate window in nanoseconds. 0 disables slew limiting.
     /// - Cloud: 0 (disabled)
-    /// - Embedded: 1_000_000 (one 1 kHz control period)
+    /// - Embedded: 1_000_000 (independent 1 ms slew window)
     const ACT_RATE_WINDOW_NS: u64;
 }
 
@@ -215,7 +214,7 @@ impl PhysicalProfile for CloudProfile {
 ///
 /// # Guarantees
 ///
-/// - Predictable execution time (WCET bounded)
+/// - Bounded verifier cost under the model; physical timing requires qualification
 /// - Profile-bounded map allocations
 /// - Synchronous interpreter execution through immutable hook snapshots
 /// - Aggregate WCET utilization admission
@@ -236,22 +235,22 @@ impl PhysicalProfile for EmbeddedProfile {
     /// 100K instructions (hard limit for WCET)
     const MAX_INSN_COUNT: usize = 100_000;
 
-    /// No JIT - interpreter or AOT only
+    /// The shipped runtime uses the interpreter.
     const JIT_ALLOWED: bool = false;
 
     /// Profile-local ceiling applied before the kernel manager's quotas.
     const MEMORY_BUDGET: usize = 64 * 1024;
 
     /// One control-loop period's worth of cycle units
-    /// (`RT_PERIOD_NS / CYCLE_UNIT_NS` = 1_000_000 / 6 ≈ 166_666): a single hook
-    /// invocation that cannot fit one period is unschedulable at any frequency.
+    /// (`RT_PERIOD_NS / CYCLE_UNIT_NS` = 10_000_000 / 6 ≈ 1_666_666).
+    /// Aggregate modeled utilization is separately capped at 50%.
     const WCET_CYCLE_BUDGET: u64 = Self::RT_PERIOD_NS / Self::CYCLE_UNIT_NS;
 
-    /// Pi5 A76 JIT: ~5.74 ns/unit measured, rounded up to 6 (docs/performance/current-results.md §12).
+    /// Retained model coefficient, pending shipped-interpreter qualification.
     const CYCLE_UNIT_NS: u64 = 6;
 
-    /// 1 kHz control loop.
-    const RT_PERIOD_NS: u64 = 1_000_000;
+    /// 100 Hz control loop.
+    const RT_PERIOD_NS: u64 = 10_000_000;
 
     /// U = 0.5: at most half a core spent across all admitted BPF hooks.
     const UTILIZATION_BUDGET_NS_PER_S: u64 = 500_000_000;
@@ -318,6 +317,8 @@ mod tests {
     fn embedded_profile_forbids_jit() {
         assert!(!EmbeddedProfile::JIT_ALLOWED);
         assert_eq!(EmbeddedProfile::MEMORY_BUDGET, 64 * 1024);
+        assert_eq!(EmbeddedProfile::RT_PERIOD_NS, 10_000_000);
+        assert_eq!(EmbeddedProfile::UTILIZATION_BUDGET_NS_PER_S, 500_000_000);
     }
 
     #[test]
