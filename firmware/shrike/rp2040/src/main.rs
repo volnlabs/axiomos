@@ -8,11 +8,12 @@
 
 #[cfg(feature = "fpga-runtime")]
 compile_error!(
-    "fpga-runtime is disabled until the generated artifact/timing and atomic control-loop adapter exist"
+    "fpga-runtime is disabled until the exact artifact, runtime profile and bilateral session path are qualified"
 );
 
 #[allow(dead_code)]
 mod board;
+mod inputs;
 #[allow(dead_code)]
 mod spi;
 mod uart;
@@ -22,14 +23,18 @@ use embedded_hal::digital::{OutputPin, PinState};
 use embedded_hal::pwm::SetDutyCycle;
 use hal::clocks::Clock;
 use hal::pac;
+use inputs::{ActiveLowEstop, PollingUltrasonic, UltrasonicTiming};
 use panic_halt as _;
 use rp2040_hal as hal;
 use shrike_control::fpga::{
     BitstreamError, BitstreamImage, BitstreamManifest, FpgaLifecycle, FpgaPlatform,
     RUNTIME_STATUS_REQUEST, STATUS_READY,
 };
-use shrike_control::transport::{LinkQuiescence, TelemetryTx};
-use shrike_control::MicrosClock;
+use shrike_control::requalification::{
+    prepare, RequalificationRequest, StoppedReceiver, MAX_POLLS,
+};
+use shrike_control::transport::{LinkQuiescence, TelemetryTx, TransportError};
+use shrike_control::{run, ByteIo, Config, MicrosClock, MotorPairSink, RunTermination};
 use shrike_link::Decoder;
 use spi::{Registers, RuntimeSpi};
 use uart::{TimerClock, UartByteIo};
@@ -41,8 +46,8 @@ pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 const XTAL_HZ: u32 = 12_000_000;
 
 /// This can become `Some((manifest, ready_timeout_us))` only with the generated
-/// image and a calibrated device timing contract. Runtime is still compile-time
-/// disabled until its atomic control-loop adapter exists.
+/// image and a calibrated device timing contract. Runtime remains compile-time
+/// disabled pending the complete bilateral session and hardware qualification.
 const VALIDATED_FPGA_ARTIFACT: Option<(BitstreamManifest, u64)> = None;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +64,20 @@ struct FpgaProfile {
     runtime: spi::RuntimeEntry,
     configuration_timeout_us: u64,
 }
+
+/// Candidate acquisition/link timing is explicit and remains unqualified.
+/// No default can select FPGA power, motor output or sensor acquisition.
+#[derive(Clone, Copy)]
+struct RuntimeProfile {
+    fpga: FpgaProfile,
+    ultrasonic: UltrasonicTiming,
+    session_timeout_us: u64,
+    command_timeout_us: u64,
+    ping_period_us: u64,
+    heartbeat_period_us: u64,
+}
+
+const VALIDATED_RUNTIME_PROFILE: Option<RuntimeProfile> = None;
 
 /// Owns every safety-relevant R0.4 output. Unsupported operations return an
 /// error because this checkout lacks the vendor timing and generated image.
@@ -273,16 +292,11 @@ fn main() -> ! {
         spi,
         clock: &clock,
         image: None,
-        profile: None,
+        profile: VALIDATED_RUNTIME_PROFILE.map(|profile| profile.fpga),
     };
     let mut lifecycle = FpgaLifecycle::new(platform);
 
-    // No operational `Some` path exists yet: enabling runtime requires one
-    // atomic adapter for the existing UART/watchdog/e-stop control loop, not
-    // two independent MotorChannel writes. The feature above fails at compile
-    // time until that adapter and the generated artifact contract are added.
-    let _ = VALIDATED_FPGA_ARTIFACT;
-    lifecycle.fail_safe("FPGA runtime integration/artifact unavailable");
+    lifecycle.fail_safe("waiting for explicit runtime qualification");
 
     // board::PI_UART: UART0 TX/RX on GPIO16/17, owned only by this adapter.
     let uart_pins = (
@@ -296,18 +310,111 @@ fn main() -> ! {
         clocks.peripheral_clock.freq().to_Hz(),
     )
     .unwrap_or_else(|_| stopped());
+    if drain_stopped(&mut io, &clock, &mut lifecycle).is_err() {
+        stopped();
+    }
+    let (Some(profile), Some((manifest, ready_timeout_us))) =
+        (VALIDATED_RUNTIME_PROFILE, VALIDATED_FPGA_ARTIFACT)
+    else {
+        lifecycle.fail_safe("runtime profile/artifact unavailable");
+        stopped();
+    };
+    if profile.session_timeout_us <= 2 * (LinkQuiescence::QUIET_US + 1)
+        || profile.command_timeout_us == 0
+        || profile.ping_period_us < profile.ultrasonic.max_attempt_us
+        || profile.heartbeat_period_us == 0
+    {
+        stopped();
+    }
+
+    // Intended external wiring: low/open is stopped; qualify the independent
+    // FPGA e-stop path and this GPIO5 observation before selecting a profile.
+    let mut estop = ActiveLowEstop::new(pins.gpio5.into_pull_down_input());
+    let mut ultra = PollingUltrasonic::new(
+        pins.gpio10.into_push_pull_output_in_state(PinState::Low),
+        pins.gpio11.into_pull_down_input(),
+        &clock,
+        profile.ultrasonic,
+    )
+    .unwrap_or_else(|_| stopped());
+
+    loop {
+        let mut receiver = StoppedReceiver::new();
+        let session = loop {
+            match receiver.poll(&mut io, &mut estop) {
+                Ok(Some(session)) => break session,
+                Ok(None) => cortex_m::asm::nop(),
+                Err(_) => {
+                    // No accepted operation is retried. Remain inhibited and
+                    // clear framing before receiving a new explicit request.
+                    if ultra.reset().is_err()
+                        || drain_stopped(&mut io, &clock, &mut lifecycle).is_err()
+                    {
+                        stopped();
+                    }
+                    receiver = StoppedReceiver::new();
+                }
+            }
+        };
+        let mut requested_session = session;
+        while let Some(deadline_us) = clock.now_us().checked_add(profile.session_timeout_us) {
+            let request = RequalificationRequest {
+                session: requested_session,
+                manifest,
+                ready_timeout_us,
+                deadline_us,
+            };
+            if prepare(request, &mut io, &clock, &mut estop, &mut lifecycle).is_err() {
+                break;
+            }
+            let result = run(
+                &mut io,
+                &clock,
+                &mut ultra,
+                &mut estop,
+                &mut lifecycle,
+                Config {
+                    expected_session: Some(requested_session),
+                    offer_deadline_us: deadline_us,
+                    link_timeout_us: profile.command_timeout_us,
+                    ping_period_us: profile.ping_period_us,
+                    peer_heartbeat_period_us: profile.heartbeat_period_us,
+                },
+                None,
+            );
+            if ultra.reset().is_err() {
+                stopped();
+            }
+            match result.map(|summary| summary.termination) {
+                // The running loop already inhibited and finished its old TX
+                // frame before returning this new explicit request.
+                Some(RunTermination::Requalify { session }) => requested_session = session,
+                _ => break,
+            }
+        }
+        if ultra.reset().is_err() || drain_stopped(&mut io, &clock, &mut lifecycle).is_err() {
+            stopped();
+        }
+    }
+}
+
+/// Reuse the same inhibited UART drain for boot and terminal recovery. Waiting
+/// for a new explicit request does not reconfigure the FPGA or release e-stop.
+fn drain_stopped(
+    io: &mut impl ByteIo,
+    clock: &impl MicrosClock,
+    lifecycle: &mut impl MotorPairSink,
+) -> Result<(), TransportError> {
     let mut decoder = Decoder::new();
     let mut tx = TelemetryTx::new();
-    let mut drain = LinkQuiescence::begin(&mut io, &mut lifecycle, &mut decoder, &mut tx, &clock)
-        .unwrap_or_else(|_| stopped());
-
-    // One bounded local drain pass per iteration. Both success and failure
-    // remain inhibited: local quiet is neither peer qualification nor rearm.
-    while let Ok(false) = drain.poll(&mut io, &clock) {
+    let mut drain = LinkQuiescence::begin(io, lifecycle, &mut decoder, &mut tx, clock)?;
+    for _ in 0..MAX_POLLS {
+        if drain.poll(io, clock)? {
+            return Ok(());
+        }
         cortex_m::asm::nop();
     }
-    lifecycle.fail_safe("local drain ended; runtime remains unavailable");
-    stopped()
+    Err(TransportError::PollLimit)
 }
 
 fn stopped() -> ! {

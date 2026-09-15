@@ -7,3 +7,11 @@ description = "Host-only simulation of shrike_control. Provides mock implementat
 [dependencies]
 shrike_control = { path = "../control" }
 shrike_link = { path = "../../../kernel/crates/shrike_link" }
+
+[dev-dependencies]
+# Exercise the actual GPIO adapter using the same installed HAL traits.
+embedded-hal = "1.0"
+
+[[test]]
+name = "input_adapter"
+path = "../rp2040/host-tests/input_adapter.rs"

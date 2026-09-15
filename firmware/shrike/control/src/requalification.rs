@@ -6,7 +6,81 @@ use shrike_link::{Decoder, Msg};
 
 use crate::fpga::{BitstreamManifest, FpgaLifecycle, FpgaPlatform, LifecycleError};
 use crate::transport::{LinkQuiescence, TelemetryTx, TransportError};
-use crate::{ByteIo, EstopLine, MicrosClock};
+use crate::{ByteIo, EstopLine, FaultReason, MicrosClock, RunTermination, StopReason};
+
+/// Bounded receiver used only while the outer owner already inhibits outputs.
+/// A complete request is returned only after RX idle, so following buffered
+/// stop/traffic cannot be erased by preparation's reset into successful rearm.
+/// Errors poison this receiver; the owner must reset/drain before replacing it.
+#[derive(Default)]
+pub struct StoppedReceiver {
+    decoder: Decoder,
+    request: Option<NonZeroU32>,
+    failed: Option<RunTermination>,
+}
+
+impl StoppedReceiver {
+    pub const fn new() -> Self {
+        Self {
+            decoder: Decoder::new(),
+            request: None,
+            failed: None,
+        }
+    }
+
+    /// At most 64 nonblocking reads; neither TX nor the FPGA is touched.
+    pub fn poll(
+        &mut self,
+        io: &mut impl ByteIo,
+        estop: &mut impl EstopLine,
+    ) -> Result<Option<NonZeroU32>, RunTermination> {
+        if let Some(failed) = self.failed {
+            return Err(failed);
+        }
+        let result = (|| {
+            for _ in 0..64 {
+                if estop.asserted() {
+                    return Err(RunTermination::Stop(StopReason::HardwareEstop));
+                }
+                let byte = io
+                    .read()
+                    .map_err(|_| RunTermination::Fault(FaultReason::Io))?;
+                if estop.asserted() {
+                    return Err(RunTermination::Stop(StopReason::HardwareEstop));
+                }
+                let Some(byte) = byte else {
+                    return Ok(self.request.take());
+                };
+                if self.request.is_some() {
+                    return Err(RunTermination::Fault(FaultReason::UnexpectedMessage));
+                }
+                match self.decoder.push(byte) {
+                    Some(Ok(Msg::Requalify { session })) => {
+                        self.request = Some(
+                            NonZeroU32::new(session)
+                                .ok_or(RunTermination::Fault(FaultReason::UnexpectedMessage))?,
+                        );
+                    }
+                    Some(Ok(Msg::Estop { .. })) => {
+                        return Err(RunTermination::Stop(StopReason::SoftwareEstop));
+                    }
+                    Some(Ok(_)) => {
+                        return Err(RunTermination::Fault(FaultReason::UnexpectedMessage));
+                    }
+                    Some(Err(_)) => return Err(RunTermination::Fault(FaultReason::Decode)),
+                    None => {}
+                }
+            }
+            Ok(None)
+        })();
+        if let Err(failed) = result {
+            self.failed = Some(failed);
+            self.request = None;
+            self.decoder = Decoder::new();
+        }
+        result
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct RequalificationRequest {

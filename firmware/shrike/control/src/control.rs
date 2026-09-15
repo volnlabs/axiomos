@@ -34,8 +34,9 @@ pub trait ByteIo {
 }
 
 /// Atomic paired-motor boundary owned by the FPGA lifecycle. Before calling
-/// [`run`], the outer driver must configure the sink and establish zero output;
-/// the loop never configures, rearms, or creates a new control session.
+/// [`run`], the outer driver configures reset state without a command. Managed
+/// execution accepts its initial zero only after the exact session offer; the
+/// loop never configures or rearms a stopped FPGA.
 pub trait MotorPairSink {
     type Error;
 

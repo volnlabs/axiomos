@@ -119,6 +119,7 @@ struct Io {
     state: Rc<State>,
     writes: u32,
     idle_calls: u32,
+    stop_on_rx_idle: bool,
 }
 impl Io {
     fn new(state: Rc<State>) -> Self {
@@ -127,6 +128,7 @@ impl Io {
             state,
             writes: 0,
             idle_calls: 0,
+            stop_on_rx_idle: false,
         }
     }
 }
@@ -139,7 +141,11 @@ impl ByteIo for Io {
         if let Some(byte) = self.state.rx.borrow_mut().pop_front() {
             return Ok(Some(byte));
         }
-        self.inner.read()
+        let result = self.inner.read();
+        if self.stop_on_rx_idle && result == Ok(None) {
+            self.state.stopped.set(true);
+        }
+        result
     }
     fn try_write(&mut self, bytes: &[u8]) -> Result<usize, ()> {
         self.writes += 1;
@@ -533,11 +539,27 @@ fn preparation_rejects_expired_deadline_overflow_and_frozen_drain() {
 
 #[test]
 fn prepared_composes_with_exact_offer_after_pi_quiet_and_rejects_late_offer() {
+    use shrike_control::requalification::StoppedReceiver;
     for late in [false, true] {
         let state = State::new(None);
         let mut io = Io::new(state.clone());
         let mut fpga = fpga(state.clone());
         let req = request();
+        let mut requalify = [0; MAX_FRAME];
+        let n = encode(
+            &Msg::Requalify {
+                session: req.session.get(),
+            },
+            &mut requalify,
+        )
+        .unwrap();
+        state.rx.borrow_mut().extend(&requalify[..n]);
+        assert_eq!(
+            StoppedReceiver::new().poll(&mut io, &mut Estop(state.clone())),
+            Ok(Some(req.session))
+        );
+        assert!(io.inner.output.is_empty());
+        assert!(state.commands.borrow().is_empty());
         prepare(
             req,
             &mut io,
@@ -659,4 +681,116 @@ fn frozen_prepared_tx_and_hardware_idle_share_the_full_preparation_poll_bound() 
             );
         }
     }
+}
+
+#[test]
+fn stopped_receiver_preserves_partial_requests_and_never_acts_or_replies() {
+    use shrike_control::requalification::StoppedReceiver;
+    let mut frame = [0; MAX_FRAME];
+    let n = encode(&Msg::Requalify { session: 7 }, &mut frame).unwrap();
+    for split in 0..n {
+        let state = State::new(None);
+        let mut io = Io::new(state.clone());
+        let mut stop = Estop(state.clone());
+        let mut receiver = StoppedReceiver::new();
+        state.rx.borrow_mut().extend(&frame[..split]);
+        assert_eq!(receiver.poll(&mut io, &mut stop), Ok(None));
+        state.rx.borrow_mut().extend(&frame[split..n]);
+        assert_eq!(receiver.poll(&mut io, &mut stop), Ok(NonZeroU32::new(7)));
+        assert_eq!(receiver.poll(&mut io, &mut stop), Ok(None));
+        assert_eq!(io.inner.resets, 0);
+        assert!(io.inner.output.is_empty());
+        assert!(state.commands.borrow().is_empty());
+    }
+}
+
+#[test]
+fn stopped_receiver_requires_rx_idle_and_rejects_following_traffic() {
+    use shrike_control::requalification::StoppedReceiver;
+    let mut frame = [0; MAX_FRAME];
+    let n = encode(&Msg::Requalify { session: 7 }, &mut frame).unwrap();
+    for trailing in [false, true] {
+        let state = State::new(None);
+        let mut io = Io::new(state.clone());
+        let mut stop = Estop(state.clone());
+        let mut receiver = StoppedReceiver::new();
+        // Complete the request at the end of the first bounded RX pass.
+        state.rx.borrow_mut().extend(vec![0; 64 - n]);
+        state.rx.borrow_mut().extend(&frame[..n]);
+        if trailing {
+            let mut other = [0; MAX_FRAME];
+            let count = encode(&Msg::Estop { assert: true }, &mut other).unwrap();
+            state.rx.borrow_mut().extend(&other[..count]);
+        }
+        assert_eq!(receiver.poll(&mut io, &mut stop), Ok(None));
+        if trailing {
+            assert!(receiver.poll(&mut io, &mut stop).is_err());
+        } else {
+            assert_eq!(receiver.poll(&mut io, &mut stop), Ok(NonZeroU32::new(7)));
+        }
+        assert!(io.inner.output.is_empty());
+    }
+}
+
+#[test]
+fn stopped_receiver_stop_io_and_decode_faults_poison_until_explicit_new_owner() {
+    use shrike_control::requalification::StoppedReceiver;
+    use shrike_control::StopReason;
+    for kind in 0..4 {
+        let state = State::new(None);
+        let mut io = Io::new(state.clone());
+        let mut stop = Estop(state.clone());
+        let mut receiver = StoppedReceiver::new();
+        let expected = match kind {
+            0 => {
+                state.stopped.set(true);
+                RunTermination::Stop(StopReason::HardwareEstop)
+            }
+            1 => {
+                state.rx_error.set(true);
+                RunTermination::Fault(FaultReason::Io)
+            }
+            2 => {
+                let mut frame = [0; MAX_FRAME];
+                let n = encode(&Msg::Requalify { session: 7 }, &mut frame).unwrap();
+                frame[n - 1] ^= 1;
+                state.rx.borrow_mut().extend(&frame[..n]);
+                RunTermination::Fault(FaultReason::Decode)
+            }
+            _ => {
+                let mut frame = [0; MAX_FRAME];
+                let n = encode(&Msg::Estop { assert: false }, &mut frame).unwrap();
+                state.rx.borrow_mut().extend(&frame[..n]);
+                RunTermination::Stop(StopReason::SoftwareEstop)
+            }
+        };
+        assert_eq!(receiver.poll(&mut io, &mut stop), Err(expected));
+        state.stopped.set(false);
+        state.rx_error.set(false);
+        let mut frame = [0; MAX_FRAME];
+        let n = encode(&Msg::Requalify { session: 8 }, &mut frame).unwrap();
+        state.rx.borrow_mut().extend(&frame[..n]);
+        let before = state.rx.borrow().len();
+        assert_eq!(receiver.poll(&mut io, &mut stop), Err(expected));
+        assert_eq!(state.rx.borrow().len(), before);
+        assert!(io.inner.output.is_empty());
+    }
+}
+
+#[test]
+fn stopped_receiver_rechecks_hardware_stop_after_the_final_idle_read() {
+    use shrike_control::requalification::StoppedReceiver;
+    use shrike_control::StopReason;
+    let state = State::new(None);
+    let mut io = Io::new(state.clone());
+    io.stop_on_rx_idle = true;
+    let mut frame = [0; MAX_FRAME];
+    let n = encode(&Msg::Requalify { session: 7 }, &mut frame).unwrap();
+    state.rx.borrow_mut().extend(&frame[..n]);
+    assert_eq!(
+        StoppedReceiver::new().poll(&mut io, &mut Estop(state.clone())),
+        Err(RunTermination::Stop(StopReason::HardwareEstop))
+    );
+    assert!(state.rx.borrow().is_empty());
+    assert!(io.inner.output.is_empty());
 }

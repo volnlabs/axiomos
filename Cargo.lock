@@ -1806,6 +1806,7 @@ version = "0.1.0"
 name = "shrike_rp2040_host_sim"
 version = "0.1.0"
 dependencies = [
+ "embedded-hal",
  "shrike_control",
  "shrike_link",
 ]
