@@ -133,9 +133,6 @@ pub const BPF_HELPER_MOTOR_PAIR_V1: i32 = 1008;
 /// Capture one managed controller wheel-pair request; never actuates hardware.
 pub const BPF_HELPER_MANAGED_MOTOR_PAIR_V1: i32 = 1009;
 
-/// Width of the slot portion of encoded BPF handles.
-pub const BPF_HANDLE_SLOT_BITS: u8 = 10;
-
 pub const MANAGED_CONTROL_CONTEXT_V1_VERSION: u32 = 1;
 pub const MANAGED_CONTROL_CONTEXT_V1_SIZE: u32 = 56;
 

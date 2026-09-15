@@ -88,6 +88,7 @@ This catalog contains only interfaces dispatched by shipped kernels. Reserved sy
 | 1004 | `BPF_HELPER_GPIO_GET` | Raspberry Pi 5 |
 | 1005 | `BPF_HELPER_PWM_WRITE` | Raspberry Pi 5 |
 | 1008 | `BPF_HELPER_MOTOR_PAIR_V1` | Raspberry Pi 5 (experimental v1) |
+| 1009 | `BPF_HELPER_MANAGED_MOTOR_PAIR_V1` | managed interpreter only |
 
 ## BPF attach types
 
