@@ -29,6 +29,9 @@ run_step managed-installer-tests cargo test --locked -p signed_bpf_loader --lib 
 run_step rp2040-uart-test-build rustc --edition 2021 -D warnings --test \
     firmware/shrike/rp2040/host-tests/uart_adapter.rs -o "$OUTPUT_DIR/rp2040-uart-tests"
 run_step rp2040-uart-tests "$OUTPUT_DIR/rp2040-uart-tests"
+run_step rp2040-spi-test-build rustc --edition 2021 -D warnings --test \
+    firmware/shrike/rp2040/host-tests/spi_adapter.rs -o "$OUTPUT_DIR/rp2040-spi-tests"
+run_step rp2040-spi-tests "$OUTPUT_DIR/rp2040-spi-tests"
 run_step kernel-host-tests env EMBEDDED_DISK_PATH=/dev/null cargo test --locked -p kernel --lib --features embedded-profile,managed-runtime
 run_step quality-boundary-static python3 -B scripts/verify/quality.py --check
 run_step artifact-provenance-static python3 scripts/verify/artifact-provenance.py

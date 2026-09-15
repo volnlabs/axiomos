@@ -13,6 +13,8 @@ compile_error!(
 
 #[allow(dead_code)]
 mod board;
+#[allow(dead_code)]
+mod spi;
 mod uart;
 
 use cortex_m_rt::entry;
@@ -22,9 +24,13 @@ use hal::clocks::Clock;
 use hal::pac;
 use panic_halt as _;
 use rp2040_hal as hal;
-use shrike_control::fpga::{BitstreamManifest, FpgaLifecycle, FpgaPlatform};
+use shrike_control::fpga::{
+    BitstreamManifest, FpgaLifecycle, FpgaPlatform, RUNTIME_STATUS_REQUEST,
+};
 use shrike_control::transport::{LinkQuiescence, TelemetryTx};
+use shrike_control::MicrosClock;
 use shrike_link::Decoder;
+use spi::{Registers, RuntimeSpi};
 use uart::{TimerClock, UartByteIo};
 
 #[link_section = ".boot2"]
@@ -39,76 +45,75 @@ const XTAL_HZ: u32 = 12_000_000;
 const VALIDATED_FPGA_ARTIFACT: Option<(BitstreamManifest, u64)> = None;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConfigurationUnavailable {
+enum PlatformError {
     MissingValidatedArtifact,
+    Spi(spi::Error),
 }
 
 /// Owns every safety-relevant R0.4 output. Unsupported operations return an
 /// error because this checkout lacks the vendor timing and generated image.
-struct R04Platform<PWR, EN, CS, RESET, RIGHT, SPI> {
+struct R04Platform<'a, PWR, EN, RESET, RIGHT, SPI> {
     pwr: PWR,
     en: EN,
-    cs: CS,
     reset: RESET,
     right_pwm: RIGHT,
-    _spi: SPI,
+    spi: RuntimeSpi<SPI>,
+    clock: &'a TimerClock,
 }
 
-impl<PWR, EN, CS, RESET, RIGHT, SPI> FpgaPlatform for R04Platform<PWR, EN, CS, RESET, RIGHT, SPI>
+impl<PWR, EN, RESET, RIGHT, SPI> FpgaPlatform for R04Platform<'_, PWR, EN, RESET, RIGHT, SPI>
 where
     PWR: OutputPin,
     EN: OutputPin,
-    CS: OutputPin,
+    SPI: Registers,
     RESET: OutputPin,
     RIGHT: SetDutyCycle,
 {
-    type Error = ConfigurationUnavailable;
+    type Error = PlatformError;
 
     fn force_safe(&mut self) {
         let _ = self.reset.set_low();
         let _ = self.right_pwm.set_duty_cycle(0);
         let _ = self.en.set_low();
         let _ = self.pwr.set_low();
-        let _ = self.cs.set_high();
+        self.spi.inhibit();
     }
 
     fn now_us(&mut self) -> u64 {
-        let timer = unsafe { &*pac::TIMER::ptr() };
-        loop {
-            let high = timer.timerawh().read().bits();
-            let low = timer.timerawl().read().bits();
-            if high == timer.timerawh().read().bits() {
-                return ((high as u64) << 32) | low as u64;
-            }
-        }
+        self.clock.now_us()
     }
 
     fn bitstream_sha256(&mut self, _: u32, _: u32) -> Result<[u8; 32], Self::Error> {
-        Err(ConfigurationUnavailable::MissingValidatedArtifact)
+        Err(PlatformError::MissingValidatedArtifact)
     }
 
     fn begin_configuration(&mut self) -> Result<(), Self::Error> {
-        Err(ConfigurationUnavailable::MissingValidatedArtifact)
+        Err(PlatformError::MissingValidatedArtifact)
     }
 
     fn stream_bitstream(&mut self, _: u32, _: u32) -> Result<(), Self::Error> {
-        Err(ConfigurationUnavailable::MissingValidatedArtifact)
+        Err(PlatformError::MissingValidatedArtifact)
     }
 
     fn ready_status(&mut self) -> Result<u8, Self::Error> {
-        Err(ConfigurationUnavailable::MissingValidatedArtifact)
+        Err(PlatformError::MissingValidatedArtifact)
     }
 
     fn handoff_to_runtime(&mut self) -> Result<(), Self::Error> {
-        Err(ConfigurationUnavailable::MissingValidatedArtifact)
+        Err(PlatformError::MissingValidatedArtifact)
     }
 
-    fn runtime_transfer(&mut self, _: &[u8; 12]) -> Result<u8, Self::Error> {
-        Err(ConfigurationUnavailable::MissingValidatedArtifact)
+    fn runtime_transfer(&mut self, frame: &[u8; 12]) -> Result<u8, Self::Error> {
+        self.spi
+            .transfer(frame)
+            .map(|reply| reply[0])
+            .map_err(PlatformError::Spi)
     }
 
     fn read_runtime_status(&mut self) -> Result<[u8; 2], Self::Error> {
-        Err(ConfigurationUnavailable::MissingValidatedArtifact)
+        self.spi
+            .transfer(&RUNTIME_STATUS_REQUEST)
+            .map_err(PlatformError::Spi)
     }
 }
 
@@ -147,6 +152,9 @@ fn main() -> ! {
     // Keep SPI disabled until the generated artifact supplies its validated
     // device timing. The pin tuple still compile-checks the exact SPI0 map.
     let spi = hal::spi::Spi::<_, _, _, 8>::new(pac.SPI0, spi_pins);
+    let clock = TimerClock::new(pac.TIMER, &mut pac.RESETS).unwrap_or_else(|_| stopped());
+    let spi = RuntimeSpi::from_disabled(spi, fpga_cs, &clock, &mut pac.RESETS)
+        .unwrap_or_else(|_| stopped());
 
     let mut pwm_slices = hal::pwm::Slices::new(pac.PWM, &mut pac.RESETS);
     let pwm = &mut pwm_slices.pwm7;
@@ -158,10 +166,10 @@ fn main() -> ! {
     let platform = R04Platform {
         pwr: fpga_pwr,
         en: fpga_en,
-        cs: fpga_cs,
         reset: fpga_reset,
         right_pwm: pwm_slices.pwm7.channel_b,
-        _spi: spi,
+        spi,
+        clock: &clock,
     };
     let mut lifecycle = FpgaLifecycle::new(platform);
 
@@ -172,7 +180,6 @@ fn main() -> ! {
     let _ = VALIDATED_FPGA_ARTIFACT;
     lifecycle.fail_safe("FPGA runtime integration/artifact unavailable");
 
-    let clock = TimerClock::new(pac.TIMER, &mut pac.RESETS).unwrap_or_else(|_| stopped());
     // board::PI_UART: UART0 TX/RX on GPIO16/17, owned only by this adapter.
     let uart_pins = (
         pins.gpio16.into_function::<hal::gpio::FunctionUart>(),

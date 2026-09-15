@@ -243,8 +243,9 @@ mod target {
         }
     }
 
-    /// The only owner of TIMER's latched read pair. No IRQ/core uses that pair;
-    /// R04Platform's existing raw-counter reads do not touch the latch.
+    /// The only owner of TIMER's latched read pair. The FPGA lifecycle, SPI
+    /// transport and control loop share this clock sequentially on CPU0; no
+    /// IRQ or other core reads the latch between the paired register reads.
     pub(crate) struct TimerClock(pac::TIMER);
 
     impl TimerClock {
