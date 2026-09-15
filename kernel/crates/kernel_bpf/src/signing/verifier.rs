@@ -130,6 +130,12 @@ impl SignatureVerifier {
         self.trusted_keys.iter().find(|k| k.id() == id)
     }
 
+    /// Managed bundles identify a trust root by its entire public key.
+    /// Never let a truncated legacy ID select a different key.
+    pub fn get_key_by_public_key(&self, public_key: &[u8; PUBLIC_KEY_LEN]) -> Option<&TrustedKey> {
+        self.trusted_keys.iter().find(|k| k.key() == public_key)
+    }
+
     /// Get the number of trusted keys.
     pub fn key_count(&self) -> usize {
         self.trusted_keys.len()

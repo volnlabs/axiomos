@@ -74,6 +74,7 @@ extern crate alloc;
 mod authentication;
 mod error;
 mod hash;
+pub mod managed;
 mod signature;
 mod verifier;
 
