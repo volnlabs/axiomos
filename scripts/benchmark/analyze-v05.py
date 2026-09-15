@@ -139,7 +139,7 @@ def reduce_records(rows: list[dict], expectations: dict, acceptance: dict, confi
     if not isinstance(header.get("source_id"), str) or len(header["source_id"]) != 40 or any(c not in "0123456789abcdef" for c in header["source_id"]):
         raise ValueError("source_id must be a lowercase SHA-1")
     if not isinstance(header.get("artifact_id"), str) or len(header["artifact_id"]) != 64 or any(c not in "0123456789abcdef" for c in header["artifact_id"]):
-        raise ValueError("artifact_id must be a lowercase SHA-256")
+        raise ValueError("artifact_id must be a lowercase 256-bit digest")
     _identity(header.get("acceptance_config_sha256"), "acceptance_config_sha256")
     clock_hz = _integer(header, "clock_hz", positive=True)
     if header["acceptance_config_sha256"] != config_digest:
@@ -164,7 +164,7 @@ def reduce_records(rows: list[dict], expectations: dict, acceptance: dict, confi
             _integer(event, "scheduled_ticks")
         if "artifact_id" in event:
             if not isinstance(event["artifact_id"], str) or len(event["artifact_id"]) != 64 or any(c not in "0123456789abcdef" for c in event["artifact_id"]):
-                raise ValueError("artifact_id must be a lowercase SHA-256")
+                raise ValueError("artifact_id must be a lowercase 256-bit digest")
         if "mode" in event and not _one_of(event["mode"], {"controller", "safe"}):
             raise ValueError("invalid cycle mode")
         if kind == "operation_request" and not _one_of(event["operation"], {"activate", "rollback"}):
@@ -355,7 +355,7 @@ def describe():
             "terminal_fields": sorted(TERMINAL_FIELDS), "implemented_checks": ["JSON and exact record shapes", "expected SHA identity/config binding", "sequence and tick order", "independent bounded exact counts/outcomes/release coverage", "controller/safe cycle lifecycle, generation, schedule, and deadline", "handoff-enter to next eligible release/commit timeout and first-use identity"],
             "unsupported_events": ["policy request", "enqueue", "sink acknowledgment"],
             "unsupported_operations": ["retire", "deactivate", "administrative lifecycle operations"],
-            "expectations_shape": {"schema": EXPECTATIONS_SCHEMA, "acceptance_config_sha256": "lowercase SHA-256", "boots": {"<boot_id>": {"source_id": "lowercase SHA-1", "artifact_id": "lowercase SHA-256 of initial installation", "event_counts": "exact nonnegative integer counts by event type", "operation_outcomes": "exact successful/failed/rejected/canceled integer counts", "release_cycles": {"first": "positive integer", "count": "bounded nonnegative integer"}}}},
+            "expectations_shape": {"schema": EXPECTATIONS_SCHEMA, "acceptance_config_sha256": "lowercase SHA-256", "boots": {"<boot_id>": {"source_id": "lowercase SHA-1", "artifact_id": "lowercase canonical artifact digest (managed bundles use SHA3-256)", "event_counts": "exact nonnegative integer counts by event type", "operation_outcomes": "exact successful/failed/rejected/canceled integer counts", "release_cycles": {"first": "positive integer", "count": "bounded nonnegative integer"}}}},
             "operation_generation_semantics": "requested candidate installation generation; installed only after successful commit and matching first behavior entry",
             "gate_scope": "host trace subset; not an end-to-end acceptance gate",
             "release_pass_supported": False}

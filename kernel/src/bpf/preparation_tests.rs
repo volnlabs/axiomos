@@ -9,6 +9,9 @@ use zerocopy::{FromBytes, IntoBytes};
 
 use super::*;
 
+#[path = "preparation_trace_tests.rs"]
+mod trace;
+
 #[path = "preparation_workflow_tests.rs"]
 mod workflow;
 

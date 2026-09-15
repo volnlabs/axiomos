@@ -1,0 +1,150 @@
+import copy
+import hashlib
+import importlib.util
+import json
+import os
+import subprocess
+from pathlib import Path
+import tempfile
+import unittest
+from unittest import mock
+
+ROOT = Path(__file__).parents[2]
+SPEC = importlib.util.spec_from_file_location("v05_host_runner", ROOT / "scripts/benchmark/v05-host-runner.py")
+runner = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(runner)
+
+
+def cargo_artifact(executable, **changes):
+    record = {"reason": "compiler-artifact", "target": {"name": "kernel", "kind": ["lib"]},
+              "profile": {"test": True}, "executable": str(executable)}
+    record.update(changes)
+    return record
+
+
+def cargo_output(*records):
+    return "".join(json.dumps(record) + "\n" for record in records)
+
+
+class V05HostRunnerTests(unittest.TestCase):
+    def test_executable_is_selected_from_exact_cargo_artifact_not_mtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            selected = Path(directory) / "old-kernel-test"
+            newer = Path(directory) / "newer-unrelated-test"
+            selected.write_bytes(b"selected")
+            newer.write_bytes(b"unrelated")
+            os.utime(selected, (1, 1))
+            os.utime(newer, (2, 2))
+            records = [
+                {"reason": "build-finished", "success": True},
+                cargo_artifact(newer, target={"name": "other", "kind": ["lib"]}),
+                cargo_artifact(newer, target={"name": "kernel", "kind": ["bin"]}),
+                cargo_artifact(newer, profile={"test": False}),
+                cargo_artifact(selected),
+            ]
+            self.assertEqual(runner.executable_from_cargo(cargo_output(*records)), selected)
+            self.assertEqual(runner.executable_from_cargo(cargo_output(*reversed(records))), selected)
+
+    def test_missing_and_ambiguous_executable_artifacts_reject(self):
+        for records in ((), ({"reason": "build-finished", "success": True},),
+                        (cargo_artifact("first"), cargo_artifact("second")),
+                        (cargo_artifact("same"), cargo_artifact("same")),
+                        (cargo_artifact("", profile={"test": True}),)):
+            with self.subTest(records=records), self.assertRaisesRegex(ValueError, "exactly one"):
+                runner.executable_from_cargo(cargo_output(*records))
+
+    def test_malformed_cargo_records_raise_a_retained_failure(self):
+        for record in ([], None, True, {"reason": "compiler-artifact", "target": None},
+                       cargo_artifact("test", profile=[]),
+                       {**cargo_artifact("test"), "executable": ["not", "a", "path"]}):
+            with self.subTest(record=record), self.assertRaises(ValueError):
+                runner.executable_from_cargo(cargo_output(record))
+        with self.assertRaises(ValueError):
+            runner.executable_from_cargo('{"reason":"compiler-artifact","reason":"build-finished"}\n')
+
+    def test_trace_extraction_preserves_exact_jsonl_and_ignores_test_noise(self):
+        trace = '{"type":"header"}\n{"type":"cycle_release","seq":1}\n{"type":"terminal"}\n'
+        stdout = "running 1 test\n" + "".join("V05_TRACE " + line for line in trace.splitlines(keepends=True)) + "test result: ok\n"
+        self.assertEqual(runner.extract_trace(stdout), trace)
+
+    def test_empty_truncated_or_malformed_producer_output_rejects(self):
+        for stdout in ("", "test result: ok\n", "V05_TRACE\n", "V05_TRACE{}\n",
+                       'V05_TRACE {"type":"header"}\n',
+                       'V05_TRACE {"type":"header"}\nV05_TRACE {"type":"event"}\n',
+                       'V05_TRACE {"type":"header"}\nV05_TRACE {"type":"event"}\nV05_TRACE {"type":"terminal"}',
+                       'V05_TRACE {"type":"header"}\nV05_TRACE []\nV05_TRACE {"type":"terminal"}\n',
+                       'V05_TRACE {"type":"header","type":"terminal"}\n',
+                       'V05_TRACE {broken}\n'):
+            with self.subTest(stdout=stdout), self.assertRaises(ValueError):
+                runner.extract_trace(stdout)
+
+    def test_retained_bundles_bind_every_trace_artifact_and_initial_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            bundles = {"a.bundle": b"signed controller A", "b.bundle": b"signed controller B"}
+            digests = {name: hashlib.sha3_256(data).hexdigest() for name, data in bundles.items()}
+            for name, data in bundles.items():
+                (directory / name).write_bytes(data)
+            rows = [{"type": "header", "artifact_id": digests["a.bundle"]},
+                    {"type": "operation_request", "artifact_id": digests["b.bundle"]},
+                    {"type": "terminal"}]
+            self.assertEqual(runner.validate_artifacts(rows, directory), digests)
+            with self.assertRaisesRegex(ValueError, "artifact identities"):
+                runner.validate_artifacts([rows[1], rows[0], rows[2]], directory)
+            with self.assertRaisesRegex(ValueError, "artifact identities"):
+                runner.validate_artifacts([rows[0], rows[2]], directory)
+            (directory / "b.bundle").write_bytes(b"modified controller B")
+            with self.assertRaisesRegex(ValueError, "artifact identities"):
+                runner.validate_artifacts(rows, directory)
+            (directory / "b.bundle").unlink()
+            with self.assertRaises(FileNotFoundError):
+                runner.validate_artifacts(rows, directory)
+
+    def test_timeout_retains_partial_stdout_and_stderr(self):
+        command = ["fixture", "--exact"]
+        environment = {"FIXTURE": "synthetic"}
+
+        def timeout_after_output(actual, *, cwd, env, stdout, stderr, timeout):
+            self.assertEqual(actual, command)
+            self.assertEqual(cwd, runner.ROOT)
+            self.assertEqual(env, environment)
+            self.assertEqual(timeout, 3)
+            stdout.write('V05_TRACE {"type":"header"}\nV05_TRACE {"type":')
+            stderr.write("fixture stalled before terminal\n")
+            raise subprocess.TimeoutExpired(actual, timeout)
+
+        with tempfile.TemporaryDirectory() as directory:
+            out, err = Path(directory) / "stdout.log", Path(directory) / "stderr.log"
+            with mock.patch.object(runner.subprocess, "run", side_effect=timeout_after_output) as run:
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    runner.run_logged(command, out, err, env=environment, timeout=3)
+            run.assert_called_once()
+            self.assertEqual(out.read_text(), 'V05_TRACE {"type":"header"}\nV05_TRACE {"type":')
+            self.assertEqual(err.read_text(), "fixture stalled before terminal\n")
+            with self.assertRaises(ValueError):
+                runner.extract_trace(out.read_text())
+
+    def test_expectations_are_fixed_and_return_independent_nested_values(self):
+        ledger = copy.deepcopy(runner.SCENARIOS)
+        try:
+            expected = runner.expectations("normal", "source", "artifact", "config")
+            boot = expected["boots"]["normal"]
+            self.assertEqual(boot["event_counts"]["operation_request"], 4)
+            self.assertEqual(boot["release_cycles"], {"first": 1, "count": 16})
+            boot["event_counts"]["operation_request"] = 0
+            boot["release_cycles"]["count"] = 0
+            boot["operation_outcomes"]["successful"] = 0
+            fresh = runner.expectations("normal", "source", "artifact", "config")
+            self.assertEqual(runner.SCENARIOS, ledger)
+            self.assertEqual(fresh["boots"]["normal"], {"source_id": "source", "artifact_id": "artifact", **ledger["normal"]})
+            stalled = runner.expectations("legacy-stall", "source", "artifact", "config")["boots"]["legacy-stall"]
+            # Eight observed releases must not shrink the eleven expected releases.
+            self.assertEqual(stalled["event_counts"]["cycle_release"], 8)
+            self.assertEqual(stalled["release_cycles"]["count"], 11)
+        finally:
+            runner.SCENARIOS.clear()
+            runner.SCENARIOS.update(ledger)
+
+
+if __name__ == "__main__":
+    unittest.main()
