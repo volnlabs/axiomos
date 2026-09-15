@@ -26,7 +26,7 @@ use panic_halt as _;
 use rp2040_hal as hal;
 use shrike_control::fpga::{
     BitstreamError, BitstreamImage, BitstreamManifest, FpgaLifecycle, FpgaPlatform,
-    RUNTIME_STATUS_REQUEST,
+    RUNTIME_STATUS_REQUEST, STATUS_READY,
 };
 use shrike_control::transport::{LinkQuiescence, TelemetryTx};
 use shrike_control::MicrosClock;
@@ -62,6 +62,8 @@ struct R04Platform<'a, PWR, EN, RESET, RIGHT, SPI> {
     spi: RuntimeSpi<SPI>,
     clock: &'a TimerClock,
     image: Option<BitstreamImage<'static>>,
+    // Separate from the post-stream READY interval; supplied by qualification.
+    configuration_timeout_us: Option<u64>,
 }
 
 impl<PWR, EN, RESET, RIGHT, SPI> FpgaPlatform for R04Platform<'_, PWR, EN, RESET, RIGHT, SPI>
@@ -110,12 +112,28 @@ where
         Err(PlatformError::MissingValidatedArtifact)
     }
 
-    fn stream_bitstream(&mut self, _: u32, _: u32) -> Result<(), Self::Error> {
-        Err(PlatformError::MissingValidatedArtifact)
+    fn stream_bitstream(&mut self, offset: u32, length: u32) -> Result<(), Self::Error> {
+        let timeout = self
+            .configuration_timeout_us
+            .ok_or(PlatformError::MissingValidatedArtifact)?;
+        let bytes = self
+            .image
+            .as_ref()
+            .and_then(|image| image.bytes_for(offset, length))
+            .ok_or(PlatformError::Bitstream(BitstreamError::InvalidManifest))?;
+        self.spi
+            .stream_configuration(bytes, timeout)
+            .map_err(PlatformError::Spi)
     }
 
     fn ready_status(&mut self) -> Result<u8, Self::Error> {
-        Err(PlatformError::MissingValidatedArtifact)
+        // CONFIG is no longer readable after releasing configuration pin
+        // ownership: this design's functional MISO reflects held-low rst_n.
+        Ok(if self.spi.configuration_complete() {
+            STATUS_READY
+        } else {
+            0
+        })
     }
 
     fn handoff_to_runtime(&mut self) -> Result<(), Self::Error> {
@@ -161,12 +179,21 @@ fn main() -> ! {
     let fpga_pwr = pins.gpio12.into_push_pull_output_in_state(PinState::Low);
     let fpga_en = pins.gpio13.into_push_pull_output_in_state(PinState::Low);
     let fpga_reset = pins.gpio14.into_push_pull_output_in_state(PinState::Low);
-    let fpga_cs = pins.gpio1.into_push_pull_output_in_state(PinState::High);
+    let fpga_cs = pins
+        .gpio1
+        .into_pull_type::<hal::gpio::PullNone>()
+        .into_push_pull_output_in_state(PinState::High);
 
     let spi_pins = (
-        pins.gpio3.into_function::<hal::gpio::FunctionSpi>(), // MOSI
-        pins.gpio0.into_function::<hal::gpio::FunctionSpi>(), // MISO/READY
-        pins.gpio2.into_function::<hal::gpio::FunctionSpi>(), // SCK
+        pins.gpio3
+            .into_pull_type::<hal::gpio::PullNone>()
+            .into_function::<hal::gpio::FunctionSpi>(), // MOSI
+        pins.gpio0
+            .into_pull_type::<hal::gpio::PullNone>()
+            .into_function::<hal::gpio::FunctionSpi>(), // MISO/READY
+        pins.gpio2
+            .into_pull_type::<hal::gpio::PullNone>()
+            .into_function::<hal::gpio::FunctionSpi>(), // SCK
     );
     // Keep SPI disabled until the generated artifact supplies its validated
     // device timing. The pin tuple still compile-checks the exact SPI0 map.
@@ -190,6 +217,7 @@ fn main() -> ! {
         spi,
         clock: &clock,
         image: None,
+        configuration_timeout_us: None,
     };
     let mut lifecycle = FpgaLifecycle::new(platform);
 

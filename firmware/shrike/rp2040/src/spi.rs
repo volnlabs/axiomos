@@ -21,6 +21,9 @@ pub(crate) enum Error {
     PollLimit,
     ChipSelect,
     ResetNotReady,
+    ConfigurationState,
+    ConfigurationIncomplete,
+    HandoffTimeout,
 }
 
 #[derive(Clone, Copy)]
@@ -41,21 +44,25 @@ pub(crate) trait Registers {
     fn write_data(&mut self, byte: u8);
     fn select(&mut self, selected: bool) -> bool;
     fn disable(&mut self);
+    fn configuration_high(&mut self) -> bool;
+    fn high_impedance(&mut self);
 }
 
 pub(crate) struct RuntimeSpi<R> {
     registers: R,
     timing: Option<Timing>,
+    configuration_complete: bool,
 }
 
 struct Budget {
     last: u64,
     deadline: u64,
-    remaining: u32,
+    remaining: u64,
+    same_tick: u32,
 }
 impl Budget {
     fn sample(&mut self, registers: &mut impl Registers) -> Result<u64, Error> {
-        if self.remaining == 0 {
+        if self.remaining == 0 || self.same_tick == MAX_POLLS {
             return Err(Error::PollLimit);
         }
         self.remaining -= 1;
@@ -66,6 +73,11 @@ impl Budget {
         if now >= self.deadline {
             return Err(Error::Timeout);
         }
+        self.same_tick = if now == self.last {
+            self.same_tick + 1
+        } else {
+            0
+        };
         self.last = now;
         Ok(now)
     }
@@ -85,6 +97,7 @@ impl<R: Registers> RuntimeSpi<R> {
         Self {
             registers,
             timing: None,
+            configuration_complete: false,
         }
     }
 
@@ -110,6 +123,7 @@ impl<R: Registers> RuntimeSpi<R> {
     }
 
     pub(crate) fn inhibit(&mut self) {
+        self.configuration_complete = false;
         self.timing = None;
         // Failure may truncate this FPGA transaction; the lifecycle caller
         // also asserts runtime reset and PWR/EN safe. No command is retried.
@@ -123,6 +137,119 @@ impl<R: Registers> RuntimeSpi<R> {
             self.inhibit();
         }
         result
+    }
+
+    pub(crate) const fn configuration_complete(&self) -> bool {
+        self.configuration_complete
+    }
+
+    /// Stream an already verified raw MCU image after the power/CS startup
+    /// sequence. No runtime header or extra postamble is manufactured here.
+    /// CONFIG must be observed before CS rises; functional MISO can then change.
+    pub(crate) fn stream_configuration(
+        &mut self,
+        bytes: &[u8],
+        timeout_us: u64,
+    ) -> Result<(), Error> {
+        self.configuration_complete = false;
+        let result = self.stream_configuration_inner(bytes, timeout_us);
+        if result.is_err() {
+            self.inhibit();
+            // Even a failed stream may have raised CONFIG. Do not leave MCU
+            // drivers attached after the abort's CS edge; the lifecycle also
+            // asserts PWR/EN/reset safe. A partial transfer is never retried.
+            self.registers.high_impedance();
+        } else {
+            self.configuration_complete = true;
+        }
+        result
+    }
+
+    fn stream_configuration_inner(&mut self, bytes: &[u8], timeout_us: u64) -> Result<(), Error> {
+        // Same reserved 2 MiB ceiling as control::fpga::BitstreamManifest;
+        // this adapter's independent length check also precedes all bus writes.
+        if bytes.is_empty() || bytes.len() > 2 * 1024 * 1024 {
+            return Err(Error::InvalidLength);
+        }
+        if timeout_us == 0 {
+            return Err(Error::InvalidTiming);
+        }
+        if self.timing.is_some() {
+            return Err(Error::ConfigurationState);
+        }
+        if !self.registers.enabled() {
+            return Err(Error::Disabled);
+        }
+        let now = self.registers.now_us();
+        let mut budget = Budget {
+            last: now,
+            deadline: now.checked_add(timeout_us).ok_or(Error::InvalidTiming)?,
+            // Finite image and per-byte allowance; a separate same-tick cap
+            // catches a frozen timer even when FIFO operations keep succeeding.
+            remaining: (bytes.len() as u64 + 1) * u64::from(MAX_POLLS),
+            same_tick: 0,
+        };
+        if self.checked_flags(&mut budget)? & (TFE | RNE | BSY) != TFE {
+            return Err(Error::DirtyBus);
+        }
+        if !self.registers.select(true) {
+            return Err(Error::ChipSelect);
+        }
+        if self.registers.configuration_high() {
+            return Err(Error::ConfigurationState);
+        }
+        let mut observed = false;
+        for &byte in bytes {
+            self.exchange_byte(byte, &mut budget)?;
+            observed |= self.registers.configuration_high();
+            budget.sample(&mut self.registers)?;
+        }
+        self.wait_idle(&mut budget)?;
+        if !observed || !self.registers.configuration_high() {
+            return Err(Error::ConfigurationIncomplete);
+        }
+        let before_cs = budget.sample(&mut self.registers)?;
+        if !self.registers.select(false) {
+            return Err(Error::ChipSelect);
+        }
+        self.registers.disable();
+        self.registers.high_impedance();
+        let after_high_z = budget.sample(&mut self.registers)?;
+        // Integer-tick delta <10 conservatively includes sub-tick uncertainty.
+        // This is an observed bound, not a proof of physical pad timing.
+        if after_high_z - before_cs >= 10 {
+            return Err(Error::HandoffTimeout);
+        }
+        Ok(())
+    }
+
+    fn exchange_byte(&mut self, byte: u8, budget: &mut Budget) -> Result<u8, Error> {
+        loop {
+            let flags = self.checked_flags(budget)?;
+            if flags & RNE != 0 {
+                return Err(Error::DirtyBus);
+            }
+            if flags & TNF != 0 {
+                break;
+            }
+        }
+        self.registers.write_data(byte);
+        while self.checked_flags(budget)? & RNE == 0 {}
+        let received = self.registers.read_data();
+        budget.sample(&mut self.registers)?;
+        Ok(received)
+    }
+
+    fn wait_idle(&mut self, budget: &mut Budget) -> Result<(), Error> {
+        loop {
+            let flags = self.checked_flags(budget)?;
+            if flags & RNE != 0 {
+                return Err(Error::DirtyBus);
+            }
+            if flags & (TFE | BSY) == TFE {
+                return Ok(());
+            }
+        }
     }
 
     fn checked_flags(&mut self, budget: &mut Budget) -> Result<u32, Error> {
@@ -149,7 +276,8 @@ impl<R: Registers> RuntimeSpi<R> {
             deadline: now
                 .checked_add(timing.timeout_us)
                 .ok_or(Error::InvalidTiming)?,
-            remaining: MAX_POLLS,
+            remaining: u64::from(MAX_POLLS),
+            same_tick: 0,
         };
         if self.checked_flags(&mut budget)? & (TFE | RNE | BSY) != TFE {
             return Err(Error::DirtyBus);
@@ -164,30 +292,9 @@ impl<R: Registers> RuntimeSpi<R> {
         budget.wait(&mut self.registers, timing.setup_us)?;
         let mut reply = [0; N];
         for (&byte, received) in bytes.iter().zip(reply.iter_mut()) {
-            loop {
-                let flags = self.checked_flags(&mut budget)?;
-                if flags & RNE != 0 {
-                    return Err(Error::DirtyBus);
-                }
-                if flags & TNF != 0 {
-                    break;
-                }
-            }
-            self.registers.write_data(byte);
-            while self.checked_flags(&mut budget)? & RNE == 0 {}
-            *received = self.registers.read_data();
-            // One byte in flight bounds RX occupancy independently of stalls.
-            budget.sample(&mut self.registers)?;
+            *received = self.exchange_byte(byte, &mut budget)?;
         }
-        loop {
-            let flags = self.checked_flags(&mut budget)?;
-            if flags & RNE != 0 {
-                return Err(Error::DirtyBus);
-            }
-            if flags & (TFE | BSY) == TFE {
-                break;
-            }
-        }
+        self.wait_idle(&mut budget)?;
         budget.wait(&mut self.registers, timing.hold_us)?;
         // Include elapsed I/O and any late overrun before ending the frame.
         if self.checked_flags(&mut budget)? & (TFE | RNE | BSY) != TFE {
@@ -203,9 +310,11 @@ impl<R: Registers> RuntimeSpi<R> {
 
 #[cfg(not(test))]
 mod target {
-    use embedded_hal::digital::{OutputPin, PinState};
+    use embedded_hal::digital::{InputPin, OutputPin, PinState};
     use rp2040_hal::gpio::bank0::{Gpio0, Gpio1, Gpio2, Gpio3};
-    use rp2040_hal::gpio::{FunctionSio, FunctionSpi, Pin, PullDown, SioOutput};
+    use rp2040_hal::gpio::{
+        FunctionSio, FunctionSpi, OutputEnableOverride, Pin, PullNone, SioOutput,
+    };
     use rp2040_hal::pac;
     use rp2040_hal::spi::{Disabled, Spi};
     use shrike_control::MicrosClock;
@@ -214,15 +323,15 @@ mod target {
     use crate::uart::TimerClock;
 
     type Pins = (
-        Pin<Gpio3, FunctionSpi, PullDown>,
-        Pin<Gpio0, FunctionSpi, PullDown>,
-        Pin<Gpio2, FunctionSpi, PullDown>,
+        Pin<Gpio3, FunctionSpi, PullNone>,
+        Pin<Gpio0, FunctionSpi, PullNone>,
+        Pin<Gpio2, FunctionSpi, PullNone>,
     );
-    type ChipSelect = Pin<Gpio1, FunctionSio<SioOutput>, PullDown>;
+    type ChipSelect = Pin<Gpio1, FunctionSio<SioOutput>, PullNone>;
 
     pub(crate) struct Spi0<'a> {
         peripheral: pac::SPI0,
-        _pins: Pins,
+        pins: Pins,
         cs: ChipSelect,
         clock: &'a TimerClock,
     }
@@ -244,7 +353,7 @@ mod target {
                 if resets.reset_done().read().spi0().bit_is_set() {
                     return Ok(Self::new(Spi0 {
                         peripheral,
-                        _pins: pins,
+                        pins,
                         cs,
                         clock,
                     }));
@@ -263,6 +372,20 @@ mod target {
             postdivide: u8,
             timing: Timing,
         ) -> Result<(), Error> {
+            if !self.configuration_complete {
+                self.inhibit();
+                return Err(Error::ConfigurationState);
+            }
+            self.configure_for_loading(prescale, postdivide)?;
+            self.set_timing(timing)
+        }
+
+        /// Clocks only; the lifecycle owner supplies the power/reset sequence.
+        pub(crate) fn configure_for_loading(
+            &mut self,
+            prescale: u8,
+            postdivide: u8,
+        ) -> Result<(), Error> {
             self.inhibit();
             if prescale < 2 || prescale & 1 != 0 {
                 return Err(Error::InvalidTiming);
@@ -272,7 +395,6 @@ mod target {
             {
                 return Err(Error::DirtyBus);
             }
-            self.set_timing(timing)?;
             let spi = &self.registers.peripheral;
             // SAFETY: exclusive SPI0 owner, SSE clear; mode 0 Motorola, 8-bit
             // words, checked even prescale 2..254 and u8 postdivide. No reserved
@@ -285,6 +407,21 @@ mod target {
                 spi.sspcpsr().write(|w| w.bits(u32::from(prescale)));
             }
             spi.sspcr1().write(|w| w.sse().set_bit());
+            self.registers
+                .pins
+                .0
+                .set_output_enable_override(OutputEnableOverride::Normal);
+            self.registers
+                .pins
+                .1
+                .set_output_enable_override(OutputEnableOverride::Normal);
+            self.registers
+                .pins
+                .2
+                .set_output_enable_override(OutputEnableOverride::Normal);
+            self.registers
+                .cs
+                .set_output_enable_override(OutputEnableOverride::Normal);
             Ok(())
         }
     }
@@ -320,6 +457,22 @@ mod target {
                     PinState::High
                 })
                 .is_ok()
+        }
+        fn configuration_high(&mut self) -> bool {
+            self.pins.1.as_input().is_high().unwrap_or(false)
+        }
+        fn high_impedance(&mut self) {
+            self.pins
+                .0
+                .set_output_enable_override(OutputEnableOverride::Disable);
+            self.pins
+                .1
+                .set_output_enable_override(OutputEnableOverride::Disable);
+            self.pins
+                .2
+                .set_output_enable_override(OutputEnableOverride::Disable);
+            self.cs
+                .set_output_enable_override(OutputEnableOverride::Disable);
         }
         fn disable(&mut self) {
             self.peripheral.sspcr1().modify(|_, w| w.sse().clear_bit());

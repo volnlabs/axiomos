@@ -1,6 +1,10 @@
 version = 1
 baseline_sites = 720
-baseline_fingerprint = "sha256:baf5e73de8184126c5565478a0aaf6b2fa2e57b2f8a4e6135c32eb107f3efdf1"
+baseline_fingerprint = "sha256:c4f9bcdec7a312bfff7415a964c812305cca305d5a6be67cf238fb2564c1ed54"
+
+# 2026-09-16: configuration streaming reuses existing PAC blocks and HAL pin
+# ownership. GPIO input observation and Hi-Z use safe HAL methods with pulls
+# disabled; no new unsafe site. Existing sites move during byte-loop reuse.
 
 # 2026-09-16: one checked immutable mapped-flash slice binds the R0.4 image
 # to the reserved upper 2 MiB before SHA-256. Firmware never writes flash or
@@ -373,7 +377,7 @@ id = "FIRMWARE-MMIO"
 paths = ["firmware/*"]
 scope = "production/firmware"
 owner = "Shrike firmware maintainers"
-invariant = "Peripheral singleton pointers are accessed with exclusive ownership and interrupt-safe synchronization for the firmware lifetime. UART0 and SPI0 have separate exclusive owners; PAC writes use validated fields and masks after bounded reset completion. SPI transfers have one byte in flight, mode-0 framing, checked deadlines and a poll cap. The immutable flash slice is created only after checked manifest/range validation, wholly inside R0.4 mapped flash, and no XIP writer, programmer or other agent mutates it for the borrowed lifetime. TIMER latched low/high reads are serialized through one clock owner on the MCU main context; no IRQ/core interleaves those reads."
+invariant = "Peripheral singleton pointers are accessed with exclusive ownership and interrupt-safe synchronization for the firmware lifetime. UART0 and SPI0 have separate exclusive owners; PAC writes use validated fields and masks after bounded reset completion. SPI transfers have one byte in flight, mode-0 framing, checked deadlines and poll caps. Configuration completion is latched from the physical pin before CS release; all SPI pads have pulls disabled and output overrides release ownership before runtime rebinding. The immutable flash slice is created only after checked manifest/range validation, wholly inside R0.4 mapped flash, and no XIP writer, programmer or other agent mutates it for the borrowed lifetime. TIMER latched low/high reads are serialized through one clock owner on the MCU main context; no IRQ/core interleaves those reads."
 callers = "RP2040 control, motor, timer, and panic paths"
 tests = "thumbv6m target check and debug/release clippy; bitstream digest/range/binding host and Miri tests; actual UART/SPI register-algorithm tests, partial-frame timeout/overrun, TX backpressure/BSY and clock fault injection, shared RX-fault/quiet-window simulations and focused Miri. Physical reset propagation, FIFO/shift drain, bilateral quiescence, concurrency and timer wraparound remain unqualified."
 priority = "P1"

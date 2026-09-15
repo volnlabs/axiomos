@@ -31,6 +31,9 @@ struct Model {
     fault_at: Option<usize>,
     clock_at: Option<(usize, u64)>,
     select_fails: bool,
+    config_after: Option<usize>,
+    high_z: bool,
+    high_z_delay: u64,
 }
 impl Default for Model {
     fn default() -> Self {
@@ -51,6 +54,9 @@ impl Default for Model {
             fault_at: None,
             clock_at: None,
             select_fails: false,
+            config_after: None,
+            high_z: false,
+            high_z_delay: 0,
         }
     }
 }
@@ -109,6 +115,16 @@ impl Registers for &RefCell<Model> {
         }
         m.selected = selected;
         !m.select_fails
+    }
+    fn configuration_high(&mut self) -> bool {
+        let m = self.borrow();
+        m.selected && !m.high_z && m.config_after.is_some_and(|n| m.sent.len() >= n)
+    }
+    fn high_impedance(&mut self) {
+        let mut m = self.borrow_mut();
+        assert!(!m.selected);
+        m.high_z = true;
+        m.time += m.high_z_delay;
     }
     fn disable(&mut self) {
         self.borrow_mut().enabled = false;
@@ -271,4 +287,108 @@ fn tx_backpressure_and_shift_register_completion_share_the_transaction_budget() 
     bus.set_timing(TIMING).unwrap();
     assert_eq!(bus.transfer(&[7; 12]), Err(Error::Timeout));
     assert!(!model.borrow().enabled);
+}
+
+#[test]
+fn configuration_stream_latches_completion_before_cs_and_high_impedance() {
+    let payload: [u8; 127] = core::array::from_fn(|i| i as u8);
+    let model = RefCell::new(Model {
+        config_after: Some(payload.len()),
+        ..Model::default()
+    });
+    let mut bus = RuntimeSpi::new(&model);
+    bus.stream_configuration(&payload, 5_000).unwrap();
+    assert!(bus.configuration_complete());
+    assert!(!(&model).configuration_high());
+    let m = model.borrow();
+    assert!(m.high_z && !m.enabled);
+    assert_eq!(m.sent.iter().map(|v| v.1).collect::<Vec<_>>(), payload);
+    assert_eq!(m.edges.iter().filter(|v| v.1).count(), 1);
+    drop(m);
+    assert_eq!(bus.transfer(&[0xa5, 0]), Err(Error::Disabled));
+    assert!(
+        !bus.configuration_complete(),
+        "any subsequent fault invalidates the latch"
+    );
+}
+
+#[test]
+fn configuration_rejects_stale_missing_or_late_completion() {
+    for (config_after, delay, expected) in [
+        (Some(0), 0, Error::ConfigurationState),
+        (None, 0, Error::ConfigurationIncomplete),
+        (Some(12), 10, Error::HandoffTimeout),
+    ] {
+        let model = RefCell::new(Model {
+            config_after,
+            high_z_delay: delay,
+            ..Model::default()
+        });
+        let mut bus = RuntimeSpi::new(&model);
+        assert_eq!(bus.stream_configuration(&[0x5a; 12], 1_000), Err(expected));
+        assert!(!bus.configuration_complete() && !model.borrow().enabled);
+        if config_after == Some(0) {
+            assert!(model.borrow().sent.is_empty());
+        }
+    }
+    for offset in 0..12 {
+        let model = RefCell::new(Model {
+            config_after: Some(12),
+            stall_at: Some(offset),
+            ..Model::default()
+        });
+        let mut bus = RuntimeSpi::new(&model);
+        assert_eq!(
+            bus.stream_configuration(&[0x5a; 12], 1_000),
+            Err(Error::Timeout)
+        );
+        assert!(!bus.configuration_complete());
+        assert_eq!(model.borrow().sent.len(), offset + 1);
+    }
+}
+
+#[test]
+fn configuration_stream_is_bounded_with_a_stopped_timer_and_rejects_bad_sizes() {
+    let model = RefCell::new(Model {
+        step: 0,
+        stall_at: Some(0),
+        ..Model::default()
+    });
+    let mut bus = RuntimeSpi::new(&model);
+    assert_eq!(
+        bus.stream_configuration(&[1; 12], 100_000),
+        Err(Error::PollLimit)
+    );
+    assert!(!bus.configuration_complete());
+    for (bytes, timeout, expected) in [
+        (vec![], 100, Error::InvalidLength),
+        (vec![0; 2 * 1024 * 1024 + 1], 100, Error::InvalidLength),
+        (vec![0], 0, Error::InvalidTiming),
+    ] {
+        let model = RefCell::new(Model::default());
+        let mut bus = RuntimeSpi::new(&model);
+        assert_eq!(bus.stream_configuration(&bytes, timeout), Err(expected));
+        assert!(model.borrow().sent.is_empty());
+    }
+}
+
+#[test]
+fn configuration_image_larger_than_runtime_poll_budget_is_still_bounded() {
+    // Observed MCU image size in the pinned vendor corpus; bytes are a model
+    // fixture, not a generated or qualified FPGA artifact.
+    let payload: Vec<u8> = (0..46_408).map(|i| (i ^ (i >> 8)) as u8).collect();
+    for (step, expected) in [(1, Ok(())), (0, Err(Error::PollLimit))] {
+        let model = RefCell::new(Model {
+            config_after: Some(payload.len()),
+            step,
+            ..Model::default()
+        });
+        let mut bus = RuntimeSpi::new(&model);
+        assert_eq!(bus.stream_configuration(&payload, 1_000_000), expected);
+        assert_eq!(bus.configuration_complete(), expected.is_ok());
+        if expected.is_err() {
+            assert!(model.borrow().sent.len() < payload.len());
+        }
+        assert!(model.borrow().high_z);
+    }
 }
