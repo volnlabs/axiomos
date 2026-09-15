@@ -7,6 +7,7 @@
 //! crate maps a `Decision` onto RP1 MMIO (see `kernel/src/actuation.rs`).
 
 mod audit;
+pub mod recorder;
 
 use alloc::vec::Vec;
 use core::marker::PhantomData;
