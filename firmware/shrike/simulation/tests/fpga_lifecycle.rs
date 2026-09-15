@@ -391,6 +391,80 @@ fn ready_must_be_positive_and_arrive_before_the_elapsed_deadline() {
 }
 
 #[test]
+fn readiness_rejects_elapsed_io_reversed_clocks_and_deadline_overflow() {
+    for (times, statuses, handoff_started, expected) in [
+        (
+            vec![10, 11, 30],
+            vec![Ok(STATUS_READY)],
+            false,
+            LifecycleError::ReadyTimeout,
+        ),
+        (
+            vec![10, 11, 12, 30],
+            vec![Ok(STATUS_READY)],
+            true,
+            LifecycleError::ReadyTimeout,
+        ),
+        (
+            vec![10, 9],
+            vec![Ok(STATUS_READY)],
+            false,
+            LifecycleError::ClockRegression,
+        ),
+        (
+            vec![10, 11, 10],
+            vec![Ok(STATUS_READY)],
+            false,
+            LifecycleError::ClockRegression,
+        ),
+        (
+            vec![10, 11, 12, 11],
+            vec![Ok(STATUS_READY)],
+            true,
+            LifecycleError::ClockRegression,
+        ),
+        (
+            vec![10, 11, 12, 11],
+            vec![Ok(0), Ok(STATUS_READY)],
+            false,
+            LifecycleError::ClockRegression,
+        ),
+        (
+            vec![u64::MAX - 1],
+            vec![Ok(STATUS_READY)],
+            false,
+            LifecycleError::InvalidReadyBound,
+        ),
+    ] {
+        let mut fpga = MockFpga::healthy();
+        fpga.times_us = times.clone();
+        fpga.statuses = statuses;
+        let mut lifecycle = FpgaLifecycle::new(fpga);
+        assert_eq!(
+            lifecycle.configure(manifest(), 20),
+            Err(expected),
+            "times {times:?}"
+        );
+        assert!(!lifecycle.runtime_ready());
+        lifecycle.platform().assert_safe();
+        assert_eq!(lifecycle.platform().events.last(), Some(&Event::Safe));
+        assert_eq!(
+            lifecycle.platform().events.contains(&Event::Handoff),
+            handoff_started
+        );
+        assert_eq!(
+            lifecycle.runtime_command(1, 100, 100, 0),
+            Err(LifecycleError::NotReady)
+        );
+    }
+    let mut fpga = MockFpga::healthy();
+    fpga.times_us = vec![10, 11, 29, 29];
+    let mut lifecycle = FpgaLifecycle::new(fpga);
+    assert_eq!(lifecycle.configure(manifest(), 20), Ok(()));
+    assert!(lifecycle.runtime_ready());
+}
+
+#[test]
 fn runtime_faults_clear_handoff_and_stale_commands_cannot_resume() {
     let mut lifecycle = FpgaLifecycle::new(MockFpga::healthy());
     lifecycle.configure(manifest(), 1).unwrap();

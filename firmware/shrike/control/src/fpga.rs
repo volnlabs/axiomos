@@ -34,7 +34,9 @@ pub trait FpgaPlatform {
 
     /// Drive PWR/EN/PWM low and make CS inactive.
     fn force_safe(&mut self);
-    /// Nondecreasing monotonic time used to enforce the calibrated READY deadline.
+    /// Advancing monotonic time used to enforce the calibrated READY deadline.
+    /// Platform calls must return within their qualified bounds; clock samples
+    /// detect elapsed I/O and regression, but cannot preempt a stuck adapter.
     fn now_us(&mut self) -> u64;
     fn bitstream_sha256(&mut self, offset: u32, length: u32) -> Result<[u8; 32], Self::Error>;
     fn begin_configuration(&mut self) -> Result<(), Self::Error>;
@@ -57,6 +59,7 @@ pub enum LifecycleError<E> {
     InvalidCommand,
     HashMismatch,
     ReadyTimeout,
+    ClockRegression,
     BadStatus,
     NotReady,
     Platform(E),
@@ -78,6 +81,8 @@ impl<P: FpgaPlatform> FpgaLifecycle<P> {
         }
     }
 
+    /// The READY interval starts after streaming and includes status reads and
+    /// runtime handoff. Only completion strictly before its deadline is ready.
     pub fn configure(
         &mut self,
         manifest: BitstreamManifest,
@@ -112,15 +117,20 @@ impl<P: FpgaPlatform> FpgaLifecycle<P> {
             return self.abort(LifecycleError::Platform(error));
         }
 
-        let ready_deadline = self.platform.now_us().saturating_add(ready_timeout_us);
+        let mut last_seen = self.platform.now_us();
+        let ready_deadline = match last_seen.checked_add(ready_timeout_us) {
+            Some(deadline) => deadline,
+            None => return self.abort(LifecycleError::InvalidReadyBound),
+        };
         loop {
-            if self.platform.now_us() >= ready_deadline {
-                return self.abort(LifecycleError::ReadyTimeout);
-            }
+            last_seen = self.check_ready_clock(last_seen, ready_deadline)?;
             let status = match self.platform.ready_status() {
                 Ok(status) => status,
                 Err(error) => return self.abort(LifecycleError::Platform(error)),
             };
+            // A positive reply is not timely merely because its read began
+            // before the deadline. Account for elapsed platform I/O as well.
+            last_seen = self.check_ready_clock(last_seen, ready_deadline)?;
             if status == 0 {
                 continue;
             }
@@ -130,9 +140,25 @@ impl<P: FpgaPlatform> FpgaLifecycle<P> {
             if let Err(error) = self.platform.handoff_to_runtime() {
                 return self.abort(LifecycleError::Platform(error));
             }
+            self.check_ready_clock(last_seen, ready_deadline)?;
             self.runtime_ready = true;
             return Ok(());
         }
+    }
+
+    fn check_ready_clock(
+        &mut self,
+        previous: u64,
+        deadline: u64,
+    ) -> Result<u64, LifecycleError<P::Error>> {
+        let now = self.platform.now_us();
+        if now < previous {
+            return self.abort(LifecycleError::ClockRegression);
+        }
+        if now >= deadline {
+            return self.abort(LifecycleError::ReadyTimeout);
+        }
+        Ok(now)
     }
 
     pub fn runtime_command(
