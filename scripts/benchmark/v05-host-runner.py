@@ -289,6 +289,15 @@ def run(output: Path) -> None:
     cli_manifest = ROOT / "userspace/tools/rk_cli/Cargo.toml"
     cli_test_command = ["cargo", "test", "--locked", "--manifest-path", str(cli_manifest),
                         "--bin", "rk", "--no-run", "--message-format=json"]
+    component_tests = {
+        "kernel_time": (["cargo", "test", "--locked", "-p", "kernel_time", "--lib",
+                         "--no-run", "--message-format=json"], "kernel_time", "lib"),
+        "shrike_link": (["cargo", "test", "--locked", "-p", "shrike_link", "--lib",
+                         "--no-run", "--message-format=json"], "shrike_link", "lib"),
+        "shrike_paired": (["cargo", "test", "--locked", "-p", "shrike_rp2040_host_sim",
+                           "--test", "paired_control", "--no-run", "--message-format=json"],
+                          "paired_control", "test"),
+    }
     manifest = {"schema": "axiomos.v05.host-run.v1", "source_id": source,
                 "evidence_kind": "synthetic", "release_verdict": "blocked",
                 "artifact_identity_algorithm": "sha3-256", "file_checksum_algorithm": "sha256",
@@ -297,6 +306,7 @@ def run(output: Path) -> None:
                 "timeout_cause_evidence": "fixture asserts HandoffError::TimedOut and ETIMEDEOUT; trace records generic failed outcome",
                 "build_command": command, "bpf_build_command": bpf_command,
                 "cli_test_build_command": cli_test_command,
+                "component_test_build_commands": {key: value[0] for key, value in component_tests.items()},
                 "test": TEST, "status": "incomplete",
                 "build_environment": {key: env[key] for key in
                                       ("EMBEDDED_DISK_PATH", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTUP_TOOLCHAIN", "CARGO_BUILD_TARGET")
@@ -324,6 +334,15 @@ def run(output: Path) -> None:
         cli_test = output / "rk-cli-test"
         shutil.copy2(executable_from_cargo(cli_test_build.stdout, "rk", "bin", True), cli_test)
         manifest["cli_test_executable_sha256"] = v05.file_sha256(cli_test)
+        manifest["component_test_executables_sha256"] = {}
+        for key, (build_command, target, kind) in component_tests.items():
+            component_build = run_logged(build_command, output / f"{key}-build.jsonl",
+                                         output / f"{key}-build.stderr", env=env, timeout=600)
+            component_build.check_returncode()
+            retained_component = output / v05.SOFTWARE_EXECUTABLES[key]
+            shutil.copy2(executable_from_cargo(component_build.stdout, target, kind, True),
+                         retained_component)
+            manifest["component_test_executables_sha256"][key] = v05.file_sha256(retained_component)
         if clean_source() != source or v05.file_sha256(v05.DEFAULT_ACCEPTANCE) != config:
             raise ValueError("source or acceptance changed during the build")
         reclamation = {"schema": "axiomos.v05.reclamation.v1", "source_id": source,
@@ -400,6 +419,8 @@ def run(output: Path) -> None:
                 or v05.file_sha256(retained) != manifest["test_executable_sha256"]
                 or v05.file_sha256(bpf_retained) != manifest["bpf_test_executable_sha256"]
                 or v05.file_sha256(cli_test) != manifest["cli_test_executable_sha256"]
+                or any(v05.file_sha256(output / v05.SOFTWARE_EXECUTABLES[key]) != digest
+                       for key, digest in manifest["component_test_executables_sha256"].items())
                 or v05.file_sha256(cli) != manifest["cli"]["sha256"]):
             raise ValueError("source, acceptance or executable changed during collection")
         manifest["status"] = "pass"

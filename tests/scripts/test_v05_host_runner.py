@@ -48,13 +48,17 @@ class V05HostRunnerTests(unittest.TestCase):
 
     def test_bpf_executable_selection_excludes_kernel_binary_and_non_test_artifacts(self):
         selected = Path("retained-bpf-test")
+        selected_integration = Path("retained-paired-test")
         records = [cargo_artifact("kernel-test"),
                    cargo_artifact("bpf-bin", target={"name": "kernel_bpf", "kind": ["bin"]}),
                    cargo_artifact("bpf-lib", target={"name": "kernel_bpf", "kind": ["lib"]}, profile={"test": False}),
-                   cargo_artifact(selected, target={"name": "kernel_bpf", "kind": ["lib"]})]
+                   cargo_artifact(selected, target={"name": "kernel_bpf", "kind": ["lib"]}),
+                   cargo_artifact(selected_integration, target={"name": "paired_control", "kind": ["test"]})]
         self.assertEqual(runner.executable_from_cargo(cargo_output(*records), "kernel_bpf", "lib", True), selected)
+        self.assertEqual(runner.executable_from_cargo(cargo_output(*records), "paired_control", "test", True),
+                         selected_integration)
         with self.assertRaisesRegex(ValueError, "exactly one kernel_bpf"):
-            runner.executable_from_cargo(cargo_output(*records[:-1]), "kernel_bpf", "lib", True)
+            runner.executable_from_cargo(cargo_output(*records[:3]), "kernel_bpf", "lib", True)
 
     def test_software_collection_retains_each_fixed_exact_case_and_executable_hash(self):
         expected = [(gate, case, executable, test)

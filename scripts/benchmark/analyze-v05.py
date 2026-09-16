@@ -77,11 +77,24 @@ SOFTWARE_CASES = {
         "stale_a_b_a": ("kernel", "bpf::installation::tests::interleavings::stale_a_b_a_operation_and_generation_ids_cannot_republish"),
         "handoff_invalidation": ("kernel", "bpf::installation::tests::stop_cancel_timeout_and_reset_cannot_publish_even_with_matching_ack"),
     },
+    "handoff": {
+        "old_frame_offsets": ("shrike_link", "handoff::tests::barrier_follows_a_whole_old_frame_at_every_offset_and_discards_unsent_motion"),
+        "matching_ack": ("shrike_link", "handoff::tests::only_matching_ack_after_whole_frame_makes_next_boundary_eligible_once"),
+        "canceled_frame_offsets": ("shrike_link", "handoff::tests::cancelled_handoff_frame_keeps_completion_identity_at_every_byte_offset"),
+        "barrier_identity": ("shrike_paired", "managed_offer_and_barrier_echo_exact_identity_and_block_stale_motion"),
+        "fpga_status": ("shrike_paired", "managed_fpga_posttransaction_mismatch_cannot_emit_acknowledgement"),
+        "reverse_tx_offsets": ("shrike_paired", "requalify_finishes_each_started_reply_offset_and_discards_pending_motion"),
+    },
     "failure_custody": {
         "request_and_map_faults": ("kernel", "bpf::control::tests::map_failure_after_capture_discards_request_stops_release_and_releases_lease"),
         "request_validation": ("kernel_bpf", "execution::interpreter::tests::managed_verified_failures_never_publish_an_earlier_capture"),
         "queue_and_deadline_stop": ("kernel", "bpf::control::tests::missed_deadlines_reversed_clocks_and_queue_failure_never_resume_automatically"),
         "observer_separation": ("kernel", "bpf::managed::tests::managed_objects_reject_legacy_access_and_bound_artifacts"),
+    },
+    "scheduling": {
+        "absolute_releases": ("kernel_time", "periodic::tests::absolute_releases_account_for_gaps_without_catch_up"),
+        "masked_interval": ("kernel_time", "periodic::tests::long_masked_interval_cannot_look_like_a_passing_schedule"),
+        "counter_exhaustion": ("kernel_time", "periodic::tests::invalid_clock_and_counter_exhaustion_reject_before_mutation"),
     },
     "abi": {
         "legacy_mode_restrictions": ("kernel", "syscall::bpf::tests::managed_wheel_ownership_blocks_legacy_mutations_but_preserves_read_commands"),
@@ -99,7 +112,8 @@ SOFTWARE_CASES = {
     },
 }
 SOFTWARE_EXECUTABLES = {"kernel": "host-test", "kernel_bpf": "bpf-test",
-                        "rk_cli": "rk-cli-test"}
+                        "rk_cli": "rk-cli-test", "kernel_time": "kernel-time-test",
+                        "shrike_link": "shrike-link-test", "shrike_paired": "shrike-paired-test"}
 RESOURCE_MAXIMA = {
     "ownership": {"instances_live": 1, "artifact_strong_live": 2, "instance_strong_live": 2},
     "installation": {"instances_before_reclamation": 2, "active_artifact_strong_after_reclamation": 3,
