@@ -5,8 +5,8 @@
  * This is a minimal BPF program that demonstrates the basic structure
  * of a BPF program. It simply returns 0 (success).
  *
- * NOTE: This file is for documentation purposes. axiomos currently loads
- * raw BPF bytecode directly. To compile this to BPF bytecode:
+ * The signed legacy ELF loader accepts exactly one entry and no maps.
+ * This example is also the production signed-load smoke fixture. Compile with:
  *
  *   clang -target bpf -O2 -c hello.bpf.c -o hello.bpf.o
  *
@@ -22,20 +22,6 @@ __attribute__((section("tracepoint/syscalls/sys_enter")))
 int hello_bpf(void *ctx)
 {
     /* Return success */
-    return 0;
-}
-
-/* Simple timer callback example */
-__attribute__((section("timer")))
-int timer_tick(void *ctx)
-{
-    /* 
-     * In a real implementation, we would call:
-     * bpf_trace_printk("Tick\n", 5);
-     * 
-     * But that requires a properly linked helper.
-     * For now, just return 0.
-     */
     return 0;
 }
 
