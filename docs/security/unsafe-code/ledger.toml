@@ -1,6 +1,6 @@
 version = 1
 baseline_sites = 736
-baseline_fingerprint = "sha256:928a8e3f782195cb1e5dff1828a061510f3c2a912ad24a3b8c78e35aee8267c9"
+baseline_fingerprint = "sha256:4e922a88a796fa80e675da2bfd03dcd2d0b8347e181bbadcf53fe9c8820af5b3"
 
 # 2026-09-16: the opt-in unloaded v0.5 timing image adds one RP1 GPIO
 # construction site for its exclusively owned GPIO12/GPIO13 analyzer markers.

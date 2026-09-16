@@ -359,7 +359,10 @@ pub fn run(port: &Path, command: RuntimeCommand) -> Result<()> {
     )?;
     match command {
         RuntimeCommand::AuditStatus => {
-            println!("{}", audit::status_json(&client.audit_status()?));
+            println!(
+                "{}",
+                audit::timing_status_json(&client.audit_timing_status()?)
+            );
         }
         RuntimeCommand::AuditExport { output } => {
             let mut file = OpenOptions::new()
@@ -809,6 +812,24 @@ mod tests {
                 artifact.private_max_entries = 1;
                 body.copy_from_slice(artifact.as_bytes());
             }
+            BPF_MANAGED_RECORDER_STATUS
+                if body.len() == std::mem::size_of::<ManagedAuditStatusV2>() =>
+            {
+                let mut status = ManagedAuditStatusV2::read_from_bytes(body).unwrap();
+                status.recorder.clock_frequency = 54_000_000;
+                status.recorder.flags = MANAGED_AUDIT_CLOCK_READY;
+                status.recorder.capacity = MANAGED_AUDIT_RECORDS as u32;
+                status.recorder.record_bytes =
+                    std::mem::size_of::<ManagedAuditRecordV1>() as u32;
+                status.releases_serviced = 1_000_000;
+                status.releases_late = 7;
+                status.max_wake_lateness_ticks = 9;
+                status.safe_releases = 10;
+                status.last_release_sequence = 1_000_000;
+                status.last_scheduled_ticks = 540_000_000_000;
+                status.last_actual_ticks = 540_000_000_009;
+                body.copy_from_slice(status.as_bytes());
+            }
             BPF_MANAGED_RECORDER_STATUS => {
                 let mut status = ManagedAuditStatusV1::read_from_bytes(body).unwrap();
                 status.clock_frequency = 54_000_000;
@@ -890,6 +911,26 @@ mod tests {
         );
         assert_eq!(client.io.calls.len(), 5);
         assert_eq!(client.io.stops, 0);
+    }
+
+    #[test]
+    fn timing_status_retains_cumulative_release_counters_after_recorder_wrap() {
+        let mut peer = Peer::new();
+        peer.syscall = audit_reply;
+        let mut client = Client::connect(peer, 17, [0xa5; 8], Duration::from_secs(1)).unwrap();
+        let status = client.audit_timing_status().unwrap();
+        assert_eq!(
+            (
+                status.releases_serviced,
+                status.releases_missed,
+                status.last_release_sequence,
+                status.max_wake_lateness_ticks
+            ),
+            (1_000_000, 0, 1_000_000, 9)
+        );
+        let json = audit::timing_status_json(&status);
+        assert_eq!(json["version"], 2);
+        assert_eq!(json["timer"]["releases_missed"], 0);
     }
 
     #[test]

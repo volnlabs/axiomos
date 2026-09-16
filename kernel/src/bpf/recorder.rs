@@ -16,6 +16,21 @@ struct State {
     link_stop: Option<(u64, u32, u32)>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct TimingStatus {
+    frequency: u64,
+    releases_serviced: u64,
+    releases_missed: u64,
+    releases_late: u64,
+    max_wake_lateness_ticks: u64,
+    completion_misses: u64,
+    safe_releases: u64,
+    last_release_sequence: u64,
+    last_scheduled_ticks: u64,
+    last_actual_ticks: u64,
+    timer_fault: u32,
+}
+
 impl State {
     const fn new() -> Self {
         Self {
@@ -58,6 +73,10 @@ impl State {
         {
             return Err(EINVAL);
         }
+        Ok(self.status_snapshot(request))
+    }
+
+    fn status_snapshot(&self, request: ManagedAuditStatusV1) -> ManagedAuditStatusV1 {
         let status = self.window.status();
         let mut flags = 0;
         if self.frequency != 0 {
@@ -82,7 +101,7 @@ impl State {
             }
             None => Record::EMPTY,
         };
-        Ok(ManagedAuditStatusV1 {
+        ManagedAuditStatusV1 {
             clock_frequency: self.frequency,
             session: self.session,
             oldest: status.oldest,
@@ -95,6 +114,48 @@ impl State {
             record_bytes: size_of::<Record>() as u32,
             latest_stop,
             ..request
+        }
+    }
+
+    fn status_v2(
+        &self,
+        request: ManagedAuditStatusV2,
+        timing: TimingStatus,
+    ) -> Result<ManagedAuditStatusV2, Errno> {
+        if request.recorder.version != MANAGED_AUDIT_STATUS_VERSION {
+            return Err(ENOTSUP);
+        }
+        if request.recorder.size as usize != size_of::<ManagedAuditStatusV2>() {
+            return Err(EINVAL);
+        }
+        if request
+            != (ManagedAuditStatusV2 {
+                recorder: ManagedAuditStatusV1 {
+                    version: MANAGED_AUDIT_STATUS_VERSION,
+                    size: size_of::<ManagedAuditStatusV2>() as u32,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        {
+            return Err(EINVAL);
+        }
+        if self.frequency != timing.frequency {
+            return Err(EIO);
+        }
+        Ok(ManagedAuditStatusV2 {
+            recorder: self.status_snapshot(request.recorder),
+            releases_serviced: timing.releases_serviced,
+            releases_missed: timing.releases_missed,
+            releases_late: timing.releases_late,
+            max_wake_lateness_ticks: timing.max_wake_lateness_ticks,
+            completion_misses: timing.completion_misses,
+            safe_releases: timing.safe_releases,
+            last_release_sequence: timing.last_release_sequence,
+            last_scheduled_ticks: timing.last_scheduled_ticks,
+            last_actual_ticks: timing.last_actual_ticks,
+            timer_fault: timing.timer_fault,
+            reserved: 0,
         })
     }
 
@@ -190,6 +251,35 @@ pub(crate) fn status(request: ManagedAuditStatusV1) -> Result<ManagedAuditStatus
     }
 }
 
+pub(crate) fn status_v2(request: ManagedAuditStatusV2) -> Result<ManagedAuditStatusV2, Errno> {
+    #[cfg(all(feature = "managed-runtime", target_arch = "aarch64", feature = "rpi5"))]
+    {
+        crate::mcore::context::with_interrupts_masked(|| {
+            let timer = crate::arch::aarch64::interrupts::timer_snapshot().ok_or(ENODEV)?;
+            let last = timer.last_release;
+            let timing = TimingStatus {
+                frequency: timer.frequency,
+                releases_serviced: timer.releases.serviced,
+                releases_missed: timer.releases.missed,
+                releases_late: timer.releases.late,
+                max_wake_lateness_ticks: timer.releases.max_wake_lateness,
+                completion_misses: timer.completion_misses,
+                safe_releases: timer.safe_releases,
+                last_release_sequence: last.map_or(0, |release| release.sequence),
+                last_scheduled_ticks: last.map_or(0, |release| release.scheduled),
+                last_actual_ticks: last.map_or(0, |release| release.actual),
+                timer_fault: u32::from(timer.fault_code),
+            };
+            with_owner(|state| state.status_v2(request, timing))
+        })
+    }
+    #[cfg(not(all(feature = "managed-runtime", target_arch = "aarch64", feature = "rpi5")))]
+    {
+        let _ = request;
+        Err(ENOTSUP)
+    }
+}
+
 pub(crate) fn read(request: ManagedAuditReadV1) -> Result<ManagedAuditReadV1, Errno> {
     #[cfg(feature = "managed-runtime")]
     {
@@ -212,6 +302,16 @@ mod tests {
         ManagedAuditStatusV1 {
             version: MANAGED_ADMIN_VERSION,
             size: size_of::<ManagedAuditStatusV1>() as u32,
+            ..Default::default()
+        }
+    }
+    fn status_v2_request() -> ManagedAuditStatusV2 {
+        ManagedAuditStatusV2 {
+            recorder: ManagedAuditStatusV1 {
+                version: MANAGED_AUDIT_STATUS_VERSION,
+                size: size_of::<ManagedAuditStatusV2>() as u32,
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -259,6 +359,31 @@ mod tests {
             (0, 1, 1, MANAGED_AUDIT_READ_GAP)
         );
         assert_eq!(lost.records, [Record::EMPTY; 2]);
+        let timing = TimingStatus {
+            frequency: 54_000_000,
+            releases_serviced: 10,
+            releases_missed: 2,
+            releases_late: 3,
+            max_wake_lateness_ticks: 7,
+            completion_misses: 1,
+            safe_releases: 4,
+            last_release_sequence: 12,
+            last_scheduled_ticks: 6_480_000,
+            last_actual_ticks: 6_480_007,
+            timer_fault: 3,
+        };
+        let v2 = state.status_v2(status_v2_request(), timing).unwrap();
+        assert_eq!(v2.recorder.clock_frequency, 54_000_000);
+        assert_eq!(
+            (
+                v2.releases_serviced,
+                v2.releases_missed,
+                v2.last_release_sequence,
+                v2.completion_misses,
+                v2.timer_fault
+            ),
+            (10, 2, 12, 1, 3)
+        );
         let mut stale = read_request(1);
         stale.expected_session = 1;
         assert_eq!(state.read(stale), Err(ESTALE));
@@ -273,6 +398,19 @@ mod tests {
             bytes[offset] = 1;
             assert_eq!(
                 state.status(ManagedAuditStatusV1::read_from_bytes(&bytes).unwrap()),
+                Err(EINVAL)
+            );
+        }
+        let timing = TimingStatus::default();
+        let status_v2 = status_v2_request();
+        for offset in 8..size_of::<ManagedAuditStatusV2>() {
+            let mut bytes = status_v2.as_bytes().to_vec();
+            bytes[offset] = 1;
+            assert_eq!(
+                state.status_v2(
+                    ManagedAuditStatusV2::read_from_bytes(&bytes).unwrap(),
+                    timing
+                ),
                 Err(EINVAL)
             );
         }

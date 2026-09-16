@@ -237,6 +237,8 @@ Thirteen commands use independently versioned, padding-free native ABI structure
 through `SYS_BPF`, dispatched before the legacy `BpfAttr` size check. All require
 `BEHAVIOR_ADMIN`, the exact documented version and structure length, and zero
 reserved fields. Requests use version 1 except the version-2 artifact slot query.
+Recorder status also accepts version 2 for cumulative timer qualification data;
+version 1 remains the bounded export snapshot.
 Ordinary init children have no administration capability. The
 [dedicated installer](runtime-installer-v1.md) provides bounded debug-UART
 transport and receives only administration authority in the managed image.
@@ -254,7 +256,7 @@ transport and receives only administration authority in the managed image.
 | Cancel installation | 264 | `ManagedInstallationCancelV1` / 40 | Lifecycle cancellation requested |
 | Deactivate | 265 | `ManagedInstallationRequestV1` / 32 | Accepted operation ID |
 | Retire inactive artifact | 266 | `ManagedInstallationRequestV1` / 32 | Accepted operation ID |
-| Recorder status | 267 | `ManagedAuditStatusV1` / 176 | Clock, retained interval, loss counters and latest stop |
+| Recorder status | 267 | `ManagedAuditStatusV1` / 176; `ManagedAuditStatusV2` / 256 | Window status (v1) or window plus cumulative release/deadline counters (v2) |
 | Recorder read | 268 | `ManagedAuditReadV1` / 248 | At most two records and an explicit cursor gap |
 
 Recorder queries use the single preallocated kernel window, without taking the

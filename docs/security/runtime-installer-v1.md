@@ -140,10 +140,12 @@ Existing output files are rejected. These commands require the dedicated
 installer's existing `BEHAVIOR_ADMIN` authority and do not actuate or rearm.
 
 The native ABI contains 96-byte records and copies at most two per read. Status
-contains clock frequency, control-link session, exclusive retained interval,
-overwrite/drop/suppression counters and independent latest-stop custody. On the
-qualified single CPU, recorder status/read and append use a bounded IRQ-masked critical
-section; no program-manager lock, allocation or waiting occurs in that section.
+version-2 status adds cumulative serviced, missed, late, completion-miss and safe
+release counters plus the latest timer identity and sticky fault. Export keeps the
+version-1 window snapshot: clock frequency, control-link session, exclusive retained
+interval, overwrite/drop/suppression counters and independent latest-stop custody.
+On the qualified single CPU, recorder status/read and append use a bounded IRQ-masked
+critical section; no program-manager lock, allocation or waiting occurs in that section.
 
 JSONL starts with a versioned `axiomos-managed-audit` header, followed by record
 envelopes and explicit gap entries, then an end marker with record/gap counts.

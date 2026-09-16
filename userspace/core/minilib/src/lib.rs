@@ -187,6 +187,20 @@ pub fn managed_recorder_status() -> Result<kernel_abi::ManagedAuditStatusV1, ker
     Ok(request)
 }
 
+pub fn managed_recorder_timing_status()
+-> Result<kernel_abi::ManagedAuditStatusV2, kernel_abi::Errno> {
+    let mut request = kernel_abi::ManagedAuditStatusV2 {
+        recorder: kernel_abi::ManagedAuditStatusV1 {
+            version: kernel_abi::MANAGED_AUDIT_STATUS_VERSION,
+            size: core::mem::size_of::<kernel_abi::ManagedAuditStatusV2>() as u32,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    managed_bpf(kernel_abi::BPF_MANAGED_RECORDER_STATUS, &mut request)?;
+    Ok(request)
+}
+
 pub fn managed_slot_artifact(
     expected_generation: u64,
     expected_last_id: u64,

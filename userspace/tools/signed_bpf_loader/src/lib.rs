@@ -146,6 +146,11 @@ mod managed {
                 forward::<ManagedInstallationCancelV1>(command, body, response, false, &mut bpf)
             }
             BPF_MANAGED_RECORDER_STATUS => {
+                if body.len() == core::mem::size_of::<ManagedAuditStatusV2>() {
+                    return forward::<ManagedAuditStatusV2>(
+                        command, body, response, true, &mut bpf,
+                    );
+                }
                 forward::<ManagedAuditStatusV1>(command, body, response, true, &mut bpf)
             }
             BPF_MANAGED_RECORDER_READ => {
@@ -350,6 +355,10 @@ mod managed {
                 (
                     BPF_MANAGED_RECORDER_STATUS,
                     core::mem::size_of::<ManagedAuditStatusV1>(),
+                ),
+                (
+                    BPF_MANAGED_RECORDER_STATUS,
+                    core::mem::size_of::<ManagedAuditStatusV2>(),
                 ),
                 (
                     BPF_MANAGED_RECORDER_READ,

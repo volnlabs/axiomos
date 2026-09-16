@@ -12,6 +12,7 @@ pub const MANAGED_AUDIT_SEQUENCE_EXHAUSTED: u32 = 8;
 pub const MANAGED_AUDIT_HAS_STOP: u32 = 16;
 pub const MANAGED_AUDIT_STOP_RECORDED: u32 = 32;
 pub const MANAGED_AUDIT_READ_GAP: u32 = 1;
+pub const MANAGED_AUDIT_STATUS_VERSION: u32 = 2;
 
 pub const MANAGED_AUDIT_ARTIFACT: u32 = 1;
 pub const MANAGED_AUDIT_OPERATION: u32 = 2;
@@ -323,6 +324,27 @@ pub struct ManagedAuditStatusV1 {
     pub latest_stop: ManagedAuditRecordV1,
 }
 
+/// Version-2 recorder status retains the version-1 window snapshot and adds
+/// cumulative timer counters that cannot be reconstructed after ring overwrite.
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable,
+)]
+pub struct ManagedAuditStatusV2 {
+    pub recorder: ManagedAuditStatusV1,
+    pub releases_serviced: u64,
+    pub releases_missed: u64,
+    pub releases_late: u64,
+    pub max_wake_lateness_ticks: u64,
+    pub completion_misses: u64,
+    pub safe_releases: u64,
+    pub last_release_sequence: u64,
+    pub last_scheduled_ticks: u64,
+    pub last_actual_ticks: u64,
+    pub timer_fault: u32,
+    pub reserved: u32,
+}
+
 #[repr(C)]
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable,
@@ -349,7 +371,12 @@ mod tests {
     fn recorder_requests_fit_existing_management_buffers_without_padding() {
         assert_eq!(core::mem::size_of::<ManagedAuditRecordV1>(), 96);
         assert_eq!(core::mem::size_of::<ManagedAuditStatusV1>(), 176);
+        assert_eq!(core::mem::size_of::<ManagedAuditStatusV2>(), 256);
         assert_eq!(core::mem::size_of::<ManagedAuditReadV1>(), 248);
+        assert!(
+            core::mem::size_of::<ManagedAuditStatusV2>()
+                <= core::mem::size_of::<crate::ManagedUploadChunkV1>()
+        );
         assert!(
             core::mem::size_of::<ManagedAuditReadV1>()
                 <= core::mem::size_of::<crate::ManagedUploadChunkV1>()

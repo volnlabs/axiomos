@@ -60,51 +60,46 @@ impl<T: Read + Write> Client<T> {
         ensure!(result == 0, "invalid recorder status return");
         let status = ManagedAuditStatusV1::read_from_bytes(&bytes)
             .map_err(|_| anyhow!("invalid recorder status size"))?;
+        validate_status(&status, request.version, request.size)?;
+        Ok(status)
+    }
+
+    pub(super) fn audit_timing_status(&mut self) -> Result<ManagedAuditStatusV2> {
+        let request = ManagedAuditStatusV2 {
+            recorder: ManagedAuditStatusV1 {
+                version: MANAGED_AUDIT_STATUS_VERSION,
+                size: size_of::<ManagedAuditStatusV2>() as u32,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (result, bytes) =
+            self.request(BPF_MANAGED_RECORDER_STATUS as u16, request.as_bytes())?;
+        ensure!(result == 0, "invalid timing status return");
+        let status = ManagedAuditStatusV2::read_from_bytes(&bytes)
+            .map_err(|_| anyhow!("invalid timing status size"))?;
+        validate_status(
+            &status.recorder,
+            request.recorder.version,
+            request.recorder.size,
+        )?;
         ensure!(
-            status.version == request.version
-                && status.size == request.size
-                && status.reserved == 0
-                && status.flags & !63 == 0
-                && status.capacity as usize == MANAGED_AUDIT_RECORDS
-                && status.record_bytes as usize == size_of::<ManagedAuditRecordV1>(),
-            "invalid recorder status header"
+            status.reserved == 0
+                && status.releases_serviced.checked_add(status.releases_missed)
+                    == Some(status.last_release_sequence)
+                && status.releases_late <= status.releases_serviced
+                && status.completion_misses <= status.releases_serviced
+                && status.safe_releases <= status.releases_serviced
+                && status.timer_fault <= 8
+                && ((status.releases_serviced == 0
+                    && status.last_release_sequence == 0
+                    && status.last_scheduled_ticks == 0
+                    && status.last_actual_ticks == 0)
+                    || (status.releases_serviced != 0
+                        && status.last_release_sequence != 0
+                        && status.last_scheduled_ticks <= status.last_actual_ticks)),
+            "invalid cumulative timing status"
         );
-        ensure!(
-            status.oldest == status.next.saturating_sub(u64::from(status.capacity))
-                && status.overwritten == status.oldest,
-            "invalid retained audit interval"
-        );
-        ensure!(
-            (status.flags & MANAGED_AUDIT_CLOCK_READY != 0) == (status.clock_frequency != 0)
-                && (status.flags & MANAGED_AUDIT_SESSION_ESTABLISHED != 0) == (status.session != 0)
-                && (status.flags & MANAGED_AUDIT_SEQUENCE_EXHAUSTED != 0)
-                    == (status.next == u64::MAX),
-            "inconsistent recorder clock, session or exhaustion status"
-        );
-        if status.flags & MANAGED_AUDIT_HAS_STOP != 0 {
-            valid_record(&status.latest_stop)?;
-            ensure!(
-                status.latest_stop.kind == MANAGED_AUDIT_STOP,
-                "invalid latest-stop kind"
-            );
-            if status.flags & MANAGED_AUDIT_STOP_RECORDED != 0 {
-                ensure!(
-                    status.latest_stop.sequence < status.next,
-                    "invalid latest-stop sequence"
-                );
-            } else {
-                ensure!(
-                    status.latest_stop.sequence == 0,
-                    "unrecorded stop has a sequence"
-                );
-            }
-        } else {
-            ensure!(
-                status.flags & MANAGED_AUDIT_STOP_RECORDED == 0
-                    && status.latest_stop == ManagedAuditRecordV1::EMPTY,
-                "unexpected latest-stop data"
-            );
-        }
         Ok(status)
     }
 
@@ -177,6 +172,55 @@ impl<T: Read + Write> Client<T> {
         out.flush()?;
         Ok(())
     }
+}
+
+fn validate_status(status: &ManagedAuditStatusV1, version: u32, size: u32) -> Result<()> {
+    ensure!(
+        status.version == version
+            && status.size == size
+            && status.reserved == 0
+            && status.flags & !63 == 0
+            && status.capacity as usize == MANAGED_AUDIT_RECORDS
+            && status.record_bytes as usize == size_of::<ManagedAuditRecordV1>(),
+        "invalid recorder status header"
+    );
+        ensure!(
+            status.oldest == status.next.saturating_sub(u64::from(status.capacity))
+                && status.overwritten == status.oldest,
+            "invalid retained audit interval"
+        );
+        ensure!(
+            (status.flags & MANAGED_AUDIT_CLOCK_READY != 0) == (status.clock_frequency != 0)
+                && (status.flags & MANAGED_AUDIT_SESSION_ESTABLISHED != 0) == (status.session != 0)
+                && (status.flags & MANAGED_AUDIT_SEQUENCE_EXHAUSTED != 0)
+                    == (status.next == u64::MAX),
+            "inconsistent recorder clock, session or exhaustion status"
+        );
+        if status.flags & MANAGED_AUDIT_HAS_STOP != 0 {
+            valid_record(&status.latest_stop)?;
+            ensure!(
+                status.latest_stop.kind == MANAGED_AUDIT_STOP,
+                "invalid latest-stop kind"
+            );
+            if status.flags & MANAGED_AUDIT_STOP_RECORDED != 0 {
+                ensure!(
+                    status.latest_stop.sequence < status.next,
+                    "invalid latest-stop sequence"
+                );
+            } else {
+                ensure!(
+                    status.latest_stop.sequence == 0,
+                    "unrecorded stop has a sequence"
+                );
+            }
+        } else {
+            ensure!(
+                status.flags & MANAGED_AUDIT_STOP_RECORDED == 0
+                    && status.latest_stop == ManagedAuditRecordV1::EMPTY,
+                "unexpected latest-stop data"
+            );
+        }
+    Ok(())
 }
 
 fn validate_artifact(request: &ManagedSlotArtifactV2, reply: &ManagedSlotArtifactV2) -> Result<()> {
@@ -315,6 +359,24 @@ pub(super) fn status_json(status: &ManagedAuditStatusV1) -> Value {
         "suppressed":status.suppressed, "flags":status.flags,
         "capacity":status.capacity, "record_bytes":status.record_bytes,
         "latest_stop":latest, "payloads_decoded":false})
+}
+
+pub(super) fn timing_status_json(status: &ManagedAuditStatusV2) -> Value {
+    let mut value = status_json(&status.recorder);
+    value["version"] = json!(2);
+    value["timer"] = json!({
+        "releases_serviced":status.releases_serviced,
+        "releases_missed":status.releases_missed,
+        "releases_late":status.releases_late,
+        "max_wake_lateness_ticks":status.max_wake_lateness_ticks,
+        "completion_misses":status.completion_misses,
+        "safe_releases":status.safe_releases,
+        "last_release_sequence":status.last_release_sequence,
+        "last_scheduled_ticks":status.last_scheduled_ticks,
+        "last_actual_ticks":status.last_actual_ticks,
+        "timer_fault":status.timer_fault
+    });
+    value
 }
 
 #[cfg(test)]

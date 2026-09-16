@@ -37,6 +37,8 @@ fn request_version(cmd: u32, size: usize) -> Result<u32, Errno> {
         Ok(MANAGED_ADMIN_VERSION)
     } else if cmd == BPF_MANAGED_SLOT_QUERY && size == size_of::<ManagedSlotArtifactV2>() {
         Ok(MANAGED_SLOT_ARTIFACT_VERSION)
+    } else if cmd == BPF_MANAGED_RECORDER_STATUS && size == size_of::<ManagedAuditStatusV2>() {
+        Ok(MANAGED_AUDIT_STATUS_VERSION)
     } else {
         Err(EINVAL)
     }
@@ -244,6 +246,13 @@ pub(super) fn dispatch(owner: u64, cmd: u32, ptr: usize, size: usize) -> isize {
             }
             BPF_MANAGED_RECORDER_STATUS => {
                 validate_header(cmd, bytes)?;
+                if bytes.len() == size_of::<ManagedAuditStatusV2>() {
+                    let request =
+                        ManagedAuditStatusV2::read_from_bytes(bytes).map_err(|_| EINVAL)?;
+                    let reply = crate::bpf::recorder::status_v2(request)?;
+                    super::validation::copy_to_userspace_bounded(ptr, reply.as_bytes())?;
+                    return Ok(0);
+                }
                 let request = ManagedAuditStatusV1::read_from_bytes(bytes).map_err(|_| EINVAL)?;
                 let reply = crate::bpf::recorder::status(request)?;
                 super::validation::copy_to_userspace_bounded(ptr, reply.as_bytes())?;
@@ -404,6 +413,18 @@ mod tests {
             bytes[4..8].fill(0);
             assert_eq!(validate_header(cmd, &bytes), Err(EINVAL));
         }
+        let mut timing = alloc::vec![0; size_of::<ManagedAuditStatusV2>()];
+        timing[..4].copy_from_slice(&MANAGED_AUDIT_STATUS_VERSION.to_ne_bytes());
+        timing[4..8].copy_from_slice(&(size_of::<ManagedAuditStatusV2>() as u32).to_ne_bytes());
+        assert_eq!(
+            validate_header(BPF_MANAGED_RECORDER_STATUS, &timing),
+            Ok(())
+        );
+        timing[..4].copy_from_slice(&MANAGED_ADMIN_VERSION.to_ne_bytes());
+        assert_eq!(
+            validate_header(BPF_MANAGED_RECORDER_STATUS, &timing),
+            Err(ENOTSUP)
+        );
         assert!(!is_command(BPF_MANAGED_REARM + 1));
     }
 
