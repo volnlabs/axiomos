@@ -54,7 +54,7 @@ class V05ReducerTests(unittest.TestCase):
         self.assertEqual(report["gate_results"]["authentication_and_loading"], "not_evaluated")
 
     def test_config_cannot_enable_unevaluated_gates(self):
-        for name in ("physical_campaign", "authentication_and_loading"):
+        for name in ("physical_campaign", "fault_matrix"):
             for retain_policy in (True, False):
                 acceptance = json.loads(json.dumps(self.config))
                 gate = acceptance["required_gates"][name]
@@ -69,6 +69,95 @@ class V05ReducerTests(unittest.TestCase):
         self.assertEqual(report["release_verdict"], "blocked")
         self.assertEqual(report["release_blockers"], [name for name, gate in self.config["required_gates"].items()
                                                      if gate["required"] and report["gate_results"][name] != "pass"])
+
+    def software_fixture(self, directory):
+        directory = Path(directory)
+        manifest = dict(schema="axiomos.v05.software.v1", source_id=SOURCE,
+                        acceptance_config_sha256=self.digest, executables={}, cases=[])
+        for executable, name in v05.SOFTWARE_EXECUTABLES.items():
+            path = directory / name
+            path.write_bytes(f"synthetic {executable} fixture, not qualification".encode())
+            manifest["executables"][executable] = dict(path=name, sha256=v05.file_sha256(path))
+        for gate, cases in v05.SOFTWARE_CASES.items():
+            for case, (executable, test) in cases.items():
+                row = dict(gate=gate, case=case, executable=executable, test=test, returncode=0)
+                for stream in ("stdout", "stderr"):
+                    path = directory / f"{gate}-{case}.{stream}"
+                    path.write_text("" if stream == "stderr" else
+                                    f"\nrunning 1 test\ntest {test} ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 123 filtered out; finished in 0.01s\n\n")
+                    row[stream], row[stream + "_sha256"] = path.name, v05.file_sha256(path)
+                manifest["cases"].append(row)
+        path = directory / "software.json"
+        path.write_text(json.dumps(manifest))
+        return path, manifest
+
+    def test_software_requires_complete_evidence_and_honors_disabled_gates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, _ = self.software_fixture(directory)
+            acceptance = json.loads(json.dumps(self.config))
+            for gate in v05.SOFTWARE_CASES:
+                acceptance["required_gates"][gate]["implemented_by_reducer"] = True
+            missing = v05.reduce_records(self.records(), self.expectations(), acceptance, self.digest)
+            result = v05.reduce_records(self.records(), self.expectations(), acceptance, self.digest, software=path)
+            for gate in v05.SOFTWARE_CASES:
+                self.assertEqual(missing["gate_results"][gate], "not_evaluated")
+                self.assertEqual(result["gate_results"][gate], "pass")
+                for policy in ("not_evaluated", "blocked"):
+                    acceptance["required_gates"][gate].update(implemented_by_reducer=False, missing_policy=policy)
+                    report = v05.reduce_records(self.records(), self.expectations(), acceptance, self.digest, software=path)
+                    self.assertEqual(report["gate_results"][gate], policy)
+                    acceptance["required_gates"][gate]["implemented_by_reducer"] = True
+            self.assertEqual(result["release_verdict"], "blocked")
+            self.assertEqual(len(result["software_evidence"]["cases"]), 14)
+
+    def test_software_rejects_identity_hash_case_and_executable_substitution(self):
+        mutations = [
+            lambda m: m.update(schema="unknown"),
+            lambda m: m.update(source_id="2" * 40),
+            lambda m: m.update(acceptance_config_sha256="e" * 64),
+            lambda m: m["cases"].pop(),
+            lambda m: m["cases"].__setitem__(1, m["cases"][0]),
+            lambda m: m["cases"][0].update(gate=[]),
+            lambda m: m["cases"][0].update(test="another::test"),
+            lambda m: m["cases"][0].update(executable="kernel"),
+            lambda m: m["cases"][0].update(returncode=True),
+            lambda m: m["cases"][0].update(returncode=1),
+            lambda m: m["cases"][0].update(stdout="../outside"),
+            lambda m: m["cases"][0].update(stdout_sha256="0" * 64),
+            lambda m: m["executables"]["kernel_bpf"].update(path="host-test"),
+            lambda m: m["executables"]["kernel_bpf"].update(sha256="0" * 64),
+            lambda m: m["executables"].pop("kernel_bpf"),
+            lambda m: m["cases"][1].update(stderr=m["cases"][0]["stderr"]),
+        ]
+        for change in mutations:
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                path, manifest = self.software_fixture(directory)
+                change(manifest)
+                path.write_text(json.dumps(manifest))
+                with self.assertRaises(ValueError):
+                    v05.validate_software(path, SOURCE, self.digest)
+
+    def test_software_rejects_rehashed_incomplete_failed_or_reordered_logs(self):
+        mutations = [
+            lambda text: text.replace("running 1 test", "running 0 tests"),
+            lambda text: text.replace(" ... ok", " ... ignored"),
+            lambda text: text.replace("1 passed", "0 passed"),
+            lambda text: text[:text.index("test result:")],
+            lambda text: text.rstrip(),
+            lambda text: "\n".join(reversed(text.splitlines())) + "\n",
+            lambda text: text + "test unexpected::test ... ok\n",
+            lambda text: text + text,
+        ]
+        for change in mutations:
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                path, manifest = self.software_fixture(directory)
+                row = manifest["cases"][0]
+                log = Path(directory) / row["stdout"]
+                log.write_text(change(log.read_text()))
+                row["stdout_sha256"] = v05.file_sha256(log)
+                path.write_text(json.dumps(manifest))
+                with self.assertRaises(ValueError):
+                    v05.validate_software(path, SOURCE, self.digest)
 
     def reclamation_fixture(self, directory):
         directory = Path(directory)

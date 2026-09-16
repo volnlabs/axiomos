@@ -46,6 +46,81 @@ class V05HostRunnerTests(unittest.TestCase):
             self.assertEqual(runner.executable_from_cargo(cargo_output(*records)), selected)
             self.assertEqual(runner.executable_from_cargo(cargo_output(*reversed(records))), selected)
 
+    def test_bpf_executable_selection_excludes_kernel_binary_and_non_test_artifacts(self):
+        selected = Path("retained-bpf-test")
+        records = [cargo_artifact("kernel-test"),
+                   cargo_artifact("bpf-bin", target={"name": "kernel_bpf", "kind": ["bin"]}),
+                   cargo_artifact("bpf-lib", target={"name": "kernel_bpf", "kind": ["lib"]}, profile={"test": False}),
+                   cargo_artifact(selected, target={"name": "kernel_bpf", "kind": ["lib"]})]
+        self.assertEqual(runner.executable_from_cargo(cargo_output(*records), "kernel_bpf", "lib", True), selected)
+        with self.assertRaisesRegex(ValueError, "exactly one kernel_bpf"):
+            runner.executable_from_cargo(cargo_output(*records[:-1]), "kernel_bpf", "lib", True)
+
+    def test_software_collection_retains_each_fixed_exact_case_and_executable_hash(self):
+        expected = [(gate, case, executable, test)
+                    for gate, cases in runner.v05.SOFTWARE_CASES.items()
+                    for case, (executable, test) in cases.items()]
+        self.assertEqual(len(expected), 14)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            for filename in runner.v05.SOFTWARE_EXECUTABLES.values():
+                (output / filename).write_bytes(filename.encode())
+            commands = []
+
+            def recorded(command, stdout, stderr, *, env):
+                commands.append(command)
+                self.assertEqual(env, {"FIXTURE": "synthetic"})
+                stdout.write_text(f"running 1 test\ntest {command[1]} ... ok\n"
+                                  "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n")
+                stderr.write_text("fixture stderr\n")
+                return subprocess.CompletedProcess(command, 0)
+
+            with mock.patch.object(runner, "run_logged", side_effect=recorded):
+                runner.collect_software(output, "source", "config", {"FIXTURE": "synthetic"})
+            evidence = json.loads((output / "software.json").read_text())
+            self.assertEqual(set(evidence), {"schema", "source_id", "acceptance_config_sha256", "executables", "cases"})
+            self.assertEqual(evidence["schema"], "axiomos.v05.software.v1")
+            self.assertEqual(evidence["source_id"], "source")
+            self.assertEqual(evidence["acceptance_config_sha256"], "config")
+            self.assertEqual(len(evidence["cases"]), len(expected))
+            paths = []
+            for row, (gate, case, executable, test), command in zip(evidence["cases"], expected, commands):
+                self.assertEqual(command, [str(output / runner.v05.SOFTWARE_EXECUTABLES[executable]), test,
+                                           "--exact", "--test-threads=1"])
+                self.assertEqual((row["gate"], row["case"], row["executable"], row["test"], row["returncode"]),
+                                 (gate, case, executable, test, 0))
+                for stream in ("stdout", "stderr"):
+                    paths.append(row[stream])
+                    self.assertEqual(row[stream + "_sha256"], runner.v05.file_sha256(output / row[stream]))
+            self.assertEqual(len(paths), len(set(paths)))
+            for key, filename in runner.v05.SOFTWARE_EXECUTABLES.items():
+                self.assertEqual(evidence["executables"][key],
+                                 {"path": filename, "sha256": runner.v05.file_sha256(output / filename)})
+
+    def test_failed_software_case_is_retained_before_collection_stops(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            for filename in runner.v05.SOFTWARE_EXECUTABLES.values():
+                (output / filename).write_bytes(filename.encode())
+
+            def failed(command, stdout, stderr, *, env):
+                stdout.write_text("actual failed test output\n")
+                stderr.write_text("actual failure details\n")
+                return subprocess.CompletedProcess(command, 101)
+
+            with mock.patch.object(runner, "run_logged", side_effect=failed) as run:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    runner.collect_software(output, "source", "config", {})
+            run.assert_called_once()
+            evidence = json.loads((output / "software.json").read_text())
+            self.assertEqual(len(evidence["cases"]), 1)
+            row = evidence["cases"][0]
+            self.assertEqual(row["returncode"], 101)
+            self.assertEqual((output / row["stdout"]).read_text(), "actual failed test output\n")
+            self.assertEqual((output / row["stderr"]).read_text(), "actual failure details\n")
+            for stream in ("stdout", "stderr"):
+                self.assertEqual(row[stream + "_sha256"], runner.v05.file_sha256(output / row[stream]))
+
     def test_missing_and_ambiguous_executable_artifacts_reject(self):
         for records in ((), ({"reason": "build-finished", "success": True},),
                         (cargo_artifact("first"), cargo_artifact("second")),

@@ -245,6 +245,32 @@ def export_workflow(output: Path, retained: Path, cli: Path, env: dict) -> dict:
     return result
 
 
+def collect_software(output: Path, source: str, config: str, env: dict) -> None:
+    software = {"schema": "axiomos.v05.software.v1", "source_id": source,
+                "acceptance_config_sha256": config,
+                "executables": {key: {"path": filename, "sha256": v05.file_sha256(output / filename)}
+                                for key, filename in v05.SOFTWARE_EXECUTABLES.items()},
+                "cases": []}
+    dump(output / "software.json", software)
+    for gate, cases in v05.SOFTWARE_CASES.items():
+        for case, (executable, test) in cases.items():
+            directory = output / "software" / gate / case
+            directory.mkdir(parents=True)
+            stdout, stderr = directory / "stdout.log", directory / "stderr.log"
+            command = [str(output / v05.SOFTWARE_EXECUTABLES[executable]), test,
+                       "--exact", "--test-threads=1"]
+            result = run_logged(command, stdout, stderr, env=env)
+            software["cases"].append({
+                "gate": gate, "case": case, "executable": executable, "test": test,
+                "stdout": str(stdout.relative_to(output)), "stdout_sha256": v05.file_sha256(stdout),
+                "stderr": str(stderr.relative_to(output)), "stderr_sha256": v05.file_sha256(stderr),
+                "returncode": result.returncode,
+            })
+            # Preserve the failed exact invocation before ending the campaign.
+            dump(output / "software.json", software)
+            result.check_returncode()
+
+
 def run(output: Path) -> None:
     source = clean_source()
     output.mkdir(parents=True, exist_ok=False)
@@ -257,13 +283,17 @@ def run(output: Path) -> None:
     env.pop("AXIOM_BPF_TRUSTED_KEY_PATH", None)
     command = ["cargo", "test", "--locked", "-p", "kernel", "--lib", "--features",
                "embedded-profile,managed-runtime", "--no-run", "--message-format=json"]
+    bpf_command = ["cargo", "test", "--locked", "-p", "kernel_bpf", "--lib",
+                   "--no-default-features", "--features", "embedded-profile",
+                   "--no-run", "--message-format=json"]
     manifest = {"schema": "axiomos.v05.host-run.v1", "source_id": source,
                 "evidence_kind": "synthetic", "release_verdict": "blocked",
                 "artifact_identity_algorithm": "sha3-256", "file_checksum_algorithm": "sha256",
                 "scope": "host state-machine sequencing with modeled clock, acknowledgements and effect submission",
                 "operation_id_domain": "benchmark attempts; accepted kernel operation IDs are checked inside the fixture",
                 "timeout_cause_evidence": "fixture asserts HandoffError::TimedOut and ETIMEDEOUT; trace records generic failed outcome",
-                "build_command": command, "test": TEST, "status": "incomplete",
+                "build_command": command, "bpf_build_command": bpf_command,
+                "test": TEST, "status": "incomplete",
                 "build_environment": {key: env[key] for key in
                                       ("EMBEDDED_DISK_PATH", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTUP_TOOLCHAIN", "CARGO_BUILD_TARGET")
                                       if key in env},
@@ -278,6 +308,12 @@ def run(output: Path) -> None:
         manifest["test_executable_sha256"] = v05.file_sha256(retained)
         manifest["toolchain"] = subprocess.check_output(["rustc", "-Vv"], cwd=ROOT, env=env, text=True)
         manifest["cargo_lock_sha256"] = v05.file_sha256(ROOT / "Cargo.lock")
+        bpf_build = run_logged(bpf_command, output / "bpf-build.jsonl", output / "bpf-build.stderr",
+                               env=env, timeout=600)
+        bpf_build.check_returncode()
+        bpf_retained = output / "bpf-test"
+        shutil.copy2(executable_from_cargo(bpf_build.stdout, "kernel_bpf", "lib", True), bpf_retained)
+        manifest["bpf_test_executable_sha256"] = v05.file_sha256(bpf_retained)
         if clean_source() != source or v05.file_sha256(v05.DEFAULT_ACCEPTANCE) != config:
             raise ValueError("source or acceptance changed during the build")
         reclamation = {"schema": "axiomos.v05.reclamation.v1", "source_id": source,
@@ -300,6 +336,7 @@ def run(output: Path) -> None:
             # from a witness printed before the test process finishes.
             dump(output / "reclamation.json", reclamation)
             result.check_returncode()
+        collect_software(output, source, config, env)
         for scenario in SCENARIOS:
             directory = output / scenario
             directory.mkdir()
@@ -316,7 +353,8 @@ def run(output: Path) -> None:
             digests = validate_artifacts(v05.parse_jsonl(trace), artifacts)
             dump(directory / "expectations.json", expectations(scenario, source, digests["a.bundle"], config))
             reduce_command = [sys.executable, str(ROOT / "scripts/benchmark/analyze-v05.py"),
-                              "--acceptance", str(acceptance), "--reclamation", str(output / "reclamation.json"), "--expectations",
+                              "--acceptance", str(acceptance), "--reclamation", str(output / "reclamation.json"),
+                              "--software", str(output / "software.json"), "--expectations",
                               str(directory / "expectations.json"), str(directory / "trace.jsonl")]
             reduced = run_logged(reduce_command, directory / "results.json", directory / "reducer.stderr")
             report = v05.parse_json(reduced.stdout)
@@ -324,7 +362,8 @@ def run(output: Path) -> None:
                 raise ValueError("malformed reducer result")
             if scenario == "normal":
                 if (reduced.returncode != 0 or report.get("trace_verdict") != "pass"
-                        or report.get("gate_results", {}).get("resource_reclamation") != "pass"):
+                        or report.get("gate_results", {}).get("resource_reclamation") != "pass"
+                        or any(report.get("gate_results", {}).get(gate) != "pass" for gate in v05.SOFTWARE_CASES)):
                     raise ValueError("normal host trace did not pass reduction")
             elif (reduced.returncode != 1 or report.get("trace_verdict") != "fail"
                   or report.get("error") != "cycle release coverage does not match expectations"):
@@ -350,6 +389,7 @@ def run(output: Path) -> None:
         manifest["workflow"] = export_workflow(output, retained, cli, env)
         if (clean_source() != source or v05.file_sha256(v05.DEFAULT_ACCEPTANCE) != config
                 or v05.file_sha256(retained) != manifest["test_executable_sha256"]
+                or v05.file_sha256(bpf_retained) != manifest["bpf_test_executable_sha256"]
                 or v05.file_sha256(cli) != manifest["cli"]["sha256"]):
             raise ValueError("source, acceptance or executable changed during collection")
         manifest["status"] = "pass"

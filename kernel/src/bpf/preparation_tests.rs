@@ -2521,7 +2521,81 @@ fn worker_cancellation_at_each_build_and_handoff_boundary_preserves_old_active()
             let private_id = slot.lock().snapshot().pending.unwrap();
             slot.lock().enter_handoff(private_id).unwrap();
         }
+
+        let before_slot = slot.lock().snapshot();
+        let private_id = before_slot.pending.unwrap();
+        let before_error = slot.lock().operation_error(private_id);
+        let before_operation = manager.lock().query_installation(&slot.lock(), id).unwrap();
+        let (before_usage, before_admission, before_busy, before_cancelled, before_lifecycle) = {
+            let manager = manager.lock();
+            (
+                manager.resource_usage(),
+                (
+                    manager.admission.committed_ns_per_s(),
+                    manager.admission.reserved_ns_per_s(),
+                ),
+                manager.managed_slot_busy,
+                manager.preparation.cancelled,
+                manager.preparation.lifecycle.map(|lifecycle| {
+                    (
+                        lifecycle.instance_id,
+                        lifecycle.generation,
+                        lifecycle.target,
+                    )
+                }),
+            )
+        };
+        assert_eq!(before_operation.id, id);
+        assert_eq!(
+            before_operation.phase,
+            [
+                MANAGED_OPERATION_QUEUED,
+                MANAGED_OPERATION_PREPARING,
+                MANAGED_OPERATION_STAGED,
+                MANAGED_OPERATION_HANDOFF,
+            ][ordering]
+        );
+        assert_eq!(before_operation.error, 0);
+        assert!(before_busy);
+        assert!(!before_cancelled);
+        assert_eq!(before_error, None);
+        assert_eq!(
+            before_lifecycle,
+            Some((private_id, before_slot.generation + 1, target))
+        );
+
         assert!(manager.lock().reclaim_owner(7));
+        let after_slot = slot.lock().snapshot();
+        let after_error = slot.lock().operation_error(private_id);
+        let after_operation = manager.lock().query_installation(&slot.lock(), id).unwrap();
+        let (after_usage, after_admission, after_busy, after_cancelled, after_lifecycle) = {
+            let manager = manager.lock();
+            (
+                manager.resource_usage(),
+                (
+                    manager.admission.committed_ns_per_s(),
+                    manager.admission.reserved_ns_per_s(),
+                ),
+                manager.managed_slot_busy,
+                manager.preparation.cancelled,
+                manager.preparation.lifecycle.map(|lifecycle| {
+                    (
+                        lifecycle.instance_id,
+                        lifecycle.generation,
+                        lifecycle.target,
+                    )
+                }),
+            )
+        };
+        assert_eq!(after_slot, before_slot, "ordering {ordering}");
+        assert_eq!(after_operation, before_operation, "ordering {ordering}");
+        assert_eq!(after_usage, before_usage, "ordering {ordering}");
+        assert_eq!(after_admission, before_admission, "ordering {ordering}");
+        assert_eq!(after_busy, before_busy, "ordering {ordering}");
+        assert_eq!(after_cancelled, before_cancelled, "ordering {ordering}");
+        assert_eq!(after_lifecycle, before_lifecycle, "ordering {ordering}");
+        assert_eq!(after_error, before_error, "ordering {ordering}");
+
         manager
             .lock()
             .cancel_installation(&mut slot.lock(), id, 1, target)

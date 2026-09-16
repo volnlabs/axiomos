@@ -16,6 +16,7 @@ Examples::
 This initial reducer does not implement physical, fault-matrix, recorder-cost,
 or complete release gates, so it cannot emit a v0.5 release PASS.
 Optional --reclamation validates retained host resource tests only.
+Optional --software validates the fixed host software-property suite.
 """
 from __future__ import annotations
 
@@ -43,6 +44,33 @@ RECLAMATION_CASES = {
     "eviction_custody": "bpf::installation::tests::installation_a_b_c_rollback_keeps_actual_code_and_fresh_helper_state",
     "reader_retirement": "bpf::installation::tests::installation_permanent_worker_retries_exact_retirement_until_readers_and_weak_release",
 }
+# Fixed host acceptance cases, reviewed against the canonical contract. These
+# logs prove the listed assertions ran; they are not execution attestations.
+SOFTWARE_CASES = {
+    "authentication_and_loading": {
+        "manifest_tampering": ("kernel_bpf", "signing::managed::tests::every_wire_byte_is_authenticated_or_rejected_as_invalid"),
+        "signed_unsupported_shape": ("kernel_bpf", "signing::managed::tests::supported_shape_checks_apply_even_to_validly_signed_inputs"),
+        "malformed_bundles": ("kernel_bpf", "signing::managed::tests::truncated_extra_empty_and_oversized_bundles_reject"),
+        "actual_preparation": ("kernel", "bpf::preparation::tests::managed_preparation_valid_dedup_auth_verify_and_cancel_paths_balance_charges"),
+        "elf_rejection": ("kernel", "bpf::tests::legacy_elf_composition_rejects_without_publishing_resources"),
+        "elf_acceptance": ("kernel", "bpf::tests::legacy_elf_composition_accepts_one_map_free_entry"),
+    },
+    "preparation_isolation": {
+        "stateful_failures": ("kernel", "bpf::preparation::tests::isolation::preparation_failures_preserve_stateful_active_previous_and_admission"),
+    },
+    "private_state": {
+        "separate_instances": ("kernel", "bpf::managed::tests::managed_execution_uses_exact_bindings_and_keeps_instance_state_isolated"),
+        "external_access": ("kernel", "bpf::managed::tests::managed_objects_reject_legacy_access_and_bound_artifacts"),
+        "fresh_rollback": ("kernel", "bpf::installation::tests::installation_a_b_c_rollback_keeps_actual_code_and_fresh_helper_state"),
+        "local_handles": ("kernel_bpf", "verifier::managed::tests::managed_local_bindings_reject_absent_dynamic_global_and_stale_handles"),
+    },
+    "ownership": {
+        "upload_and_preparation_exit": ("kernel", "bpf::preparation::tests::managed_preparation_exit_cancels_only_incomplete_process_owned_upload"),
+        "active_exit": ("kernel", "bpf::preparation::tests::worker_cancellation_at_each_build_and_handoff_boundary_preserves_old_active"),
+        "retirement_exit": ("kernel", "bpf::preparation::tests::worker_inactive_retirement_candidate_commit_keeps_public_identity_and_reader_custody"),
+    },
+}
+SOFTWARE_EXECUTABLES = {"kernel": "host-test", "kernel_bpf": "bpf-test"}
 RESOURCE_MAXIMA = {
     "ownership": {"instances_live": 1, "artifact_strong_live": 2, "instance_strong_live": 2},
     "installation": {"instances_before_reclamation": 2, "active_artifact_strong_after_reclamation": 3,
@@ -132,13 +160,13 @@ def _over_ns(delta_ticks: int, limit_ns: int, clock_hz: int) -> bool:
 def _evidence_file(parent: Path, name, digest) -> Path:
     if (not isinstance(name, str) or not name or Path(name).is_absolute()
             or ".." in Path(name).parts):
-        raise ValueError("invalid reclamation evidence path")
+        raise ValueError("invalid retained evidence path")
     path = (parent / name).resolve()
     if not path.is_relative_to(parent) or not path.is_file():
-        raise ValueError("reclamation evidence path escapes or is missing")
+        raise ValueError("retained evidence path escapes or is missing")
     if (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
             or file_sha256(path) != digest):
-        raise ValueError("reclamation evidence hash mismatch")
+        raise ValueError("retained evidence hash mismatch")
     return path
 
 
@@ -262,6 +290,62 @@ def validate_reclamation(path: Path, source: str, config: str, acceptance: dict)
             "scope": "retained host tests; not physical or timing qualification"}
 
 
+def validate_software(path: Path, source: str, config: str) -> dict:
+    evidence = load_json(path)
+    if (not isinstance(evidence, dict)
+            or set(evidence) != {"schema", "source_id", "acceptance_config_sha256", "executables", "cases"}
+            or evidence["schema"] != "axiomos.v05.software.v1"
+            or evidence["source_id"] != source or evidence["acceptance_config_sha256"] != config):
+        raise ValueError("software schema, source or acceptance mismatch")
+    parent = path.resolve().parent
+    executables = evidence["executables"]
+    if not isinstance(executables, dict) or set(executables) != set(SOFTWARE_EXECUTABLES):
+        raise ValueError("missing software executables")
+    used_paths = {path.resolve()}
+    for name, expected_path in SOFTWARE_EXECUTABLES.items():
+        executable = executables[name]
+        if (not isinstance(executable, dict) or set(executable) != {"path", "sha256"}
+                or executable["path"] != expected_path):
+            raise ValueError("malformed software executable")
+        resolved = _evidence_file(parent, executable["path"], executable["sha256"])
+        if resolved in used_paths:
+            raise ValueError("software executables reuse evidence paths")
+        used_paths.add(resolved)
+    cases = evidence["cases"]
+    if not isinstance(cases, list) or len(cases) != sum(map(len, SOFTWARE_CASES.values())):
+        raise ValueError("missing software cases")
+    seen = set()
+    for case in cases:
+        if (not isinstance(case, dict)
+                or set(case) != {"gate", "case", "executable", "test", "stdout", "stdout_sha256", "stderr", "stderr_sha256", "returncode"}
+                or not all(isinstance(case[key], str) for key in ("gate", "case", "executable", "test"))
+                or case["gate"] not in SOFTWARE_CASES
+                or case["case"] not in SOFTWARE_CASES[case["gate"]]
+                or (case["executable"], case["test"]) != SOFTWARE_CASES[case["gate"]][case["case"]]
+                or (case["gate"], case["case"]) in seen
+                or type(case["returncode"]) is not int or case["returncode"] != 0):
+            raise ValueError("malformed, duplicate or failed software case")
+        seen.add((case["gate"], case["case"]))
+        logs = {}
+        for stream in ("stdout", "stderr"):
+            log = _evidence_file(parent, case[stream], case[stream + "_sha256"])
+            if log in used_paths:
+                raise ValueError("software cases reuse evidence paths")
+            used_paths.add(log)
+            logs[stream] = log.read_text(encoding="utf-8")
+        # These cases run with libtest capture enabled, without --quiet. Exact
+        # ordered completion rejects empty selection, ignored tests and crashes.
+        lines = [line for line in logs["stdout"].splitlines() if line]
+        if (logs["stderr"] or not logs["stdout"].endswith("\n") or len(lines) != 3
+                or lines[:2] != ["running 1 test", "test " + case["test"] + " ... ok"]
+                or not re.fullmatch(r"test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+\.[0-9]+s", lines[2])):
+            raise ValueError("software log lacks exact successful test completion")
+    return {"manifest_sha256": file_sha256(path),
+            "executables_sha256": {name: value["sha256"] for name, value in executables.items()},
+            "cases": [f"{gate}/{case}" for gate, case in sorted(seen)],
+            "scope": "fixed host property tests; ownership uses manager cleanup calls, not process-exit scheduling; no physical or timing qualification"}
+
+
 def _validate_acceptance(value: dict) -> None:
     if not isinstance(value, dict) or value.get("schema") != "axiomos.v05.acceptance.v1":
         raise ValueError("acceptance schema mismatch")
@@ -274,11 +358,11 @@ def _validate_acceptance(value: dict) -> None:
     for name, gate in value["required_gates"].items():
         if not isinstance(gate, dict) or type(gate.get("required")) is not bool or type(gate.get("implemented_by_reducer")) is not bool or (not gate["implemented_by_reducer"] and not _one_of(gate.get("missing_policy"), {"blocked", "not_evaluated"})):
             raise ValueError("malformed acceptance required_gates")
-        if gate["implemented_by_reducer"] and name not in {"trace_subset", "resource_reclamation"}:
+        if gate["implemented_by_reducer"] and name not in {"trace_subset", "resource_reclamation", *SOFTWARE_CASES}:
             raise ValueError(f"unsupported reducer gate {name!r}")
 
 
-def reduce_records(rows: list[dict], expectations: dict, acceptance: dict, config_digest: str, reclamation: Path | None = None) -> dict:
+def reduce_records(rows: list[dict], expectations: dict, acceptance: dict, config_digest: str, reclamation: Path | None = None, software: Path | None = None) -> dict:
     _validate_acceptance(acceptance)
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise ValueError("trace records must be objects")
@@ -486,12 +570,14 @@ def reduce_records(rows: list[dict], expectations: dict, acceptance: dict, confi
 
     failures = sum(actual_outcomes[name] for name in OUTCOMES if name != "successful")
     resource_evidence = None if reclamation is None else validate_reclamation(reclamation, header["source_id"], config_digest, acceptance)
-    gate_results = {name: (gate["missing_policy"] if not gate["implemented_by_reducer"] else
-                          "pass" if name == "trace_subset" else
-                          ("pass" if resource_evidence is not None else "not_evaluated") if name == "resource_reclamation" else gate["missing_policy"])
-                    for name, gate in acceptance["required_gates"].items()}
+    software_evidence = None if software is None else validate_software(software, header["source_id"], config_digest)
+    evaluated = {"trace_subset": True, "resource_reclamation": resource_evidence is not None,
+                 **{name: software_evidence is not None for name in SOFTWARE_CASES}}
+    gate_results = {name: ("pass" if evaluated[name] else "not_evaluated") if gate["implemented_by_reducer"]
+                    else gate["missing_policy"] for name, gate in acceptance["required_gates"].items()}
     return {
         "reclamation_evidence": resource_evidence,
+        "software_evidence": software_evidence,
         "schema": "axiomos.v05.results.v1",
         "trace_verdict": "pass",
         "release_verdict": "blocked",
@@ -512,8 +598,9 @@ def describe():
             "unsupported_operations": ["retire", "deactivate", "administrative lifecycle operations"],
             "expectations_shape": {"schema": EXPECTATIONS_SCHEMA, "acceptance_config_sha256": "lowercase SHA-256", "boots": {"<boot_id>": {"source_id": "lowercase SHA-1", "artifact_id": "lowercase canonical artifact digest (managed bundles use SHA3-256)", "event_counts": "exact nonnegative integer counts by event type", "operation_outcomes": "exact successful/failed/rejected/canceled integer counts", "release_cycles": {"first": "positive integer", "count": "bounded nonnegative integer"}}}},
             "operation_generation_semantics": "requested candidate installation generation; installed only after successful commit and matching first behavior entry",
-            "gate_scope": "host trace subset and optional retained reclamation tests; not an end-to-end acceptance gate",
+            "gate_scope": "host trace subset and optional fixed software/reclamation tests; not an end-to-end acceptance gate",
             "reclamation_cases": RECLAMATION_CASES,
+            "software_cases": SOFTWARE_CASES,
             "release_pass_supported": False}
 
 
@@ -522,6 +609,7 @@ def main() -> int:
     parser.add_argument("--acceptance", type=Path, default=DEFAULT_ACCEPTANCE)
     parser.add_argument("--expectations", type=Path)
     parser.add_argument("--reclamation", type=Path, help="retained fixed host reclamation suite evidence")
+    parser.add_argument("--software", type=Path, help="retained fixed host software-property suite evidence")
     parser.add_argument("--describe", action="store_true")
     parser.add_argument("--show-acceptance", action="store_true")
     parser.add_argument("--self-test", action="store_true")
@@ -541,7 +629,7 @@ def main() -> int:
         parser.error("trace and --expectations are required")
     try:
         acceptance = load_json(args.acceptance)
-        result = reduce_records(parse_jsonl(args.trace.read_text(encoding="utf-8")), load_json(args.expectations), acceptance, file_sha256(args.acceptance), args.reclamation)
+        result = reduce_records(parse_jsonl(args.trace.read_text(encoding="utf-8")), load_json(args.expectations), acceptance, file_sha256(args.acceptance), args.reclamation, args.software)
         result["input_sha256"] = {"trace": file_sha256(args.trace), "expectations": file_sha256(args.expectations)}
     except (OSError, UnicodeError, ValueError) as error:
         print(json.dumps({"schema": "axiomos.v05.results.v1", "trace_verdict": "fail", "release_verdict": "blocked", "error": str(error)}, sort_keys=True))
