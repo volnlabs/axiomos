@@ -19,6 +19,31 @@ mod trace;
 mod workflow;
 
 #[test]
+fn preparation_reports_resource_unsupported_budget_and_verifier_failures_distinctly() {
+    assert_eq!(bundle_error(BundleError::Malformed), EINVAL);
+    assert_eq!(bundle_error(BundleError::Unsupported), ENOTSUP);
+    assert_eq!(bundle_error(BundleError::Capacity), E2BIG);
+    assert_eq!(verification_error(VerifyError::ResourceExhausted), ENOMEM);
+    assert_eq!(
+        verification_error(VerifyError::UnsupportedManagedContract),
+        ENOTSUP
+    );
+    assert_eq!(
+        verification_error(VerifyError::InsnCountExceeded { count: 2, limit: 1 }),
+        E2BIG
+    );
+    assert_eq!(verification_error(VerifyError::EmptyProgram), ENOEXEC);
+    #[cfg(feature = "embedded-profile")]
+    assert_eq!(
+        verification_error(VerifyError::WcetExceeded {
+            cycles: 2,
+            budget: 1
+        }),
+        E2BIG
+    );
+}
+
+#[test]
 fn rearm_shares_operation_capacity_and_preserves_installation_resources() {
     let (mut worker, slot, manager) = fixture_worker();
     let (upload, target) = resident_via_worker(&mut worker, &slot, &manager, 0, 1);

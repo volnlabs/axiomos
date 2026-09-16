@@ -12,9 +12,9 @@ actuation code consumes.
 | `MAX_INSN_COUNT` | 1,000,000 | 100,000 |
 | `MEMORY_BUDGET` | 0 (kernel quotas) | 64 KiB per map |
 | `JIT_ALLOWED` | false | false |
-| `WCET_CYCLE_BUDGET` | unbounded | one 1 ms period |
-| `CYCLE_UNIT_NS` | nominal 1 | conservative 6 |
-| `RT_PERIOD_NS` | unbounded | 1,000,000 |
+| `WCET_CYCLE_BUDGET` | unbounded | one 10 ms period |
+| `CYCLE_UNIT_NS` | nominal 1 | provisional 6 |
+| `RT_PERIOD_NS` | unbounded | 10,000,000 |
 | `UTILIZATION_BUDGET_NS_PER_S` | unbounded | 500,000,000 |
 | Map resize methods | compiled | erased |
 | Actuation ceiling/slew | no-op bounds | 90%, 20% per period |

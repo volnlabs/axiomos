@@ -148,12 +148,31 @@ def stitch(paths, acceptance):
     rearm = {}
     rearm_committed = set()
     rearm_failed = set()
-    uploads = {"resident": 0, "rejected_by_errno": {}}
+    uploads = {"resident": 0, "rejected_by_errno": {}, "outcomes": {}}
+    upload_phases = {}
+    pending_identity = None
     completion_misses = 0
     stops = {}
     for record in (retained[index] for index in range(previous_end)):
         payload = record["payload"]
-        if record["kind"] == 3:
+        if pending_identity is not None and record["kind"] != 1:
+            raise ValueError("authenticated upload identity is interrupted")
+        if record["kind"] == 1:
+            if pending_identity is None:
+                raise ValueError("orphan artifact identity fragment")
+            fragment = struct.unpack("<II56s", payload)
+            operation, ticks, handle, next_index, identity = pending_identity
+            if (fragment[0] != next_index or fragment[1] != handle
+                    or record["correlation"] != operation or record["ticks"] != ticks):
+                raise ValueError("reordered or mismatched artifact identity fragment")
+            identity.extend(fragment[2])
+            if next_index == 3:
+                uploads["outcomes"][str(operation)]["bundle_digest"] = bytes(
+                    identity[160:192]).hex()
+                pending_identity = None
+            else:
+                pending_identity = (operation, ticks, handle, next_index + 1, identity)
+        elif record["kind"] == 3:
             fields = cycle(payload)
             item = dict(cycle_id=fields[0], scheduled=fields[1], actual=fields[2],
                         missed=fields[3], flags=fields[5], failure=fields[12],
@@ -166,11 +185,39 @@ def stitch(paths, acceptance):
             fields = lifecycle(payload)
             if fields[0] == 1:
                 upload = struct.unpack("<IIIIIIIIQQ16s", payload)
-                if upload[1] == 4 and upload[2] == 0:
+                phase, error, flags, handle = upload[1:5]
+                if (record["correlation"] == 0 or phase not in range(1, 7)
+                        or flags & ~7 or upload[7] != 0 or upload[10] != bytes(16)
+                        or not 0 < upload[5] <= 256 * 1024 or upload[6] > upload[5]
+                        or (phase == 4) != bool(flags & 2)
+                        or (phase in (5, 6)) != bool(error)
+                        or (not flags & 2 and handle != 0)
+                        or (not flags & 4 and upload[9] != 0)
+                        or (flags & 6 and not flags & 1)
+                        or (flags & 1 and phase < 4)):
+                    raise ValueError("invalid upload audit payload")
+                phases = upload_phases.setdefault(record["correlation"], [])
+                if phase in phases or (phases and phase <= phases[-1]):
+                    raise ValueError("duplicate or reordered upload phase")
+                phases.append(phase)
+                if phase in (4, 5, 6):
+                    key = str(record["correlation"])
+                    if key in uploads["outcomes"]:
+                        raise ValueError("duplicate terminal upload outcome")
+                    uploads["outcomes"][key] = {
+                        "phase": phase,
+                        "errno": error,
+                        "artifact_handle": handle if flags & 2 else None,
+                        "bundle_digest": None,
+                    }
+                if phase == 4:
                     uploads["resident"] += 1
-                elif upload[1] in (5, 6) and upload[2] != 0:
-                    key = str(upload[2])
+                elif phase in (5, 6):
+                    key = str(error)
                     uploads["rejected_by_errno"][key] = uploads["rejected_by_errno"].get(key, 0) + 1
+                if flags & 1:
+                    pending_identity = (
+                        record["correlation"], record["ticks"], handle, 0, bytearray())
             elif fields[0] == 2:
                 if fields[7] in (1, 2):
                     state = installations.setdefault(fields[2], {
@@ -230,6 +277,11 @@ def stitch(paths, acceptance):
                             raise ValueError("duplicate rearm handoff stage")
                         state[key] = (record["sequence"], observed)
 
+    if pending_identity is not None:
+        raise ValueError("truncated authenticated upload identity")
+    if any(phases not in ([1, 6], [1, 2, 3, 4], [1, 2, 3, 5], [1, 2, 3, 6])
+           for phases in upload_phases.values()):
+        raise ValueError("upload audit lifecycle is incomplete")
     cycles.sort(key=lambda item: item["cycle_id"])
     if not cycles:
         raise ValueError("audit contains no recorded control release")

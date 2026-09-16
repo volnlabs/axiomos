@@ -1549,34 +1549,31 @@ impl BpfManager {
         })?
     }
 
-    /// Clone a loaded runtime by id (verifier-cost instrumentation only).
     #[cfg(feature = "verifier-cost")]
-    pub(crate) fn get_program(&self, prog_id: u32) -> Option<Arc<ProgramRuntime>> {
-        self.program_entry(prog_id)
-            .and_then(|entry| entry.program.legacy().cloned())
-    }
-
-    #[cfg(feature = "verifier-cost")]
-    pub fn get_program_for(
+    pub(crate) fn get_program_for(
         &self,
         owner: u64,
         prog_id: u32,
-    ) -> Result<Arc<ProgramRuntime>, BpfError> {
+    ) -> Result<(Arc<ProgramRuntime>, u64), BpfError> {
         self.ensure_program_owner(owner, prog_id)?;
-        self.get_program(prog_id).ok_or(BpfError::NotLoaded)
+        let entry = self.program_entry(prog_id).ok_or(BpfError::NotLoaded)?;
+        Ok((
+            entry.program.legacy().cloned().ok_or(BpfError::NotLoaded)?,
+            entry.wcet_cycles,
+        ))
     }
 
     /// Execute `program` `runs` times back-to-back against an empty context
     /// and emit an `AXIOM EXEC COST` marker with the total CNTVCT_EL0 delta.
-    /// Timing wraps the production execution path (`execute_program`: JIT on
-    /// AArch64, interpreter elsewhere), so the measurement calibrates the cost
-    /// of what actually runs on the device. Must be called without the
-    /// manager lock held (see `get_program`).
+    /// Timing wraps the shipped interpreter path, so the measurement calibrates
+    /// what actually runs on the device. Must be called without the
+    /// manager lock held (see `get_program_for`).
     #[cfg(feature = "verifier-cost")]
-    pub fn bench_execute(
+    pub(crate) fn bench_execute(
         program: &ProgramRuntime,
         prog_id: u32,
         runs: u32,
+        wcet_cycles: u64,
     ) -> Result<(), BpfError> {
         let ctx = BpfContext::empty();
         let start = read_cycles();
@@ -1584,6 +1581,9 @@ impl BpfManager {
             Self::execute_program(program, &ctx)?;
         }
         let cycles = read_cycles().wrapping_sub(start);
+        let modeled_ns = wcet_cycles
+            .checked_mul(<ActiveProfile as PhysicalProfile>::CYCLE_UNIT_NS)
+            .ok_or(BpfError::ResourceLimit)?;
         crate::serial_println!(
             "{}",
             kernel_bpf::cost_corpus::ExecRecord {
@@ -1591,6 +1591,9 @@ impl BpfManager {
                 insns: program.program.instructions().len(),
                 runs,
                 cycles,
+                clock_hz: cycle_frequency(),
+                wcet_cycles,
+                modeled_ns,
             }
         );
         Ok(())
@@ -2219,6 +2222,18 @@ impl BpfManager {
         map.map
             .update(&[], data, flags)
             .map_err(|_| BpfError::OutOfMemory)
+    }
+}
+
+#[cfg(feature = "verifier-cost")]
+fn cycle_frequency() -> u64 {
+    #[cfg(all(target_arch = "aarch64", feature = "rpi5"))]
+    {
+        crate::arch::aarch64::interrupts::timer_snapshot().map_or(0, |timer| timer.frequency)
+    }
+    #[cfg(not(all(target_arch = "aarch64", feature = "rpi5")))]
+    {
+        0
     }
 }
 

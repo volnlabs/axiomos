@@ -27,6 +27,15 @@ TIMER_FIELDS = {"releases_serviced", "releases_missed", "releases_late",
                 "max_wake_lateness_ticks", "completion_misses", "safe_releases",
                 "last_release_sequence", "last_scheduled_ticks", "last_actual_ticks",
                 "timer_fault"}
+CALIBRATION_SHAPES = {shape: (100, 1000) for shape in
+                      ("straight", "memory", "div", "ktime", "map", "copy")}
+CALIBRATION_LABEL = re.compile(
+    r"(straight|memory|div|ktime|map|copy|ringbuf) n=(\d+) prog_id=(\d+)")
+CALIBRATION_COST = re.compile(
+    r"AXIOM VERIFIER COST prog_id=(\d+) insns=(\d+) states=(\d+) cycles=(\d+) wcet=(\d+)")
+CALIBRATION_EXEC = re.compile(
+    r"AXIOM EXEC COST prog_id=(\d+) insns=(\d+) runs=(\d+) cycles=(\d+) "
+    r"clock_hz=(\d+) wcet=(\d+) modeled_ns=(\d+)")
 
 
 def pairs(values):
@@ -90,6 +99,92 @@ def file_ref(root, value):
     if sha256(path) != value["sha256"]:
         raise ValueError(f"retained file hash mismatch {value['path']}")
     return path
+
+
+def calibration(path, acceptance):
+    data = path.read_bytes()
+    if not data or len(data) > 16 * 1024 * 1024 or not data.endswith(b"\n"):
+        raise ValueError("calibration log is empty, oversized, or truncated")
+    try:
+        lines = data.decode("utf-8").splitlines()
+    except UnicodeError:
+        raise ValueError("calibration log is not UTF-8") from None
+    if (lines.count("=== Verifier Cost Bench ===") != 1
+            or lines.count("=== Verifier Cost Bench Done ===") != 1
+            or any(token in data for token in (b" FAILED", b"KERNEL_FATAL",
+                                                b"kernel panicked", b"panicked at", b"Panic!"))):
+        raise ValueError("calibration run is incomplete or failed")
+    start = lines.index("=== Verifier Cost Bench ===")
+    done = lines.index("=== Verifier Cost Bench Done ===")
+    if start >= done:
+        raise ValueError("calibration markers are out of order")
+    if (lines.count("AXIOM ADMISSION printk-ban rc=-1 PASS") != 1
+            or lines.count("AXIOM ADMISSION control rc=0 PASS") != 1
+            or sum(line.startswith("AXIOM ADMISSION ") for line in lines) != 2):
+        raise ValueError("calibration admission checks are incomplete")
+
+    labels, costs, executions = {}, {}, {}
+    for line_no, line in enumerate(lines):
+        if match := CALIBRATION_LABEL.fullmatch(line):
+            shape, size, program = match.group(1), int(match.group(2)), int(match.group(3))
+            if (shape, size) in labels or any(program == value[0] for value in labels.values()):
+                raise ValueError("duplicate calibration label or program")
+            labels[(shape, size)] = (program, line_no)
+        elif match := CALIBRATION_COST.fullmatch(line):
+            fields = tuple(int(value) for value in match.groups())
+            if fields[0] in costs:
+                raise ValueError("duplicate calibration verifier result")
+            costs[fields[0]] = (line_no, *fields[1:])
+        elif match := CALIBRATION_EXEC.fullmatch(line):
+            fields = tuple(int(value) for value in match.groups())
+            executions.setdefault(fields[0], []).append((line_no, *fields[1:]))
+        elif (line.startswith(("AXIOM VERIFIER COST", "AXIOM EXEC COST"))
+              or any(line.startswith(f"{shape} n=") for shape in CALIBRATION_SHAPES)):
+            raise ValueError(f"malformed calibration marker on line {line_no + 1}")
+
+    runs = integer(acceptance["campaign"]["calibration_exec_runs"],
+                   "calibration_exec_runs", positive=True)
+    samples = integer(acceptance["campaign"]["calibration_samples_per_shape"],
+                      "calibration_samples_per_shape", positive=True)
+    cycle_unit = integer(acceptance["cpu"]["modeled_cycle_unit_ns"],
+                         "modeled_cycle_unit_ns", positive=True)
+    expected_labels = {(shape, size) for shape, sizes in CALIBRATION_SHAPES.items()
+                       for size in sizes}
+    programs = {value[0] for value in labels.values()}
+    if set(labels) != expected_labels or set(costs) != programs or set(executions) != programs:
+        raise ValueError("calibration contains missing or extra programs")
+    report, frequencies = {}, set()
+    for shape, sizes in CALIBRATION_SHAPES.items():
+        for size in sizes:
+            label = labels.get((shape, size))
+            program = label[0] if label else None
+            cost = costs.get(program)
+            measured = executions.get(program, [])
+            if (program is None or cost is None or len(measured) != samples
+                    or cost[1] != size or not 0 < cost[2] <= size
+                    or cost[3] == 0 or cost[4] == 0
+                    or not start < cost[0] < label[1] < measured[0][0]
+                    or measured[-1][0] >= done):
+                raise ValueError(f"calibration coverage is incomplete for {shape}/{size}")
+            maximum_ppm, previous_line = 0, label[1]
+            for line_no, insns, observed_runs, ticks, frequency, wcet, modeled_ns in measured:
+                if (insns != size or observed_runs != runs or ticks == 0
+                        or line_no <= previous_line or frequency == 0 or wcet != cost[4]
+                        or modeled_ns != wcet * cycle_unit
+                        or ticks * 1_000_000_000 > modeled_ns * runs * frequency):
+                    raise ValueError(f"admission model does not bound {shape}/{size}")
+                previous_line = line_no
+                frequencies.add(frequency)
+                maximum_ppm = max(maximum_ppm,
+                                  (ticks * 1_000_000_000 * 1_000_000
+                                   + modeled_ns * runs * frequency - 1)
+                                  // (modeled_ns * runs * frequency))
+            report[f"{shape}/{size}"] = {"program": program, "wcet": cost[4],
+                                          "model_utilization_ppm_max": maximum_ppm}
+    if len(frequencies) != 1:
+        raise ValueError("calibration counter frequency changed")
+    return {"clock_frequency": next(iter(frequencies)), "cycle_unit_ns": cycle_unit,
+            "samples_per_shape": samples, "programs": report}
 
 
 def status_sample(root, reference, expected_boot=None, query_timeout_ns=2_000_000_000):
@@ -192,7 +287,8 @@ def reduce(manifest_path, acceptance_path=DEFAULT_ACCEPTANCE):
     root = manifest_path.resolve().parent
     campaign = json_file(manifest_path)
     expected = {"schema", "acceptance_config_sha256", "source_id", "motors_connected",
-                "provenance", "bundles", "boots", "endurance", "load_trials", "fault_trials"}
+                "provenance", "bundles", "calibration", "boots", "endurance",
+                "load_trials", "fault_trials"}
     if set(campaign) != expected or campaign["schema"] != "axiomos.v05.physical-campaign.v1" or campaign["motors_connected"] is not False or not SOURCE.fullmatch(str(campaign["source_id"])):
         raise ValueError("physical campaign schema or source mismatch")
     acceptance = json_file(acceptance_path)
@@ -212,11 +308,13 @@ def reduce(manifest_path, acceptance_path=DEFAULT_ACCEPTANCE):
             or not isinstance(source_features["features"], list)
             or any(not isinstance(value, str) for value in source_features["features"])
             or len(set(source_features["features"])) != len(source_features["features"])
-            or not {"embedded-rpi5", "managed-runtime-bench-markers"}.issubset(
+            or not {"embedded-rpi5", "managed-runtime-bench-markers",
+                    "verifier-cost"}.issubset(
                 source_features["features"])
             or {"bpf-unsigned-development", "bringup-diagnostics", "trace-control-link"}
             & set(source_features["features"])):
         raise ValueError("qualified source/features manifest mismatch")
+    calibration_report = calibration(file_ref(root, campaign["calibration"]), acceptance)
     bundles = campaign["bundles"]
     if not isinstance(bundles, dict) or set(bundles) != {"controller_a", "controller_b", "private_state"}:
         raise ValueError("required signed bundle set is incomplete")
@@ -230,7 +328,6 @@ def reduce(manifest_path, acceptance_path=DEFAULT_ACCEPTANCE):
     boot_reports, run_reports = {}, {}
     total_releases = total_transitions = total_rearms = total_stops = total_cycle_failures = 0
     phase_counts = [0] * minimum["transition_phase_bins"]
-    resident = rejected = 0
     for boot in boots:
         fields = {"boot_id", "boot_log", "boot_inventory", "audit_exports",
                   "status_start", "status_end", "shrike_runs"}
@@ -263,8 +360,6 @@ def reduce(manifest_path, acceptance_path=DEFAULT_ACCEPTANCE):
             raise ValueError(f"boot {boot_id} audit acceptance failed")
         for index, count in enumerate(audit["transition_phase_bins"]):
             phase_counts[index] += count
-        resident += audit["uploads"]["resident"]
-        rejected += sum(audit["uploads"]["rejected_by_errno"].values())
         total_rearms += len(audit["rearm_quiescence"])
         total_stops += sum(audit["stops"].values())
         total_cycle_failures += audit["cycle_failures"]
@@ -294,17 +389,34 @@ def reduce(manifest_path, acceptance_path=DEFAULT_ACCEPTANCE):
     required_loads = {"valid_post_boot", "invalid_signature", "verifier_rejection", "over_budget"}
     if not isinstance(load_trials, list) or {trial.get("case") for trial in load_trials if isinstance(trial, dict)} != required_loads:
         raise ValueError("physical loading cases are incomplete")
-    valid = invalid = 0
+    expected_errno = {"valid_post_boot": 0, "invalid_signature": 2,
+                      "verifier_rejection": 44, "over_budget": 1}
+    seen_operations = set()
+    controller_b_digest = hashlib.sha3_256(bundle_paths["controller_b"].read_bytes()).hexdigest()
     for trial in load_trials:
-        if set(trial) != {"boot_id", "case", "errno"} or trial["boot_id"] not in boot_reports:
+        if (set(trial) != {"boot_id", "case", "operation_id", "errno", "bundle"}
+                or trial["boot_id"] not in boot_reports):
             raise ValueError("invalid physical loading trial")
+        operation = integer(trial["operation_id"], "load trial operation", positive=True)
         errno = integer(trial["errno"], "load trial errno")
-        if (trial["case"] == "valid_post_boot") != (errno == 0):
-            raise ValueError("loading trial outcome contradicts its case")
-        valid += errno == 0
-        invalid += errno != 0
-    if resident < valid or rejected < invalid:
-        raise ValueError("audit does not contain the declared physical loading outcomes")
+        trial_digest = hashlib.sha3_256(file_ref(root, trial["bundle"]).read_bytes()).hexdigest()
+        identity = (trial["boot_id"], operation)
+        outcome = boot_reports[trial["boot_id"]]["audit"]["uploads"]["outcomes"].get(
+            str(operation))
+        if (identity in seen_operations or errno != expected_errno[trial["case"]]
+                or not isinstance(outcome, dict) or outcome.get("errno") != errno
+                or (outcome.get("phase") == 4) != (errno == 0)
+                or (trial["case"] == "invalid_signature"
+                    and outcome.get("bundle_digest") is not None)
+                or (trial["case"] in {"valid_post_boot", "verifier_rejection"}
+                    and outcome.get("bundle_digest") is None)
+                or (trial["case"] == "valid_post_boot"
+                    and (trial_digest != controller_b_digest
+                         or outcome.get("bundle_digest") != trial_digest))
+                or (trial["case"] == "verifier_rejection"
+                    and outcome.get("bundle_digest") != trial_digest)):
+            raise ValueError("physical loading outcome lacks exact audit custody")
+        seen_operations.add(identity)
 
     matrix = acceptance["fault_matrix"]
     trials = campaign["fault_trials"]
@@ -357,6 +469,7 @@ def reduce(manifest_path, acceptance_path=DEFAULT_ACCEPTANCE):
                        "successful_transitions": total_transitions,
                        "rearm_quiescence": total_rearms, "fault_trials": len(trials),
                        "phase_bins": phase_counts, "analyzer_runs": len(run_reports)},
+            "calibration": calibration_report,
             "endurance": endurance_report, "boots": boot_reports}
 
 

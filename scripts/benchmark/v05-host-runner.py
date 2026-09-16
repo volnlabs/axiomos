@@ -286,6 +286,9 @@ def run(output: Path) -> None:
     bpf_command = ["cargo", "test", "--locked", "-p", "kernel_bpf", "--lib",
                    "--no-default-features", "--features", "embedded-profile",
                    "--no-run", "--message-format=json"]
+    cli_manifest = ROOT / "userspace/tools/rk_cli/Cargo.toml"
+    cli_test_command = ["cargo", "test", "--locked", "--manifest-path", str(cli_manifest),
+                        "--bin", "rk", "--no-run", "--message-format=json"]
     manifest = {"schema": "axiomos.v05.host-run.v1", "source_id": source,
                 "evidence_kind": "synthetic", "release_verdict": "blocked",
                 "artifact_identity_algorithm": "sha3-256", "file_checksum_algorithm": "sha256",
@@ -293,6 +296,7 @@ def run(output: Path) -> None:
                 "operation_id_domain": "benchmark attempts; accepted kernel operation IDs are checked inside the fixture",
                 "timeout_cause_evidence": "fixture asserts HandoffError::TimedOut and ETIMEDEOUT; trace records generic failed outcome",
                 "build_command": command, "bpf_build_command": bpf_command,
+                "cli_test_build_command": cli_test_command,
                 "test": TEST, "status": "incomplete",
                 "build_environment": {key: env[key] for key in
                                       ("EMBEDDED_DISK_PATH", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTUP_TOOLCHAIN", "CARGO_BUILD_TARGET")
@@ -314,6 +318,12 @@ def run(output: Path) -> None:
         bpf_retained = output / "bpf-test"
         shutil.copy2(executable_from_cargo(bpf_build.stdout, "kernel_bpf", "lib", True), bpf_retained)
         manifest["bpf_test_executable_sha256"] = v05.file_sha256(bpf_retained)
+        cli_test_build = run_logged(cli_test_command, output / "cli-test-build.jsonl",
+                                    output / "cli-test-build.stderr", env=env, timeout=600)
+        cli_test_build.check_returncode()
+        cli_test = output / "rk-cli-test"
+        shutil.copy2(executable_from_cargo(cli_test_build.stdout, "rk", "bin", True), cli_test)
+        manifest["cli_test_executable_sha256"] = v05.file_sha256(cli_test)
         if clean_source() != source or v05.file_sha256(v05.DEFAULT_ACCEPTANCE) != config:
             raise ValueError("source or acceptance changed during the build")
         reclamation = {"schema": "axiomos.v05.reclamation.v1", "source_id": source,
@@ -377,7 +387,6 @@ def run(output: Path) -> None:
                 "files_sha256": {str(path.relative_to(directory)): v05.file_sha256(path)
                                  for path in sorted(directory.rglob("*")) if path.is_file()},
             }
-        cli_manifest = ROOT / "userspace/tools/rk_cli/Cargo.toml"
         cli_command = ["cargo", "build", "--locked", "--manifest-path", str(cli_manifest),
                        "--bin", "rk", "--message-format=json"]
         cli_build = run_logged(cli_command, output / "cli-build.jsonl", output / "cli-build.stderr", env=env, timeout=600)
@@ -390,6 +399,7 @@ def run(output: Path) -> None:
         if (clean_source() != source or v05.file_sha256(v05.DEFAULT_ACCEPTANCE) != config
                 or v05.file_sha256(retained) != manifest["test_executable_sha256"]
                 or v05.file_sha256(bpf_retained) != manifest["bpf_test_executable_sha256"]
+                or v05.file_sha256(cli_test) != manifest["cli_test_executable_sha256"]
                 or v05.file_sha256(cli) != manifest["cli"]["sha256"]):
             raise ValueError("source, acceptance or executable changed during collection")
         manifest["status"] = "pass"

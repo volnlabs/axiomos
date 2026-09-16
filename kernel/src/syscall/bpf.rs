@@ -824,14 +824,14 @@ pub fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> isize {
             let Some(manager) = BPF_MANAGER.get() else {
                 return -1;
             };
-            let program = match manager.lock().get_program_for(owner, prog_id) {
+            let (program, wcet_cycles) = match manager.lock().get_program_for(owner, prog_id) {
                 Ok(program) => program,
                 Err(error) => {
                     log::error!("sys_bpf: BENCH_EXEC denied for prog id {}", prog_id);
                     return bpf_error_errno(error);
                 }
             };
-            match crate::bpf::BpfManager::bench_execute(&program, prog_id, runs) {
+            match crate::bpf::BpfManager::bench_execute(&program, prog_id, runs, wcet_cycles) {
                 Ok(()) => 0,
                 Err(e) => {
                     log::error!("sys_bpf: BENCH_EXEC prog {} failed: {}", prog_id, e);

@@ -314,14 +314,26 @@ pub struct ExecRecord {
     pub runs: u32,
     /// Total architectural cycles across all runs.
     pub cycles: u64,
+    /// Architectural counter frequency used for this measurement.
+    pub clock_hz: u64,
+    /// Verifier WCET units attached to this exact loaded program.
+    pub wcet_cycles: u64,
+    /// Nanoseconds charged per invocation by the active admission profile.
+    pub modeled_ns: u64,
 }
 
 impl core::fmt::Display for ExecRecord {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "AXIOM EXEC COST prog_id={} insns={} runs={} cycles={}",
-            self.prog_id, self.insns, self.runs, self.cycles
+            "AXIOM EXEC COST prog_id={} insns={} runs={} cycles={} clock_hz={} wcet={} modeled_ns={}",
+            self.prog_id,
+            self.insns,
+            self.runs,
+            self.cycles,
+            self.clock_hz,
+            self.wcet_cycles,
+            self.modeled_ns
         )
     }
 }
@@ -407,10 +419,13 @@ mod tests {
             insns: 1000,
             runs: 64,
             cycles: 123456,
+            clock_hz: 54_000_000,
+            wcet_cycles: 5678,
+            modeled_ns: 34_068,
         };
         assert_eq!(
             rec.to_string(),
-            "AXIOM EXEC COST prog_id=3 insns=1000 runs=64 cycles=123456"
+            "AXIOM EXEC COST prog_id=3 insns=1000 runs=64 cycles=123456 clock_hz=54000000 wcet=5678 modeled_ns=34068"
         );
     }
 

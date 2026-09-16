@@ -39,6 +39,7 @@ EXEC_MARKER = re.compile(
     r"insns=(?P<insns>\d+)\s+"
     r"runs=(?P<runs>\d+)\s+"
     r"cycles=(?P<cycles>\d+)"
+    r"(?:\s+clock_hz=(?P<clock_hz>\d+)\s+wcet=(?P<wcet>\d+)\s+modeled_ns=(?P<modeled_ns>\d+))?"
 )
 
 # Shape labels printed by the verifier_bench driver: "<shape> n=<n> prog_id=<id>".
@@ -76,7 +77,7 @@ def parse(lines):
             continue
         m = EXEC_MARKER.search(line)
         if m:
-            exec_rows.append({k: int(v) for k, v in m.groupdict().items()})
+            exec_rows.append({k: (int(v) if v is not None else 0) for k, v in m.groupdict().items()})
             continue
         m = LABEL.search(line.strip())
         if m:
@@ -210,7 +211,7 @@ def main():
         if exec_rows:
             exec_csv = args.csv.replace(".csv", "-exec.csv")
             with open(exec_csv, "w", newline="") as f:
-                w = csv.DictWriter(f, fieldnames=["shape", "n", "prog_id", "insns", "runs", "cycles"])
+                w = csv.DictWriter(f, fieldnames=["shape", "n", "prog_id", "insns", "runs", "cycles", "clock_hz", "wcet", "modeled_ns"])
                 w.writeheader()
                 for r in exec_rows:
                     shape, n = labels.get(r["prog_id"], ("?", r["insns"]))

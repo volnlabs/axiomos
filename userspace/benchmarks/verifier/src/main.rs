@@ -17,8 +17,7 @@ use kernel_abi::{
     BpfAttr, BPF_ATTACH_TYPE_TIMER as ATTACH_TYPE_TIMER, BPF_HELPER_GPIO_GET as HELPER_GPIO_GET,
     BPF_HELPER_KTIME_GET_NS as HELPER_KTIME_GET_NS,
     BPF_HELPER_MAP_LOOKUP_ELEM as HELPER_MAP_LOOKUP_ELEM,
-    BPF_HELPER_RINGBUF_OUTPUT as HELPER_RINGBUF_OUTPUT,
-    BPF_HELPER_TRACE_PRINTK as HELPER_TRACE_PRINTK, BPF_MAP_TYPE_RINGBUF,
+    BPF_HELPER_TRACE_PRINTK as HELPER_TRACE_PRINTK,
 };
 use minilib::{bpf, exit, write};
 
@@ -32,6 +31,7 @@ const MAX_INSNS: usize = 1000;
 const BPF_MAP_CREATE: i32 = kernel_abi::BPF_MAP_CREATE as i32;
 const BPF_MAP_UPDATE_ELEM: i32 = kernel_abi::BPF_MAP_UPDATE_ELEM as i32;
 const BPF_PROG_LOAD: i32 = kernel_abi::BPF_PROG_LOAD as i32;
+const BPF_PROG_UNLOAD: i32 = kernel_abi::BPF_PROG_UNLOAD as i32;
 /// BPF_PROG_ATTACH (kernel_abi). Attach commits the hook's utilization, so it
 /// is where the admission gate fires.
 const BPF_PROG_ATTACH: i32 = kernel_abi::BPF_PROG_ATTACH as i32;
@@ -41,10 +41,7 @@ const BPF_BENCH_EXEC: i32 = kernel_abi::BPF_BENCH_EXEC as i32;
 
 /// Back-to-back executions per timing marker.
 const EXEC_RUNS: u32 = 64;
-
-/// Ring-buffer map type + size (bytes, power of two) for the ringbuf shape.
-const MAP_TYPE_RINGBUF: u64 = BPF_MAP_TYPE_RINGBUF as u64;
-const RINGBUF_BYTES: u64 = 65536;
+const EXEC_SAMPLES: u32 = 5;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -181,38 +178,6 @@ fn helper_copy_heavy(buf: &mut [BpfInsn; MAX_INSNS], n: usize) -> usize {
     i
 }
 
-/// Sample prologue, then k×(mov r1,rb ; mov r2,r10 ; add r2,-8 ; mov r3,8 ;
-/// mov r4,0 ; call ringbuf_output), then `mov r0,0 ; exit` — n = 4 + 6k.
-fn helper_ringbuf_heavy(buf: &mut [BpfInsn; MAX_INSNS], n: usize, rb_id: i32) -> usize {
-    let k = (n - 4) / 6;
-    let mut i = 0;
-    buf[i] = BpfInsn::new(0xb7, 1, 0, 0); // mov64 r1, 0
-    i += 1;
-    buf[i] = BpfInsn::new(0x7b, (1 << 4) | 10, -8, 0); // stx_dw [r10-8], r1
-    i += 1;
-    let mut c = 0;
-    while c < k {
-        buf[i] = BpfInsn::new(0xb7, 1, 0, rb_id); // mov64 r1, rb_id
-        i += 1;
-        buf[i] = BpfInsn::new(0xbf, (10 << 4) | 2, 0, 0); // mov64 r2, r10
-        i += 1;
-        buf[i] = BpfInsn::new(0x07, 2, 0, -8); // add64 r2, -8
-        i += 1;
-        buf[i] = BpfInsn::new(0xb7, 3, 0, 8); // mov64 r3, 8 (size)
-        i += 1;
-        buf[i] = BpfInsn::new(0xb7, 4, 0, 0); // mov64 r4, 0 (flags)
-        i += 1;
-        buf[i] = BpfInsn::new(0x85, 0, 0, HELPER_RINGBUF_OUTPUT); // call
-        i += 1;
-        c += 1;
-    }
-    buf[i] = BpfInsn::new(0xb7, 0, 0, 0); // mov64 r0, 0
-    i += 1;
-    buf[i] = BpfInsn::new(0x95, 0, 0, 0); // exit
-    i += 1;
-    i
-}
-
 // --- Admission self-test shapes (Track C gate check) ---
 
 /// `mov r1,0 ; call trace_printk ; mov r0,0 ; exit` — calls the helper banned on
@@ -290,13 +255,34 @@ fn bench_exec(prog_id: i32) {
         attach_btf_id: EXEC_RUNS,
         ..Default::default()
     };
-    let res = bpf(
-        BPF_BENCH_EXEC,
+    let mut sample = 0;
+    while sample < EXEC_SAMPLES {
+        let res = bpf(
+            BPF_BENCH_EXEC,
+            &attr as *const _ as *const u8,
+            core::mem::size_of::<BpfAttr>() as i32,
+        );
+        if res < 0 {
+            print("  exec-bench FAILED (kernel built without verifier-cost?)\n");
+            return;
+        }
+        sample += 1;
+    }
+}
+
+fn measure_program(prog_id: i32) {
+    bench_exec(prog_id);
+    let attr = BpfAttr {
+        attach_prog_fd: prog_id as u32,
+        ..Default::default()
+    };
+    if bpf(
+        BPF_PROG_UNLOAD,
         &attr as *const _ as *const u8,
         core::mem::size_of::<BpfAttr>() as i32,
-    );
-    if res < 0 {
-        print("  exec-bench FAILED (kernel built without verifier-cost?)\n");
+    ) != 0
+    {
+        print("  unload FAILED\n");
     }
 }
 
@@ -320,7 +306,7 @@ pub extern "C" fn _start() -> ! {
             print(" prog_id=");
             print_num(prog_id as u64);
             print("\n");
-            bench_exec(prog_id);
+            measure_program(prog_id);
         }
     }
 
@@ -360,27 +346,8 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // A ring-buffer map for the ringbuf-output shape. No consumer drains it, so
-    // it is sized large enough to absorb the calibration runs (cost is
-    // lock-dominated, so a partial fill does not skew the slope).
-    print("Creating ringbuf map...\n");
-    let rb_attr = BpfAttr {
-        prog_type: MAP_TYPE_RINGBUF as u32,
-        insn_cnt: 0,
-        insns: RINGBUF_BYTES << 32, // max_entries=bytes (pow2) | value_size=0
-        ..Default::default()
-    };
-    let rb_fd = bpf(
-        BPF_MAP_CREATE,
-        &rb_attr as *const _ as *const u8,
-        core::mem::size_of::<BpfAttr>() as i32,
-    );
-    if rb_fd < 0 {
-        print("ringbuf create FAILED — skipping ringbuf shape\n");
-    }
-
     for &n in CALIBRATION_SIZES.iter() {
-        for shape in 0..6u32 {
+        for shape in 0..5u32 {
             let (name, len): (&str, usize) = match shape {
                 0 => ("memory", memory_heavy(&mut buf, n)),
                 1 => ("div", div_heavy(&mut buf, n)),
@@ -391,13 +358,7 @@ pub extern "C" fn _start() -> ! {
                     }
                     ("map", helper_map_heavy(&mut buf, n, map_fd))
                 }
-                4 => ("copy", helper_copy_heavy(&mut buf, n)),
-                _ => {
-                    if rb_fd < 0 {
-                        continue;
-                    }
-                    ("ringbuf", helper_ringbuf_heavy(&mut buf, n, rb_fd))
-                }
+                _ => ("copy", helper_copy_heavy(&mut buf, n)),
             };
             let prog_id = load_prog(&buf, len);
             print(name);
@@ -409,7 +370,7 @@ pub extern "C" fn _start() -> ! {
                 print(" prog_id=");
                 print_num(prog_id as u64);
                 print("\n");
-                bench_exec(prog_id);
+                measure_program(prog_id);
             }
         }
     }
@@ -418,14 +379,10 @@ pub extern "C" fn _start() -> ! {
     // rc=-1 in `sys_bpf`, so PASS is judged on the expected rc polarity; the
     // kernel's log lines name the exact gate on the same serial stream.
     //
-    // Note on the WCET budget: the syscall load path caps a program at 4096
-    // instructions, and the densest reachable shape (copy-heavy) tops out near
-    // ~5.6k WCET units at 1000 insns — far below the ~166k single-program WCET
-    // budget. So no *loadable* program trips that gate; the bound that actually
-    // bites on this profile is the *cumulative* utilization budget, which a
-    // single program also cannot reach alone (5.6k*6ns*1kHz ≈ 3.4e7 << 5e8 ns/s)
-    // but a fleet of attachments can. The self-test exercises the two reachable
-    // gates: the printk RT-ban (load time) and cumulative utilization (attach).
+    // The per-program and cumulative limits cannot be reached through this
+    // process's stricter program-count quota at 100 Hz. Host ledger tests cover
+    // those arithmetic boundaries; this device check exercises the reachable
+    // policy ban and a successful attach.
     print("=== Admission Self-Test ===\n");
 
     // printk-ban: loading a trace_printk caller is rejected on the RT fragment.
@@ -443,38 +400,6 @@ pub extern "C" fn _start() -> ! {
         -1 // load failed unexpectedly → force FAIL below
     };
     selftest_case("control", attach_rc, load_rc >= 0 && attach_rc == 0);
-
-    // admission (cumulative): attach copies of the densest reachable program
-    // (copy-heavy at the 1000-insn cap, wcet ≈ 5.6k → ≈3.4e7 ns/s each) to the
-    // same hook until the summed utilization crosses the 5e8 ns/s budget
-    // (~15 attachments). PASS = some attach succeeded and a later one was
-    // rejected, i.e. the budget bit.
-    let len = helper_copy_heavy(&mut buf, MAX_INSNS);
-    let mut attached: u32 = 0;
-    let mut reject_rc: i32 = 0;
-    let mut iter = 0;
-    while iter < 32 {
-        let pid = load_prog(&buf, len);
-        if pid < 0 {
-            break; // unexpected load failure → reject_rc stays 0 → FAIL
-        }
-        let arc = attach_prog(pid, ATTACH_TYPE_TIMER);
-        if arc < 0 {
-            reject_rc = arc;
-            break;
-        }
-        attached += 1;
-        iter += 1;
-    }
-    print("AXIOM ADMISSION admission attached=");
-    print_num(attached as u64);
-    print(" rc=");
-    print_rc(reject_rc);
-    print(if attached > 0 && reject_rc < 0 {
-        " PASS\n"
-    } else {
-        " FAIL\n"
-    });
 
     print("=== Verifier Cost Bench Done ===\n");
     exit(0);

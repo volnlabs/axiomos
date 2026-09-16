@@ -303,21 +303,22 @@ R0: range [10, 110]
 
 Beyond safety, the verifier bounds *execution* cost (Track C, #43).
 `verifier/cost.rs` assigns each instruction a static cycle cost (per-helper
-costs included, calibrated on Pi 5 Cortex-A76 — `CYCLE_UNIT_NS = 6` ns/unit)
+costs included; `CYCLE_UNIT_NS = 6` ns/unit remains provisional until the
+retained Pi 5 interpreter corpus passes)
 and computes the program's WCET as the longest path through its loop-free CFG.
 The result lands in `VerifyStats::wcet_cycles`.
 
 Two enforcement points consume it on the embedded profile:
 
 - **Per-program budget (verifier):** WCET over `WCET_CYCLE_BUDGET`
-  (`RT_PERIOD_NS / CYCLE_UNIT_NS` = 1,000,000 / 6 ≈ 166,666 units — one 1 kHz
+  (`RT_PERIOD_NS / CYCLE_UNIT_NS` = 10,000,000 / 6 ≈ 1,666,666 units — one 100 Hz
   control-loop period) rejects with `WcetExceeded` before exploration.
 - **Utilization admission (kernel):** each attach commits
   `wcet × CYCLE_UNIT_NS × freq` ns/s to an `AdmissionLedger`
   (`verifier/admission.rs`); the sum across all attached programs is capped at
   `UTILIZATION_BUDGET_NS_PER_S` = 5×10⁸ (U = 0.5, half a core). Over-budget
   attaches are refused; detach returns the budget. This is the EDF utilization
-  test, validated on Pi 5 hardware (`docs/performance/current-results.md` §12).
+  test. Hardware validation belongs to the retained v0.5 qualification corpus.
 
 `trace_printk` is banned on RT-fragment programs
 (`HelperForbiddenOnRtFragment`). See `docs/security/verifier-assurance.md` at the repo

@@ -25,23 +25,23 @@ related:
 - [ ] Set `AXIOM_BPF_TRUSTED_KEY_PATH` to the 32-byte production Ed25519
       public key used for this hardware image.
 - [ ] Build with the instrumentation feature:
-      `cargo xtask build rpi5 -- release embedded-rpi5,verifier-cost`
+      `cargo xtask build rpi5 -- release embedded-rpi5,managed-runtime-bench-markers,verifier-cost`
 - [ ] Deploy: `cargo xtask deploy rpi5 -- /path/to/sdcard/boot`.
 - [ ] Boot Pi5, attach Debug Probe UART (115200), start capture:
       `sudo timeout 70s cat $PORT | tr -d "\r" | tee verifier-cost.log`
 
 ## Run + capture
 - [ ] Run `/bin/verifier_bench` (phase 1: scaling loads {10..1000}; phase 2:
-      calibration shapes ×{100,1000}, each exec'd 64×).
+      calibration shapes ×{100,1000}, five samples of 64 executions each).
 - [ ] Confirm per load: `AXIOM VERIFIER COST … wcet=…` line; per exec-bench:
-      `AXIOM EXEC COST prog_id=… insns=… runs=64 cycles=…` line.
+      `AXIOM EXEC COST … runs=64 cycles=… clock_hz=… wcet=… modeled_ns=…` line.
 - [ ] If `exec-bench FAILED` prints → kernel built without `verifier-cost`.
 - [ ] Reduce:
       `cargo xtask bench verifier -- verifier-cost.log -o verifier-cost.csv \
             --plot verifier-cost.png --cntfrq 54000000`
 
 ## What to verify (acceptance)
-- [ ] **states == insns** for every load (loop-free linear bound; script warns if not).
+- [ ] **states <= insns** for every load (loop-free linear bound; script warns if not).
 - [ ] **cycles** (verification cost) is linear in `n` — the Track B claim.
 - [ ] **wcet** emitted and monotonic in `n` (straight-line ⇒ wcet ≈ n cycle units).
 - [ ] Record the attributed results and evidence manifest under
@@ -53,7 +53,7 @@ related:
 
 ### Brick 3 — A76 calibration (UNBLOCKED by exec-cost branch)
 The gap is closed on `track-c/exec-cost-calibration`: calibration corpus
-(memory/div/ktime/map shapes at n={100,1000}) + `BPF_BENCH_EXEC` (cmd 100,
+(memory/div/ktime/map/copy shapes at n={100,1000}) + `BPF_BENCH_EXEC` (cmd 100,
 feature-gated) + `AXIOM EXEC COST` markers + script slope fit. One run now
 calibrates:
 - `COST_DEFAULT`  ← straight shape slope
@@ -61,15 +61,19 @@ calibrates:
 - `COST_ALU_EXPENSIVE` ← div shape
 - `COST_HELPER_READ`   ← ktime shape
 - `COST_HELPER_MAP`    ← map shape
-Still uncalibrated after tonight (extrapolate or later run): `COST_HELPER_COPY`,
-`COST_HELPER_RINGBUF`, `COST_HELPER_TRACE` (printk would spam serial mid-timing).
+- `COST_HELPER_COPY`   ← GPIO/device copy shape
+Managed v0.5 does not permit ring-buffer or trace helpers. Its copy-class
+request helper is bounded by the retained copy corpus and full-release timing.
 - Script prints "Calibration estimates: X cycles/op -> CONSTANT" directly —
   paste those numbers into `verifier/cost.rs`, normalize so COST_DEFAULT ≈ 1
   (or keep raw cycles — decide when numbers exist).
-- NOTE: on aarch64 `execute_program` uses the **JIT**, so timing reflects the
-  production engine, not the interpreter. That's the right thing to calibrate.
+- On AArch64 `execute_program` uses the shipped interpreter; JIT is disabled in
+  both profiles.
 - After editing constants: re-run, check predicted `wcet=` vs measured per-run
   cycles converge.
+- The device-side policy-ban and successful-attach checks are reachable. The
+  embedded per-owner program quota prevents this process from saturating the
+  aggregate ledger at 100 Hz, so host ledger boundary tests remain authoritative.
 
 ### Brick 4 — DONE (PR #144): budget + admission mechanism shipped
 - `WcetExceeded` enforced at verify (embedded, 100k placeholder units);

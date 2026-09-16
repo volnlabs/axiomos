@@ -207,6 +207,26 @@ fn resource_error(error: BpfError) -> Errno {
     }
 }
 
+fn verification_error(error: VerifyError) -> Errno {
+    match error {
+        VerifyError::ResourceExhausted => ENOMEM,
+        VerifyError::UnsupportedManagedContract => ENOTSUP,
+        VerifyError::InsnCountExceeded { .. } => E2BIG,
+        #[cfg(feature = "embedded-profile")]
+        VerifyError::WcetExceeded { .. } => E2BIG,
+        _ => ENOEXEC,
+    }
+}
+
+fn bundle_error(error: BundleError) -> Errno {
+    match error {
+        BundleError::Malformed => EINVAL,
+        BundleError::Unsupported => ENOTSUP,
+        BundleError::Capacity => E2BIG,
+        BundleError::Authentication(_) => EACCES,
+    }
+}
+
 impl Work {
     /// All hashing, verification, wrapper allocation and scratch destruction
     /// happen here with no manager lock and with interrupts enabled.
@@ -227,12 +247,7 @@ impl Work {
             let bundle = self
                 .trust
                 .authenticate_managed(&result.buffer[..self.total])
-                .map_err(|error| match error {
-                    BundleError::Malformed => EINVAL,
-                    BundleError::Unsupported => ENOTSUP,
-                    BundleError::Capacity => ENOMEM,
-                    BundleError::Authentication(_) => EACCES,
-                })?;
+                .map_err(bundle_error)?;
             result.identity = Some(bundle.identity());
             // The boot-provisioned trust roots may request only this fixed slot's
             // wheel-pair effect. BEHAVIOR_ADMIN never supplies an effect ceiling.
@@ -243,10 +258,7 @@ impl Work {
                 &mut budget,
             );
             result.peak = budget.high_water();
-            let artifact = artifact.map_err(|error| match error {
-                VerifyError::ResourceExhausted => ENOMEM,
-                _ => ENOEXEC,
-            })?;
+            let artifact = artifact.map_err(verification_error)?;
             let output = artifact.output_charge();
             let runtime = Arc::try_new(artifact).map_err(|_| ENOMEM);
             budget.release_output(output).map_err(|_| ENOMEM)?;

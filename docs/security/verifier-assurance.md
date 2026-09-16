@@ -69,15 +69,13 @@ DAG). Because the path is the *maximum* over branches, cost on a non-taken arm i
 excluded — WCET ≠ the naive instruction-cost total. The result is returned as
 `VerifyStats::wcet_cycles` and emitted in the `verifier-cost` marker (`wcet=`).
 
-Costs are **calibrated cycle units**: the Pi 5 (Cortex-A76) calibration run
-measured per-class execution cost (ALU, memory, div, helper classes including
-copy and ringbuf) and fixed `PhysicalProfile::CYCLE_UNIT_NS = 6` (≈5.74 ns/unit
-measured, rounded up — `docs/performance/current-results.md` §12). Two enforcement points
-consume the bound today:
+Costs are modeled cycle units. `PhysicalProfile::CYCLE_UNIT_NS = 6` is
+provisional until the retained Pi 5 interpreter corpus required by v0.5 passes.
+Two enforcement points consume the bound today:
 
 - **Per-program budget (verifier):** the embedded profile rejects a program
   whose WCET exceeds `WCET_CYCLE_BUDGET = RT_PERIOD_NS / CYCLE_UNIT_NS ≈
-  166_666` units (one 1 kHz control-loop period) with `WcetExceeded`. The
+  1_666_666` units (one 100 Hz control-loop period) with `WcetExceeded`. The
   check runs with the other structural profile constraints *before*
   path-sensitive exploration, so an over-budget program is refused without
   paying exploration cost. Note this budget is currently unreachable through
@@ -89,12 +87,12 @@ consume the bound today:
   sum across all attached programs is capped at
   `UTILIZATION_BUDGET_NS_PER_S = 5×10⁸` (U = 0.5, the EDF utilization test).
   An attach that would cross the budget is refused (safe but not schedulable);
-  detach returns the budget. Validated on Pi 5 silicon: the admission
-  self-test shows the 15th attach of a dense program refused exactly where
-  the arithmetic predicts (`docs/performance/current-results.md` §12).
+  detach returns the budget. Host ledger tests cover the quota-unreachable
+  aggregate boundary; the final v0.5 campaign retains the reachable device
+  policy/control checks and interpreter corpus before this becomes a hardware claim.
 
 The remaining approximation is the fire frequency: every hook is assumed to
-run at the nominal 1 kHz control-loop rate. Per-hook-type and caller-declared
+run at the nominal 100 Hz control-loop rate. Per-hook-type and caller-declared
 frequencies are future work.
 
 ## What makes the bound real in the implementation
@@ -139,5 +137,5 @@ and thus the size of programs verifiable in bounded cost — rise substantially.
   (states with the `T(n)=(h+1)·n` overlay, cycles vs `n`). The shared shapes live
   in `kernel_bpf::cost_corpus`, whose `cost_corpus` unit tests pin the
   `states_explored ≤ n` bound at the exact measurement sizes. This is the
-  authoritative (real A76, in-kernel) measurement; the host criterion curve is a
-  proxy. See `docs/performance/current-results.md` §12.
+  hardware input when its raw log and image provenance pass the v0.5 physical
+  reducer; the host criterion curve is a proxy.

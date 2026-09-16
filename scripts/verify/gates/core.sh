@@ -244,4 +244,4 @@ run_cargo_step kernel-aarch64-check check -p kernel --target aarch64-unknown-non
 run_cargo_step kernel-managed-rpi5-check check -p kernel --target aarch64-unknown-none \
     --no-default-features --features embedded-rpi5,managed-runtime
 run_cargo_step kernel-managed-rpi5-bench-check check -p kernel --target aarch64-unknown-none \
-    --no-default-features --features embedded-rpi5,managed-runtime-bench-markers
+    --no-default-features --features embedded-rpi5,managed-runtime-bench-markers,verifier-cost

@@ -115,7 +115,8 @@ class V05ReducerTests(unittest.TestCase):
                     self.assertEqual(report["gate_results"][gate], policy)
                     acceptance["required_gates"][gate]["implemented_by_reducer"] = True
             self.assertEqual(result["release_verdict"], "blocked")
-            self.assertEqual(len(result["software_evidence"]["cases"]), 28)
+            self.assertEqual(len(result["software_evidence"]["cases"]),
+                             sum(len(cases) for cases in v05.SOFTWARE_CASES.values()))
 
     def test_software_rejects_identity_hash_case_and_executable_substitution(self):
         mutations = [

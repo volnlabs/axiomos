@@ -30,6 +30,10 @@ def fixture():
         "<QQQQIIhhhhIIII", ident, 400_000_000 + ident * 10_000_000,
         400_000_000 + ident * 10_000_000,
         0, 8, flags, 0, 0, 0, 0, 1, 1, 0, 0)
+    upload = lambda phase, error, flags=0, handle=0: struct.pack(
+        "<IIIIIIIIQQ16s", 1, phase, error, flags, handle, 16, 16, 0, 32,
+        100 if flags & 4 else 0, bytes(16))
+    identity = bytes(160) + bytes.fromhex("dd" * 32) + bytes(32)
     values = [
         (0, 0, 40, 5, session(1)),
         (1, 200_000_000, 40, 5, handoff(2, 5, 200_000_000)),
@@ -60,6 +64,17 @@ def fixture():
         (26, 420_000_000, 0, 2, lifecycle(5, 2, 2, 0)),
         (27, 420_000_001, 2, 5, handoff(7, 4, 420_000_001, 12, 102, 2, 3)),
         (28, 420_000_002, 2, 3, cycle(2)),
+        (29, 420_000_003, 51, 2, upload(1, 0)),
+        (30, 420_000_003, 51, 2, upload(2, 0)),
+        (31, 420_000_003, 51, 2, upload(3, 0)),
+        (32, 420_000_003, 51, 2, upload(4, 0, 7, 9)),
+        *[(33 + index, 420_000_003, 51, 1,
+           struct.pack("<II56s", index, 9, identity[index * 56:(index + 1) * 56]))
+          for index in range(4)],
+        (37, 420_000_004, 50, 2, upload(1, 0)),
+        (38, 420_000_004, 50, 2, upload(2, 0)),
+        (39, 420_000_004, 50, 2, upload(3, 0)),
+        (40, 420_000_004, 50, 2, upload(5, 2)),
     ]
     for value in values:
         records.append(packed(*value))
@@ -94,6 +109,8 @@ class AuditStitchTests(unittest.TestCase):
         self.assertEqual(report["releases"], 2)
         self.assertEqual(report["successful_transitions"], {"activate": 1, "rollback": 1})
         self.assertEqual(report["confirmed_handoffs"], 2)
+        self.assertEqual(report["uploads"]["outcomes"]["50"]["errno"], 2)
+        self.assertEqual(report["uploads"]["outcomes"]["51"]["bundle_digest"], "dd" * 32)
         self.assertEqual(report["transition_phase_bins"], [0, 0, 0, 0, 1, 0, 1, 0, 0, 0])
         self.assertEqual(report["rearm_quiescence"][0]["initial_ticks"], 200_000_000)
         self.assertFalse(report["qualification_evaluated"])
@@ -104,17 +121,22 @@ class AuditStitchTests(unittest.TestCase):
             payload = bytearray.fromhex(values[14]["payload_hex"])
             payload[12:16] = (99).to_bytes(4, "little")
             values[14] = {**values[14], "payload_hex": payload.hex()}
+        def wrong_artifact_fragment(_, values):
+            payload = bytearray.fromhex(values[34]["payload_hex"])
+            payload[:4] = (3).to_bytes(4, "little")
+            values[34] = {**values[34], "payload_hex": payload.hex()}
         mutations = [
             lambda a, b: b.__setitem__(5, {**b[5], "ticks": b[5]["ticks"] + 1}),
             lambda a, b: b.__setitem__(slice(0, 1), []),
             lambda a, b: a[1].update(ticks=199_999_999,
                                      payload_hex=struct.pack("<IIIIQQQIII12s", 4, 2, 9, 0, 0,
                                                              199_999_999, 0, 5, 0, 1, bytes(12)).hex()),
-            lambda a, b: b[-1].update(ticks=430_000_000,
-                                      payload_hex=bytes.fromhex(b[-1]["payload_hex"][:16]
+            lambda a, b: b[28].update(ticks=430_000_000,
+                                      payload_hex=bytes.fromhex(b[28]["payload_hex"][:16]
                                                                + (420_000_000).to_bytes(8, "little").hex()
-                                                               + b[-1]["payload_hex"][32:]).hex()),
+                                                               + b[28]["payload_hex"][32:]).hex()),
             wrong_ack_identity,
+            wrong_artifact_fragment,
         ]
         for mutate in mutations:
             with self.subTest(mutate=mutate), tempfile.TemporaryDirectory() as directory:

@@ -91,8 +91,15 @@ SOFTWARE_CASES = {
         "recorder_shapes": ("kernel", "syscall::managed::tests::recorder_headers_reject_inexact_lengths_and_unknown_versions"),
         "syscall_sizes": ("kernel", "syscall::managed::tests::managed_commands_reject_wrong_syscall_size_before_user_copy"),
     },
+    "recorder": {
+        "bounded_window": ("kernel", "bpf::recorder::tests::recorder_queries_preserve_clock_and_bound_lost_frozen_intervals"),
+        "fault_custody": ("kernel", "bpf::recorder::events::tests::actual_controller_fault_keeps_queue_outcome_identity_and_stop_window"),
+        "identity_decode": ("rk_cli", "commands::runtime::audit::decode::tests::offline_identity_and_lifecycle_require_exact_fragments_and_correlated_boundaries"),
+        "malformed_decode": ("rk_cli", "commands::runtime::audit::decode::tests::offline_decode_rejects_incomplete_reordered_malformed_and_oversized_data"),
+    },
 }
-SOFTWARE_EXECUTABLES = {"kernel": "host-test", "kernel_bpf": "bpf-test"}
+SOFTWARE_EXECUTABLES = {"kernel": "host-test", "kernel_bpf": "bpf-test",
+                        "rk_cli": "rk-cli-test"}
 RESOURCE_MAXIMA = {
     "ownership": {"instances_live": 1, "artifact_strong_live": 2, "instance_strong_live": 2},
     "installation": {"instances_before_reclamation": 2, "active_artifact_strong_after_reclamation": 3,

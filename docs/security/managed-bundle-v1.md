@@ -366,9 +366,10 @@ the complete authenticated identity. Unauthenticated rejection has no trusted
 identity. An expired receipt returns `ESTALE`.
 
 Malformed requests use `EINVAL`; unsupported versions/features use `ENOTSUP`;
-authentication uses `EACCES`; rejected bytecode uses `ENOEXEC`; capacity/allocation
-exhaustion uses `ENOMEM`; a busy operation uses `EBUSY`; stale identities use
-`ESTALE`; counter exhaustion uses `EOVERFLOW`. Wrong upload ownership uses `EPERM`.
+authentication uses `EACCES`; rejected bytecode uses `ENOEXEC`; a declared
+bundle/profile bound uses `E2BIG`; allocation or retained-capacity exhaustion
+uses `ENOMEM`; a busy operation uses `EBUSY`; stale identities use `ESTALE`;
+counter exhaustion uses `EOVERFLOW`. Wrong upload ownership uses `EPERM`.
 Cancellation before registration prevents residency; after registration it
 returns `EALREADY` and does not unload code. Finalize does not perform timing
 admission, construct an instance or authorize activation. Resident means only
