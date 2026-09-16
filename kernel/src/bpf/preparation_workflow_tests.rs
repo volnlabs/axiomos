@@ -604,7 +604,7 @@ fn recorded_rearm(operation: u64) -> (Handoff, shrike_link::handoff::RearmReceip
         .handoff
         .rearm_on_transport(operation, 0, 1000, &mut control.tx)
         .unwrap();
-    events::session_context(0);
+    events::session_requalification_started(operation, 1);
     control.enqueue_handoff(0);
     assert!(matches!(
         control.drain_tx(1).as_slice(),

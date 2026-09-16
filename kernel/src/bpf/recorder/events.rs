@@ -323,8 +323,51 @@ pub(crate) fn cycle(release: PeriodicRelease, report: CycleReport) {
 /// Negotiated audit context, not current motion eligibility or a persistent boot
 /// identifier. Clear only when fresh requalification starts; stops retain it so
 /// the normal post-stop window remains exportable with its existing cursor.
+#[cfg(test)]
 pub(crate) fn session_context(session: u32) {
     observe(|state, _| state.session = u64::from(session));
+}
+
+fn session_event(operation: u64, session: u32, event: u32) {
+    if operation == 0 || session == 0 {
+        return;
+    }
+    observe(|state, ticks| {
+        if event == MANAGED_AUDIT_SESSION_REQUALIFICATION_STARTED {
+            state.session = 0;
+        } else if event == MANAGED_AUDIT_SESSION_ESTABLISHED_EVENT {
+            state.session = u64::from(session);
+        }
+        let payload = ManagedAuditSessionV1 {
+            link_kind: MANAGED_AUDIT_SESSION_LINK,
+            event,
+            session,
+            flags: MANAGED_AUDIT_SESSION_HAS_OPERATION,
+            ..Default::default()
+        };
+        let _ = state.window.append(Record {
+            ticks,
+            correlation: operation,
+            kind: MANAGED_AUDIT_LINK,
+            payload: payload
+                .as_bytes()
+                .try_into()
+                .expect("64-byte session payload"),
+            ..Record::EMPTY
+        });
+    });
+}
+
+pub(crate) fn session_requalification_started(operation: u64, session: u32) {
+    session_event(
+        operation,
+        session,
+        MANAGED_AUDIT_SESSION_REQUALIFICATION_STARTED,
+    );
+}
+
+pub(crate) fn session_established(operation: u64, session: u32) {
+    session_event(operation, session, MANAGED_AUDIT_SESSION_ESTABLISHED_EVENT);
 }
 
 /// Worker supplies only a successfully authenticated manifest. One owner
@@ -730,6 +773,52 @@ pub(crate) mod tests {
             }
         });
         assert_eq!(records.len(), 2); // Clock plus one stop; metadata adds no history.
+    }
+
+    #[test]
+    fn requalification_and_session_commit_are_explicit_bounded_records() {
+        let status = || {
+            capture_status(ManagedAuditStatusV1 {
+                version: MANAGED_ADMIN_VERSION,
+                size: core::mem::size_of::<ManagedAuditStatusV1>() as u32,
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        let records = capture_records(|| {
+            session_context(1);
+            capture_ticks(10);
+            session_requalification_started(7, 2);
+            assert_eq!(status().session, 0);
+            capture_ticks(20);
+            session_established(7, 2);
+            assert_eq!(status().session, 2);
+        });
+        assert_eq!(records.len(), 2);
+        for (record, event, ticks) in [
+            (
+                &records[0],
+                MANAGED_AUDIT_SESSION_REQUALIFICATION_STARTED,
+                10,
+            ),
+            (&records[1], MANAGED_AUDIT_SESSION_ESTABLISHED_EVENT, 20),
+        ] {
+            assert_eq!(
+                (record.kind, record.correlation, record.ticks),
+                (MANAGED_AUDIT_LINK, 7, ticks)
+            );
+            let payload = ManagedAuditSessionV1::read_from_bytes(&record.payload).unwrap();
+            assert_eq!(
+                payload,
+                ManagedAuditSessionV1 {
+                    link_kind: MANAGED_AUDIT_SESSION_LINK,
+                    event,
+                    session: 2,
+                    flags: MANAGED_AUDIT_SESSION_HAS_OPERATION,
+                    ..Default::default()
+                }
+            );
+        }
     }
 
     #[test]

@@ -906,7 +906,7 @@ pub(crate) fn request_rearm(operation: u64) -> Result<(), HandoffError> {
             &mut link.handoff,
             &mut link.tx,
         )?;
-        crate::bpf::recorder::events::session_context(0);
+        crate::bpf::recorder::events::session_requalification_started(operation, pending.session());
         motor_discard(discarded, MANAGED_AUDIT_DISCARD_INHIBITED);
         link.pending_estop = None;
         link.rx = RingBuf::new();

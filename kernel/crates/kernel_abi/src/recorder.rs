@@ -30,6 +30,30 @@ pub const MANAGED_AUDIT_HANDOFF_RECEIPT_COMMITTED: u32 = 7;
 pub const MANAGED_AUDIT_HANDOFF_HAS_OPERATION: u32 = 1;
 pub const MANAGED_AUDIT_HANDOFF_HAS_GENERATION: u32 = 2;
 
+pub const MANAGED_AUDIT_SESSION_LINK: u32 = 5;
+pub const MANAGED_AUDIT_SESSION_REQUALIFICATION_STARTED: u32 = 1;
+pub const MANAGED_AUDIT_SESSION_ESTABLISHED_EVENT: u32 = 2;
+pub const MANAGED_AUDIT_SESSION_HAS_OPERATION: u32 = 1;
+
+/// LINK subtype 5. The first event is recorded after the existing rearm owner
+/// has disarmed the link and reserved a fresh session, before its two reset/
+/// quiet phases. The second is recorded only after consuming the matching
+/// readiness receipt. Neither event claims physical output observation.
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable,
+)]
+pub struct ManagedAuditSessionV1 {
+    pub link_kind: u32,
+    pub event: u32,
+    pub session: u32,
+    pub flags: u32,
+    pub reserved: [u8; 32],
+    pub reserved_tail: [u8; 16],
+}
+
+const _: () = assert!(core::mem::size_of::<ManagedAuditSessionV1>() == 64);
+
 /// LINK subtype 4. Envelope correlation is the pending internal instance ID
 /// when HAS_OPERATION, never an inferred public ID. Wire identity comes from
 /// the actual message/receipt; an ignored reply may name a different session.

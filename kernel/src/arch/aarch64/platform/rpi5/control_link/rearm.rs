@@ -28,6 +28,7 @@ enum Phase {
 
 pub(super) struct Rearm {
     operation: u64,
+    session: u32,
     frequency: u64,
     last_ticks: u64,
     passes: u32,
@@ -56,10 +57,11 @@ impl Rearm {
         // The authorized owner has already inhibited the slot. A fresh attempt
         // revokes all old eligibility, but preserves a started TX frame.
         handoff.disarm();
-        let (_, discarded) = handoff.rearm_on_transport(operation, now, timeout, tx)?;
+        let (session, discarded) = handoff.rearm_on_transport(operation, now, timeout, tx)?;
         Ok((
             Self {
                 operation,
+                session,
                 frequency,
                 last_ticks: now,
                 passes: 0,
@@ -73,6 +75,10 @@ impl Rearm {
 
     pub(super) const fn operation(&self) -> u64 {
         self.operation
+    }
+
+    pub(super) const fn session(&self) -> u32 {
+        self.session
     }
 
     fn sample(&mut self, clock: &mut impl FnMut() -> u64) -> Result<u64, HandoffError> {

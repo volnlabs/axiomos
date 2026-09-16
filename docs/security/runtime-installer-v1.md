@@ -379,7 +379,7 @@ existing lifecycle acceptance maps that ID to the public operation ID.
 | 16 | wire_correlation / u64 | Nonzero barrier/ack correlation; zero for session messages |
 | 24 | observed_ticks / u64 | CNTPCT sample used for reply/transition processing, or recording sample after mutation |
 | 32 | generation / u64 | New committed generation for event 7; zero otherwise |
-| 40 | message_kind / u32 | 1 SessionOffer, 2 SessionReady, 3 SafeBarrier, 4 SafeAck |
+| 40 | message_kind / u32 | 1 SessionOffer, 2 SessionReady, 3 SafeBarrier, 4 SafeAck, 5 Requalify, 6 Prepared |
 | 44 | error / u32 | Zero or the existing 2001..2009 handoff error vocabulary |
 | 48 | flags / u32 | Bit 0 internal operation present; bit 1 committed generation present |
 | 52 | reserved / 12 bytes | Zero |
@@ -409,10 +409,16 @@ expected transaction identity.
 `peer_reports_safe` is true only for a matching SafeAck or its committed receipt;
 `physical_output_observed` remains false. The export header's negotiated session
 context does not establish current motion eligibility or physical qualification.
-The drain and requalification/rearm implementation still requires physical
-qualification, dedicated reset records and sink measurements. Current decoding
-checks this retained protocol trace, not the complete release campaign or physical
-timing acceptance.
+
+LINK subtype 5 is `ManagedAuditSessionV1`. Event 1 follows link disarm and fresh
+session reservation, before the two local reset/quiescence intervals. Event 2
+follows only after consuming the matching `SessionReady` receipt. Both records
+use the public rearm operation ID as correlation and retain the nonzero session;
+all reserved bytes are zero. The decoder requires event 1 before the
+Requalify/Prepared/SessionOffer/SessionReady sequence and event 2 before the
+rearm lifecycle commit. These boundaries do not prove hardware FIFO drain or
+physical output safety. The implementation still requires physical reset and
+sink qualification.
 
 CYCLE correlation is the installation generation captured with the artifact
 handle under the control-slot lock, after the handoff boundary and before the

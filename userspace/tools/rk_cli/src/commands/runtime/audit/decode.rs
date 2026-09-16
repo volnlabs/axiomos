@@ -366,7 +366,8 @@ struct LifecycleTrace {
     public: u64,
     accepted: ManagedAuditLifecycleV1,
     // Lifecycle events 1..8; barrier begin/frame/complete/ack/receipt 9..13;
-    // failed handoff 14; interrupted retained history 15.
+    // failed handoff 14; interrupted retained history 15; rearm ready 16;
+    // reset/quiescence start 17; session establishment 18.
     seen: u32,
     barrier: Option<(u32, u64, u32)>,
 }
@@ -674,7 +675,12 @@ impl DecodeState {
             MANAGED_AUDIT_LINK => {
                 let subtype = u32::from_le_bytes(r.payload[..4].try_into().unwrap());
                 ensure!(
-                    matches!(subtype, MANAGED_AUDIT_MOTOR_TX | MANAGED_AUDIT_HANDOFF_LINK)
+                    matches!(
+                        subtype,
+                        MANAGED_AUDIT_MOTOR_TX
+                            | MANAGED_AUDIT_HANDOFF_LINK
+                            | MANAGED_AUDIT_SESSION_LINK
+                    )
                         || r.correlation == 0,
                     "unexpected global link correlation"
                 );
@@ -761,11 +767,80 @@ impl DecodeState {
                         }))
                     }
                     MANAGED_AUDIT_HANDOFF_LINK => self.handoff_link(r),
+                    MANAGED_AUDIT_SESSION_LINK => self.session_link(r),
                     _ => bail!("unsupported link payload"),
                 }
             }
             _ => bail!("unsupported record kind"),
         }
+    }
+    fn session_link(&mut self, r: &ManagedAuditRecordV1) -> Result<Value> {
+        let p = ManagedAuditSessionV1::read_from_bytes(&r.payload).unwrap();
+        ensure!(
+            matches!(
+                p.event,
+                MANAGED_AUDIT_SESSION_REQUALIFICATION_STARTED
+                    | MANAGED_AUDIT_SESSION_ESTABLISHED_EVENT
+            ) && p.session != 0
+                && p.flags == MANAGED_AUDIT_SESSION_HAS_OPERATION
+                && r.correlation != 0
+                && p.reserved == [0; 32]
+                && p.reserved_tail == [0; 16],
+            "invalid session lifecycle fields"
+        );
+        let mut public = None;
+        if let Some(trace) = self.lifecycles.get_mut(&(true, r.correlation)) {
+            public = Some(trace.public);
+            let (bit, required) = if p.event == MANAGED_AUDIT_SESSION_REQUALIFICATION_STARTED {
+                (17, 1 << 2)
+            } else {
+                (18, (1 << 16) | (1 << 17))
+            };
+            ensure!(
+                trace.seen & ((1 << bit) | (1 << 5) | (1 << 6)) == 0,
+                "repeated or terminal session lifecycle"
+            );
+            if trace.seen & required != required {
+                ensure!(
+                    trace.seen & (1 << 15) != 0,
+                    "session lifecycle missing prerequisite"
+                );
+                self.gaps.push(json!({"sequence":r.sequence,"reason":"session lifecycle prerequisite lost in transport gap"}));
+            }
+            if p.event == MANAGED_AUDIT_SESSION_REQUALIFICATION_STARTED {
+                ensure!(
+                    (9..=18).all(|later| trace.seen & (1 << later) == 0),
+                    "reset/quiescence began after rearm transport progress"
+                );
+                trace.barrier = Some((p.session, 0, 0));
+            } else {
+                ensure!(
+                    trace.barrier == Some((p.session, 0, 0)),
+                    "established session differs from requalification"
+                );
+            }
+            trace.seen |= 1 << bit;
+        } else {
+            ensure!(
+                self.missing_mapping_allowed,
+                "session lifecycle has no rearm acceptance in complete window"
+            );
+            self.gap(
+                r.sequence,
+                "session lifecycle operation is outside the retained context",
+            );
+        }
+        Ok(json!({
+            "event": if p.event == MANAGED_AUDIT_SESSION_REQUALIFICATION_STARTED {
+                "reset_quiescence_started"
+            } else {
+                "session_established"
+            },
+            "session": p.session,
+            "public_operation_id": public,
+            "motion_eligible": false,
+            "physical_output_observed": false
+        }))
     }
     fn handoff_link(&mut self, r: &ManagedAuditRecordV1) -> Result<Value> {
         let p = ManagedAuditHandoffV1::read_from_bytes(&r.payload).unwrap();
@@ -995,7 +1070,7 @@ impl DecodeState {
             }
             let prerequisite = match p.event {
                 2 => Some(1),
-                5 => Some(16),
+                5 => Some(18),
                 _ => None,
             };
             if let Some(required) = prerequisite {
@@ -1395,6 +1470,22 @@ mod tests {
             lifecycle(1, MANAGED_OPERATION_QUEUED, 0),
             lifecycle(2, MANAGED_OPERATION_PREPARING, 0),
         ];
+        let session = |event| ManagedAuditRecordV1 {
+            kind: MANAGED_AUDIT_LINK,
+            correlation: 7,
+            payload: ManagedAuditSessionV1 {
+                link_kind: MANAGED_AUDIT_SESSION_LINK,
+                event,
+                session: 2,
+                flags: MANAGED_AUDIT_SESSION_HAS_OPERATION,
+                ..Default::default()
+            }
+            .as_bytes()
+            .try_into()
+            .unwrap(),
+            ..Default::default()
+        };
+        records.push(session(MANAGED_AUDIT_SESSION_REQUALIFICATION_STARTED));
         for (message_kind, event) in [(5, 2), (5, 3), (6, 4), (1, 2), (1, 3), (2, 4)] {
             records.push(ManagedAuditRecordV1 {
                 kind: MANAGED_AUDIT_LINK,
@@ -1413,12 +1504,15 @@ mod tests {
                 ..Default::default()
             });
         }
+        records.push(session(MANAGED_AUDIT_SESSION_ESTABLISHED_EVENT));
         records.push(lifecycle(5, MANAGED_OPERATION_COMMITTED, 0));
         let decoded = decode(export(&records).as_bytes()).unwrap();
         assert!(decoded["semantic_gaps"].as_array().unwrap().is_empty());
-        assert_eq!(decoded["events"][8]["decoded"]["action"], "rearm");
-        assert_eq!(decoded["events"][8]["decoded"]["inhibited"], true);
-        assert!(decoded["events"][8]["decoded"]["identity"].is_null());
+        assert_eq!(decoded["events"][2]["decoded"]["event"], "reset_quiescence_started");
+        assert_eq!(decoded["events"][9]["decoded"]["event"], "session_established");
+        assert_eq!(decoded["events"][10]["decoded"]["action"], "rearm");
+        assert_eq!(decoded["events"][10]["decoded"]["inhibited"], true);
+        assert!(decoded["events"][10]["decoded"]["identity"].is_null());
         // Public rearm IDs and internal installation IDs have separate domains.
         let mut joined = identity_and_lifecycle();
         joined.extend(
@@ -1427,7 +1521,7 @@ mod tests {
                 .map(|r| ManagedAuditRecordV1 { ticks: 10, ..*r }),
         );
         decode(export(&joined).as_bytes()).unwrap();
-        for index in 0..8 {
+        for index in 0..records.len() - 1 {
             let mut missing = records.clone();
             missing.remove(index);
             assert!(
@@ -1435,7 +1529,7 @@ mod tests {
                 "missing {index}"
             );
         }
-        for index in 1..8 {
+        for index in 1..records.len() - 1 {
             let mut reordered = records.clone();
             reordered.swap(index, index + 1);
             assert!(
@@ -1446,19 +1540,19 @@ mod tests {
         for field in ["instance", "artifact", "generation", "flags", "session"] {
             let mut malformed = records.clone();
             if field == "session" {
-                let mut p = ManagedAuditHandoffV1::read_from_bytes(&malformed[7].payload).unwrap();
+                let mut p = ManagedAuditHandoffV1::read_from_bytes(&malformed[8].payload).unwrap();
                 p.session += 1;
-                malformed[7].payload = p.as_bytes().try_into().unwrap();
+                malformed[8].payload = p.as_bytes().try_into().unwrap();
             } else {
                 let mut p =
-                    ManagedAuditLifecycleV1::read_from_bytes(&malformed[8].payload).unwrap();
+                    ManagedAuditLifecycleV1::read_from_bytes(&malformed[10].payload).unwrap();
                 match field {
                     "instance" => p.instance_id = 1,
                     "artifact" => p.artifact_handle = 1,
                     "generation" => p.target_generation = 2,
                     _ => p.flags = 1,
                 }
-                malformed[8].payload = p.as_bytes().try_into().unwrap();
+                malformed[10].payload = p.as_bytes().try_into().unwrap();
             }
             assert!(decode(export(&malformed).as_bytes()).is_err(), "{field}");
         }
