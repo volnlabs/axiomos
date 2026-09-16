@@ -69,6 +69,12 @@ SOFTWARE_CASES = {
         "active_exit": ("kernel", "bpf::preparation::tests::worker_cancellation_at_each_build_and_handoff_boundary_preserves_old_active"),
         "retirement_exit": ("kernel", "bpf::preparation::tests::worker_inactive_retirement_candidate_commit_keeps_public_identity_and_reader_custody"),
     },
+    "publication_races": {
+        "writer_schedules": ("kernel", "bpf::installation::tests::interleavings::all_legal_writer_cancel_stop_and_worker_schedules_preserve_the_active_installation"),
+        "stop_commit_boundary": ("kernel", "bpf::installation::tests::interleavings::stop_before_or_after_release_commit_has_one_authoritative_generation"),
+        "stale_a_b_a": ("kernel", "bpf::installation::tests::interleavings::stale_a_b_a_operation_and_generation_ids_cannot_republish"),
+        "handoff_invalidation": ("kernel", "bpf::installation::tests::stop_cancel_timeout_and_reset_cannot_publish_even_with_matching_ack"),
+    },
 }
 SOFTWARE_EXECUTABLES = {"kernel": "host-test", "kernel_bpf": "bpf-test"}
 RESOURCE_MAXIMA = {

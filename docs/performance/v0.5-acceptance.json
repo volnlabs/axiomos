@@ -37,7 +37,7 @@
     "preparation_isolation": {"required": true, "implemented_by_reducer": true, "missing_policy": "not_evaluated"},
     "private_state": {"required": true, "implemented_by_reducer": true, "missing_policy": "not_evaluated"},
     "ownership": {"required": true, "implemented_by_reducer": true, "missing_policy": "not_evaluated"},
-    "publication_races": {"required": true, "implemented_by_reducer": false, "missing_policy": "not_evaluated"},
+    "publication_races": {"required": true, "implemented_by_reducer": true, "missing_policy": "not_evaluated"},
     "failure_custody": {"required": true, "implemented_by_reducer": false, "missing_policy": "not_evaluated"},
     "abi": {"required": true, "implemented_by_reducer": false, "missing_policy": "not_evaluated"},
     "reset_quiescence": {"required": true, "implemented_by_reducer": false, "missing_policy": "not_evaluated"},

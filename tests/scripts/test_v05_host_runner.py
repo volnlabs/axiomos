@@ -60,7 +60,7 @@ class V05HostRunnerTests(unittest.TestCase):
         expected = [(gate, case, executable, test)
                     for gate, cases in runner.v05.SOFTWARE_CASES.items()
                     for case, (executable, test) in cases.items()]
-        self.assertEqual(len(expected), 14)
+        self.assertEqual(len(expected), 18)
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
             for filename in runner.v05.SOFTWARE_EXECUTABLES.values():

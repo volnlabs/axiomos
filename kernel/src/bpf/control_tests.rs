@@ -253,6 +253,62 @@ fn missing_request_submits_zero_and_failed_invocation_discards_its_capture() {
 }
 
 #[test]
+fn map_failure_after_capture_discards_request_stops_release_and_releases_lease() {
+    let program = [
+        BpfInsn::mov64_imm(1, 7),
+        BpfInsn::mov64_imm(2, -7),
+        BpfInsn::call(kernel_abi::BPF_HELPER_MANAGED_MOTOR_PAIR_V1),
+        BpfInsn::new(0x62, 10, 0, -4, 99),
+        BpfInsn::mov64_imm(1, 1),
+        BpfInsn::mov64_reg(2, 10),
+        BpfInsn::add64_imm(2, -4),
+        BpfInsn::call(kernel_abi::BPF_HELPER_MAP_LOOKUP_ELEM),
+        BpfInsn::mov64_imm(0, 0),
+        BpfInsn::exit(),
+    ];
+    let (manager, mut slot) = installed(&program);
+    let private_map = manager
+        .maps
+        .iter()
+        .flatten()
+        .find(|entry| entry.owner == crate::bpf::ObjectOwner::KernelManaged)
+        .unwrap()
+        .runtime
+        .clone();
+    let release = PeriodicSchedule::new(0, 10)
+        .unwrap()
+        .release(10)
+        .unwrap()
+        .unwrap();
+    let mut submissions = 0;
+
+    let report = slot.run_release(
+        release,
+        100,
+        SensorSnapshot::default(),
+        80_000_000,
+        &mut || 11,
+        |pair, _, _, _| {
+            submissions += 1;
+            queued(pair)
+        },
+    );
+
+    assert_eq!(submissions, 0);
+    assert_eq!(
+        report.failure,
+        Some(CycleFailure::Invocation(BpfError::ManagedMapFailure))
+    );
+    assert!(!report.invocation_completed);
+    assert_eq!(report.requested, None);
+    assert_eq!(report.submission, None);
+    assert!(slot.snapshot().inhibited);
+    assert!(!private_map
+        .leased
+        .load(core::sync::atomic::Ordering::Acquire));
+}
+
+#[test]
 fn missed_deadlines_reversed_clocks_and_queue_failure_never_resume_automatically() {
     for (ticks, expected, queued_before_stop) in [
         ([9, 11, 11], CycleFailure::ClockReversed, false),
