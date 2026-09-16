@@ -576,7 +576,7 @@ pub(crate) mod tests {
     extern crate std;
     use alloc::boxed::Box;
     use alloc::vec::Vec;
-    use core::cell::RefCell;
+    use core::cell::{Cell, RefCell};
 
     use kernel_bpf::execution::ManagedMotorPair;
     use kernel_time::periodic::PeriodicSchedule;
@@ -588,15 +588,60 @@ pub(crate) mod tests {
 
     std::thread_local! {
         static CAPTURE: RefCell<Option<Box<State>>> = const { RefCell::new(None) };
+        static CAPTURE_TICKS: Cell<Option<u64>> = const { Cell::new(None) };
     }
 
     pub(super) fn observe(f: impl FnOnce(&mut State, u64)) {
         CAPTURE.with(|capture| {
             if let Some(state) = capture.borrow_mut().as_mut() {
-                let ticks = state.window.status().next;
+                let ticks = CAPTURE_TICKS
+                    .get()
+                    .unwrap_or_else(|| state.window.status().next);
                 f(state, ticks);
             }
         });
+    }
+
+    /// Host workflow adapter to the same validated recorder status/read methods.
+    /// The capture is intentionally confined to the invoking test thread.
+    pub(crate) fn capture_ticks(ticks: u64) {
+        CAPTURE_TICKS.with(|clock| {
+            assert!(clock.get().is_none_or(|previous| previous <= ticks));
+            clock.set(Some(ticks));
+        });
+    }
+
+    pub(crate) fn capture_init_clock(frequency: u64, ticks: u64) {
+        capture_ticks(ticks);
+        CAPTURE.with(|capture| {
+            capture
+                .borrow_mut()
+                .as_mut()
+                .expect("active capture")
+                .init_clock(frequency, ticks);
+        });
+    }
+
+    pub(crate) fn capture_status(
+        request: ManagedAuditStatusV1,
+    ) -> Result<ManagedAuditStatusV1, Errno> {
+        CAPTURE.with(|capture| {
+            capture
+                .borrow()
+                .as_ref()
+                .expect("active capture")
+                .status(request)
+        })
+    }
+
+    pub(crate) fn capture_read(request: ManagedAuditReadV1) -> Result<ManagedAuditReadV1, Errno> {
+        CAPTURE.with(|capture| {
+            capture
+                .borrow()
+                .as_ref()
+                .expect("active capture")
+                .read(request)
+        })
     }
 
     /// Test-local capture of real producers; no host hardware owner is enabled.
@@ -607,6 +652,7 @@ pub(crate) mod tests {
         });
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
         let state = CAPTURE.with(|capture| capture.borrow_mut().take().unwrap());
+        CAPTURE_TICKS.set(None);
         if let Err(error) = result {
             std::panic::resume_unwind(error);
         }

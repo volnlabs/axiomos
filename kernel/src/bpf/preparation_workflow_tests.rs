@@ -1,5 +1,7 @@
 //! Joined host workflow. UART and safe acknowledgements are modeled; no
 //! physical FPGA output, userspace copy boundary or qualified timing is claimed.
+extern crate std;
+
 use kernel_bpf::actuation::{AuditSource, Authority, Monitor};
 use kernel_bpf::profile::ActiveProfile;
 use kernel_time::periodic::PeriodicRelease;
@@ -72,13 +74,158 @@ fn bpf_call(
                 Ok(0)
             }
             BPF_MANAGED_SLOT_QUERY => {
-                body.copy_from_slice(manager.managed_slot_query(&slot).as_bytes());
+                if body.len() == core::mem::size_of::<ManagedSlotArtifactV2>() {
+                    let request =
+                        ManagedSlotArtifactV2::read_from_bytes(body).map_err(|_| EINVAL)?;
+                    if request
+                        != (ManagedSlotArtifactV2 {
+                            version: MANAGED_SLOT_ARTIFACT_VERSION,
+                            size: core::mem::size_of::<ManagedSlotArtifactV2>() as u32,
+                            expected_generation: request.expected_generation,
+                            expected_last_id: request.expected_last_id,
+                            artifact_handle: request.artifact_handle,
+                            expected_roles: request.expected_roles,
+                            ..Default::default()
+                        })
+                    {
+                        return Err(EINVAL);
+                    }
+                    body.copy_from_slice(
+                        manager
+                            .managed_slot_artifact_query(&slot, request)?
+                            .as_bytes(),
+                    );
+                } else {
+                    body.copy_from_slice(manager.managed_slot_query(&slot).as_bytes());
+                }
+                Ok(0)
+            }
+            BPF_MANAGED_RECORDER_STATUS => {
+                let request = ManagedAuditStatusV1::read_from_bytes(body).map_err(|_| EINVAL)?;
+                body.copy_from_slice(events::tests::capture_status(request)?.as_bytes());
+                Ok(0)
+            }
+            BPF_MANAGED_RECORDER_READ => {
+                let request = ManagedAuditReadV1::read_from_bytes(body).map_err(|_| EINVAL)?;
+                body.copy_from_slice(events::tests::capture_read(request)?.as_bytes());
                 Ok(0)
             }
             _ => Err(ENOTSUP),
         }
     })();
     result.map_or_else(|error| -isize::from(error), |value| value as isize)
+}
+
+// Optional bridge for the actual CLI serial exporter. This replaces only the
+// physical UART and syscall copy/topology boundary; recorder validation and the
+// installer framing/dispatcher remain the real implementations.
+#[cfg(unix)]
+fn serve_audit(slot: &spin::Mutex<ControlSlot>, manager: &spin::Mutex<BpfManager>) {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+    use std::time::{Duration, Instant};
+
+    let Some(path) = std::env::var_os("AXIOM_V05_AUDIT_SOCKET") else {
+        return;
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let listener = UnixListener::bind(path).expect("bind fresh audit socket");
+    listener.set_nonblocking(true).unwrap();
+    let (mut stream, _) = loop {
+        assert!(Instant::now() < deadline, "audit accept deadline");
+        match listener.accept() {
+            Ok(connection) => break connection,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("audit accept: {error}"),
+        }
+    };
+    let mut transport = Transport::new();
+    let mut input = [0u8; 256];
+    let mut bytes_read = 0usize;
+    let mut final_read_pending = false;
+    let mut final_read_transmitted = false;
+    let mut response_complete = false;
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .expect("audit overall deadline");
+        assert!(!remaining.is_zero(), "audit overall deadline");
+        let timeout = remaining.min(Duration::from_secs(2));
+        stream.set_read_timeout(Some(timeout)).unwrap();
+        stream.set_write_timeout(Some(timeout)).unwrap();
+        let count = stream.read(&mut input).expect("bounded audit read");
+        assert!(Instant::now() < deadline, "audit overall deadline");
+        if count == 0 {
+            assert!(
+                final_read_transmitted && response_complete,
+                "audit peer left before complete export"
+            );
+            assert!(transport.pending_reply().is_none());
+            break;
+        }
+        bytes_read = bytes_read.checked_add(count).unwrap();
+        assert!(bytes_read <= 1024 * 1024, "bounded audit request bytes");
+        for byte in &input[..count] {
+            response_complete = false;
+            assert!(Instant::now() < deadline, "audit overall deadline");
+            // Transport receives at most one frame per call. Feeding each byte
+            // avoids dropping a coalesced socket read's following frame tail.
+            transport.receive(core::slice::from_ref(byte), |request, response| {
+                response_complete = false;
+                final_read_pending = false;
+                let length = dispatch(
+                    request,
+                    response,
+                    |command, body| {
+                        assert!(
+                            matches!(
+                                command,
+                                BPF_MANAGED_SLOT_QUERY
+                                    | BPF_MANAGED_RECORDER_STATUS
+                                    | BPF_MANAGED_RECORDER_READ
+                            ),
+                            "audit endpoint is read only"
+                        );
+                        let result = bpf_call(slot, manager, command, body);
+                        assert_eq!(result, 0, "audit request failed");
+                        if command == BPF_MANAGED_RECORDER_READ {
+                            let reply = ManagedAuditReadV1::read_from_bytes(body).unwrap();
+                            assert_eq!(reply.gap, 0, "unexpected audit gap");
+                            final_read_pending = reply.end != 0 && reply.next_cursor == reply.end;
+                        }
+                        result
+                    },
+                    || panic!("audit endpoint cannot stop again"),
+                );
+                assert!(length >= 8);
+                assert_eq!(
+                    i64::from_le_bytes(response[..8].try_into().unwrap()),
+                    0,
+                    "unserved audit request"
+                );
+                length
+            });
+            if let Some(reply) = transport.pending_reply() {
+                let mut decoder = InstallerDecoder::new();
+                let mut frame = None;
+                for byte in reply {
+                    frame = decoder.push(*byte).or(frame);
+                }
+                let frame = frame.expect("whole installer response");
+                assert_ne!(frame.kind, FrameKind::Error, "installer rejected frame");
+                stream.write_all(reply).expect("bounded audit write");
+                assert!(Instant::now() < deadline, "audit overall deadline");
+                if frame.kind == FrameKind::ResponseLast {
+                    response_complete = true;
+                    final_read_transmitted |= final_read_pending;
+                }
+                let count = reply.len();
+                transport.written(count);
+            }
+        }
+    }
 }
 
 struct Wire {
@@ -266,6 +413,7 @@ impl HostControl {
     fn release(&mut self) -> PeriodicRelease {
         self.sequence += 1;
         let scheduled = 300 + self.sequence * 10;
+        events::tests::capture_ticks(scheduled);
         PeriodicRelease {
             sequence: self.sequence,
             scheduled,
@@ -277,6 +425,7 @@ impl HostControl {
     }
 
     fn drain_tx(&mut self, ticks: u64) -> Vec<Msg> {
+        events::tests::capture_ticks(ticks);
         let mut decoder = Decoder::new();
         let mut messages = Vec::new();
         while let Some((byte, completion)) = self.tx.next_byte_with_completion() {
@@ -284,12 +433,40 @@ impl HostControl {
                 messages.push(message.unwrap());
             }
             match completion {
-                Some(FrameCompletion::Handoff(_)) => self.handoff.sent(ticks).unwrap(),
+                Some(FrameCompletion::Handoff(frame)) => {
+                    let result = self.handoff.sent(ticks);
+                    events::handoff(
+                        MANAGED_AUDIT_HANDOFF_LOCAL_COMPLETE,
+                        frame.operation,
+                        frame.message,
+                        Some(ticks),
+                        None,
+                        result.err(),
+                    );
+                    result.unwrap();
+                }
                 Some(FrameCompletion::Motor(frame)) => events::motor_tx(frame, true),
                 None => {}
             }
         }
         messages
+    }
+
+    fn enqueue_handoff(&mut self, ticks: u64) {
+        events::tests::capture_ticks(ticks);
+        let frame = self
+            .handoff
+            .enqueue(&mut self.tx, ticks * 1_000_000)
+            .unwrap()
+            .expect("one handoff frame");
+        events::handoff(
+            MANAGED_AUDIT_HANDOFF_FRAMED,
+            frame.operation,
+            frame.message,
+            Some(ticks),
+            None,
+            None,
+        );
     }
 
     fn invoke(
@@ -378,9 +555,7 @@ impl HostControl {
         assert!(report.safe_mode && report.handoff);
         assert_eq!(report.failure, None);
         events::cycle(release, report);
-        self.handoff
-            .enqueue(&mut self.tx, release.actual * 1_000_000)
-            .unwrap();
+        self.enqueue_handoff(release.actual);
         let messages = self.drain_tx(release.actual + 1);
         let [Msg::SafeBarrier {
             session,
@@ -391,17 +566,16 @@ impl HostControl {
             panic!("one complete barrier");
         };
         // Only a protocol model acknowledgement: no FPGA output observation.
-        assert!(self
-            .handoff
-            .on_reply(
-                Msg::SafeAck {
-                    session: *session,
-                    correlation: *correlation,
-                    sequence: *sequence
-                },
-                release.actual + 2
-            )
-            .is_ok());
+        let reply = Msg::SafeAck {
+            session: *session,
+            correlation: *correlation,
+            sequence: *sequence,
+        };
+        events::tests::capture_ticks(release.actual + 2);
+        let operation = self.handoff.operation();
+        let result = self.handoff.on_reply(reply, release.actual + 2);
+        events::handoff_reply(operation, reply, release.actual + 2, result);
+        assert!(result.unwrap());
         let release = self.release();
         assert_eq!(
             slot.lock().handoff_boundary(
@@ -418,6 +592,47 @@ impl HostControl {
     }
 }
 
+fn recorded_rearm(operation: u64) -> (Handoff, shrike_link::handoff::RearmReceipt) {
+    let mut control = HostControl {
+        handoff: Handoff::new(),
+        tx: TxState::new(),
+        sequence: 0,
+        motor_sequence: 0,
+        monitor: Monitor::<ActiveProfile>::new(),
+    };
+    control
+        .handoff
+        .rearm_on_transport(operation, 0, 1000, &mut control.tx)
+        .unwrap();
+    control.enqueue_handoff(0);
+    assert!(matches!(
+        control.drain_tx(1).as_slice(),
+        [Msg::Requalify { session: 1 }]
+    ));
+    events::tests::capture_ticks(2);
+    let prepared = Msg::Prepared { session: 1 };
+    let result = control.handoff.on_reply(prepared, 2);
+    events::handoff_reply(Some(operation), prepared, 2, result);
+    assert!(result.unwrap());
+    control
+        .handoff
+        .offer_after_requalification_drain(203, 80)
+        .unwrap();
+    control.enqueue_handoff(203);
+    assert!(matches!(
+        control.drain_tx(204).as_slice(),
+        [Msg::SessionOffer { session: 1 }]
+    ));
+    events::tests::capture_ticks(205);
+    let ready = Msg::SessionReady { session: 1 };
+    let result = control.handoff.on_reply(ready, 205);
+    events::handoff_reply(Some(operation), ready, 205, result);
+    assert!(result.unwrap());
+    let receipt = control.handoff.take_rearm_ready(206).unwrap().unwrap();
+    events::tests::capture_ticks(208);
+    (control.handoff, receipt)
+}
+
 #[test]
 fn framed_installer_upload_replace_fresh_rollback_and_stop_produce_one_joined_audit() {
     let (mut worker, slot, manager) = fixture_worker();
@@ -430,6 +645,7 @@ fn framed_installer_upload_replace_fresh_rollback_and_stop_produce_one_joined_au
     let mut artifacts = Vec::new();
     let mut lifecycle_ids = Vec::new();
     let records = events::tests::capture_records(|| {
+        events::tests::capture_init_clock(1000, 0);
         let rearm = value(
             &wire.command(
                 &slot,
@@ -446,7 +662,11 @@ fn framed_installer_upload_replace_fresh_rollback_and_stop_produce_one_joined_au
             ),
         );
         assert_eq!(rearm, 1);
-        let (mut handoff, receipt) = rearm_ready_fixture(rearm);
+        assert!(matches!(
+            worker.take(&mut slot.lock(), &mut manager.lock()),
+            WorkerAction::Rearm(_)
+        ));
+        let (mut handoff, receipt) = recorded_rearm(rearm);
         let mut monitor = Monitor::<ActiveProfile>::new();
         monitor.estop_trigger(AuditSource::Operator, 0);
         manager
@@ -598,6 +818,8 @@ fn framed_installer_upload_replace_fresh_rollback_and_stop_produce_one_joined_au
             (3, a.artifact_handle, b.artifact_handle)
         );
         assert_ne!(stopped.flags & MANAGED_SLOT_INHIBITED, 0);
+        #[cfg(unix)]
+        serve_audit(&slot, &manager);
     });
     for (id, identity) in artifacts {
         let mut bytes = Vec::new();
@@ -661,4 +883,15 @@ fn framed_installer_upload_replace_fresh_rollback_and_stop_produce_one_joined_au
             }));
     }
     assert!(records.iter().any(|r| r.kind == MANAGED_AUDIT_STOP));
+    if let Some(path) = std::env::var_os("AXIOM_V05_AUDIT_RECORDS") {
+        use std::io::Write;
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .unwrap();
+        for record in &records {
+            output.write_all(record.as_bytes()).unwrap();
+        }
+    }
 }

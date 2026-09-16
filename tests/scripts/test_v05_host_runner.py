@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import struct
 from pathlib import Path
 import tempfile
 import unittest
@@ -144,6 +145,35 @@ class V05HostRunnerTests(unittest.TestCase):
         finally:
             runner.SCENARIOS.clear()
             runner.SCENARIOS.update(ledger)
+
+    def test_joined_export_must_match_kernel_bytes_and_explain_fresh_rollback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            header = dict(type="header", slot_generation=3, oldest=0, end=1, overwritten=0, dropped=0)
+            record = dict(type="record", sequence=0, ticks=1, correlation=3, kind=2, payload_hex="a5" * 64)
+            end = dict(type="end", cursor=1, records=1, gaps=0)
+            raw = struct.pack("<QQQI4x64s", 0, 1, 3, 2, b"\xa5" * 64)
+            (directory / "records.bin").write_bytes(raw)
+            rows = [header, record, end]
+            (directory / "audit.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+            pairs = [(1, [0, 0]), (1, [1, 1]), (1, [2, 2]), (2, [0, 3]), (2, [1, 3]), (3, [0, 0]), (3, [1, 1])]
+            events = [dict(decoded=dict(event="cycle", generation=generation, requested_pair=pair, handoff=False)) for generation, pair in pairs]
+            events += [dict(decoded=dict(event="cycle", handoff=True, requested_pair=None)) for _ in range(3)]
+            decoded = dict(qualification_evaluated=False, signature_reverified=False, payloads_decoded=True,
+                           semantic_gaps=[], events=events, latest_stop_decoded={"event": "stop"})
+            (directory / "decoded.json").write_text(json.dumps(decoded))
+            self.assertEqual(runner.validate_audit(directory)["generation"], 3)
+            (directory / "records.bin").write_bytes(raw[:-1])
+            with self.assertRaisesRegex(ValueError, "actual kernel recorder"):
+                runner.validate_audit(directory)
+            (directory / "records.bin").write_bytes(raw)
+            events[5]["decoded"]["requested_pair"] = [3, 3]
+            (directory / "decoded.json").write_text(json.dumps(decoded))
+            with self.assertRaisesRegex(ValueError, "fresh rollback"):
+                runner.validate_audit(directory)
+            (directory / "audit.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows[:-1]))
+            with self.assertRaisesRegex(ValueError, "complete records"):
+                runner.validate_audit(directory)
 
 
 if __name__ == "__main__":

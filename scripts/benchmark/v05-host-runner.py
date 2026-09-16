@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Retain and reduce the real kernel host lifecycle fixture with a modeled clock.
+"""Retain host lifecycle evidence and export its recorder through the real CLI.
 
 This is synthetic evidence, never hardware timing or a release qualification.
 Run from a clean checkout; use a new output directory under target/ or outside
@@ -15,15 +15,21 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import select
 import shutil
+import socket
+import struct
 import subprocess
 import sys
+import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("analyze_v05", ROOT / "scripts/benchmark/analyze-v05.py")
 v05 = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(v05)
 TEST = "bpf::preparation::tests::trace::managed_host_benchmark_trace"
+WORKFLOW_TEST = "bpf::preparation::tests::workflow::framed_installer_upload_replace_fresh_rollback_and_stop_produce_one_joined_audit"
 
 # Workload ledger, fixed independently of emitted events. Normal: A runs during
 # two delayed worker releases; replace B, rollback A, reject stale generation,
@@ -71,7 +77,7 @@ def clean_source() -> str:
     return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
 
 
-def executable_from_cargo(output: str) -> Path:
+def executable_from_cargo(output: str, name="kernel", kind="lib", test=True) -> Path:
     paths = []
     for line in output.splitlines():
         record = v05.parse_json(line)
@@ -82,15 +88,15 @@ def executable_from_cargo(output: str) -> Path:
                 or not isinstance(record.get("profile"), dict)):
             raise ValueError("malformed Cargo artifact metadata")
         if (record.get("reason") == "compiler-artifact"
-                and record.get("target", {}).get("name") == "kernel"
-                and record.get("target", {}).get("kind") == ["lib"]
-                and record.get("profile", {}).get("test") is True
+                and record.get("target", {}).get("name") == name
+                and record.get("target", {}).get("kind") == [kind]
+                and record.get("profile", {}).get("test") is test
                 and record.get("executable")):
             if not isinstance(record["executable"], str):
                 raise ValueError("malformed Cargo executable path")
             paths.append(Path(record["executable"]))
     if len(paths) != 1:
-        raise ValueError("Cargo must identify exactly one kernel host test executable")
+        raise ValueError(f"Cargo must identify exactly one {name} executable")
     return paths[0]
 
 
@@ -125,6 +131,116 @@ def validate_artifacts(rows: list[dict], directory: Path) -> dict:
             or set(observed) != set(digests.values())):
         raise ValueError("trace artifact identities differ from retained bundles")
     return digests
+
+
+def validate_audit(directory: Path) -> dict:
+    rows = v05.parse_jsonl((directory / "audit.jsonl").read_text(encoding="utf-8"))
+    if len(rows) < 3 or any(not isinstance(row, dict) for row in rows):
+        raise ValueError("joined audit lacks complete records")
+    header, terminal = rows[0], rows[-1]
+    records = rows[1:-1]
+    if (header.get("type") != "header" or terminal.get("type") != "end"
+            or header.get("slot_generation") != 3 or header.get("oldest") != 0
+            or header.get("overwritten") != 0 or header.get("dropped") != 0
+            or terminal.get("gaps") != 0 or terminal.get("records") != len(records)
+            or terminal.get("cursor") != header.get("end")):
+        raise ValueError("joined audit interval or final installation mismatch")
+    try:
+        if any(r["type"] != "record" or len(bytes.fromhex(r["payload_hex"])) != 64 for r in records):
+            raise ValueError("joined audit contains invalid records")
+        raw = b"".join(struct.pack("<QQQI4x64s", r["sequence"], r["ticks"], r["correlation"],
+                                  r["kind"], bytes.fromhex(r["payload_hex"])) for r in records)
+    except (KeyError, TypeError, struct.error) as error:
+        raise ValueError("joined audit contains malformed records") from error
+    if not raw or raw != (directory / "records.bin").read_bytes():
+        raise ValueError("CLI export differs from actual kernel recorder bytes")
+    decoded = v05.load_json(directory / "decoded.json")
+    if (decoded.get("qualification_evaluated") is not False
+            or decoded.get("signature_reverified") is not False
+            or decoded.get("payloads_decoded") is not True
+            or decoded.get("semantic_gaps") != []):
+        raise ValueError("joined audit decode is incomplete or overclaims qualification")
+    cycles = [r["decoded"] for r in decoded.get("events", []) if r.get("decoded", {}).get("event") == "cycle"]
+    requests = [(r.get("generation"), r["requested_pair"]) for r in cycles if r.get("requested_pair") is not None]
+    if (requests != [(1, [0, 0]), (1, [1, 1]), (1, [2, 2]), (2, [0, 3]), (2, [1, 3]), (3, [0, 0]), (3, [1, 1])]
+            or sum(r.get("handoff") is True for r in cycles) != 3
+            or decoded.get("latest_stop_decoded") is None):
+        raise ValueError("decoded audit does not explain replacement, fresh rollback and stop")
+    return {"records": len(records), "generation": header["slot_generation"],
+            "scope": "real host recorder, installer and CLI export/decode; syscall copies and physical transport excluded"}
+
+
+def export_workflow(output: Path, retained: Path, cli: Path, env: dict) -> dict:
+    directory = output / "workflow"
+    directory.mkdir()
+    # A fresh PTY is the only serial character device opened by this campaign.
+    # The Unix socket carries unchanged installer frames to the host kernel test.
+    with tempfile.TemporaryDirectory(prefix="v05-audit-") as temporary:
+        address = str(Path(temporary) / "installer.sock")
+        master, slave = os.openpty()
+        worker = client = None
+        worker_command = [str(retained), WORKFLOW_TEST, "--exact", "--nocapture", "--test-threads=1"]
+        client_command = [str(cli), "runtime", "--port", os.ttyname(slave), "audit-export",
+                          "--output", str(directory / "audit.jsonl")]
+        try:
+            with (directory / "kernel.stdout").open("wb") as out, (directory / "kernel.stderr").open("wb") as err, \
+                    (directory / "cli.stdout").open("wb") as cli_out, (directory / "cli.stderr").open("wb") as cli_err:
+                worker = subprocess.Popen(worker_command, cwd=ROOT, stdout=out, stderr=err,
+                                          env={**env, "AXIOM_V05_AUDIT_SOCKET": address,
+                                               "AXIOM_V05_AUDIT_RECORDS": str(directory / "records.bin")})
+                deadline = time.monotonic() + 30
+                while not Path(address).exists():
+                    if worker.poll() is not None or time.monotonic() >= deadline:
+                        raise ValueError("kernel audit endpoint did not become ready")
+                    time.sleep(0.01)
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
+                    peer.settimeout(1)
+                    peer.connect(address)
+                    os.set_blocking(master, False)
+                    client = subprocess.Popen(client_command, cwd=ROOT, stdout=cli_out, stderr=cli_err)
+                    while client.poll() is None:
+                        if time.monotonic() >= deadline:
+                            raise ValueError("joined audit export timed out")
+                        readable, _, _ = select.select([master, peer], [], [], 0.05)
+                        for source in readable:
+                            data = os.read(master, 64) if source == master else peer.recv(64)
+                            if not data:
+                                raise ValueError("kernel audit endpoint ended before CLI export")
+                            if source == master:
+                                peer.sendall(data)
+                            elif os.write(master, data) != len(data):
+                                raise ValueError("PTY could not retain a complete reply fragment")
+                    if client.wait() != 0:
+                        raise ValueError("rk audit-export failed; see retained cli.stderr")
+                    peer.shutdown(socket.SHUT_WR)
+                if worker.wait(timeout=3) != 0:
+                    raise ValueError("kernel audit workflow failed; see retained kernel.stdout")
+                if time.monotonic() >= deadline:
+                    raise ValueError("joined audit export completed after its deadline")
+        finally:
+            for process in (client, worker):
+                if process is not None and process.poll() is None:
+                    process.kill()
+                    process.wait()
+            os.close(master)
+            os.close(slave)
+    decode_command = [str(cli), "audit-decode", str(directory / "audit.jsonl"),
+                      "--output", str(directory / "decoded.json")]
+    decoded = run_logged(decode_command, directory / "decode.stdout", directory / "decode.stderr")
+    decoded.check_returncode()
+    result = validate_audit(directory)
+    # A real CLI decode must refuse an interrupted export, not just unit fixtures.
+    truncated = directory / "truncated.jsonl"
+    truncated.write_bytes(b"".join((directory / "audit.jsonl").read_bytes().splitlines(keepends=True)[:-1]))
+    rejected_output = directory / "truncated-decoded.json"
+    negative_command = [str(cli), "audit-decode", str(truncated), "--output", str(rejected_output)]
+    rejected = run_logged(negative_command, directory / "negative.stdout", directory / "negative.stderr")
+    if rejected.returncode == 0 or rejected_output.exists():
+        raise ValueError("CLI decoder accepted an interrupted export")
+    result.update(kernel_command=worker_command, cli_command=client_command,
+                  decode_command=decode_command, negative_command=negative_command,
+                  truncated_export_rejected=True)
+    return result
 
 
 def run(output: Path) -> None:
@@ -220,8 +336,19 @@ def run(output: Path) -> None:
                 "files_sha256": {str(path.relative_to(directory)): v05.file_sha256(path)
                                  for path in sorted(directory.rglob("*")) if path.is_file()},
             }
+        cli_manifest = ROOT / "userspace/tools/rk_cli/Cargo.toml"
+        cli_command = ["cargo", "build", "--locked", "--manifest-path", str(cli_manifest),
+                       "--bin", "rk", "--message-format=json"]
+        cli_build = run_logged(cli_command, output / "cli-build.jsonl", output / "cli-build.stderr", env=env, timeout=600)
+        cli_build.check_returncode()
+        cli = output / "rk"
+        shutil.copy2(executable_from_cargo(cli_build.stdout, "rk", "bin", False), cli)
+        manifest["cli"] = {"build_command": cli_command, "sha256": v05.file_sha256(cli),
+                           "cargo_lock_sha256": v05.file_sha256(cli_manifest.with_name("Cargo.lock"))}
+        manifest["workflow"] = export_workflow(output, retained, cli, env)
         if (clean_source() != source or v05.file_sha256(v05.DEFAULT_ACCEPTANCE) != config
-                or v05.file_sha256(retained) != manifest["test_executable_sha256"]):
+                or v05.file_sha256(retained) != manifest["test_executable_sha256"]
+                or v05.file_sha256(cli) != manifest["cli"]["sha256"]):
             raise ValueError("source, acceptance or executable changed during collection")
         manifest["status"] = "pass"
     except (OSError, ValueError, subprocess.SubprocessError) as error:
