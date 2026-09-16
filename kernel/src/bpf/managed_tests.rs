@@ -613,6 +613,8 @@ fn managed_execution_uses_exact_bindings_and_keeps_instance_state_isolated() {
     assert_eq!(a.execute(&context).unwrap().motor_pair().left, 0);
     assert_eq!(a.execute(&context).unwrap().motor_pair().left, 1);
     assert_eq!(b.execute(&context).unwrap().motor_pair().left, 0);
+    // B's write must not replace A's existing private counter.
+    assert_eq!(a.execute(&context).unwrap().motor_pair().left, 2);
     assert!(!a.maps[0]
         .as_ref()
         .unwrap()

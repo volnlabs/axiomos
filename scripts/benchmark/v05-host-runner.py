@@ -236,8 +236,9 @@ def export_workflow(output: Path, retained: Path, cli: Path, env: dict) -> dict:
     rejected_output = directory / "truncated-decoded.json"
     negative_command = [str(cli), "audit-decode", str(truncated), "--output", str(rejected_output)]
     rejected = run_logged(negative_command, directory / "negative.stdout", directory / "negative.stderr")
-    if rejected.returncode == 0 or rejected_output.exists():
-        raise ValueError("CLI decoder accepted an interrupted export")
+    if (rejected.returncode != 1 or rejected_output.exists()
+            or not rejected.stderr.startswith("Error: missing or unknown audit fields\n")):
+        raise ValueError("CLI decoder did not explicitly reject an interrupted export")
     result.update(kernel_command=worker_command, cli_command=client_command,
                   decode_command=decode_command, negative_command=negative_command,
                   truncated_export_rejected=True)

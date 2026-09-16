@@ -2284,6 +2284,53 @@ mod tests {
         elf
     }
 
+    fn legacy_elf_with_relocation(rel_type: u32) -> Vec<u8> {
+        let names = b"\0.shstrtab\0.strtab\0.symtab\0socket/a\0.relsocket/a\0";
+        let strtab = b"\0";
+        let program_data = [
+            0xb7, 0, 0, 0, 0, 0, 0, 0, // r0 = 0
+            0x95, 0, 0, 0, 0, 0, 0, 0, // exit
+        ];
+        let strtab_offset = 64 + names.len();
+        let symtab_offset = strtab_offset + strtab.len();
+        let program_offset = symtab_offset + 24;
+        let relocation_offset = program_offset + program_data.len();
+        let shoff = relocation_offset + 16;
+        let mut elf = vec![0u8; shoff + 6 * 64];
+        elf[0..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2;
+        elf[5] = 1;
+        elf[6] = 1;
+        elf[18..20].copy_from_slice(&247u16.to_le_bytes());
+        elf[40..48].copy_from_slice(&(shoff as u64).to_le_bytes());
+        elf[60..62].copy_from_slice(&6u16.to_le_bytes());
+        elf[62..64].copy_from_slice(&1u16.to_le_bytes());
+
+        elf[64..64 + names.len()].copy_from_slice(names);
+        elf[strtab_offset..strtab_offset + strtab.len()].copy_from_slice(strtab);
+        elf[program_offset..program_offset + program_data.len()].copy_from_slice(&program_data);
+        elf[relocation_offset + 8..relocation_offset + 16]
+            .copy_from_slice(&(rel_type as u64).to_le_bytes());
+
+        write_elf_section(&mut elf, shoff + 64, 1, 3, 0, 64, names.len());
+        write_elf_section(&mut elf, shoff + 128, 11, 3, 0, strtab_offset, 1);
+        write_elf_section(&mut elf, shoff + 192, 19, 2, 0, symtab_offset, 24);
+        elf[shoff + 192 + 40..shoff + 192 + 44].copy_from_slice(&2u32.to_le_bytes());
+        write_elf_section(
+            &mut elf,
+            shoff + 256,
+            27,
+            1,
+            4,
+            program_offset,
+            program_data.len(),
+        );
+        write_elf_section(&mut elf, shoff + 320, 36, 9, 0, relocation_offset, 16);
+        elf[shoff + 320 + 40..shoff + 320 + 44].copy_from_slice(&3u32.to_le_bytes());
+        elf[shoff + 320 + 44..shoff + 320 + 48].copy_from_slice(&4u32.to_le_bytes());
+        elf
+    }
+
     fn write_elf_section(
         elf: &mut [u8],
         header: usize,
@@ -2305,16 +2352,67 @@ mod tests {
         let mut manager = BpfManager::new();
         manager.set_allow_unsigned(true);
         let initial = manager.resource_usage();
-        assert_eq!(
-            manager.load_program(&legacy_elf(2, false)),
-            Err(BpfError::NotLoaded)
+
+        let assert_rejected = |manager: &mut BpfManager, case: &str, elf: &[u8]| {
+            assert_eq!(
+                manager.load_program(elf),
+                Err(BpfError::NotLoaded),
+                "{case}"
+            );
+            assert_eq!(manager.resource_usage(), initial, "{case}");
+            assert!(
+                manager.programs.iter().all(Option::is_none),
+                "{case} published a program"
+            );
+            assert_eq!(
+                manager.maps.len(),
+                RESERVED_MAP_COUNT as usize,
+                "{case} published a map"
+            );
+        };
+
+        assert_rejected(
+            &mut manager,
+            "multiple entry programs",
+            &legacy_elf(2, false),
         );
-        assert_eq!(manager.resource_usage(), initial);
-        assert_eq!(
-            manager.load_program(&legacy_elf(1, true)),
-            Err(BpfError::NotLoaded)
-        );
-        assert_eq!(manager.resource_usage(), initial);
+        assert_rejected(&mut manager, "map-bearing object", &legacy_elf(1, true));
+
+        for (case, elf) in [
+            ("unsupported ELF class", {
+                let mut elf = legacy_elf(1, false);
+                elf[4] = 1;
+                elf
+            }),
+            ("unsupported ELF machine", {
+                let mut elf = legacy_elf(1, false);
+                elf[18..20].copy_from_slice(&62u16.to_le_bytes());
+                elf
+            }),
+            ("unsupported ELF endianness encoding", {
+                let mut elf = legacy_elf(1, false);
+                elf[5] = 0;
+                elf
+            }),
+        ] {
+            assert_rejected(&mut manager, case, &elf);
+        }
+
+        for (case, rel_type) in [
+            ("R_BPF_NONE relocation", 0),
+            ("R_BPF_64_ABS64 relocation", 2),
+            ("R_BPF_64_ABS32 relocation", 3),
+        ] {
+            let elf = legacy_elf_with_relocation(rel_type);
+            assert_eq!(
+                BpfLoader::<ActiveProfile>::new().load(&elf).err(),
+                Some(kernel_bpf::loader::LoadError::UnsupportedRelocationType(
+                    rel_type
+                )),
+                "{case} fixture"
+            );
+            assert_rejected(&mut manager, case, &elf);
+        }
     }
 
     #[test]

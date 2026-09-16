@@ -19,6 +19,49 @@ use super::{
     ENVELOPE_MAP_ID,
 };
 
+// Scoped host fault injection at the four existing build_with checkpoints.
+// No additional allocation/failure path exists in non-test builds.
+#[cfg(test)]
+pub(super) mod allocation_test {
+    extern crate std;
+    use core::cell::Cell;
+
+    use kernel_bpf::execution::BpfError;
+
+    std::thread_local! {
+        static FAILURE: Cell<Option<(usize, usize)>> = const { Cell::new(None) };
+    }
+
+    pub(super) fn checkpoint() -> Result<(), BpfError> {
+        FAILURE.with(|failure| {
+            if let Some((at, visited)) = failure.get() {
+                let visited = visited + 1;
+                failure.set(Some((at, visited)));
+                if visited == at {
+                    return Err(BpfError::OutOfMemory);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    pub(in crate::bpf) fn with_failure<R>(at: usize, work: impl FnOnce() -> R) -> R {
+        assert!((1..=4).contains(&at));
+        struct Restore(Option<(usize, usize)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                FAILURE.set(self.0);
+            }
+        }
+        let restore = Restore(FAILURE.replace(Some((at, 0))));
+        let result = work();
+        let visited = FAILURE.get().expect("active fault scope").1;
+        drop(restore);
+        assert_eq!(visited, at, "requested allocation checkpoint was reached");
+        result
+    }
+}
+
 /// One fresh controller state. Retained artifacts contain no instance or map.
 /// No public constructor can substitute different sizes or permissions for the
 /// contract against which this code was verified.
@@ -167,7 +210,14 @@ impl InstancePreparation {
     /// Consumes the permit exactly once, outside BPF_MANAGER and with IRQs
     /// enabled. Failure drops all candidate allocations before reporting it.
     pub fn build(self) -> PreparedInstance {
-        self.build_with(|| Ok(()))
+        #[cfg(test)]
+        {
+            self.build_with(allocation_test::checkpoint)
+        }
+        #[cfg(not(test))]
+        {
+            self.build_with(|| Ok(()))
+        }
     }
 
     fn build_with(self, mut allocation: impl FnMut() -> Result<(), BpfError>) -> PreparedInstance {

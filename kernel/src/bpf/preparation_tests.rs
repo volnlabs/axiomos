@@ -9,6 +9,9 @@ use zerocopy::{FromBytes, IntoBytes};
 
 use super::*;
 
+#[path = "preparation_isolation_tests.rs"]
+mod isolation;
+
 #[path = "preparation_trace_tests.rs"]
 mod trace;
 
@@ -1499,6 +1502,15 @@ fn worker_inactive_retirement_candidate_commit_keeps_public_identity_and_reader_
     );
     let action = worker.take(&mut slot.lock(), &mut manager.lock());
     assert!(matches!(action, WorkerAction::Retire(_)));
+    let detached = slot.lock().snapshot();
+    assert!(manager.lock().reclaim_owner(7));
+    assert_eq!(slot.lock().snapshot(), detached);
+    assert_eq!(manager.lock().resource_usage(), usage);
+    assert_eq!(
+        reader.identity().bundle_digest.as_bytes(),
+        &identity.bundle_digest
+    );
+    assert!(weak.upgrade().is_some());
     assert!(manager.lock().preparation.candidate.is_none());
     let committed = manager.lock().query_installation(&slot.lock(), 0).unwrap();
     assert_eq!(
@@ -1514,6 +1526,13 @@ fn worker_inactive_retirement_candidate_commit_keeps_public_identity_and_reader_
     assert_eq!(manager.lock().resource_usage(), usage);
     worker.perform(action, &slot, &manager);
     for attempt in 0..2 {
+        assert!(manager.lock().reclaim_owner(7));
+        assert_eq!(slot.lock().snapshot(), detached);
+        assert_eq!(
+            reader.identity().bundle_digest.as_bytes(),
+            &identity.bundle_digest
+        );
+        assert!(weak.upgrade().is_some());
         assert!(
             !service_worker(&mut worker, &slot, &manager),
             "Busy attempt {attempt} retains ownership"
@@ -1541,6 +1560,10 @@ fn worker_inactive_retirement_candidate_commit_keeps_public_identity_and_reader_
         );
     }
     drop(reader);
+    assert!(manager.lock().reclaim_owner(7));
+    assert_eq!(slot.lock().snapshot(), detached);
+    assert_eq!(manager.lock().resource_usage(), usage);
+    assert!(weak.upgrade().is_some());
     assert!(
         !service_worker(&mut worker, &slot, &manager),
         "weak reader also prevents extraction"
@@ -1548,6 +1571,9 @@ fn worker_inactive_retirement_candidate_commit_keeps_public_identity_and_reader_
     drop(weak);
     let action = worker.take(&mut slot.lock(), &mut manager.lock());
     assert!(matches!(action, WorkerAction::Release(_)));
+    let releasing = slot.lock().snapshot();
+    assert!(manager.lock().reclaim_owner(7));
+    assert_eq!(slot.lock().snapshot(), releasing);
     assert_eq!(manager.lock().resource_usage(), usage);
     assert_eq!(manager.lock().next_managed_reclamation, reclaim_before + 1);
     assert_eq!(
