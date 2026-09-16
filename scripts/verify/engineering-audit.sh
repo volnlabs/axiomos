@@ -77,6 +77,9 @@ done
 cd "$ROOT"
 
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+SOURCE_COMMIT="$(git rev-parse HEAD)"
+SOURCE_BRANCH="$(git branch --show-current)"
+SOURCE_DIRTY="$([[ -n "$(git status --porcelain)" ]] && echo true || echo false)"
 SHORT_SHA="$(git rev-parse --short=12 HEAD)"
 if [[ -z "$OUTPUT_DIR" ]]; then
     OUTPUT_DIR="target/audit-verification/${STARTED_AT//:/-}-${SHORT_SHA}"
@@ -285,9 +288,11 @@ write_manifest() {
         echo "started_at=$STARTED_AT"
         echo "finished_at=$finished_at"
         echo "repository=$ROOT"
-        echo "commit=$(git rev-parse HEAD)"
-        echo "branch=$(git branch --show-current)"
-        echo "working_tree_dirty=$([[ -n "$(git status --porcelain)" ]] && echo true || echo false)"
+        echo "commit=$SOURCE_COMMIT"
+        echo "branch=$SOURCE_BRANCH"
+        echo "working_tree_dirty=$SOURCE_DIRTY"
+        echo "finished_commit=$(git rev-parse HEAD)"
+        echo "finished_working_tree_dirty=$([[ -n "$(git status --porcelain)" ]] && echo true || echo false)"
         echo "rustc=$(rustc --version)"
         echo "cargo=$(cargo --version)"
         echo "host=$(rustc -vV | sed -n 's/^host: //p')"
@@ -585,6 +590,7 @@ source scripts/verify/gates/core.sh
 source scripts/verify/gates/required.sh
 source scripts/verify/gates/extended.sh
 source scripts/verify/gates/miri.sh
+run_step source-revision-stable test "$SOURCE_COMMIT" "$(git rev-parse HEAD)"
 
 FINISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 if [[ "$failures" -eq 0 ]]; then

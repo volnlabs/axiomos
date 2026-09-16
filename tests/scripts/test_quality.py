@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -20,6 +21,40 @@ spec.loader.exec_module(quality)
 
 
 class QualityEvidenceTests(unittest.TestCase):
+    def test_audit_retains_start_revision_and_rejects_revision_change(self) -> None:
+        script = (ROOT / "scripts/verify/engineering-audit.sh").read_text()
+        record = script.split("record() {", 1)[1].split("run_step_in_dir() {", 1)[0]
+        manifest = script.split("write_manifest() {", 1)[1].split("hash_release_artifacts() {", 1)[0]
+        gate = next(line for line in script.splitlines()
+                    if line.startswith("run_step source-revision-stable "))
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            (base / "logs").mkdir()
+            (base / "ci/manifests").mkdir(parents=True)
+            (base / "ci/manifests/build-inputs.env").write_text("")
+            command = '''
+OUTPUT_DIR="$PWD"
+MANIFEST="$PWD/manifest.txt"
+RESULTS="$PWD/results.tsv"
+SOURCE_COMMIT=original
+SOURCE_BRANCH=original-branch
+SOURCE_DIRTY=false
+passes=0 failures=0 skips=0
+git() { if [[ "$1" == rev-parse ]]; then echo changed; fi; }
+rustc() { echo test; }
+cargo() { echo test; }
+'''
+            subprocess.run(["bash", "-c", command + "\nrecord() {" + record
+                            + "\nwrite_manifest() {" + manifest + "\n" + gate
+                            + '\nwrite_manifest now FAIL\n'], cwd=base, check=True,
+                           capture_output=True, text=True)
+            values = dict(line.split("=", 1) for line in (base / "manifest.txt").read_text().splitlines())
+            self.assertEqual(values["commit"], "original")
+            self.assertEqual(values["finished_commit"], "changed")
+            self.assertEqual(values["branch"], "original-branch")
+            self.assertEqual(values["failures"], "1")
+            self.assertIn("source-revision-stable\tFAIL", (base / "results.tsv").read_text())
+
     def test_historical_scope_excludes_new_file_and_rejects_missing_entry(self) -> None:
         commit = "2cd870d8f5087ee17adba86f073559cc9a1414fe"
         pattern = "kernel/crates/shrike_link/src/*.rs"
