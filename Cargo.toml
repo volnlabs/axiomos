@@ -71,6 +71,11 @@ managed-runtime = [
   "init_x86/managed-runtime",
   "signed_bpf_loader_x86/managed-runtime",
 ]
+# Opt-in QEMU userspace ABI probe; does not enable physical managed control.
+managed-syscall-probe = [
+  "managed-runtime",
+  "signed_bpf_loader_x86/managed-syscall-probe",
+]
 managed-runtime-aarch64 = [
   "kernel_aarch64/managed-runtime",
   "init_aarch64/managed-runtime",

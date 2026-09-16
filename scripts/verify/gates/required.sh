@@ -66,8 +66,11 @@ if [[ "$MODE" != "quick" ]]; then
     run_step production-artifact-manifest hash_release_artifacts "$PRODUCTION_ARTIFACTS"
     if [[ "$RUN_QEMU" -eq 1 ]]; then
         qemu_production_smoke
+        run_cargo_step managed-syscall-probe-build build --release --features managed-syscall-probe
+        run_step qemu-managed-syscall-smoke qemu_managed_syscall_smoke
     else
         skip_step qemu-production-signed-smoke "disabled by option"
+        skip_step qemu-managed-syscall-smoke "disabled by option"
     fi
     run_cargo_step release-build build --release \
         --features bpf-unsigned-development,audit-diagnostics

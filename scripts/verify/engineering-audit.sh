@@ -553,6 +553,33 @@ qemu_production_smoke() {
     return 0
 }
 
+qemu_managed_syscall_smoke() {
+    local log="$OUTPUT_DIR/qemu-managed-syscall-serial.log" rc=0 marker
+    run_audit_qemu "$log" cargo run --locked --release \
+        --features managed-syscall-probe \
+        -- --headless --smp 1 --mem 1G || rc=$?
+    if [[ "$rc" -ne 0 && "$rc" -ne 124 ]]; then
+        echo "QEMU command failed with status $rc"
+        tail -n 80 "$log"
+        return 1
+    fi
+    for marker in QEMU_BOOT_OK MANAGED_SYSCALL_QUERY_OK MANAGED_SYSCALL_SHAPES_OK \
+        MANAGED_SYSCALL_USERCOPY_OK MANAGED_SYSCALL_WORKER_OK \
+        MANAGED_SYSCALL_LEGACY_DENY_OK MANAGED_SYSCALL_CHILD_DENY_OK \
+        MANAGED_SYSCALL_PROBE_OK; do
+        if ! grep -qF "$marker" "$log"; then
+            echo "missing required marker: $marker"
+            tail -n 80 "$log"
+            return 1
+        fi
+    done
+    if grep -qiE 'MANAGED_SYSCALL_PROBE_FAIL|kernel panicked|KERNEL_MODE.*PAGE FAULT' "$log"; then
+        echo "managed syscall probe or kernel failed"
+        tail -n 80 "$log"
+        return 1
+    fi
+}
+
 # Gate phases run in one shell so result counters and TSV recording remain atomic.
 source scripts/verify/gates/core.sh
 source scripts/verify/gates/required.sh

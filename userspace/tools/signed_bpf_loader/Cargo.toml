@@ -6,6 +6,7 @@ edition = "2024"
 [features]
 default = []
 managed-runtime = ["dep:shrike_link", "dep:zerocopy"]
+managed-syscall-probe = ["managed-runtime"]
 
 [dependencies]
 minilib = { path = "../../core/minilib" }

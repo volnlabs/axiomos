@@ -3,13 +3,18 @@
 
 use core::panic::PanicInfo;
 
+#[cfg(feature = "managed-syscall-probe")]
+mod syscall_probe;
+
 #[cfg(not(feature = "managed-runtime"))]
 use kernel_abi::{BPF_PROG_LOAD_ELF, BpfAttr};
-#[cfg(feature = "managed-runtime")]
+use minilib::exit;
+#[cfg(all(feature = "managed-runtime", not(feature = "managed-syscall-probe")))]
 use minilib::msleep;
 #[cfg(not(feature = "managed-runtime"))]
 use minilib::{O_RDONLY, bpf, close, open, pause};
-use minilib::{exit, read, write};
+#[cfg(not(feature = "managed-syscall-probe"))]
+use minilib::{read, write};
 
 #[cfg(not(feature = "managed-runtime"))]
 // `rk deploy --program startup.rbpf` places the signed container here.
@@ -25,7 +30,11 @@ fn panic(_info: &PanicInfo) -> ! {
 // SAFETY: Bare-metal userspace entry point invoked by the kernel ELF loader.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    #[cfg(feature = "managed-runtime")]
+    #[cfg(feature = "managed-syscall-probe")]
+    {
+        syscall_probe::run()
+    }
+    #[cfg(all(feature = "managed-runtime", not(feature = "managed-syscall-probe")))]
     {
         managed_start()
     }
@@ -35,7 +44,7 @@ pub extern "C" fn _start() -> ! {
     }
 }
 
-#[cfg(feature = "managed-runtime")]
+#[cfg(all(feature = "managed-runtime", not(feature = "managed-syscall-probe")))]
 fn managed_start() -> ! {
     use shrike_link::installer::FRAME_BYTES;
     use signed_bpf_loader::{Transport, dispatch};

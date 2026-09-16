@@ -1,6 +1,9 @@
 version = 1
 baseline_sites = 720
-baseline_fingerprint = "sha256:0e36c7276ade47439e05547ccc6681a0e0555a118acdf9800ebd2d5e5f2caafa"
+baseline_fingerprint = "sha256:e357be6a6cf26be39854ec25fea2b341a3b2476bdc19a6e59242649afe7fe7f3"
+
+# 2026-09-16: opt-in installer syscall probe moves the existing no_mangle
+# entry attribute by five lines; no unsafe operation or ownership changes.
 
 # 2026-09-16: recorder session publication moves the existing worker reschedule
 # site by three lines; its unsafe operation and ownership are unchanged.
