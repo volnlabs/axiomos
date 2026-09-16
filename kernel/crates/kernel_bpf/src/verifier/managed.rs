@@ -211,6 +211,14 @@ impl<P: PhysicalProfile> Verifier<'_, P> {
         budget: &VerificationBudget,
     ) -> VerifyResult<(ManagedProgram<P>, VerifyStats)> {
         let sizes = contract.value_sizes();
+        let key_sizes = [
+            if contract.envelope { 4 } else { 0 },
+            if contract.private_array.is_some() {
+                4
+            } else {
+                0
+            },
+        ];
         let perms = [
             if contract.envelope {
                 MapPerm::ReadOnly
@@ -227,6 +235,7 @@ impl<P: PhysicalProfile> Verifier<'_, P> {
             ctx_size: core::mem::size_of::<crate::execution::BpfContext<'_>>() as u32,
             ctx_data_size: core::mem::size_of::<kernel_abi::ManagedControlContextV1>() as u32,
             map_value_sizes: &sizes,
+            map_key_sizes: &key_sizes,
             map_perms: &perms,
             map_generations: &[0, 0],
             map_handle_slot_bits: kernel_abi::BPF_HANDLE_SLOT_BITS,

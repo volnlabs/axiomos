@@ -19,7 +19,7 @@ use super::liveness::{BudgetLiveness as Liveness, RegSet};
 use super::managed::ManagedContract;
 use super::map_policy::{
     check_map_write_writability, map_lookup_value_size, map_lookup_writability,
-    mutating_helper_map_arg, referenced_map_helper_arg,
+    map_target_input_size, mutating_helper_map_arg, referenced_map_helper_arg,
 };
 use super::pruner::{BudgetStatePruner as StatePruner, PruneDecision};
 use super::refine::refine_scalar;
@@ -75,13 +75,17 @@ pub struct VerifyConfig<'a> {
     /// when a precise per-map size is unavailable — used for non-map allocation
     /// returns (`bpf_ringbuf_reserve`) and when `map_value_sizes` is empty.
     pub map_value_size: u32,
-    /// Per-map accessible value sizes, indexed by map id (#123). When non-empty,
-    /// a `bpf_map_lookup_elem` whose map-id register holds a known constant `id`
-    /// yields exactly `map_value_sizes[id]` accessible bytes; a known id outside
-    /// the table is rejected; a *dynamic* (non-constant) id is bounded to the
-    /// smallest entry (sound: never over-permits any reachable map). Empty means
-    /// the caller supplied no per-map info and `map_value_size` is used.
+    /// Per-map value sizes, indexed by map id (#123). When non-empty, lookup
+    /// returns exactly the selected map's extent and update/timeseries inputs
+    /// must provide that many readable bytes. A dynamic lookup is bounded to
+    /// the smallest reachable extent; a dynamic input requires the largest.
+    /// Empty retains the standalone verifier's legacy behavior and uses
+    /// `map_value_size` only for returned/allocation pointers.
     pub map_value_sizes: &'a [u32],
+    /// Per-map key sizes used to validate the implicit key reads performed by
+    /// map helpers. Empty retains standalone verification's legacy type-only
+    /// behavior; production loaders provide one entry per map slot.
+    pub map_key_sizes: &'a [u32],
     /// Per-map access and write permissions, indexed by map id. Empty means
     /// legacy all-RW. Unavailable entries reject reads and writes; otherwise,
     /// writes require a known entry whose permission is RW.
@@ -150,9 +154,8 @@ pub struct Verifier<'a, P: PhysicalProfile = ActiveProfile> {
     /// pruner consultation.
     liveness: Option<Liveness<'a>>,
 
-    /// Caller-supplied sizes (context, map value) the verifier cannot infer
-    /// from bytecode. Read by `verify_safety` (ctx range), `verify_call` (map
-    /// value range), and `verify_memory` (bounds checks).
+    /// Caller-supplied context and map key/value sizes the verifier cannot
+    /// infer from bytecode. Read by safety, helper, and memory checks.
     config: VerifyConfig<'a>,
 
     /// Map handles proven constant at helper call sites during path exploration.
@@ -917,7 +920,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                                 map_id: handle.unwrap_or(u64::MAX),
                             });
                         }
-                        check_managed_read(state, Register::R2, 4, idx)?;
+                        check_map_input_read(state, Register::R2, 4, idx)?;
                         if helper == Some(HelperId::MapUpdateElem) {
                             if handle != Some(1) {
                                 return Err(VerifyError::WriteToReadOnlyMap {
@@ -925,7 +928,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                                     map_id: 0,
                                 });
                             }
-                            check_managed_read(
+                            check_map_input_read(
                                 state,
                                 Register::R3,
                                 contract.private_array().unwrap().value_size as usize,
@@ -986,6 +989,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                     check_map_write_writability(writability, idx)?;
                 }
                 check_helper_mem_bounds(sig.args, state, idx)?;
+                check_implicit_map_inputs(sig.id, state, &self.config, idx)?;
                 if let Some(map_arg) = referenced_map_helper_arg(sig.id)
                     && let Some(handle) = state
                         .reg(map_arg)
@@ -1144,7 +1148,7 @@ impl<'a, P: PhysicalProfile> Verifier<'a, P> {
                         });
                     }
                     if self.managed.is_some() {
-                        check_managed_stack_read(state, offset, size.size_bytes(), idx)?;
+                        check_scalar_stack_read(state, offset, size.size_bytes(), idx)?;
                     }
                 } else {
                     check_ranged_deref(src_state, insn.offset as i64, size.size_bytes(), idx)?;
@@ -1515,7 +1519,7 @@ fn helper_mem_size(state: &VerifierState, reg: Register, idx: usize) -> VerifyRe
     })
 }
 
-fn check_managed_stack_read(
+fn check_scalar_stack_read(
     state: &VerifierState,
     offset: i64,
     size: usize,
@@ -1542,10 +1546,37 @@ fn check_managed_stack_read(
     Ok(())
 }
 
+fn check_initialized_stack_read(
+    state: &VerifierState,
+    offset: i64,
+    size: usize,
+    idx: usize,
+) -> VerifyResult<()> {
+    if !state.stack.is_valid_access(offset, size) {
+        return Err(VerifyError::OutOfBoundsAccess {
+            insn_idx: idx,
+            offset,
+            size,
+        });
+    }
+    if (0..size).any(|byte| {
+        matches!(
+            state.stack.get(offset + byte as i64),
+            None | Some(StackSlot::Invalid)
+        )
+    }) {
+        return Err(VerifyError::InvalidMemoryAccess {
+            insn_idx: idx,
+            reason: "map input contains uninitialized stack bytes",
+        });
+    }
+    Ok(())
+}
+
 /// Map helper signatures omit their implicit key/value lengths. The fixed
 /// binding contract supplies them; reject unreadable or partly initialized
 /// buffers before the runtime helper can construct a slice.
-fn check_managed_read(
+fn check_map_input_read(
     state: &VerifierState,
     reg: Register,
     size: usize,
@@ -1554,14 +1585,63 @@ fn check_managed_read(
     let ptr = state.reg(reg);
     match ptr.reg_type {
         RegType::PtrToStack | RegType::PtrToFp => {
-            check_managed_stack_read(state, ptr.ptr_offset, size, idx)
+            check_initialized_stack_read(state, ptr.ptr_offset, size, idx)
         }
-        RegType::PtrToCtxData | RegType::PtrToMapValue => check_ranged_deref(ptr, 0, size, idx),
+        RegType::PtrToCtxData | RegType::PtrToMapKey | RegType::PtrToMapValue => {
+            check_ranged_deref(ptr, 0, size, idx)
+        }
         _ => Err(VerifyError::InvalidMemoryAccess {
             insn_idx: idx,
-            reason: "managed map input must reference readable scalar bytes",
+            reason: "map input must reference readable scalar bytes",
         }),
     }
+}
+
+fn check_map_input_extent(
+    state: &VerifierState,
+    input: Register,
+    sizes: &[u32],
+    config: &VerifyConfig<'_>,
+    idx: usize,
+) -> VerifyResult<()> {
+    let Some(size) =
+        map_target_input_size(state.reg(Register::R1), sizes, config).map_err(|map_id| {
+            VerifyError::InvalidMapId {
+                insn_idx: idx,
+                map_id,
+            }
+        })?
+    else {
+        return Ok(());
+    };
+    check_map_input_read(state, input, size as usize, idx)
+}
+
+/// Map helpers read fixed-size key/value buffers whose extents are absent
+/// from their bytecode signatures. Authoritative metadata makes those reads
+/// explicit to the verifier. Each table remains independently optional for
+/// compatibility with standalone legacy verifier callers.
+fn check_implicit_map_inputs(
+    helper: super::HelperId,
+    state: &VerifierState,
+    config: &VerifyConfig<'_>,
+    idx: usize,
+) -> VerifyResult<()> {
+    use super::HelperId;
+
+    match helper {
+        HelperId::MapLookupElem
+        | HelperId::MapUpdateElem
+        | HelperId::MapDeleteElem
+        | HelperId::TimeseriesPush => {
+            check_map_input_extent(state, Register::R2, config.map_key_sizes, config, idx)?;
+        }
+        _ => return Ok(()),
+    }
+    if matches!(helper, HelperId::MapUpdateElem | HelperId::TimeseriesPush) {
+        check_map_input_extent(state, Register::R3, config.map_value_sizes, config, idx)?;
+    }
+    Ok(())
 }
 
 fn check_helper_mem_bounds(
@@ -2367,6 +2447,291 @@ mod tests {
             map_lookup_value_size(&stale, &cfg),
             Err(u64::from(stale_handle))
         );
+        assert_eq!(
+            map_target_input_size(&current, cfg.map_value_sizes, &cfg),
+            Ok(Some(16))
+        );
+        assert_eq!(
+            map_target_input_size(&stale, cfg.map_value_sizes, &cfg),
+            Err(u64::from(stale_handle))
+        );
+        assert_eq!(
+            map_target_input_size(
+                &RegState::scalar(Some(ScalarValue::unknown())),
+                cfg.map_value_sizes,
+                &cfg,
+            ),
+            Err(u64::MAX)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn map_update_rejects_value_pointer_smaller_than_destination_value() {
+        const SLOT_BITS: u8 = 10;
+        let source = (3u32 << SLOT_BITS) | 0;
+        let destination = (4u32 << SLOT_BITS) | 1;
+        let insns = [
+            BpfInsn::new(0x62, 10, 0, -4, 0), // initialized four-byte key
+            BpfInsn::mov64_imm(1, source as i32),
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::add64_imm(2, -4),
+            BpfInsn::call(HelperId::MapLookupElem as i32),
+            BpfInsn::jeq_imm(0, 0, 7), // NULL skips to the scalar return
+            BpfInsn::mov64_reg(6, 0),  // preserve the four-byte value pointer
+            BpfInsn::mov64_imm(1, destination as i32),
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::add64_imm(2, -4),
+            BpfInsn::mov64_reg(3, 6),
+            BpfInsn::mov64_imm(4, 0),
+            BpfInsn::call(HelperId::MapUpdateElem as i32),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ];
+        let cfg = VerifyConfig {
+            map_value_sizes: &[4, 8],
+            map_perms: &[MapPerm::ReadWrite, MapPerm::ReadWrite],
+            map_generations: &[3, 4],
+            map_handle_slot_bits: SLOT_BITS,
+            ..VerifyConfig::default()
+        };
+
+        assert!(matches!(
+            Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, cfg),
+            Err(VerifyError::OutOfBoundsAccess {
+                insn_idx: 12,
+                offset: 0,
+                size: 8
+            })
+        ));
+    }
+
+    fn lookup_then_map_mutation(helper: HelperId, source: u32, destination: u32) -> Vec<BpfInsn> {
+        alloc::vec![
+            BpfInsn::new(0x62, 10, 0, -4, 0),
+            BpfInsn::mov64_imm(1, source as i32),
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::add64_imm(2, -4),
+            BpfInsn::call(HelperId::MapLookupElem as i32),
+            BpfInsn::jeq_imm(0, 0, 7),
+            BpfInsn::mov64_reg(6, 0),
+            BpfInsn::mov64_imm(1, destination as i32),
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::add64_imm(2, -4),
+            BpfInsn::mov64_reg(3, 6),
+            BpfInsn::mov64_imm(4, 0),
+            BpfInsn::call(helper as i32),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ]
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn map_update_and_timeseries_accept_equal_or_larger_lookup_values() {
+        for helper in [HelperId::MapUpdateElem, HelperId::TimeseriesPush] {
+            for sizes in [[8, 8], [16, 8]] {
+                let insns = lookup_then_map_mutation(helper, 0, 1);
+                let cfg = VerifyConfig {
+                    map_key_sizes: &[4, 4],
+                    map_value_sizes: &sizes,
+                    map_perms: &[MapPerm::ReadWrite, MapPerm::ReadWrite],
+                    ..VerifyConfig::default()
+                };
+                Verifier::<ActiveProfile>::verify_with_config(
+                    BpfProgType::SocketFilter,
+                    &insns,
+                    cfg,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{helper:?} with source/destination {sizes:?} failed: {error}")
+                });
+            }
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn map_update_checks_nonzero_lookup_pointer_offset_against_destination_extent() {
+        for (destination_size, expected_ok) in [(4, true), (5, false)] {
+            let mut insns = lookup_then_map_mutation(HelperId::MapUpdateElem, 0, 1);
+            insns.insert(7, BpfInsn::add64_imm(6, 4));
+            insns[5] = BpfInsn::jeq_imm(0, 0, 8);
+            let cfg = VerifyConfig {
+                map_key_sizes: &[4, 4],
+                map_value_sizes: &[8, destination_size],
+                map_perms: &[MapPerm::ReadWrite, MapPerm::ReadWrite],
+                ..VerifyConfig::default()
+            };
+            let result = Verifier::<ActiveProfile>::verify_with_config(
+                BpfProgType::SocketFilter,
+                &insns,
+                cfg,
+            );
+            if expected_ok {
+                result.expect("four bytes remain after the lookup pointer offset");
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(VerifyError::OutOfBoundsAccess {
+                        insn_idx: 13,
+                        offset: 4,
+                        size: 5
+                    })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn timeseries_rejects_value_pointer_smaller_than_destination_value() {
+        let insns = lookup_then_map_mutation(HelperId::TimeseriesPush, 0, 1);
+        let cfg = VerifyConfig {
+            map_key_sizes: &[4, 4],
+            map_value_sizes: &[4, 8],
+            map_perms: &[MapPerm::ReadWrite, MapPerm::ReadWrite],
+            ..VerifyConfig::default()
+        };
+
+        assert!(matches!(
+            Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, cfg),
+            Err(VerifyError::OutOfBoundsAccess {
+                insn_idx: 12,
+                offset: 0,
+                size: 8
+            })
+        ));
+    }
+
+    fn helper_with_short_key(helper: HelperId) -> Vec<BpfInsn> {
+        let mut insns = alloc::vec![
+            BpfInsn::new(0x62, 10, 0, -4, 0),  // only four readable key bytes
+            BpfInsn::new(0x7a, 10, 0, -16, 0), // complete eight-byte value
+            BpfInsn::mov64_imm(1, 0),
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::add64_imm(2, -4),
+        ];
+        if matches!(helper, HelperId::MapUpdateElem | HelperId::TimeseriesPush) {
+            insns.extend_from_slice(&[
+                BpfInsn::mov64_reg(3, 10),
+                BpfInsn::add64_imm(3, -16),
+                BpfInsn::mov64_imm(4, 0),
+            ]);
+        }
+        insns.extend_from_slice(&[
+            BpfInsn::call(helper as i32),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ]);
+        insns
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn map_helpers_reject_keys_crossing_the_stack_end() {
+        for helper in [
+            HelperId::MapLookupElem,
+            HelperId::MapUpdateElem,
+            HelperId::MapDeleteElem,
+            HelperId::TimeseriesPush,
+        ] {
+            let insns = helper_with_short_key(helper);
+            let call = insns.len() - 3;
+            let cfg = VerifyConfig {
+                map_key_sizes: &[8],
+                map_value_sizes: &[8],
+                map_perms: &[MapPerm::ReadWrite],
+                ..VerifyConfig::default()
+            };
+            let result = Verifier::<ActiveProfile>::verify_with_config(
+                BpfProgType::SocketFilter,
+                &insns,
+                cfg,
+            );
+            assert!(
+                matches!(
+                    result,
+                    Err(VerifyError::OutOfBoundsAccess {
+                        insn_idx,
+                        offset: -4,
+                        size: 8
+                    }) if insn_idx == call
+                ),
+                "{helper:?} accepted an undersized key: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn map_lookup_rejects_partly_initialized_key_and_accepts_complete_key() {
+        for (store, expected_ok) in [(0x62, false), (0x7a, true)] {
+            let insns = [
+                BpfInsn::new(store, 10, 0, -8, 0),
+                BpfInsn::mov64_imm(1, 0),
+                BpfInsn::mov64_reg(2, 10),
+                BpfInsn::add64_imm(2, -8),
+                BpfInsn::call(HelperId::MapLookupElem as i32),
+                BpfInsn::mov64_imm(0, 0),
+                BpfInsn::exit(),
+            ];
+            let cfg = VerifyConfig {
+                map_key_sizes: &[8],
+                map_value_sizes: &[8],
+                map_perms: &[MapPerm::ReadWrite],
+                ..VerifyConfig::default()
+            };
+            let result = Verifier::<ActiveProfile>::verify_with_config(
+                BpfProgType::SocketFilter,
+                &insns,
+                cfg,
+            );
+            if expected_ok {
+                result.expect("complete eight-byte key must verify");
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(VerifyError::InvalidMemoryAccess {
+                        insn_idx: 4,
+                        reason: "map input contains uninitialized stack bytes"
+                    })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn dynamic_map_input_uses_largest_reachable_value() {
+        let insns = [
+            BpfInsn::new(0x62, 10, 0, -4, 0),
+            BpfInsn::new(0x7a, 10, 0, -8, 0),
+            BpfInsn::new(0x79, 1, 1, 24, 0), // unknown scalar target map id
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::add64_imm(2, -4),
+            BpfInsn::mov64_reg(3, 10),
+            BpfInsn::add64_imm(3, -8),
+            BpfInsn::mov64_imm(4, 0),
+            BpfInsn::call(HelperId::MapUpdateElem as i32),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ];
+        let cfg = VerifyConfig {
+            ctx_size: core::mem::size_of::<crate::execution::BpfContext<'static>>() as u32,
+            map_key_sizes: &[4, 4],
+            map_value_sizes: &[4, 16],
+            ..VerifyConfig::default()
+        };
+
+        assert!(matches!(
+            Verifier::<ActiveProfile>::verify_with_config(BpfProgType::SocketFilter, &insns, cfg),
+            Err(VerifyError::OutOfBoundsAccess {
+                insn_idx: 8,
+                offset: -8,
+                size: 16
+            })
+        ));
     }
 
     /// A dynamic (non-constant) map id is bounded to the smallest reachable map
@@ -2629,6 +2994,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     fn mutating_helpers_accept_write_only_map_ids() {
         let cfg = VerifyConfig {
+            map_key_sizes: &[8],
+            map_value_sizes: &[8],
             map_perms: &[MapPerm::WriteOnly],
             ..VerifyConfig::default()
         };

@@ -18,6 +18,32 @@ fn map_handle_slot(id: u64, config: &VerifyConfig) -> Option<usize> {
     (config.map_generations.get(slot).copied() == Some(generation)).then_some(slot)
 }
 
+/// Resolve the number of bytes a helper may read from an input buffer for its
+/// target map. Known handles use that map's exact size. A dynamic legacy id
+/// must be safe for every possible target, so it uses the largest entry.
+/// Empty metadata retains the standalone verifier's historical type-only mode.
+pub(super) fn map_target_input_size(
+    map_id_reg: &RegState,
+    sizes: &[u32],
+    config: &VerifyConfig,
+) -> Result<Option<u32>, u64> {
+    if sizes.is_empty() {
+        return Ok(None);
+    }
+    match map_id_reg.scalar_value.and_then(|scalar| scalar.value) {
+        Some(id) => {
+            let index = map_handle_slot(id, config).ok_or(id)?;
+            sizes.get(index).copied().map(Some).ok_or(id)
+        }
+        None => {
+            if !config.map_generations.is_empty() {
+                return Err(u64::MAX);
+            }
+            Ok(sizes.iter().copied().max())
+        }
+    }
+}
+
 /// Resolve the accessible size of a map-value pointer returned by lookup.
 pub(super) fn map_lookup_value_size(
     map_id_reg: &RegState,

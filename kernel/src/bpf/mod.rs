@@ -746,8 +746,8 @@ impl BpfManager {
         &self,
         owner: u64,
         authorized: MapAccess,
-    ) -> (Vec<u32>, Vec<MapPerm>, Vec<u32>) {
-        let (sizes, perms) = self
+    ) -> (Vec<u32>, Vec<u32>, Vec<MapPerm>, Vec<u32>) {
+        let (sizes, perms): (Vec<u32>, Vec<MapPerm>) = self
             .maps
             .iter()
             .map(|slot| match slot.as_ref() {
@@ -788,7 +788,20 @@ impl BpfManager {
                 None => (0, MapPerm::Unavailable),
             })
             .unzip();
-        (sizes, perms, self.map_generations.clone())
+        let keys = self
+            .maps
+            .iter()
+            .zip(&perms)
+            .map(|(slot, perm)| {
+                if *perm == MapPerm::Unavailable {
+                    0
+                } else {
+                    slot.as_ref()
+                        .map_or(0, |entry| entry.runtime.map.def().key_size)
+                }
+            })
+            .collect();
+        (keys, sizes, perms, self.map_generations.clone())
     }
 
     fn program_maps_for_owner(
@@ -797,7 +810,7 @@ impl BpfManager {
         authorized: MapAccess,
         referenced_map_handles: &[u32],
     ) -> Result<Vec<Option<ProgramMapRuntime>>, BpfError> {
-        let (_, perms, generations) = self.map_metadata_for_owner(owner, authorized);
+        let (_, _, perms, generations) = self.map_metadata_for_owner(owner, authorized);
         let mut maps = Vec::new();
         maps.try_reserve_exact(self.maps.len())
             .map_err(|_| BpfError::OutOfMemory)?;
@@ -1068,12 +1081,14 @@ impl BpfManager {
     /// Build the verifier config for a load from the caller's map view.
     fn verify_config<'a>(
         &self,
+        keys: &'a [u32],
         sizes: &'a [u32],
         perms: &'a [MapPerm],
         generations: &'a [u32],
         authorization: BpfLoadAuthorization,
     ) -> VerifyConfig<'a> {
         self.verify_config_with_ctx_data(
+            keys,
             sizes,
             perms,
             generations,
@@ -1084,6 +1099,7 @@ impl BpfManager {
 
     fn verify_config_with_ctx_data<'a>(
         &self,
+        keys: &'a [u32],
         sizes: &'a [u32],
         perms: &'a [MapPerm],
         generations: &'a [u32],
@@ -1094,6 +1110,7 @@ impl BpfManager {
             ctx_size: VERIFY_CTX_SIZE,
             ctx_data_size,
             map_value_size: VERIFY_MAP_VALUE_SIZE,
+            map_key_sizes: keys,
             map_value_sizes: sizes,
             map_perms: perms,
             map_generations: generations,
@@ -1150,7 +1167,7 @@ impl BpfManager {
 
             // Verify before accepting: rejects unsafe bytecode and computes the
             // real stack usage (no longer the hardcoded 0). #48.
-            let (map_value_sizes, map_perms, map_generations) =
+            let (map_key_sizes, map_value_sizes, map_perms, map_generations) =
                 self.map_metadata_for_owner(owner, authorization.map_access);
             #[cfg(feature = "verifier-cost")]
             let insn_count = loaded_prog.insns().len();
@@ -1160,6 +1177,7 @@ impl BpfManager {
                 loaded_prog.prog_type(),
                 loaded_prog.insns(),
                 self.verify_config(
+                    &map_key_sizes,
                     &map_value_sizes,
                     &map_perms,
                     &map_generations,
@@ -1258,7 +1276,7 @@ impl BpfManager {
         // Verify before accepting: this is the gate that makes the verifier
         // load-bearing — unsafe bytecode is rejected and the real stack usage is
         // computed rather than trusting a hardcoded 0. #48.
-        let (map_value_sizes, map_perms, map_generations) =
+        let (map_key_sizes, map_value_sizes, map_perms, map_generations) =
             self.map_metadata_for_owner(owner, authorization.map_access);
         #[cfg(feature = "verifier-cost")]
         let insn_count = insns.len();
@@ -1268,6 +1286,7 @@ impl BpfManager {
             BpfProgType::Unspec,
             &insns,
             self.verify_config(
+                &map_key_sizes,
                 &map_value_sizes,
                 &map_perms,
                 &map_generations,
@@ -1336,7 +1355,7 @@ impl BpfManager {
             return Err(BpfError::NotLoaded);
         };
 
-        let (map_value_sizes, map_perms, map_generations) =
+        let (map_key_sizes, map_value_sizes, map_perms, map_generations) =
             self.map_metadata_for_owner(owner, program_entry.authorization.map_access);
         let ctx_data_size = attach_ctx_data_size(attach_type);
         let program = &program_entry
@@ -1345,6 +1364,7 @@ impl BpfManager {
             .ok_or(BpfError::PermissionDenied)?
             .program;
         let mut verify_config = self.verify_config_with_ctx_data(
+            &map_key_sizes,
             &map_value_sizes,
             &map_perms,
             &map_generations,
@@ -2444,14 +2464,23 @@ mod tests {
     }
 
     #[test]
-    fn map_value_sizes_and_perms_align_across_full_id_space() {
+    fn map_key_value_sizes_and_perms_align_across_full_id_space() {
         let mut manager = BpfManager::new();
         let _ = manager
             .create_map(MapType::Array as u32, 4, 8, 1)
             .expect("create user map");
+        let hash = manager
+            .create_map(MapType::Hash as u32, 12, 16, 1)
+            .expect("create map with a different key size");
 
-        let (sizes, perms, generations) = manager.map_metadata_for_owner(0, MapAccess::READ_WRITE);
+        let (keys, sizes, perms, generations) =
+            manager.map_metadata_for_owner(0, MapAccess::READ_WRITE);
 
+        assert_eq!(keys.len(), sizes.len());
+        assert_eq!(keys[ENVELOPE_MAP_ID as usize], 4);
+        assert_eq!(keys[RESERVED_MAP_COUNT as usize], 4);
+        assert_eq!(keys[handles::slot(hash)], 12);
+        assert_eq!(sizes[handles::slot(hash)], 16);
         assert_eq!(sizes.len(), perms.len());
         assert_eq!(sizes.len(), generations.len());
         assert_eq!(perms[ENVELOPE_MAP_ID as usize], MapPerm::ReadOnly);
@@ -3003,6 +3032,73 @@ mod tests {
         manager
             .destroy_map_for(1, map_id)
             .expect("destroy owner map");
+    }
+
+    #[test]
+    fn legacy_map_helpers_reject_short_inputs_without_publishing_programs() {
+        let mut manager = BpfManager::new();
+        let owner = 7;
+        let source = manager
+            .create_map_for(owner, BPF_MAP_TYPE_ARRAY, 4, 4, 1)
+            .unwrap();
+        let destination = manager
+            .create_map_for(owner, BPF_MAP_TYPE_ARRAY, 4, 8, 1)
+            .unwrap();
+        let long_key = manager
+            .create_map_for(owner, MapType::Hash as u32, 8, 8, 1)
+            .unwrap();
+        let before = manager.resource_usage();
+        for helper in [HelperId::MapUpdateElem, HelperId::TimeseriesPush] {
+            // Verifier-only: a four-byte lookup must not supply an eight-byte
+            // input. Never execute the intentionally invalid candidate.
+            let program = vec![
+                BpfInsn::new(0x62, 10, 0, -4, 0),
+                BpfInsn::mov64_imm(1, source as i32),
+                BpfInsn::mov64_reg(2, 10),
+                BpfInsn::add64_imm(2, -4),
+                BpfInsn::call(HelperId::MapLookupElem as i32),
+                BpfInsn::jeq_imm(0, 0, 7),
+                BpfInsn::mov64_reg(6, 0),
+                BpfInsn::mov64_imm(1, destination as i32),
+                BpfInsn::mov64_reg(2, 10),
+                BpfInsn::add64_imm(2, -4),
+                BpfInsn::mov64_reg(3, 6),
+                BpfInsn::mov64_imm(4, 0),
+                BpfInsn::call(helper as i32),
+                BpfInsn::mov64_imm(0, 0),
+                BpfInsn::exit(),
+            ];
+            assert_eq!(
+                manager.load_raw_program_for(owner, program),
+                Err(BpfError::VerificationFailed)
+            );
+            assert_eq!(manager.resource_usage(), before);
+        }
+        for helper in [
+            HelperId::MapLookupElem,
+            HelperId::MapUpdateElem,
+            HelperId::MapDeleteElem,
+            HelperId::TimeseriesPush,
+        ] {
+            let program = vec![
+                BpfInsn::new(0x62, 10, 0, -4, 0),
+                BpfInsn::new(0x7a, 10, 0, -16, 0),
+                BpfInsn::mov64_imm(1, long_key as i32),
+                BpfInsn::mov64_reg(2, 10),
+                BpfInsn::add64_imm(2, -4),
+                BpfInsn::mov64_reg(3, 10),
+                BpfInsn::add64_imm(3, -16),
+                BpfInsn::mov64_imm(4, 0),
+                BpfInsn::call(helper as i32),
+                BpfInsn::mov64_imm(0, 0),
+                BpfInsn::exit(),
+            ];
+            assert_eq!(
+                manager.load_raw_program_for(owner, program),
+                Err(BpfError::VerificationFailed)
+            );
+            assert_eq!(manager.resource_usage(), before);
+        }
     }
 
     #[test]
