@@ -604,6 +604,7 @@ fn recorded_rearm(operation: u64) -> (Handoff, shrike_link::handoff::RearmReceip
         .handoff
         .rearm_on_transport(operation, 0, 1000, &mut control.tx)
         .unwrap();
+    events::session_context(0);
     control.enqueue_handoff(0);
     assert!(matches!(
         control.drain_tx(1).as_slice(),
@@ -673,7 +674,10 @@ fn framed_installer_upload_replace_fresh_rollback_and_stop_produce_one_joined_au
             .lock()
             .validate_rearm(&slot.lock(), rearm, monitor.latch_epoch())
             .unwrap();
-        handoff.commit_rearm(&receipt, 208).unwrap();
+        assert!(commit_rearm_receipt(&mut Some(receipt), |receipt| {
+            handoff.commit_rearm(receipt, 208)
+        })
+        .unwrap());
         assert!(monitor.operator_rearm_if_unchanged(1, 208_000_000));
         manager
             .lock()

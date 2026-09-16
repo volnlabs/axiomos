@@ -1,6 +1,9 @@
 version = 1
 baseline_sites = 720
-baseline_fingerprint = "sha256:d930a64f0c90bfeb5d625972f9a67d08cc014dc4bb32f40bce3248fb35adc7cd"
+baseline_fingerprint = "sha256:0e36c7276ade47439e05547ccc6681a0e0555a118acdf9800ebd2d5e5f2caafa"
+
+# 2026-09-16: recorder session publication moves the existing worker reschedule
+# site by three lines; its unsafe operation and ownership are unchanged.
 
 # 2026-09-16: release-boundary safe-output selection removes cached link mode;
 # existing MMIO/counter unsafe sites only move. No new unsafe syntax or owner.

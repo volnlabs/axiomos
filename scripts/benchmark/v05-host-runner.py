@@ -141,6 +141,7 @@ def validate_audit(directory: Path) -> dict:
     records = rows[1:-1]
     if (header.get("type") != "header" or terminal.get("type") != "end"
             or header.get("slot_generation") != 3 or header.get("oldest") != 0
+            or header.get("session") != 1 or header.get("session_established") is not True
             or header.get("overwritten") != 0 or header.get("dropped") != 0
             or terminal.get("gaps") != 0 or terminal.get("records") != len(records)
             or terminal.get("cursor") != header.get("end")):

@@ -320,6 +320,13 @@ pub(crate) fn cycle(release: PeriodicRelease, report: CycleReport) {
     observe(|state, ticks| state.record_cycle(release, report, ticks));
 }
 
+/// Negotiated audit context, not current motion eligibility or a persistent boot
+/// identifier. Clear only when fresh requalification starts; stops retain it so
+/// the normal post-stop window remains exportable with its existing cursor.
+pub(crate) fn session_context(session: u32) {
+    observe(|state, _| state.session = u64::from(session));
+}
+
 /// Worker supplies only a successfully authenticated manifest. One owner
 /// critical section keeps the outcome and its four fragments consecutive.
 /// Overflow/exhaustion are recorder loss, never preparation failure.
@@ -667,6 +674,62 @@ pub(crate) mod tests {
             records.extend_from_slice(&batch.records[..batch.count]);
         }
         records
+    }
+
+    #[test]
+    fn negotiated_context_preserves_stop_window_and_invalidates_old_export_sessions() {
+        let status = || {
+            capture_status(ManagedAuditStatusV1 {
+                version: MANAGED_ADMIN_VERSION,
+                size: core::mem::size_of::<ManagedAuditStatusV1>() as u32,
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        let records = capture_records(|| {
+            capture_init_clock(1000, 0);
+            assert_eq!(status().session, 0);
+            session_context(1);
+            assert_eq!(status().session, 1);
+            let frozen = ManagedAuditReadV1 {
+                version: MANAGED_ADMIN_VERSION,
+                size: core::mem::size_of::<ManagedAuditReadV1>() as u32,
+                end: status().next,
+                expected_session: 1,
+                ..Default::default()
+            };
+            let before_stop = capture_read(frozen).unwrap();
+            capture_ticks(1);
+            trusted_stop(AuditSource::Operator);
+            trusted_stop(AuditSource::Operator);
+            assert_eq!(capture_read(frozen), Ok(before_stop));
+            let stopped = status();
+            assert_eq!(stopped.session, 1);
+            assert_ne!(stopped.flags & MANAGED_AUDIT_HAS_STOP, 0);
+            assert_eq!(stopped.suppressed, 1);
+            for session in [0, 2] {
+                session_context(session);
+                assert_eq!(capture_read(frozen), Err(ESTALE));
+                let mut current = status();
+                assert_eq!(current.session, u64::from(session));
+                assert_eq!(
+                    current.flags & MANAGED_AUDIT_SESSION_ESTABLISHED != 0,
+                    session != 0
+                );
+                // Context updates change no clock, loss counter, retained record,
+                // interval, or independently preserved latest-stop summary.
+                current.session = stopped.session;
+                current.flags |= MANAGED_AUDIT_SESSION_ESTABLISHED;
+                assert_eq!(current, stopped);
+                let current_read = capture_read(ManagedAuditReadV1 {
+                    expected_session: u64::from(session),
+                    ..frozen
+                })
+                .unwrap();
+                assert_eq!(current_read.records, before_stop.records);
+            }
+        });
+        assert_eq!(records.len(), 2); // Clock plus one stop; metadata adds no history.
     }
 
     #[test]

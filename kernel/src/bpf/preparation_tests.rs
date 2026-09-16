@@ -418,33 +418,51 @@ fn rearm_ready_fixture(
 #[test]
 fn rearm_busy_commit_retains_one_shot_receipt_until_same_operation_finishes() {
     use shrike_link::handoff::HandoffError;
+
+    use crate::bpf::recorder::events::tests::{capture_records, capture_status};
+    let status = || {
+        capture_status(ManagedAuditStatusV1 {
+            version: MANAGED_ADMIN_VERSION,
+            size: core::mem::size_of::<ManagedAuditStatusV1>() as u32,
+            ..Default::default()
+        })
+        .unwrap()
+    };
     for outcome in 0..3 {
-        let (mut handoff, receipt) = rearm_ready_fixture(41);
-        let mut retained = Some(receipt);
-        assert_eq!(
-            commit_rearm_receipt(&mut retained, |_| Err(HandoffError::Busy)),
-            Ok(false)
-        );
-        assert_eq!(retained.as_ref().unwrap().operation(), 41);
-        assert_eq!(retained.as_ref().unwrap().session(), 1);
-        assert!(handoff.take_rearm_ready(207).unwrap().is_none());
-        assert!(!handoff.motion_permitted());
-        if outcome == 2 {
-            handoff.disarm();
-        }
-        let result = commit_rearm_receipt(&mut retained, |receipt| {
-            handoff.commit_rearm(receipt, if outcome == 1 { 283 } else { 208 })
-        });
-        assert_eq!(
-            result,
-            match outcome {
-                0 => Ok(true),
-                1 => Err(ETIMEDEOUT),
-                _ => Err(EPROTO),
+        capture_records(|| {
+            let (mut handoff, receipt) = rearm_ready_fixture(41);
+            let mut retained = Some(receipt);
+            assert_eq!(
+                commit_rearm_receipt(&mut retained, |_| Err(HandoffError::Busy)),
+                Ok(false)
+            );
+            assert_eq!(status().session, 0, "busy receipt is still provisional");
+            assert_eq!(retained.as_ref().unwrap().operation(), 41);
+            assert_eq!(retained.as_ref().unwrap().session(), 1);
+            assert!(handoff.take_rearm_ready(207).unwrap().is_none());
+            assert!(!handoff.motion_permitted());
+            if outcome == 2 {
+                handoff.disarm();
             }
-        );
-        assert!(retained.is_none());
-        assert_eq!(handoff.motion_permitted(), outcome == 0);
+            let result = commit_rearm_receipt(&mut retained, |receipt| {
+                handoff.commit_rearm(receipt, if outcome == 1 { 283 } else { 208 })
+            });
+            assert_eq!(
+                result,
+                match outcome {
+                    0 => Ok(true),
+                    1 => Err(ETIMEDEOUT),
+                    _ => Err(EPROTO),
+                }
+            );
+            assert!(retained.is_none());
+            assert_eq!(handoff.motion_permitted(), outcome == 0);
+            assert_eq!(status().session, u64::from(outcome == 0));
+            assert_eq!(
+                status().flags & MANAGED_AUDIT_SESSION_ESTABLISHED != 0,
+                outcome == 0
+            );
+        });
     }
 }
 

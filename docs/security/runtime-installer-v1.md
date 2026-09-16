@@ -168,11 +168,18 @@ Signer fingerprints are checked against the complete public key using the
 existing SHA3-256 implementation. The returned `modeled_wcet_cycles` is the
 kernel's model estimate, not signed admission authority or measured hardware WCET.
 
-Ticks use CNTPCT, the same domain as managed releases. Session remains zero and
-`session_established` false until bilateral control-link integration lands; the
-clock value is never presented as a persistent boot identity. Payload bytes are
-exported losslessly as `payload_hex`, with `payloads_decoded: false`; this envelope
-export is not yet the semantic acceptance decoder or a qualified runtime trace.
+Ticks use CNTPCT, the same domain as managed releases. `session` records the
+negotiated protocol identity only after transport rearm commits successfully.
+`session_established` means that this audit context is recorded; it does not mean
+the link is currently ready, outputs are armed, or physical qualification passed.
+Ordinary stops and link faults preserve the context and retained window for
+post-stop export. Starting fresh requalification clears the context to zero;
+failure or cancellation before transport commitment leaves it zero. A later successful commitment
+records the new checked protocol session. Reads with an old `expected_session`
+reject after these context changes; the caller must take a new status snapshot.
+Neither the session nor clock is a persistent boot identity. Payload bytes are
+exported losslessly as `payload_hex`, with `payloads_decoded: false`; offline
+decoding and physical acceptance remain separate from this envelope export.
 
 #### Offline inspection
 
@@ -400,11 +407,12 @@ cancelled operation. Ignored/rejected packet identities never replace the
 expected transaction identity.
 
 `peer_reports_safe` is true only for a matching SafeAck or its committed receipt;
-`physical_output_observed` remains false. Protocol session observations do not
-promote the export header to a qualified physical session. Bilateral drain,
-requalification/rearm, dedicated reset records and physical sink measurements
-remain necessary. Current decoding checks this retained protocol trace, not the
-complete release campaign or physical timing acceptance.
+`physical_output_observed` remains false. The export header's negotiated session
+context does not establish current motion eligibility or physical qualification.
+The drain and requalification/rearm implementation still requires physical
+qualification, dedicated reset records and sink measurements. Current decoding
+checks this retained protocol trace, not the complete release campaign or physical
+timing acceptance.
 
 CYCLE correlation is the installation generation captured with the artifact
 handle under the control-slot lock, after the handoff boundary and before the

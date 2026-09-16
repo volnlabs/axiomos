@@ -1094,6 +1094,9 @@ fn commit_rearm_receipt(
     match commit(receipt) {
         Err(shrike_link::handoff::HandoffError::Busy) => Ok(false),
         result => {
+            if result.is_ok() {
+                super::recorder::events::session_context(receipt.session());
+            }
             *retained = None;
             result.map(|()| true).map_err(rearm_link_error)
         }

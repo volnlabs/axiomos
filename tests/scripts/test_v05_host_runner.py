@@ -149,7 +149,8 @@ class V05HostRunnerTests(unittest.TestCase):
     def test_joined_export_must_match_kernel_bytes_and_explain_fresh_rollback(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
-            header = dict(type="header", slot_generation=3, oldest=0, end=1, overwritten=0, dropped=0)
+            header = dict(type="header", slot_generation=3, session=1, session_established=True,
+                          oldest=0, end=1, overwritten=0, dropped=0)
             record = dict(type="record", sequence=0, ticks=1, correlation=3, kind=2, payload_hex="a5" * 64)
             end = dict(type="end", cursor=1, records=1, gaps=0)
             raw = struct.pack("<QQQI4x64s", 0, 1, 3, 2, b"\xa5" * 64)

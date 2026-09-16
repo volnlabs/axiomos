@@ -8,8 +8,8 @@ use kernel_bpf::actuation::recorder::{Error, Record, Recorder, LINK, RECORD_CAPA
 struct State {
     window: Recorder<RECORD_CAPACITY>,
     frequency: u64,
-    // No persistent boot identity is claimed. Link-session integration sets this
-    // only after the existing explicit establishment procedure is connected.
+    // Most recently committed negotiated audit context. Stops retain it; fresh
+    // requalification clears it. Never a persistent boot ID or motion authority.
     session: u64,
     // Preserve a specific link cause through repeated generic managed stops.
     // Cleared by another stop cause or by actual controller execution.
