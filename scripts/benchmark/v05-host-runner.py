@@ -162,6 +162,26 @@ def run(output: Path) -> None:
         manifest["cargo_lock_sha256"] = v05.file_sha256(ROOT / "Cargo.lock")
         if clean_source() != source or v05.file_sha256(v05.DEFAULT_ACCEPTANCE) != config:
             raise ValueError("source or acceptance changed during the build")
+        reclamation = {"schema": "axiomos.v05.reclamation.v1", "source_id": source,
+                       "acceptance_config_sha256": config,
+                       "executable": {"path": "host-test", "sha256": manifest["test_executable_sha256"]},
+                       "cases": []}
+        for case, test in v05.RECLAMATION_CASES.items():
+            directory = output / "reclamation" / case
+            directory.mkdir(parents=True)
+            stdout, stderr = directory / "stdout.log", directory / "stderr.log"
+            test_command = [str(retained), test, "--exact", "--nocapture", "--test-threads=1"]
+            result = run_logged(test_command, stdout, stderr,
+                                env={**env, "AXIOM_V05_RESOURCE_EVIDENCE": "1"})
+            reclamation["cases"].append({
+                "case": case, "test": test, "returncode": result.returncode,
+                "stdout": str(stdout.relative_to(output)), "stdout_sha256": v05.file_sha256(stdout),
+                "stderr": str(stderr.relative_to(output)), "stderr_sha256": v05.file_sha256(stderr),
+            })
+            # Retain even a failed or incomplete campaign; never infer success
+            # from a witness printed before the test process finishes.
+            dump(output / "reclamation.json", reclamation)
+            result.check_returncode()
         for scenario in SCENARIOS:
             directory = output / scenario
             directory.mkdir()
@@ -178,14 +198,15 @@ def run(output: Path) -> None:
             digests = validate_artifacts(v05.parse_jsonl(trace), artifacts)
             dump(directory / "expectations.json", expectations(scenario, source, digests["a.bundle"], config))
             reduce_command = [sys.executable, str(ROOT / "scripts/benchmark/analyze-v05.py"),
-                              "--acceptance", str(acceptance), "--expectations",
+                              "--acceptance", str(acceptance), "--reclamation", str(output / "reclamation.json"), "--expectations",
                               str(directory / "expectations.json"), str(directory / "trace.jsonl")]
             reduced = run_logged(reduce_command, directory / "results.json", directory / "reducer.stderr")
             report = v05.parse_json(reduced.stdout)
             if not isinstance(report, dict):
                 raise ValueError("malformed reducer result")
             if scenario == "normal":
-                if reduced.returncode != 0 or report.get("trace_verdict") != "pass":
+                if (reduced.returncode != 0 or report.get("trace_verdict") != "pass"
+                        or report.get("gate_results", {}).get("resource_reclamation") != "pass"):
                     raise ValueError("normal host trace did not pass reduction")
             elif (reduced.returncode != 1 or report.get("trace_verdict") != "fail"
                   or report.get("error") != "cycle release coverage does not match expectations"):

@@ -575,6 +575,16 @@ fn deactivation_preserves_candidate_alias_and_activation_from_empty_keeps_previo
     assert_eq!(slot.snapshot().previous, Some(a));
 }
 
+fn resource_usage_json(usage: crate::bpf::BpfResourceUsage) -> alloc::string::String {
+    alloc::format!(
+        "{{\"live_programs\":{},\"program_bytes\":{},\"live_maps\":{},\"map_bytes\":{}}}",
+        usage.live_programs,
+        usage.program_bytes,
+        usage.live_maps,
+        usage.map_bytes
+    )
+}
+
 #[test]
 fn deactivation_100000_transitions_keep_retained_code_and_zero_instance_floor() {
     let mut manager = BpfManager::new();
@@ -582,12 +592,18 @@ fn deactivation_100000_transitions_keep_retained_code_and_zero_instance_floor() 
     let a = candidate(&mut manager, 1);
     let floor = manager.resource_usage();
     let mut high_water = None;
+    let mut iterations = 0usize;
+    let mut transitions = 0usize;
+    let mut instances_active = 0usize;
+    let mut retained_artifact_strong_after_reclamation = 0usize;
     for generation in (1..100_000).step_by(2) {
         let previous = slot.snapshot().previous;
         let id = stage(&mut slot, &mut manager, previous);
         commit(&mut slot, id);
+        transitions += 1;
         drain(&mut slot, &mut manager);
         let full = manager.resource_usage();
+        instances_active = instances_active.max(manager.managed_instances.iter().flatten().count());
         if let Some(high_water) = high_water {
             assert_eq!(full, high_water);
         }
@@ -598,6 +614,7 @@ fn deactivation_100000_transitions_keep_retained_code_and_zero_instance_floor() 
             .unwrap();
         assert_eq!(manager.resource_usage(), full);
         assert_eq!(commit(&mut slot, id), generation + 1);
+        transitions += 1;
         assert_eq!(manager.resource_usage(), full);
         drain(&mut slot, &mut manager);
         assert_eq!(manager.resource_usage(), floor);
@@ -607,8 +624,21 @@ fn deactivation_100000_transitions_keep_retained_code_and_zero_instance_floor() 
         assert_eq!(slot.snapshot().previous, Some(a));
         assert!(manager.managed_instances.iter().all(Option::is_none));
         assert_eq!(Arc::strong_count(manager.managed_artifact(a).unwrap()), 2);
+        retained_artifact_strong_after_reclamation = retained_artifact_strong_after_reclamation
+            .max(Arc::strong_count(manager.managed_artifact(a).unwrap()));
+        iterations += 1;
     }
     std::println!("deactivation 100000: floor={floor:?}, high_water={high_water:?}");
+    if std::env::var_os("AXIOM_V05_RESOURCE_EVIDENCE").is_some() {
+        std::println!(
+            "V05_RESOURCE {{\"schema\":\"axiomos.v05.resources.v1\",\"case\":\"deactivation\",\"iterations\":{iterations},\"transitions\":{transitions},\"generation\":{},\"baseline\":{},\"floor\":{},\"high_water\":{},\"final\":{},\"observed_maxima\":{{\"instances_active\":{instances_active},\"retained_artifact_strong_after_reclamation\":{retained_artifact_strong_after_reclamation}}}}}",
+            slot.snapshot().generation,
+            resource_usage_json(floor),
+            resource_usage_json(floor),
+            resource_usage_json(high_water.unwrap()),
+            resource_usage_json(manager.resource_usage()),
+        );
+    }
 }
 
 #[test]
@@ -1374,16 +1404,23 @@ fn installation_lost_release_receipt_never_reopens_capacity() {
 fn installation_100000_transitions_bound_real_retention_and_high_water() {
     let mut manager = BpfManager::new();
     let mut slot = ControlSlot::new();
+    let mut transitions = 0usize;
     let a = candidate(&mut manager, 1);
     let id = stage(&mut slot, &mut manager, None);
     commit(&mut slot, id);
+    transitions += 1;
     drain(&mut slot, &mut manager);
     let b = candidate(&mut manager, 2);
     let id = stage(&mut slot, &mut manager, None);
     commit(&mut slot, id);
+    transitions += 1;
     drain(&mut slot, &mut manager);
     let floor = manager.resource_usage();
     let mut high_water = None;
+    let mut iterations = 0usize;
+    let mut instances_before_reclamation = 0usize;
+    let mut active_artifact_strong_after_reclamation = 0usize;
+    let mut previous_artifact_strong_after_reclamation = 0usize;
     for generation in 3..=100_000 {
         let previous = slot.snapshot().previous.unwrap();
         let id = stage(&mut slot, &mut manager, Some(previous));
@@ -1393,8 +1430,11 @@ fn installation_100000_transitions_bound_real_retention_and_high_water() {
         }
         high_water = Some(full);
         assert_eq!(commit(&mut slot, id), generation);
+        transitions += 1;
         assert_eq!(manager.resource_usage(), full);
         assert_eq!(manager.managed_instances.iter().flatten().count(), 2);
+        instances_before_reclamation =
+            instances_before_reclamation.max(manager.managed_instances.iter().flatten().count());
         drain(&mut slot, &mut manager);
         assert_eq!(manager.resource_usage(), floor);
         assert_eq!(manager.managed_instances.iter().flatten().count(), 1);
@@ -1413,11 +1453,30 @@ fn installation_100000_transitions_bound_real_retention_and_high_water() {
             2
         );
         assert!(active == a || active == b);
+        active_artifact_strong_after_reclamation = active_artifact_strong_after_reclamation
+            .max(Arc::strong_count(manager.managed_artifact(active).unwrap()));
+        previous_artifact_strong_after_reclamation = previous_artifact_strong_after_reclamation
+            .max(Arc::strong_count(
+                manager
+                    .managed_artifact(slot.snapshot().previous.unwrap())
+                    .unwrap(),
+            ));
+        iterations += 1;
     }
     std::println!(
         "installation 100000: floor={floor:?}, high_water={high_water:?}, generation={}",
         slot.snapshot().generation
     );
+    if std::env::var_os("AXIOM_V05_RESOURCE_EVIDENCE").is_some() {
+        std::println!(
+            "V05_RESOURCE {{\"schema\":\"axiomos.v05.resources.v1\",\"case\":\"installation\",\"iterations\":{iterations},\"transitions\":{transitions},\"generation\":{},\"baseline\":{},\"floor\":{},\"high_water\":{},\"final\":{},\"observed_maxima\":{{\"instances_before_reclamation\":{instances_before_reclamation},\"active_artifact_strong_after_reclamation\":{active_artifact_strong_after_reclamation},\"previous_artifact_strong_after_reclamation\":{previous_artifact_strong_after_reclamation}}}}}",
+            slot.snapshot().generation,
+            resource_usage_json(floor),
+            resource_usage_json(floor),
+            resource_usage_json(high_water.unwrap()),
+            resource_usage_json(manager.resource_usage()),
+        );
+    }
 }
 
 #[test]

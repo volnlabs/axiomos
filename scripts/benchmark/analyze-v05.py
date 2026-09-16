@@ -14,13 +14,15 @@ Examples::
   python3 scripts/benchmark/analyze-v05.py --show-acceptance
 
 This initial reducer does not implement physical, fault-matrix, recorder-cost,
-or reclamation gates, so it cannot emit a v0.5 release PASS.
+or complete release gates, so it cannot emit a v0.5 release PASS.
+Optional --reclamation validates retained host resource tests only.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -30,6 +32,23 @@ DEFAULT_ACCEPTANCE = ROOT / "docs/performance/v0.5-acceptance.json"
 TRACE_SCHEMA = "axiomos.v05.trace.v1"
 EXPECTATIONS_SCHEMA = "axiomos.v05.expectations.v1"
 OUTCOMES = ("successful", "failed", "rejected", "canceled")
+
+RECLAMATION_CASES = {
+    "ownership": "bpf::managed::tests::managed_ownership_lifecycle_survives_100_000_fresh_instances",
+    "installation": "bpf::installation::tests::installation_100000_transitions_bound_real_retention_and_high_water",
+    "deactivation": "bpf::installation::tests::deactivation_100000_transitions_keep_retained_code_and_zero_instance_floor",
+    "generation_exhaustion": "bpf::installation::tests::installation_stale_exhaustion_and_failed_build_preserve_active",
+    "preparation_exhaustion": "bpf::managed::tests::managed_preparation_counter_exhaustion_does_not_reserve_resources",
+    "reclamation_exhaustion": "bpf::managed::tests::managed_reclamation_counter_exhaustion_preserves_tables_bindings_and_charges",
+    "eviction_custody": "bpf::installation::tests::installation_a_b_c_rollback_keeps_actual_code_and_fresh_helper_state",
+    "reader_retirement": "bpf::installation::tests::installation_permanent_worker_retries_exact_retirement_until_readers_and_weak_release",
+}
+RESOURCE_MAXIMA = {
+    "ownership": {"instances_live": 1, "artifact_strong_live": 2, "instance_strong_live": 2},
+    "installation": {"instances_before_reclamation": 2, "active_artifact_strong_after_reclamation": 3,
+                     "previous_artifact_strong_after_reclamation": 2},
+    "deactivation": {"instances_active": 1, "retained_artifact_strong_after_reclamation": 2},
+}
 
 FIELDS = {
     "operation_request": {"seq", "ticks", "operation_id", "operation", "generation", "artifact_id"},
@@ -110,6 +129,139 @@ def _over_ns(delta_ticks: int, limit_ns: int, clock_hz: int) -> bool:
     return delta_ticks * 1_000_000_000 > limit_ns * clock_hz
 
 
+def _evidence_file(parent: Path, name, digest) -> Path:
+    if (not isinstance(name, str) or not name or Path(name).is_absolute()
+            or ".." in Path(name).parts):
+        raise ValueError("invalid reclamation evidence path")
+    path = (parent / name).resolve()
+    if not path.is_relative_to(parent) or not path.is_file():
+        raise ValueError("reclamation evidence path escapes or is missing")
+    if (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or file_sha256(path) != digest):
+        raise ValueError("reclamation evidence hash mismatch")
+    return path
+
+
+def _resource_counter(row: dict, key: str, *, positive=False) -> int:
+    value = _integer(row, key, positive=positive)
+    if value > (1 << 64) - 1:
+        raise ValueError("resource counter exceeds u64")
+    return value
+
+
+def _resource_witness(row: dict, case: str, minimum: int) -> None:
+    fields = {"schema", "case", "iterations", "transitions", "generation", "baseline", "floor", "high_water", "final", "observed_maxima"}
+    if not isinstance(row, dict) or set(row) != fields or row["schema"] != "axiomos.v05.resources.v1" or row["case"] != case:
+        raise ValueError("malformed resource witness")
+    iterations, transitions = _resource_counter(row, "iterations", positive=True), _resource_counter(row, "transitions")
+    if case == "ownership":
+        valid_count = iterations >= minimum and transitions == 0 and row["generation"] is None
+    else:
+        _resource_counter(row, "generation", positive=True)
+        valid_count = (transitions >= minimum and type(row["generation"]) is int
+                       and row["generation"] == transitions
+                       and transitions == (iterations + 2 if case == "installation" else iterations * 2))
+    if not valid_count:
+        raise ValueError("resource churn coverage or generation mismatch")
+    resource_fields = {"live_programs", "program_bytes", "live_maps", "map_bytes"}
+    for key in ("baseline", "floor", "high_water", "final"):
+        usage = row[key]
+        if not isinstance(usage, dict) or set(usage) != resource_fields:
+            raise ValueError("malformed resource usage")
+        for field in resource_fields:
+            _resource_counter(usage, field)
+    baseline, floor, high, final = (row[key] for key in ("baseline", "floor", "high_water", "final"))
+    if final != baseline or any(high[key] < floor[key] or floor[key] < baseline[key] for key in resource_fields):
+        raise ValueError("resource plateau or high-water contradiction")
+    expected_programs, expected_maps = (2, 1) if case == "installation" else (1, 0)
+    if (floor["live_programs"] != expected_programs or floor["live_maps"] != expected_maps
+            or high["live_programs"] != expected_programs or high["live_maps"] != expected_maps + 1
+            or high["program_bytes"] <= floor["program_bytes"] or high["map_bytes"] <= floor["map_bytes"]):
+        raise ValueError("resource instance high-water contradiction")
+    if case == "ownership":
+        if (baseline["live_programs"] != 0 or baseline["live_maps"] != 0
+                or baseline["map_bytes"] != floor["map_bytes"]
+                or baseline["program_bytes"] >= floor["program_bytes"]):
+            raise ValueError("resource artifact baseline contradiction")
+    elif baseline != floor:
+        raise ValueError("resource retained floor contradiction")
+    maxima = row["observed_maxima"]
+    if (not isinstance(maxima, dict) or maxima != RESOURCE_MAXIMA[case]
+            or any(type(value) is not int for value in maxima.values())):
+        raise ValueError("resource retained-reference contradiction")
+
+
+def validate_reclamation(path: Path, source: str, config: str, acceptance: dict) -> dict:
+    evidence = load_json(path)
+    if (not isinstance(evidence, dict) or set(evidence) != {"schema", "source_id", "acceptance_config_sha256", "executable", "cases"}
+            or evidence["schema"] != "axiomos.v05.reclamation.v1"
+            or evidence["source_id"] != source or evidence["acceptance_config_sha256"] != config):
+        raise ValueError("reclamation schema, source or acceptance mismatch")
+    parent = path.resolve().parent
+    executable = evidence["executable"]
+    if not isinstance(executable, dict) or set(executable) != {"path", "sha256"} or executable["path"] != "host-test":
+        raise ValueError("malformed reclamation executable")
+    used_paths = {_evidence_file(parent, executable["path"], executable["sha256"])}
+    cases = evidence["cases"]
+    if not isinstance(cases, list) or len(cases) != len(RECLAMATION_CASES):
+        raise ValueError("missing reclamation cases")
+    campaign = acceptance.get("campaign")
+    if not isinstance(campaign, dict):
+        raise ValueError("malformed reclamation campaign")
+    minimum = _resource_counter(campaign, "host_churn_operations_min", positive=True)
+    resources = acceptance.get("resources")
+    if not isinstance(resources, dict) or not isinstance(resources.get("retire_batch_capacity"), dict):
+        raise ValueError("malformed reclamation resource limits")
+    # The fixed eviction case holds A/B/C plus one displaced instance and one
+    # evicted artifact in a single retirement batch. Churn observes two instances.
+    for limits, required in ((resources, {"max_artifacts": 3, "max_instances": 2, "max_retire_batches": 1}),
+                             (resources["retire_batch_capacity"], {"displaced_instances": 1, "evicted_artifacts": 1})):
+        if any(_resource_counter(limits, name) < count for name, count in required.items()):
+            raise ValueError("reclamation observations exceed configured resource limits")
+    seen, witnesses = set(), {}
+    for case in cases:
+        if (not isinstance(case, dict) or set(case) != {"case", "test", "stdout", "stdout_sha256", "stderr", "stderr_sha256", "returncode"}
+                or not isinstance(case["case"], str) or case["case"] not in RECLAMATION_CASES
+                or case["case"] in seen or case["test"] != RECLAMATION_CASES[case["case"]]
+                or type(case["returncode"]) is not int or case["returncode"] != 0):
+            raise ValueError("malformed, duplicate or failed reclamation case")
+        name = case["case"]
+        seen.add(name)
+        logs = {}
+        for stream in ("stdout", "stderr"):
+            log = _evidence_file(parent, case[stream], case[stream + "_sha256"])
+            if log in used_paths:
+                raise ValueError("reclamation cases reuse evidence paths")
+            used_paths.add(log)
+            logs[stream] = log.read_text(encoding="utf-8")
+        lines = logs["stdout"].splitlines()
+        footer = [line for line in lines if line.startswith("test result:")]
+        if (not logs["stdout"].endswith("\n") or lines.count("running 1 test") != 1
+                or sum(line.startswith("running ") for line in lines) != 1 or len(footer) != 1
+                or not re.fullmatch(r"test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+\.[0-9]+s", footer[0])
+                or any(line.strip() for line in lines[lines.index(footer[0]) + 1:])):
+            raise ValueError("reclamation log lacks exact successful test completion")
+        test_lines = [line for line in lines if line.startswith("test ") and not line.startswith("test result:")]
+        if len(test_lines) != 1 or not test_lines[0].startswith("test " + case["test"] + " ... "):
+            raise ValueError("reclamation log test identity mismatch")
+        if not lines.index("running 1 test") < lines.index(test_lines[0]) < lines.index(footer[0]):
+            raise ValueError("reclamation test identity outside execution")
+        witness_lines = [line for line in lines if line.startswith("V05_RESOURCE")]
+        if name in RESOURCE_MAXIMA:
+            if len(witness_lines) != 1 or not witness_lines[0].startswith("V05_RESOURCE "):
+                raise ValueError("missing or malformed resource witness")
+            if not lines.index("running 1 test") < lines.index(witness_lines[0]) < lines.index(footer[0]):
+                raise ValueError("resource witness outside test execution")
+            witness = parse_json(witness_lines[0][len("V05_RESOURCE "):])
+            _resource_witness(witness, name, minimum)
+            witnesses[name] = witness
+        elif witness_lines:
+            raise ValueError("unexpected resource witness")
+    return {"manifest_sha256": file_sha256(path), "test_executable_sha256": executable["sha256"],
+            "cases": sorted(seen), "witnesses": witnesses,
+            "scope": "retained host tests; not physical or timing qualification"}
+
+
 def _validate_acceptance(value: dict) -> None:
     if not isinstance(value, dict) or value.get("schema") != "axiomos.v05.acceptance.v1":
         raise ValueError("acceptance schema mismatch")
@@ -122,11 +274,11 @@ def _validate_acceptance(value: dict) -> None:
     for name, gate in value["required_gates"].items():
         if not isinstance(gate, dict) or type(gate.get("required")) is not bool or type(gate.get("implemented_by_reducer")) is not bool or (not gate["implemented_by_reducer"] and not _one_of(gate.get("missing_policy"), {"blocked", "not_evaluated"})):
             raise ValueError("malformed acceptance required_gates")
-        if gate["implemented_by_reducer"] and name != "trace_subset":
+        if gate["implemented_by_reducer"] and name not in {"trace_subset", "resource_reclamation"}:
             raise ValueError(f"unsupported reducer gate {name!r}")
 
 
-def reduce_records(rows: list[dict], expectations: dict, acceptance: dict, config_digest: str) -> dict:
+def reduce_records(rows: list[dict], expectations: dict, acceptance: dict, config_digest: str, reclamation: Path | None = None) -> dict:
     _validate_acceptance(acceptance)
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise ValueError("trace records must be objects")
@@ -333,10 +485,13 @@ def reduce_records(rows: list[dict], expectations: dict, acceptance: dict, confi
             raise ValueError("installation changed without a successful commit")
 
     failures = sum(actual_outcomes[name] for name in OUTCOMES if name != "successful")
-    # Successful validation above proves only the trace checks executed here.
-    gate_results = {name: ("pass" if name == "trace_subset" else gate["missing_policy"])
+    resource_evidence = None if reclamation is None else validate_reclamation(reclamation, header["source_id"], config_digest, acceptance)
+    gate_results = {name: (gate["missing_policy"] if not gate["implemented_by_reducer"] else
+                          "pass" if name == "trace_subset" else
+                          ("pass" if resource_evidence is not None else "not_evaluated") if name == "resource_reclamation" else gate["missing_policy"])
                     for name, gate in acceptance["required_gates"].items()}
     return {
+        "reclamation_evidence": resource_evidence,
         "schema": "axiomos.v05.results.v1",
         "trace_verdict": "pass",
         "release_verdict": "blocked",
@@ -357,7 +512,8 @@ def describe():
             "unsupported_operations": ["retire", "deactivate", "administrative lifecycle operations"],
             "expectations_shape": {"schema": EXPECTATIONS_SCHEMA, "acceptance_config_sha256": "lowercase SHA-256", "boots": {"<boot_id>": {"source_id": "lowercase SHA-1", "artifact_id": "lowercase canonical artifact digest (managed bundles use SHA3-256)", "event_counts": "exact nonnegative integer counts by event type", "operation_outcomes": "exact successful/failed/rejected/canceled integer counts", "release_cycles": {"first": "positive integer", "count": "bounded nonnegative integer"}}}},
             "operation_generation_semantics": "requested candidate installation generation; installed only after successful commit and matching first behavior entry",
-            "gate_scope": "host trace subset; not an end-to-end acceptance gate",
+            "gate_scope": "host trace subset and optional retained reclamation tests; not an end-to-end acceptance gate",
+            "reclamation_cases": RECLAMATION_CASES,
             "release_pass_supported": False}
 
 
@@ -365,6 +521,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--acceptance", type=Path, default=DEFAULT_ACCEPTANCE)
     parser.add_argument("--expectations", type=Path)
+    parser.add_argument("--reclamation", type=Path, help="retained fixed host reclamation suite evidence")
     parser.add_argument("--describe", action="store_true")
     parser.add_argument("--show-acceptance", action="store_true")
     parser.add_argument("--self-test", action="store_true")
@@ -384,7 +541,7 @@ def main() -> int:
         parser.error("trace and --expectations are required")
     try:
         acceptance = load_json(args.acceptance)
-        result = reduce_records(parse_jsonl(args.trace.read_text(encoding="utf-8")), load_json(args.expectations), acceptance, file_sha256(args.acceptance))
+        result = reduce_records(parse_jsonl(args.trace.read_text(encoding="utf-8")), load_json(args.expectations), acceptance, file_sha256(args.acceptance), args.reclamation)
         result["input_sha256"] = {"trace": file_sha256(args.trace), "expectations": file_sha256(args.expectations)}
     except (OSError, UnicodeError, ValueError) as error:
         print(json.dumps({"schema": "axiomos.v05.results.v1", "trace_verdict": "fail", "release_verdict": "blocked", "error": str(error)}, sort_keys=True))

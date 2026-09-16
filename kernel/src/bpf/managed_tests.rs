@@ -467,6 +467,13 @@ fn managed_preparation_counter_exhaustion_does_not_reserve_resources() {
     assert!(manager.managed_instance_preparation.is_none());
 }
 
+fn resource_usage_json(usage: crate::bpf::BpfResourceUsage) -> String {
+    format!(
+        "{{\"live_programs\":{},\"program_bytes\":{},\"live_maps\":{},\"map_bytes\":{}}}",
+        usage.live_programs, usage.program_bytes, usage.live_maps, usage.map_bytes
+    )
+}
+
 #[test]
 fn managed_ownership_lifecycle_survives_100_000_fresh_instances() {
     const ITERATIONS: usize = 100_000;
@@ -482,6 +489,10 @@ fn managed_ownership_lifecycle_survives_100_000_fresh_instances() {
     let artifact_floor = manager.resource_usage();
     let mut live_high_water = artifact_floor;
     let mut previous_private_id = None;
+    let mut completed_iterations = 0usize;
+    let mut instances_live = 0usize;
+    let mut artifact_strong_live = 0usize;
+    let mut instance_strong_live = 0usize;
 
     for iteration in 0..ITERATIONS {
         let instance = manager.create_managed_instance(artifact_id).unwrap();
@@ -490,6 +501,11 @@ fn managed_ownership_lifecycle_survives_100_000_fresh_instances() {
             .and_then(|entry| entry.private_map_id)
             .unwrap();
         let live = manager.resource_usage();
+        instances_live = instances_live.max(manager.managed_instances.iter().flatten().count());
+        artifact_strong_live = artifact_strong_live.max(Arc::strong_count(
+            manager.managed_artifact(artifact_id).unwrap(),
+        ));
+        instance_strong_live = instance_strong_live.max(Arc::strong_count(&instance));
         live_high_water.live_programs = live_high_water.live_programs.max(live.live_programs);
         live_high_water.program_bytes = live_high_water.program_bytes.max(live.program_bytes);
         live_high_water.live_maps = live_high_water.live_maps.max(live.live_maps);
@@ -509,6 +525,7 @@ fn managed_ownership_lifecycle_survives_100_000_fresh_instances() {
         assert_eq!(manager.reclaim_managed_instances(), 1);
         assert_eq!(manager.resource_usage(), artifact_floor);
         previous_private_id = Some(private_id);
+        completed_iterations += 1;
     }
 
     manager.retire_managed_artifact(artifact_id).unwrap();
@@ -521,6 +538,15 @@ fn managed_ownership_lifecycle_survives_100_000_fresh_instances() {
     std::println!(
         "managed ownership 100k: floor={artifact_floor:?} live_high_water={live_high_water:?} table_floor={table_floor:?}"
     );
+    if std::env::var_os("AXIOM_V05_RESOURCE_EVIDENCE").is_some() {
+        std::println!(
+            "V05_RESOURCE {{\"schema\":\"axiomos.v05.resources.v1\",\"case\":\"ownership\",\"iterations\":{completed_iterations},\"transitions\":0,\"generation\":null,\"baseline\":{},\"floor\":{},\"high_water\":{},\"final\":{},\"observed_maxima\":{{\"instances_live\":{instances_live},\"artifact_strong_live\":{artifact_strong_live},\"instance_strong_live\":{instance_strong_live}}}}}",
+            resource_usage_json(table_floor),
+            resource_usage_json(artifact_floor),
+            resource_usage_json(live_high_water),
+            resource_usage_json(manager.resource_usage()),
+        );
+    }
 }
 
 pub(in crate::bpf) fn stateful_managed_program() -> alloc::vec::Vec<BpfInsn> {

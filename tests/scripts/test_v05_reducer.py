@@ -54,7 +54,7 @@ class V05ReducerTests(unittest.TestCase):
         self.assertEqual(report["gate_results"]["authentication_and_loading"], "not_evaluated")
 
     def test_config_cannot_enable_unevaluated_gates(self):
-        for name in ("physical_campaign", "resource_reclamation"):
+        for name in ("physical_campaign", "authentication_and_loading"):
             for retain_policy in (True, False):
                 acceptance = json.loads(json.dumps(self.config))
                 gate = acceptance["required_gates"][name]
@@ -69,6 +69,180 @@ class V05ReducerTests(unittest.TestCase):
         self.assertEqual(report["release_verdict"], "blocked")
         self.assertEqual(report["release_blockers"], [name for name, gate in self.config["required_gates"].items()
                                                      if gate["required"] and report["gate_results"][name] != "pass"])
+
+    def reclamation_fixture(self, directory):
+        directory = Path(directory)
+        (directory / "host-test").write_bytes(b"synthetic executable fixture, not a qualification")
+        resource = lambda programs, program_bytes, maps, map_bytes: dict(live_programs=programs, program_bytes=program_bytes, live_maps=maps, map_bytes=map_bytes)
+        table, artifact = resource(0, 100, 0, 200), resource(1, 120, 0, 200)
+        active, double = resource(1, 140, 1, 220), resource(2, 160, 1, 220)
+        witnesses = {
+            "ownership": dict(iterations=100000, transitions=0, generation=None, baseline=table, floor=artifact, high_water=active, final=table,
+                              observed_maxima={"instances_live": 1, "artifact_strong_live": 2, "instance_strong_live": 2}),
+            "installation": dict(iterations=99998, transitions=100000, generation=100000, baseline=double, floor=double,
+                                 high_water=resource(2, 180, 2, 240), final=double,
+                                 observed_maxima={"instances_before_reclamation": 2, "active_artifact_strong_after_reclamation": 3, "previous_artifact_strong_after_reclamation": 2}),
+            "deactivation": dict(iterations=50000, transitions=100000, generation=100000, baseline=artifact, floor=artifact, high_water=active, final=artifact,
+                                 observed_maxima={"instances_active": 1, "retained_artifact_strong_after_reclamation": 2}),
+        }
+        cases = []
+        for name, test in v05.RECLAMATION_CASES.items():
+            stdout = "running 1 test\ntest " + test + " ... synthetic fixture\n"
+            if name in witnesses:
+                stdout += "V05_RESOURCE " + json.dumps(dict(schema="axiomos.v05.resources.v1", case=name, **witnesses[name])) + "\n"
+            stdout += "ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 123 filtered out; finished in 0.10s\n\n"
+            (directory / (name + ".stdout")).write_text(stdout)
+            (directory / (name + ".stderr")).write_text("")
+            cases.append(dict(case=name, test=test, stdout=name + ".stdout", stdout_sha256=v05.file_sha256(directory / (name + ".stdout")),
+                              stderr=name + ".stderr", stderr_sha256=v05.file_sha256(directory / (name + ".stderr")), returncode=0))
+        manifest = dict(schema="axiomos.v05.reclamation.v1", source_id=SOURCE, acceptance_config_sha256=self.digest,
+                        executable=dict(path="host-test", sha256=v05.file_sha256(directory / "host-test")), cases=cases)
+        path = directory / "reclamation.json"
+        path.write_text(json.dumps(manifest))
+        return path, manifest
+
+    def test_reclamation_requires_actual_evidence_and_never_qualifies_release(self):
+        acceptance = json.loads(json.dumps(self.config))
+        acceptance["required_gates"]["resource_reclamation"]["implemented_by_reducer"] = True
+        acceptance["required_gates"]["resource_reclamation"].pop("missing_policy", None)
+        report = v05.reduce_records(self.records(), self.expectations(), acceptance, self.digest)
+        self.assertEqual(report["gate_results"]["resource_reclamation"], "not_evaluated")
+        self.assertIn("resource_reclamation", report["release_blockers"])
+        with tempfile.TemporaryDirectory() as directory:
+            path, _ = self.reclamation_fixture(directory)
+            report = v05.reduce_records(self.records(), self.expectations(), acceptance, self.digest, path)
+        self.assertEqual(report["gate_results"]["resource_reclamation"], "pass")
+        self.assertNotIn("resource_reclamation", report["release_blockers"])
+        self.assertEqual(report["release_verdict"], "blocked")
+        self.assertEqual(report["gate_results"]["physical_campaign"], "blocked")
+        self.assertEqual(report["gate_results"]["authentication_and_loading"], "not_evaluated")
+        self.assertEqual(report["reclamation_evidence"]["witnesses"]["installation"]["iterations"], 99998)
+
+    def test_disabled_reducer_gates_keep_configured_policy_despite_valid_evidence(self):
+        for name in ("trace_subset", "resource_reclamation"):
+            for policy in ("blocked", "not_evaluated"):
+                with self.subTest(gate=name, policy=policy), tempfile.TemporaryDirectory() as directory:
+                    acceptance = json.loads(json.dumps(self.config))
+                    acceptance["required_gates"][name].update(implemented_by_reducer=False, missing_policy=policy)
+                    config_path = Path(directory) / "acceptance.json"
+                    config_path.write_text(json.dumps(acceptance))
+                    digest = v05.file_sha256(config_path)
+                    rows, expected = self.records(), self.expectations()
+                    rows[0]["acceptance_config_sha256"] = digest
+                    expected["acceptance_config_sha256"] = digest
+                    path, manifest = self.reclamation_fixture(directory)
+                    manifest["acceptance_config_sha256"] = digest
+                    path.write_text(json.dumps(manifest))
+                    report = v05.reduce_records(rows, expected, acceptance, digest, path)
+                    self.assertEqual(report["gate_results"][name], policy)
+                    self.assertIn(name, report["release_blockers"])
+                    self.assertEqual(report["release_verdict"], "blocked")
+
+    def test_reclamation_rejects_identity_hash_path_and_required_case_changes(self):
+        changes = (
+            lambda m, p: m.update(source_id="2" * 40),
+            lambda m, p: m.update(acceptance_config_sha256="f" * 64),
+            lambda m, p: m["executable"].update(sha256="0" * 64),
+            lambda m, p: m["cases"][0].update(stdout_sha256="0" * 64),
+            lambda m, p: m["cases"][0].update(stderr_sha256="0" * 64),
+            lambda m, p: m["cases"].pop(),
+            lambda m, p: m["cases"].__setitem__(1, m["cases"][0]),
+            lambda m, p: m["cases"][0].update(test="unrelated::test"),
+            lambda m, p: m["cases"][0].update(returncode=True),
+            lambda m, p: m["cases"][0].update(returncode=1),
+            lambda m, p: m["cases"][0].update(stdout="../outside"),
+            lambda m, p: m["cases"][0].update(stdout=str(p / "ownership.stdout")),
+            lambda m, p: (p / "ownership.stdout").unlink(),
+            lambda m, p: (p / "host-test").write_bytes(b"changed executable"),
+            lambda m, p: (p / "ownership.stderr").write_text("changed retained stderr"),
+        )
+        for index, change in enumerate(changes):
+            with self.subTest(change=index), tempfile.TemporaryDirectory() as directory:
+                path, manifest = self.reclamation_fixture(directory)
+                change(manifest, Path(directory))
+                path.write_text(json.dumps(manifest))
+                with self.assertRaises(ValueError):
+                    v05.validate_reclamation(path, SOURCE, self.digest, self.config)
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory); evidence = parent / "evidence"; evidence.mkdir()
+            path, manifest = self.reclamation_fixture(evidence)
+            outside = parent / "outside"; outside.write_text((evidence / "ownership.stdout").read_text())
+            (evidence / "ownership.stdout").unlink(); (evidence / "ownership.stdout").symlink_to(outside)
+            with self.assertRaisesRegex(ValueError, "escapes"):
+                v05.validate_reclamation(path, SOURCE, self.digest, self.config)
+
+    def test_reclamation_rejects_truncated_failed_or_ambiguous_test_logs(self):
+        changes = (
+            lambda text: text.rstrip("\n"),
+            lambda text: text.split("test result:")[0],
+            lambda text: text.replace("1 passed", "0 passed"),
+            lambda text: text.replace("0 ignored", "1 ignored"),
+            lambda text: text.replace("running 1 test", "running 2 tests"),
+            lambda text: text.replace("test bpf::managed::tests::managed_ownership_lifecycle_survives_100_000_fresh_instances ... ", "test unrelated::test ... "),
+            lambda text: text.replace("running 1 test\n", "running 1 test\ntest unrelated::test ... ok\n"),
+            lambda text: text + "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s\n",
+            lambda text: text + "unaccounted trailing output\n",
+            lambda text: "\n".join(line for line in text.splitlines() if not line.startswith("V05_RESOURCE")) + "\n",
+            lambda text: text.replace("V05_RESOURCE ", "V05_RESOURCE"),
+            lambda text: next(line for line in text.splitlines(keepends=True) if line.startswith("V05_RESOURCE "))
+                         + "".join(line for line in text.splitlines(keepends=True) if not line.startswith("V05_RESOURCE ")),
+        )
+        for index, change in enumerate(changes):
+            with self.subTest(change=index), tempfile.TemporaryDirectory() as directory:
+                path, manifest = self.reclamation_fixture(directory)
+                log = Path(directory) / manifest["cases"][0]["stdout"]
+                log.write_text(change(log.read_text()))
+                manifest["cases"][0]["stdout_sha256"] = v05.file_sha256(log)
+                path.write_text(json.dumps(manifest))
+                with self.assertRaises(ValueError):
+                    v05.validate_reclamation(path, SOURCE, self.digest, self.config)
+
+    def test_reclamation_obeys_rehashed_acceptance_resource_limits(self):
+        limits = (("max_artifacts", 2), ("max_instances", 1), ("max_retire_batches", 0),
+                  ("displaced_instances", 0), ("evicted_artifacts", 0))
+        for key, value in limits:
+            with self.subTest(limit=key), tempfile.TemporaryDirectory() as directory:
+                path, manifest = self.reclamation_fixture(directory)
+                acceptance = json.loads(json.dumps(self.config))
+                resources = acceptance["resources"]
+                (resources if key in resources else resources["retire_batch_capacity"])[key] = value
+                config = Path(directory) / "acceptance.json"; config.write_text(json.dumps(acceptance))
+                digest = v05.file_sha256(config)
+                manifest["acceptance_config_sha256"] = digest; path.write_text(json.dumps(manifest))
+                with self.assertRaisesRegex(ValueError, "resource limits"):
+                    v05.validate_reclamation(path, SOURCE, digest, acceptance)
+
+    def test_reclamation_rejects_short_churn_and_resource_or_reference_contradictions(self):
+        changes = (
+            ("ownership", lambda r: r.update(iterations=99999)),
+            ("ownership", lambda r: r.update(iterations=1 << 64)),
+            ("ownership", lambda r: r["high_water"].update(program_bytes=1 << 64)),
+            ("installation", lambda r: r.update(iterations=(1 << 64) - 2, transitions=1 << 64, generation=1 << 64)),
+            ("ownership", lambda r: r.update(generation=0)),
+            ("ownership", lambda r: r["final"].update(program_bytes=101)),
+            ("ownership", lambda r: r["observed_maxima"].update(instance_strong_live=3)),
+            ("installation", lambda r: r.update(iterations=100000)),
+            ("installation", lambda r: r.update(generation=99999)),
+            ("installation", lambda r: r["high_water"].update(live_maps=1)),
+            ("installation", lambda r: r["high_water"].update(program_bytes=r["floor"]["program_bytes"])),
+            ("installation", lambda r: r["observed_maxima"].update(instances_before_reclamation=True)),
+            ("deactivation", lambda r: r.update(transitions=99998, generation=99998, iterations=49999)),
+            ("deactivation", lambda r: r["floor"].update(live_maps=1)),
+            ("deactivation", lambda r: r["observed_maxima"].update(retained_artifact_strong_after_reclamation=1)),
+        )
+        for name, change in changes:
+            with self.subTest(case=name, change=change), tempfile.TemporaryDirectory() as directory:
+                path, manifest = self.reclamation_fixture(directory)
+                case = next(case for case in manifest["cases"] if case["case"] == name)
+                log = Path(directory) / case["stdout"]
+                lines = log.read_text().splitlines(keepends=True)
+                index = next(i for i, line in enumerate(lines) if line.startswith("V05_RESOURCE "))
+                witness = json.loads(lines[index][len("V05_RESOURCE "):]); change(witness)
+                lines[index] = "V05_RESOURCE " + json.dumps(witness) + "\n"
+                log.write_text("".join(lines)); case["stdout_sha256"] = v05.file_sha256(log)
+                path.write_text(json.dumps(manifest))
+                with self.assertRaises(ValueError):
+                    v05.validate_reclamation(path, SOURCE, self.digest, self.config)
 
     def test_handoff_timeout_and_exact_deadline_edge(self):
         rows = self.records()
