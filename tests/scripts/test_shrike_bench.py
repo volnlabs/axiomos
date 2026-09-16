@@ -92,7 +92,7 @@ class ObserverTests(unittest.TestCase):
         cfg, data = fixture()
         cfg['channels'].update(release=6, recorder_start=7)
         cfg.update(release_count=3, release_period_min=5999, release_period_max=6001,
-                   release_deadline_samples=1000)
+                   release_deadline_samples=1000, recorder_p99_overhead_ppm_max=300_000)
         marked = bytearray(data)
         for start in (100, 6100, 12100):
             for at in range(start, start + 900): marked[at] |= 1 << 6
@@ -102,8 +102,10 @@ class ObserverTests(unittest.TestCase):
         timing = observer.finish()['v05_timing']
         self.assertEqual(timing, dict(releases=3, release_p99_samples=900,
                                      baseline_p99_samples=700, overhead_p99_samples=200,
+                                     paired_overhead_p99_ppm=285_715,
                                      release_max_samples=900, baseline_max_samples=700,
-                                     overhead_max_samples=200))
+                                     overhead_max_samples=200,
+                                     paired_overhead_max_ppm=285_715))
         oversized = copy.deepcopy(cfg); oversized['release_deadline_samples'] = 240_001
         with self.assertRaises(ValueError): self.m.validate_config(oversized)
         for damage in ('missing_recorder', 'long_release', 'bad_period'):
@@ -304,7 +306,7 @@ class ObserverTests(unittest.TestCase):
             cfg, data = fixture()
             cfg['channels'].update(release=6, recorder_start=7)
             cfg.update(release_count=3, release_period_min=5999, release_period_max=6001,
-                       release_deadline_samples=1000)
+                       release_deadline_samples=1000, recorder_p99_overhead_ppm_max=300_000)
             marked = bytearray(data)
             for start in (100, 6100, 12100):
                 for at in range(start, start + 900): marked[at] |= 1 << 6

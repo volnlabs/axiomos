@@ -13,10 +13,9 @@ Examples::
   python3 scripts/benchmark/analyze-v05.py --expectations expected.json trace.jsonl
   python3 scripts/benchmark/analyze-v05.py --show-acceptance
 
-This initial reducer does not implement physical, fault-matrix, recorder-cost,
-or complete release gates, so it cannot emit a v0.5 release PASS.
 Optional --reclamation validates retained host resource tests only.
 Optional --software validates the fixed host software-property suite.
+Optional --physical-campaign validates the retained hardware campaign.
 """
 from __future__ import annotations
 
@@ -24,6 +23,7 @@ import argparse
 import hashlib
 import json
 import re
+import runpy
 import sys
 from collections import Counter
 from pathlib import Path
@@ -33,6 +33,8 @@ DEFAULT_ACCEPTANCE = ROOT / "docs/performance/v0.5-acceptance.json"
 TRACE_SCHEMA = "axiomos.v05.trace.v1"
 EXPECTATIONS_SCHEMA = "axiomos.v05.expectations.v1"
 OUTCOMES = ("successful", "failed", "rejected", "canceled")
+PHYSICAL_GATES = ("reset_quiescence", "physical_campaign", "fault_matrix",
+                  "recorder_overhead")
 
 RECLAMATION_CASES = {
     "ownership": "bpf::managed::tests::managed_ownership_lifecycle_survives_100_000_fresh_instances",
@@ -366,6 +368,18 @@ def validate_software(path: Path, source: str, config: str) -> dict:
             "scope": "fixed host property tests; ownership uses manager cleanup calls, not process-exit scheduling; no physical or timing qualification"}
 
 
+def validate_physical(path: Path, source: str, config: str, acceptance_path: Path) -> dict:
+    reducer = runpy.run_path(str(Path(__file__).with_name("v05-physical-reducer.py")))
+    evidence = reducer["reduce"](path, acceptance_path)
+    if (evidence.get("schema") != "axiomos.v05.physical-results.v1"
+            or evidence.get("physical_acceptance") is not True
+            or evidence.get("source_id") != source
+            or evidence.get("acceptance_config_sha256") != config
+            or evidence.get("gate_results") != {name: "pass" for name in PHYSICAL_GATES}):
+        raise ValueError("physical campaign identity or gate result mismatch")
+    return evidence
+
+
 def _validate_acceptance(value: dict) -> None:
     if not isinstance(value, dict) or value.get("schema") != "axiomos.v05.acceptance.v1":
         raise ValueError("acceptance schema mismatch")
@@ -375,14 +389,24 @@ def _validate_acceptance(value: dict) -> None:
             raise ValueError(f"malformed acceptance {section}")
     if not isinstance(value.get("required_gates"), dict):
         raise ValueError("malformed acceptance required_gates")
+    if value.get("release_policy") != {"all_required_gates_must_pass": True,
+                                       "synthetic_evidence_can_pass_release": False}:
+        raise ValueError("malformed acceptance release_policy")
     for name, gate in value["required_gates"].items():
-        if not isinstance(gate, dict) or type(gate.get("required")) is not bool or type(gate.get("implemented_by_reducer")) is not bool or (not gate["implemented_by_reducer"] and not _one_of(gate.get("missing_policy"), {"blocked", "not_evaluated"})):
+        if (not isinstance(gate, dict) or type(gate.get("required")) is not bool
+                or type(gate.get("implemented_by_reducer")) is not bool
+                or ("missing_policy" in gate and not _one_of(
+                    gate["missing_policy"], {"blocked", "not_evaluated"}))
+                or (not gate["implemented_by_reducer"] and "missing_policy" not in gate)):
             raise ValueError("malformed acceptance required_gates")
-        if gate["implemented_by_reducer"] and name not in {"trace_subset", "resource_reclamation", *SOFTWARE_CASES}:
+        if gate["implemented_by_reducer"] and name not in {"trace_subset", "resource_reclamation", *SOFTWARE_CASES, *PHYSICAL_GATES}:
             raise ValueError(f"unsupported reducer gate {name!r}")
 
 
-def reduce_records(rows: list[dict], expectations: dict, acceptance: dict, config_digest: str, reclamation: Path | None = None, software: Path | None = None) -> dict:
+def reduce_records(rows: list[dict], expectations: dict, acceptance: dict,
+                   config_digest: str, reclamation: Path | None = None,
+                   software: Path | None = None, physical: Path | None = None,
+                   acceptance_path: Path = DEFAULT_ACCEPTANCE) -> dict:
     _validate_acceptance(acceptance)
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise ValueError("trace records must be objects")
@@ -591,18 +615,24 @@ def reduce_records(rows: list[dict], expectations: dict, acceptance: dict, confi
     failures = sum(actual_outcomes[name] for name in OUTCOMES if name != "successful")
     resource_evidence = None if reclamation is None else validate_reclamation(reclamation, header["source_id"], config_digest, acceptance)
     software_evidence = None if software is None else validate_software(software, header["source_id"], config_digest)
+    physical_evidence = None if physical is None else validate_physical(
+        physical, header["source_id"], config_digest, acceptance_path)
     evaluated = {"trace_subset": True, "resource_reclamation": resource_evidence is not None,
-                 **{name: software_evidence is not None for name in SOFTWARE_CASES}}
-    gate_results = {name: ("pass" if evaluated[name] else "not_evaluated") if gate["implemented_by_reducer"]
+                 **{name: software_evidence is not None for name in SOFTWARE_CASES},
+                 **{name: physical_evidence is not None for name in PHYSICAL_GATES}}
+    gate_results = {name: ("pass" if evaluated[name] else gate.get("missing_policy", "not_evaluated")) if gate["implemented_by_reducer"]
                     else gate["missing_policy"] for name, gate in acceptance["required_gates"].items()}
+    blockers = [name for name, gate in acceptance["required_gates"].items()
+                if gate["required"] and gate_results[name] != "pass"]
     return {
         "reclamation_evidence": resource_evidence,
         "software_evidence": software_evidence,
+        "physical_evidence": physical_evidence,
         "schema": "axiomos.v05.results.v1",
         "trace_verdict": "pass",
-        "release_verdict": "blocked",
+        "release_verdict": "pass" if not blockers else "blocked",
         "gate_results": gate_results,
-        "release_blockers": [name for name, gate in acceptance["required_gates"].items() if gate["required"] and gate_results[name] != "pass"],
+        "release_blockers": blockers,
         "boots": [{"boot_id": header["boot_id"], "evidence_kind": header["evidence_kind"], "source_id": header["source_id"],
                    "artifact_id": header["artifact_id"], "acceptance_config_sha256": header["acceptance_config_sha256"], "event_counts": actual_counts,
                    "operation_outcomes": actual_outcomes, "failures": failures, "unfinished_operations": unfinished,
@@ -618,10 +648,11 @@ def describe():
             "unsupported_operations": ["retire", "deactivate", "administrative lifecycle operations"],
             "expectations_shape": {"schema": EXPECTATIONS_SCHEMA, "acceptance_config_sha256": "lowercase SHA-256", "boots": {"<boot_id>": {"source_id": "lowercase SHA-1", "artifact_id": "lowercase canonical artifact digest (managed bundles use SHA3-256)", "event_counts": "exact nonnegative integer counts by event type", "operation_outcomes": "exact successful/failed/rejected/canceled integer counts", "release_cycles": {"first": "positive integer", "count": "bounded nonnegative integer"}}}},
             "operation_generation_semantics": "requested candidate installation generation; installed only after successful commit and matching first behavior entry",
-            "gate_scope": "host trace subset and optional fixed software/reclamation tests; not an end-to-end acceptance gate",
+            "gate_scope": "host trace, fixed software/reclamation tests, and optional retained physical campaign",
             "reclamation_cases": RECLAMATION_CASES,
             "software_cases": SOFTWARE_CASES,
-            "release_pass_supported": False}
+            "physical_gates": list(PHYSICAL_GATES),
+            "release_pass_supported": True}
 
 
 def main() -> int:
@@ -630,6 +661,7 @@ def main() -> int:
     parser.add_argument("--expectations", type=Path)
     parser.add_argument("--reclamation", type=Path, help="retained fixed host reclamation suite evidence")
     parser.add_argument("--software", type=Path, help="retained fixed host software-property suite evidence")
+    parser.add_argument("--physical-campaign", type=Path, help="retained physical campaign manifest")
     parser.add_argument("--describe", action="store_true")
     parser.add_argument("--show-acceptance", action="store_true")
     parser.add_argument("--self-test", action="store_true")
@@ -649,7 +681,11 @@ def main() -> int:
         parser.error("trace and --expectations are required")
     try:
         acceptance = load_json(args.acceptance)
-        result = reduce_records(parse_jsonl(args.trace.read_text(encoding="utf-8")), load_json(args.expectations), acceptance, file_sha256(args.acceptance), args.reclamation, args.software)
+        result = reduce_records(parse_jsonl(args.trace.read_text(encoding="utf-8")),
+                                load_json(args.expectations), acceptance,
+                                file_sha256(args.acceptance), args.reclamation,
+                                args.software, args.physical_campaign,
+                                args.acceptance)
         result["input_sha256"] = {"trace": file_sha256(args.trace), "expectations": file_sha256(args.expectations)}
     except (OSError, UnicodeError, ValueError) as error:
         print(json.dumps({"schema": "axiomos.v05.results.v1", "trace_verdict": "fail", "release_verdict": "blocked", "error": str(error)}, sort_keys=True))

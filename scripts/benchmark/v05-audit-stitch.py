@@ -143,6 +143,8 @@ def stitch(paths, acceptance):
 
     cycles = []
     transitions = {"activate": 0, "rollback": 0}
+    installations = {}
+    handoffs = {}
     rearm = {}
     rearm_committed = set()
     rearm_failed = set()
@@ -170,6 +172,18 @@ def stitch(paths, acceptance):
                     key = str(upload[2])
                     uploads["rejected_by_errno"][key] = uploads["rejected_by_errno"].get(key, 0) + 1
             elif fields[0] == 2:
+                if fields[7] in (1, 2):
+                    state = installations.setdefault(fields[2], {
+                        "identity": (fields[3], fields[4], fields[6], fields[7]),
+                        "events": {}})
+                    if (state["identity"] != (fields[3], fields[4], fields[6], fields[7])
+                            or fields[1] not in range(1, 9) or fields[1] in state["events"]
+                            or fields[10] & ~3 or bool(fields[10] & 1) != bool(record["correlation"])
+                            or fields[11] != 0):
+                        raise ValueError("invalid or duplicate installation lifecycle")
+                    state["events"][fields[1]] = (record["sequence"], record["ticks"],
+                                                    record["correlation"], fields[8],
+                                                    fields[9], fields[10])
                 if fields[1] == 5 and fields[9] == 0 and fields[7] in (1, 2):
                     transitions[("activate", "rollback")[fields[7] - 1]] += 1
                 if fields[7] == 5 and fields[1] == 5 and fields[9] == 0:
@@ -195,6 +209,16 @@ def stitch(paths, acceptance):
             elif subtype == 4:
                 fields = handoff(payload)
                 _, event, wire_session, _, _, observed, _, message, error, flags, reserved = fields
+                if message in (3, 4):
+                    if (record["correlation"] == 0 or flags & 1 == 0 or flags & ~3
+                            or error or reserved != bytes(12)):
+                        raise ValueError("invalid installation handoff payload")
+                    state = handoffs.setdefault(record["correlation"], {})
+                    key = (event, message)
+                    if key in state:
+                        raise ValueError("duplicate installation handoff stage")
+                    state[key] = (record["sequence"], record["ticks"], wire_session,
+                                  fields[3], fields[4], observed, fields[6], flags)
                 if record["correlation"] and message in (1, 2, 5, 6):
                     state = rearm.setdefault(record["correlation"], {"session": wire_session})
                     if (state["session"] != wire_session or error or flags & ~3 or reserved != bytes(12)):
@@ -221,6 +245,60 @@ def stitch(paths, acceptance):
     if any((item["record_ticks"] - item["scheduled"]) * 1_000_000_000
            >= period_ns * frequency for item in cycles):
         raise ValueError("cycle recording observation reached its deadline")
+
+    period_product = period_ns * frequency
+    if period_product % 1_000_000_000:
+        raise ValueError("control period is not exactly representable in audit ticks")
+    period_ticks = period_product // 1_000_000_000
+    origin = cycles[0]["scheduled"] - cycles[0]["cycle_id"] * period_ticks
+    if origin < 0:
+        raise ValueError("cycle schedule precedes its absolute grid origin")
+    phase_bins = integer(acceptance.get("campaign", {}).get("transition_phase_bins"),
+                         "transition_phase_bins", positive=True)
+    if phase_bins > 1000:
+        raise ValueError("transition phase bin count is unbounded")
+    phase_counts = [0] * phase_bins
+    confirmed_handoffs = 0
+    max_handoff_ticks = 0
+    for instance, state in installations.items():
+        events = state["events"]
+        committed = events.get(5)
+        if committed is None or committed[4] != 0:
+            continue
+        required_events = [events.get(event) for event in range(1, 6)]
+        if any(event is None for event in required_events):
+            raise ValueError(f"installation {instance} committed without every lifecycle stage")
+        if any(a[0] >= b[0] for a, b in zip(required_events, required_events[1:])):
+            raise ValueError(f"installation {instance} lifecycle is reordered")
+        if required_events[0][2] == 0 or not required_events[0][5] & 1:
+            raise ValueError(f"installation {instance} accepted without public identity")
+        stages = handoffs.get(instance, {})
+        keys = ((1, 3), (2, 3), (3, 3), (4, 4), (7, 4))
+        link = [stages.get(key) for key in keys]
+        if any(stage is None for stage in link):
+            raise ValueError(f"installation {instance} lacks confirmed SafeBarrier/SafeAck custody")
+        order = [required_events[3][0], link[0][0], link[1][0], link[2][0],
+                 link[3][0], committed[0], link[4][0]]
+        if any(a >= b for a, b in zip(order, order[1:])):
+            raise ValueError(f"installation {instance} handoff records are reordered")
+        identities = {(stage[2], stage[3], stage[4]) for stage in link}
+        identity = next(iter(identities))
+        if (len(identities) != 1 or identity[0] == 0 or identity[2] == 0
+                or link[-1][6] != state["identity"][1] or link[-1][7] != 3):
+            raise ValueError(f"installation {instance} handoff identity changed")
+        if any(a[5] > b[5] for a, b in zip(link, link[1:])):
+            raise ValueError(f"installation {instance} handoff observation time reversed")
+        duration = committed[1] - required_events[3][1]
+        if duration < 0 or duration * 1_000_000_000 > acceptance["timing"]["handoff_timeout_ns"] * frequency:
+            raise ValueError(f"installation {instance} exceeded handoff timeout")
+        accepted_ticks = required_events[0][1]
+        if accepted_ticks < origin:
+            raise ValueError(f"installation {instance} predates the control grid")
+        phase_counts[((accepted_ticks - origin) % period_ticks) * phase_bins // period_ticks] += 1
+        confirmed_handoffs += 1
+        max_handoff_ticks = max(max_handoff_ticks, duration)
+    if confirmed_handoffs != sum(transitions.values()):
+        raise ValueError("successful transition lacks one confirmed handoff")
 
     quiet = []
     for operation, state in rearm.items():
@@ -250,6 +328,9 @@ def stitch(paths, acceptance):
             "handoff_cycles_recorded": sum(bool(item["flags"] & 4) for item in cycles),
             "cycle_failures": sum(item["failure"] != 0 for item in cycles),
             "successful_transitions": transitions, "uploads": uploads, "stops": stops,
+            "confirmed_handoffs": confirmed_handoffs,
+            "max_handoff_ticks": max_handoff_ticks,
+            "transition_phase_bins": phase_counts,
             "failed_rearms": len(rearm_failed), "rearm_quiescence": quiet}
 
 

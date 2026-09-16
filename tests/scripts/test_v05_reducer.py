@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).parents[2]
 SPEC = importlib.util.spec_from_file_location("analyze_v05", ROOT / "scripts/benchmark/analyze-v05.py")
@@ -53,22 +54,28 @@ class V05ReducerTests(unittest.TestCase):
         self.assertEqual(report["gate_results"]["physical_campaign"], "blocked")
         self.assertEqual(report["gate_results"]["authentication_and_loading"], "not_evaluated")
 
-    def test_config_cannot_enable_unevaluated_gates(self):
-        for name in ("physical_campaign", "fault_matrix"):
-            for retain_policy in (True, False):
-                acceptance = json.loads(json.dumps(self.config))
-                gate = acceptance["required_gates"][name]
-                gate["implemented_by_reducer"] = True
-                if not retain_policy:
-                    del gate["missing_policy"]
-                with self.subTest(gate=name, retain_policy=retain_policy), self.assertRaisesRegex(ValueError, "unsupported reducer gate"):
-                    v05.reduce_records(self.records(), self.expectations(), acceptance, self.digest)
+    def test_physical_campaign_is_required_for_physical_gates(self):
         report = v05.reduce_records(self.records(), self.expectations(), self.config, self.digest)
         self.assertEqual(report["gate_results"]["physical_campaign"], "blocked")
         self.assertEqual(report["gate_results"]["resource_reclamation"], "not_evaluated")
         self.assertEqual(report["release_verdict"], "blocked")
         self.assertEqual(report["release_blockers"], [name for name, gate in self.config["required_gates"].items()
                                                      if gate["required"] and report["gate_results"][name] != "pass"])
+
+    def test_complete_evidence_can_pass_release(self):
+        physical = {"schema": "axiomos.v05.physical-results.v1",
+                    "physical_acceptance": True, "source_id": SOURCE,
+                    "acceptance_config_sha256": self.digest,
+                    "gate_results": {name: "pass" for name in v05.PHYSICAL_GATES}}
+        with mock.patch.object(v05, "validate_reclamation", return_value={"pass": True}), \
+             mock.patch.object(v05, "validate_software", return_value={"pass": True}), \
+             mock.patch.object(v05, "validate_physical", return_value=physical):
+            report = v05.reduce_records(
+                self.records(), self.expectations(), self.config, self.digest,
+                Path("reclamation"), Path("software"), Path("physical"))
+        self.assertEqual(report["release_verdict"], "pass")
+        self.assertEqual(report["release_blockers"], [])
+        self.assertEqual(set(report["gate_results"].values()), {"pass"})
 
     def software_fixture(self, directory):
         directory = Path(directory)

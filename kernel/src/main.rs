@@ -263,7 +263,7 @@ unsafe extern "C" fn main() -> ! {
             }
         };
         kernel::serial_println!("INIT_PROCESS_STARTED pid={}", proc.pid());
-        #[cfg(feature = "bench")]
+        #[cfg(any(feature = "bench", feature = "managed-runtime-bench-markers"))]
         kernel::serial_println!("PI5_BOOT_OK");
         dbg_mark(0x45); // 'E'
     } else {

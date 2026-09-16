@@ -65,7 +65,7 @@ def validate_config(c):
                 'sync_timeout_samples', 'repeats', 'uart_max_gap_ns', 'steps'}
     v05 = isinstance(c, dict) and V05_ROLES <= set(c.get('channels', {}))
     v05_fields = {'release_count', 'release_period_min', 'release_period_max',
-                  'release_deadline_samples'} if v05 else set()
+                  'release_deadline_samples', 'recorder_p99_overhead_ppm_max'} if v05 else set()
     if (not isinstance(c, dict) or set(c) - required - {'runtime'} - v05_fields
             or (required | v05_fields) - set(c)):
         raise ValueError('configuration fields mismatch')
@@ -92,6 +92,8 @@ def validate_config(c):
             integer(c[key], 1, 240_000_000, key)
         integer(c['release_deadline_samples'], 1, c['sample_rate_hz'] // 100,
                 'release_deadline_samples')
+        integer(c['recorder_p99_overhead_ppm_max'], 1, 1_000_000,
+                'recorder_p99_overhead_ppm_max')
         if not c['release_period_min'] <= c['release_period_max'] or c['release_deadline_samples'] > c['release_period_min']:
             raise ValueError('invalid v0.5 release timing bounds')
     if not isinstance(c['steps'], list) or not 1 <= len(c['steps']) <= 128:
@@ -146,7 +148,10 @@ class Waveform:
         self.release_hist = array('I', [0]) * bins
         self.baseline_hist = array('I', [0]) * bins
         self.overhead_hist = array('I', [0]) * bins
+        self.paired_overhead_hist = array(
+            'I', [0]) * (config.get('recorder_p99_overhead_ppm_max', -2) + 2)
         self.release_max = self.baseline_max = self.overhead_max = 0
+        self.paired_overhead_max_ppm = 0
 
     def level(self, value, name): return (value >> self.c['channels'][name]) & 1
 
@@ -200,9 +205,13 @@ class Waveform:
                 for histogram, sample in ((self.release_hist, on), (self.baseline_hist, baseline),
                                           (self.overhead_hist, overhead)):
                     histogram[sample] += 1
+                overhead_ppm = (overhead * 1_000_000 + baseline - 1) // baseline
+                self.paired_overhead_hist[
+                    min(overhead_ppm, self.c['recorder_p99_overhead_ppm_max'] + 1)] += 1
                 self.release_max = max(self.release_max, on)
                 self.baseline_max = max(self.baseline_max, baseline)
                 self.overhead_max = max(self.overhead_max, overhead)
+                self.paired_overhead_max_ppm = max(self.paired_overhead_max_ppm, overhead_ppm)
                 self.release_start = self.recorder_start = self.recorder_end = None
             if marker and not release:
                 raise ValueError('v0.5 recorder marker outside release')
@@ -321,8 +330,10 @@ class Waveform:
                 releases=self.releases, release_p99_samples=quantile(self.release_hist),
                 baseline_p99_samples=quantile(self.baseline_hist),
                 overhead_p99_samples=quantile(self.overhead_hist),
+                paired_overhead_p99_ppm=quantile(self.paired_overhead_hist),
                 release_max_samples=self.release_max, baseline_max_samples=self.baseline_max,
-                overhead_max_samples=self.overhead_max)
+                overhead_max_samples=self.overhead_max,
+                paired_overhead_max_ppm=self.paired_overhead_max_ppm)
         return report
 
 

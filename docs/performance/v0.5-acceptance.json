@@ -1,7 +1,7 @@
 {
   "schema": "axiomos.v05.acceptance.v1",
   "cpu": {"index": 0, "slots": 1, "period_ns": 10000000, "modeled_utilization_percent": 50},
-  "timing": {"handoff_timeout_ns": 80000000, "reset_quiescence_ns": 200000000, "local_uart_drain_timeout_ns": 1000000000, "pi_requalification_timeout_ns": 2000000000, "pi_session_offer_timeout_ns": 80000000},
+  "timing": {"handoff_timeout_ns": 80000000, "reset_quiescence_ns": 200000000, "local_uart_drain_timeout_ns": 1000000000, "pi_requalification_timeout_ns": 2000000000, "pi_session_offer_timeout_ns": 80000000, "timing_status_query_timeout_ns": 2000000000},
   "resources": {
     "max_artifacts": 3,
     "max_uploads": 1,
@@ -20,11 +20,12 @@
     "physical_successful_transitions_min": 10000,
     "physical_successful_transitions_per_boot_min": 1000,
     "physical_releases_min": 1000000,
+    "transition_phase_bins": 10,
     "fault_phase_repeats_min": 5,
     "pilot_seconds": 3600,
     "soak_seconds": 86400,
     "motors_connected": false,
-    "recorder_p99_ratio_max": 1.05
+    "recorder_p99_overhead_ppm_max": 50000
   },
   "fault_matrix": {
     "faults": ["stop", "link_loss", "mcu_reset", "ack_failure"],
@@ -40,10 +41,10 @@
     "publication_races": {"required": true, "implemented_by_reducer": true, "missing_policy": "not_evaluated"},
     "failure_custody": {"required": true, "implemented_by_reducer": true, "missing_policy": "not_evaluated"},
     "abi": {"required": true, "implemented_by_reducer": true, "missing_policy": "not_evaluated"},
-    "reset_quiescence": {"required": true, "implemented_by_reducer": false, "missing_policy": "not_evaluated"},
-    "physical_campaign": {"required": true, "implemented_by_reducer": false, "missing_policy": "blocked"},
-    "fault_matrix": {"required": true, "implemented_by_reducer": false, "missing_policy": "not_evaluated"},
-    "recorder_overhead": {"required": true, "implemented_by_reducer": false, "missing_policy": "not_evaluated"},
+    "reset_quiescence": {"required": true, "implemented_by_reducer": true, "missing_policy": "not_evaluated"},
+    "physical_campaign": {"required": true, "implemented_by_reducer": true, "missing_policy": "blocked"},
+    "fault_matrix": {"required": true, "implemented_by_reducer": true, "missing_policy": "not_evaluated"},
+    "recorder_overhead": {"required": true, "implemented_by_reducer": true, "missing_policy": "not_evaluated"},
     "resource_reclamation": {"required": true, "implemented_by_reducer": true, "missing_policy": "not_evaluated"}
   },
   "release_policy": {"all_required_gates_must_pass": true, "synthetic_evidence_can_pass_release": false}
