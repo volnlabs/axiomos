@@ -1,6 +1,13 @@
 version = 1
-baseline_sites = 720
-baseline_fingerprint = "sha256:e357be6a6cf26be39854ec25fea2b341a3b2476bdc19a6e59242649afe7fe7f3"
+baseline_sites = 735
+baseline_fingerprint = "sha256:7dd94cd03792edf1023622636ec84522118b99719e95663b2f14296f492c1e5e"
+
+# 2026-09-16: map helpers retain raw inputs through update dispatch so keys and
+# values can alias map entries without overlapping Rust references. Array/Hash
+# lookup uses Vec writable provenance; checked raw copies do not allocate or
+# invalidate other live-entry pointers. Embedded/cloud focused Miri covers
+# self/cross-entry copies, map-backed keys, retained writes and deletion of a
+# different entry. The managed interpreter test retains its integer-cast warning.
 
 # 2026-09-16: opt-in installer syscall probe moves the existing no_mangle
 # entry attribute by five lines; no unsafe operation or ownership changes.
@@ -301,11 +308,11 @@ id = "BPF-HELPERS"
 paths = ["kernel/src/bpf/helpers.rs"]
 scope = "production"
 owner = "BPF runtime/security maintainers"
-invariant = "Helper arguments proven by the verifier still refer to live context, map, and stack regions of the required size and alignment at execution time."
+invariant = "Helper arguments proven by the verifier still refer to live context, map, and stack regions of the required size and alignment at execution time. Update and legacy timeseries helpers retain raw inputs through map dispatch under all source/destination leases; overlapping map inputs must not become aliased Rust references."
 callers = "BPF interpreter and JIT helper dispatch"
-tests = "cloud/embedded BPF suites and semantic consistency tests; adversarial helper provenance and concurrent map-lifetime tests remain required."
+tests = "cloud/embedded BPF suites and semantic consistency tests; actual managed self/cross-entry updates and legacy update/timeseries helper alias regressions. Legacy implicit key/value extent checking requires a separate verifier audit; passing managed tests does not establish that legacy proof."
 priority = "P0"
-reviewed = "2026-07-12"
+reviewed = "2026-09-16"
 
 [[obligation]]
 id = "BPF-EXECUTION-JIT"
@@ -323,11 +330,11 @@ id = "BPF-MAPS"
 paths = ["kernel/crates/kernel_bpf/src/maps/*", "kernel/crates/kernel_bpf/src/actuation/*"]
 scope = "production"
 owner = "BPF map/runtime maintainers"
-invariant = "Returned map pointers remain aligned, in-bounds, initialized, and live for the full access; Send/Sync premises hold under concurrent update and unload."
+invariant = "Returned map pointers remain in-bounds, initialized, and live for the full access with byte alignment; writable Array/Hash pointers derive directly from Vec::as_mut_ptr. Raw updates permit aliased value-region inputs using overlap-safe copies under exclusive leases and preserve other live-entry pointers. Resize, selected-entry deletion and unload end pointer validity; Send/Sync premises require synchronization."
 callers = "BPF helpers, actuation controller, userspace map syscalls"
-tests = "cloud/embedded map suites and property tests; Miri/loom and unload-during-execution tests remain missing."
+tests = "cloud/embedded map suites and property tests; focused Miri raw self/cross-entry updates, map-backed keys, flag rejection, retained writable pointers and unrelated-entry deletion. Managed maximum-state verifier/interpreter regression; hardware and arbitrary concurrent-map qualification remain separate."
 priority = "P0"
-reviewed = "2026-07-12"
+reviewed = "2026-09-16"
 
 [[obligation]]
 id = "BPF-KERNEL-INTEGRATION"

@@ -3006,6 +3006,37 @@ mod tests {
     }
 
     #[test]
+    fn legacy_update_helpers_accept_same_map_lookup_values() {
+        let maps: [Box<dyn BpfMap<ActiveProfile>>; 2] = [
+            Box::new(ArrayMap::with_entries(8, 2).unwrap()),
+            Box::new(kernel_bpf::maps::HashMap::with_sizes(4, 8, 2).unwrap()),
+        ];
+        for map in maps {
+            let key = 0u32.to_ne_bytes();
+            let value = 77u64.to_ne_bytes();
+            map.update(&key, &value, 0).unwrap();
+            let runtime = Arc::new(MapRuntime::new(map));
+            let bindings = [Some(ProgramMapRuntime {
+                generation: 0,
+                perm: MapPerm::ReadWrite,
+                runtime: Arc::clone(&runtime),
+            })];
+            with_bpf_runtime(&bindings, |_| {
+                let source = helpers::bpf_map_lookup_elem(0, key.as_ptr());
+                assert!(!source.is_null());
+                assert_eq!(helpers::bpf_map_update_elem(0, key.as_ptr(), source, 0), 0);
+                // Legacy timeseries helper dispatch also accepts these targets.
+                assert_eq!(helpers::bpf_timeseries_push(0, key.as_ptr(), source), 0);
+                // The ring output path must reject their empty key unchanged.
+                assert_eq!(helpers::bpf_ringbuf_output(0, source, 8, 0), -1);
+            })
+            .unwrap();
+            assert_eq!(runtime.map.lookup(&key).unwrap(), value);
+            assert!(!runtime.leased.load(Ordering::Acquire));
+        }
+    }
+
+    #[test]
     fn program_map_helpers_cannot_exceed_credential_snapshot() {
         let mut limits = tiny_limits();
         limits.max_program_bytes = 128;

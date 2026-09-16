@@ -180,6 +180,27 @@ pub trait BpfMap<P: PhysicalProfile = ActiveProfile>: Send + Sync {
     /// * `flags` - Update flags (0 = any, 1 = no exist, 2 = exist)
     fn update(&self, key: &[u8], value: &[u8], flags: u64) -> MapResult<()>;
 
+    /// Update from verified helper inputs, which may point into map values.
+    ///
+    /// # Safety
+    /// Both pointers must be readable for the corresponding definition size.
+    /// Map-backed inputs must lie within live values returned by `lookup_ptr`,
+    /// with concurrent access and resize excluded (the kernel holds execution
+    /// leases). No Rust references may alias bytes modified by this operation.
+    /// Implementations exposing writable lookup pointers must override this
+    /// default to handle self-aliasing without creating overlapping references.
+    unsafe fn update_ptr(&self, key: *const u8, value: *const u8, flags: u64) -> MapResult<()> {
+        // SAFETY: caller provides valid extents; the default is for maps whose
+        // writable storage is not exposed through lookup_ptr.
+        unsafe {
+            self.update(
+                core::slice::from_raw_parts(key, self.def().key_size as usize),
+                core::slice::from_raw_parts(value, self.def().value_size as usize),
+                flags,
+            )
+        }
+    }
+
     /// Delete a key from the map.
     fn delete(&self, key: &[u8]) -> MapResult<()>;
 
@@ -190,7 +211,9 @@ pub trait BpfMap<P: PhysicalProfile = ActiveProfile>: Send + Sync {
     ///
     /// # Safety
     ///
-    /// The caller must ensure that the map is not resized or deleted while the pointer is in use.
+    /// The caller must keep the map alive and exclude concurrent access, resize,
+    /// and deletion of the selected entry while the pointer is in use. Writable map implementations
+    /// must return writable provenance; read-only maps permit reads only.
     unsafe fn lookup_ptr(&self, _key: &[u8]) -> Option<*mut u8> {
         None
     }

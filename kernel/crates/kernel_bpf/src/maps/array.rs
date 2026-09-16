@@ -72,17 +72,6 @@ impl ArrayStorage {
         Some(&self.buffer[start..end])
     }
 
-    /// Set a value at index.
-    fn set(&mut self, index: usize, value: &[u8]) -> bool {
-        if index >= self.max_entries || value.len() != self.value_size {
-            return false;
-        }
-        let start = index * self.value_size;
-        let end = start + self.value_size;
-        self.buffer[start..end].copy_from_slice(value);
-        true
-    }
-
     /// Resize storage (cloud profile only).
     #[cfg(feature = "cloud-profile")]
     fn resize(&mut self, new_max_entries: usize) -> MapResult<()> {
@@ -197,19 +186,38 @@ impl<P: PhysicalProfile> BpfMap<P> for ArrayMap<P> {
         guard.get(index).map(|v| v.to_vec())
     }
 
-    fn update(&self, key: &[u8], value: &[u8], _flags: u64) -> MapResult<()> {
-        let index = Self::parse_key(key).ok_or(MapError::InvalidKey)? as usize;
-
+    fn update(&self, key: &[u8], value: &[u8], flags: u64) -> MapResult<()> {
+        if key.len() != 4 {
+            return Err(MapError::InvalidKey);
+        }
         if value.len() != self.def.value_size as usize {
             return Err(MapError::InvalidValue);
         }
+        // SAFETY: checked slices supply the exact extents and cannot safely
+        // alias writable map storage. The implementation holds the data lock.
+        unsafe { self.update_ptr(key.as_ptr(), value.as_ptr(), flags) }
+    }
 
+    unsafe fn update_ptr(&self, key: *const u8, value: *const u8, _flags: u64) -> MapResult<()> {
+        // SAFETY: caller supplies four readable key bytes, possibly in the
+        // destination value. Capture the index before modifying any storage.
+        let index = unsafe { key.cast::<u32>().read_unaligned() } as usize;
         let mut guard = self.data.write();
-        if guard.set(index, value) {
-            Ok(())
-        } else {
-            Err(MapError::InvalidKey)
+        if index >= guard.max_entries {
+            return Err(MapError::InvalidKey);
         }
+        let start = index * guard.value_size;
+        // SAFETY: the checked index selects a complete initialized value. The
+        // caller guarantees the source extent and exclusive execution access.
+        // Vec::as_mut_ptr creates no backing slice; copy permits self-overlap.
+        unsafe {
+            core::ptr::copy(
+                value,
+                guard.buffer.as_mut_ptr().add(start),
+                guard.value_size,
+            );
+        }
+        Ok(())
     }
 
     fn delete(&self, _key: &[u8]) -> MapResult<()> {
@@ -221,16 +229,16 @@ impl<P: PhysicalProfile> BpfMap<P> for ArrayMap<P> {
         &self.def
     }
 
-    // SAFETY: This method returns a raw pointer to the map value.
-    // The caller must ensure that the pointer is not used after the map is modified or dropped.
-    // We rely on the caller to maintain the safety invariants required by the BpfMap trait.
     unsafe fn lookup_ptr(&self, key: &[u8]) -> Option<*mut u8> {
         let index = Self::parse_key(key)? as usize;
-        let guard = self.data.read();
-        let slice = guard.get(index)?;
-        // SAFETY: The caller guarantees they hold the lock or ensure validity.
-        // We are just returning a raw pointer to the slice content.
-        Some(slice.as_ptr() as *mut u8)
+        let mut guard = self.data.write();
+        if index >= guard.max_entries {
+            return None;
+        }
+        let start = index * guard.value_size;
+        // SAFETY: checked index is within the allocation. Return writable
+        // provenance without creating a reference to the backing bytes.
+        Some(unsafe { guard.buffer.as_mut_ptr().add(start) })
     }
 
     #[cfg(feature = "cloud-profile")]
@@ -274,6 +282,28 @@ mod tests {
         // Out of bounds
         let bad_key = 100u32.to_ne_bytes();
         assert!(map.lookup(&bad_key).is_none());
+    }
+
+    #[test]
+    fn array_raw_update_preserves_lookup_aliases() {
+        let map = ArrayMap::<ActiveProfile>::with_entries(8192, 2).unwrap();
+        let key0 = 0u32.to_ne_bytes();
+        let key1 = 1u32.to_ne_bytes();
+        let mut bytes = alloc::vec![0x5a; 8192];
+        bytes[..4].copy_from_slice(&key0);
+        map.update(&key0, &bytes, 0).unwrap();
+        // SAFETY: this test exclusively owns the map; both pointers stay within
+        // live entries, with no resize or Rust references to the backing bytes.
+        unsafe {
+            let source = map.lookup_ptr(&key0).unwrap();
+            map.update_ptr(source, source, 0).unwrap();
+            map.update_ptr(key1.as_ptr(), source, 0).unwrap();
+            // Retained pointers remain writable across helper updates.
+            source.add(4).write(0x7b);
+        }
+        assert_eq!(map.lookup(&key1).unwrap(), bytes);
+        bytes[4] = 0x7b;
+        assert_eq!(map.lookup(&key0).unwrap(), bytes);
     }
 
     #[test]

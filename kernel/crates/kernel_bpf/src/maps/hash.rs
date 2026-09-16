@@ -125,7 +125,11 @@ impl HashStorage {
 
     fn set_state(&mut self, index: usize, state: BucketState) {
         let offset = self.bucket_offset(index);
-        self.storage[offset] = state as u8;
+        // SAFETY: callers select an in-bounds bucket. Avoid materializing a
+        // mutable buffer slice. Deletion changes only
+        // this state byte and leaves the fixed value storage initialized,
+        // although the lookup-pointer contract ends for the deleted entry.
+        unsafe { self.storage.as_mut_ptr().add(offset).write(state as u8) };
     }
 
     fn key(&self, index: usize) -> &[u8] {
@@ -136,15 +140,6 @@ impl HashStorage {
     fn value(&self, index: usize) -> &[u8] {
         let start = self.bucket_offset(index) + 1 + self.key_size;
         &self.storage[start..start + self.value_size]
-    }
-
-    fn write_entry(&mut self, index: usize, key: &[u8], value: &[u8]) {
-        let key_start = self.bucket_offset(index) + 1;
-        let value_start = key_start + self.key_size;
-        let value_end = value_start + self.value_size;
-        self.storage[key_start..value_start].copy_from_slice(key);
-        self.storage[value_start..value_end].copy_from_slice(value);
-        self.storage[key_start - 1] = BucketState::Occupied as u8;
     }
 
     /// Compute hash of a key.
@@ -212,7 +207,26 @@ impl HashStorage {
             return Err(MapError::InvalidValue);
         }
 
-        let (idx, found) = self.find_bucket(key);
+        // SAFETY: the slices provide the exact readable extents checked above.
+        // Safe Rust also guarantees that neither input aliases the mutable
+        // storage borrowed for this update.
+        unsafe { self.update_ptr(key.as_ptr(), value.as_ptr(), flags) }
+    }
+
+    /// Update from exact-size raw inputs which may point into this storage.
+    ///
+    /// # Safety
+    /// `key` and `value` must remain readable for `key_size` and `value_size`
+    /// bytes respectively. They may point within value regions of `storage`,
+    /// but no Rust references may alias bytes written by this operation.
+    unsafe fn update_ptr(&mut self, key: *const u8, value: *const u8, flags: u64) -> MapResult<()> {
+        // Keep the temporary key reference inside the read-only lookup phase.
+        // It may itself refer to a map value which this update will overwrite.
+        let (idx, found) = {
+            // SAFETY: guaranteed by this method's contract.
+            let key = unsafe { core::slice::from_raw_parts(key, self.key_size) };
+            self.find_bucket(key)
+        };
 
         // BPF_NOEXIST (1): fail if key exists
         if flags == 1 && found {
@@ -232,7 +246,18 @@ impl HashStorage {
             self.count += 1;
         }
 
-        self.write_entry(idx, key, value);
+        let key_start = self.bucket_offset(idx) + 1;
+        let value_start = key_start + self.key_size;
+        let state = key_start - 1;
+        let storage = self.storage.as_mut_ptr();
+        // SAFETY: the destination ranges are within the selected bucket. The
+        // caller provides readable source extents. `copy` deliberately permits
+        // self-update and other overlap within the same backing allocation.
+        unsafe {
+            core::ptr::copy(key, storage.add(key_start), self.key_size);
+            core::ptr::copy(value, storage.add(value_start), self.value_size);
+            storage.add(state).write(BucketState::Occupied as u8);
+        }
 
         Ok(())
     }
@@ -413,8 +438,23 @@ impl<P: PhysicalProfile> BpfMap<P> for HashMap<P> {
     }
 
     fn update(&self, key: &[u8], value: &[u8], flags: u64) -> MapResult<()> {
+        // Reject mismatched generic-helper calls before taking a mutable guard:
+        // their value slice may have originated in this map's lookup storage.
+        if key.len() != self.def.key_size as usize {
+            return Err(MapError::InvalidKey);
+        }
+        if value.len() != self.def.value_size as usize {
+            return Err(MapError::InvalidValue);
+        }
         let mut guard = self.storage.write();
         guard.update(key, value, flags)
+    }
+
+    unsafe fn update_ptr(&self, key: *const u8, value: *const u8, flags: u64) -> MapResult<()> {
+        let mut guard = self.storage.write();
+        // SAFETY: forwarded from the BpfMap raw-update contract; the write
+        // guard excludes concurrent access without materializing input slices.
+        unsafe { guard.update_ptr(key, value, flags) }
     }
 
     fn delete(&self, key: &[u8]) -> MapResult<()> {
@@ -427,14 +467,25 @@ impl<P: PhysicalProfile> BpfMap<P> for HashMap<P> {
     }
 
     /// # Safety
-    /// This method returns a raw pointer to the map value. The caller must ensure
-    /// that the pointer is not used after the map is modified or dropped.
+    /// This method returns a raw pointer to the map value. The caller must keep
+    /// the allocation exclusively leased and prevent resize/drop/deletion of
+    /// the selected entry. Fixed-storage updates do not reallocate. Deletion
+    /// leaves initialized bytes behind but ends the entry's pointer contract.
     unsafe fn lookup_ptr(&self, key: &[u8]) -> Option<*mut u8> {
-        let guard = self.storage.read();
-        let slice = guard.lookup(key)?;
-        // SAFETY: The caller guarantees they hold the lock or ensure validity.
-        // We are just returning a raw pointer to the slice content.
-        Some(slice.as_ptr() as *mut u8)
+        let mut guard = self.storage.write();
+        if key.len() != guard.key_size {
+            return None;
+        }
+        let (idx, found) = guard.find_bucket(key);
+        if !found {
+            return None;
+        }
+        let value_start = guard.bucket_offset(idx) + 1 + guard.key_size;
+        // SAFETY: find_bucket selected an occupied, in-bounds bucket.
+        // `as_mut_ptr` preserves writable provenance without first creating a
+        // shared reference to the value bytes. The caller keeps the allocation
+        // stable and exclusively leased while this pointer remains in use.
+        Some(unsafe { guard.storage.as_mut_ptr().add(value_start) })
     }
 
     #[cfg(feature = "cloud-profile")]
@@ -514,6 +565,64 @@ mod tests {
         // Second insert with NOEXIST should fail
         let result = map.update(&key, &value, 1);
         assert!(matches!(result, Err(MapError::KeyExists)));
+    }
+
+    #[test]
+    fn hash_raw_update_preserves_map_backed_inputs_and_lookup_pointer() {
+        let map = HashMap::<ActiveProfile>::with_sizes(4, 8, 8).expect("create map");
+        let source_key = 1u32.to_ne_bytes();
+        let copied_key = 2u32.to_ne_bytes();
+        let map_backed_key = 3u32.to_ne_bytes();
+        let mut source_value = [0x5a; 8];
+        source_value[..4].copy_from_slice(&map_backed_key);
+        map.update(&source_key, &source_value, 0)
+            .expect("seed source value");
+
+        // SAFETY: this test exclusively owns a fixed-capacity map. Every raw
+        // input covers a live value extent or an exact-size local key, and no
+        // Rust reference aliases bytes while the raw operations execute.
+        unsafe {
+            let source = map.lookup_ptr(&source_key).expect("source pointer");
+
+            // Exact self-update and a same-map copy to another entry must both
+            // use overlap-aware raw copies.
+            map.update_ptr(source_key.as_ptr(), source, 0)
+                .expect("self-update");
+            map.update_ptr(copied_key.as_ptr(), source, 0)
+                .expect("copy to another entry");
+
+            // The key itself may be read from a map value. It is consumed
+            // before writes, then copied with raw operations.
+            map.update_ptr(source, source, 0)
+                .expect("map-backed key and value");
+            assert_eq!(
+                map.update_ptr(source, source, 1),
+                Err(MapError::KeyExists),
+                "NOEXIST must fail before mutating either aliased input"
+            );
+
+            // Fixed-storage updates do not reallocate. A retained lookup
+            // pointer remains writable while its entry is live and the
+            // execution lease is exclusive.
+            source.add(4).write(0x7b);
+            let destination = map.lookup_ptr(&map_backed_key).unwrap();
+            map.update_ptr(destination, source, 2)
+                .expect("key in destination consumed before overwrite");
+
+            // End pointer use before deletion: the bytes remain initialized,
+            // but a deleted entry no longer satisfies the pointer contract.
+            let retained = map.lookup_ptr(&copied_key).unwrap();
+            map.delete(&source_key).expect("delete source entry");
+            retained.add(5).write(0x6c);
+        }
+
+        let mut changed_source = source_value;
+        changed_source[4] = 0x7b;
+        assert!(map.lookup(&source_key).is_none());
+        source_value[5] = 0x6c;
+        assert_eq!(map.lookup(&copied_key), Some(source_value.to_vec()));
+        assert_eq!(map.lookup(&map_backed_key), Some(changed_source.to_vec()));
+        assert_eq!(map.len(), 2);
     }
 
     #[test]

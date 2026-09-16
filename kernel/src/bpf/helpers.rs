@@ -297,17 +297,11 @@ pub extern "C" fn bpf_map_update_elem(
     flags: u64,
 ) -> i32 {
     super::with_current_execution_map(map_id, super::MapAccess::WRITE, |map| {
-        let def = map.map.def();
         if !key_ptr.is_null() && !value_ptr.is_null() {
-            let key_size = def.key_size as usize;
-            let value_size = def.value_size as usize;
-
-            // SAFETY: Verifier ensures valid memory access for key_ptr
-            let key = unsafe { core::slice::from_raw_parts(key_ptr, key_size) };
-            // SAFETY: Verifier ensures valid memory access for value_ptr
-            let value = unsafe { core::slice::from_raw_parts(value_ptr, value_size) };
-
-            if map.map.update(key, value, flags).is_ok() {
+            // SAFETY: verification establishes both input extents, and all
+            // referenced maps remain leased until execution returns. Inputs
+            // may alias the destination; the map consumes them as raw pointers.
+            if unsafe { map.map.update_ptr(key_ptr, value_ptr, flags) }.is_ok() {
                 return 0;
             }
         }
@@ -401,17 +395,10 @@ pub extern "C" fn bpf_timeseries_push(
     }
 
     super::with_current_execution_map(map_id, super::MapAccess::WRITE, |map| {
-        let def = map.map.def();
-        let key_size = def.key_size as usize;
-        let value_size = def.value_size as usize;
-
-        // SAFETY: Verifier ensures valid memory access for key_ptr
-        let key = unsafe { core::slice::from_raw_parts(key_ptr, key_size) };
-        // SAFETY: Verifier ensures valid memory access for value_ptr
-        let value = unsafe { core::slice::from_raw_parts(value_ptr, value_size) };
-
-        // TimeSeriesMap uses update() to handle push (key treated as timestamp)
-        if map.map.update(key, value, 0).is_ok() {
+        // SAFETY: inputs have the verified definition extents and all source
+        // maps remain leased. Preserve the legacy dynamic map dispatch, which
+        // can also reach Array/Hash with a lookup value as the source.
+        if unsafe { map.map.update_ptr(key_ptr, value_ptr, 0) }.is_ok() {
             return 0;
         }
         -1

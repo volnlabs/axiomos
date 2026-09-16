@@ -630,6 +630,62 @@ fn managed_execution_uses_exact_bindings_and_keeps_instance_state_isolated() {
 }
 
 #[test]
+fn managed_verified_map_value_self_and_cross_entry_updates_preserve_state() {
+    for (value_size, entries, destination) in [(16 * 1024, 1, 0), (8192, 2, 1)] {
+        let program = [
+            BpfInsn::new(0x62, 10, 0, -4, 0),
+            BpfInsn::mov64_imm(1, 1),
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::add64_imm(2, -4),
+            BpfInsn::call(kernel_abi::BPF_HELPER_MAP_LOOKUP_ELEM),
+            BpfInsn::jne_imm(0, 0, 2),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+            BpfInsn::mov64_reg(6, 0),
+            BpfInsn::mov64_imm(1, 1),
+            BpfInsn::mov64_reg(2, 10),
+            BpfInsn::add64_imm(2, -4),
+            BpfInsn::new(0x62, 10, 0, -4, destination),
+            BpfInsn::mov64_reg(3, 6),
+            BpfInsn::mov64_imm(4, 0),
+            BpfInsn::call(kernel_abi::BPF_HELPER_MAP_UPDATE_ELEM),
+            // Write through the retained pointer after the update as well.
+            BpfInsn::new(0x72, 6, 0, 4, 0x7b),
+            BpfInsn::mov64_imm(0, 0),
+            BpfInsn::exit(),
+        ];
+        let verified = artifact_from_program(
+            11,
+            false,
+            0,
+            Some(PrivateArray {
+                value_size,
+                max_entries: entries,
+            }),
+            &program,
+        );
+        let mut manager = BpfManager::new();
+        let id = manager.register_managed_artifact(verified).unwrap();
+        let instance = manager.create_managed_instance(id).unwrap();
+        let map = &instance.maps[1].as_ref().unwrap().runtime;
+        let mut expected = alloc::vec![0x5a; value_size as usize];
+        map.map.update(&0u32.to_ne_bytes(), &expected, 0).unwrap();
+        let context = ManagedControlContextV1 {
+            version: kernel_abi::MANAGED_CONTROL_CONTEXT_V1_VERSION,
+            size: kernel_abi::MANAGED_CONTROL_CONTEXT_V1_SIZE,
+            ..Default::default()
+        };
+        instance.execute(&context).unwrap();
+        if destination == 1 {
+            assert_eq!(map.map.lookup(&1u32.to_ne_bytes()).unwrap(), expected);
+        }
+        expected[4] = 0x7b;
+        assert_eq!(map.map.lookup(&0u32.to_ne_bytes()).unwrap(), expected);
+        assert!(!map.leased.load(core::sync::atomic::Ordering::Acquire));
+    }
+}
+
+#[test]
 fn managed_execution_failure_discards_request_and_releases_map_lease() {
     let program = [
         BpfInsn::mov64_imm(1, 7),
