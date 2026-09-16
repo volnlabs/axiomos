@@ -16,6 +16,8 @@ run_step product-naming-tests python3 -B tests/scripts/test_product_naming.py
 run_step benchmark-provenance-static python3 -B scripts/verify/benchmark-provenance.py
 run_step v05-benchmark-reducer-self-test python3 -B scripts/benchmark/analyze-v05.py --self-test
 run_step v05-host-runner-tests python3 -B tests/scripts/test_v05_host_runner.py
+run_step v05-audit-stitch-tests python3 -B tests/scripts/test_v05_audit_stitch.py
+run_step shrike-bench-self-test python3 -B scripts/hil/shrike-bench.py self-test
 if [[ "$MODE" == "full" ]]; then
     run_step v05-host-trace python3 -B scripts/benchmark/v05-host-runner.py --output "$OUTPUT_DIR/v05-host-trace"
 fi
