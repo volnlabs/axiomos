@@ -75,6 +75,20 @@ SOFTWARE_CASES = {
         "stale_a_b_a": ("kernel", "bpf::installation::tests::interleavings::stale_a_b_a_operation_and_generation_ids_cannot_republish"),
         "handoff_invalidation": ("kernel", "bpf::installation::tests::stop_cancel_timeout_and_reset_cannot_publish_even_with_matching_ack"),
     },
+    "failure_custody": {
+        "request_and_map_faults": ("kernel", "bpf::control::tests::map_failure_after_capture_discards_request_stops_release_and_releases_lease"),
+        "request_validation": ("kernel_bpf", "execution::interpreter::tests::managed_verified_failures_never_publish_an_earlier_capture"),
+        "queue_and_deadline_stop": ("kernel", "bpf::control::tests::missed_deadlines_reversed_clocks_and_queue_failure_never_resume_automatically"),
+        "observer_separation": ("kernel", "bpf::managed::tests::managed_objects_reject_legacy_access_and_bound_artifacts"),
+    },
+    "abi": {
+        "legacy_mode_restrictions": ("kernel", "syscall::bpf::tests::managed_wheel_ownership_blocks_legacy_mutations_but_preserves_read_commands"),
+        "upload_shapes": ("kernel", "syscall::managed::tests::managed_abi_validates_its_own_shape_before_mutation"),
+        "lifecycle_shapes": ("kernel", "syscall::managed::tests::lifecycle_layouts_validate_before_resolving_exact_targets"),
+        "query_shapes": ("kernel", "syscall::managed::tests::artifact_query_keeps_v1_and_rejects_every_nonzero_output_byte"),
+        "recorder_shapes": ("kernel", "syscall::managed::tests::recorder_headers_reject_inexact_lengths_and_unknown_versions"),
+        "syscall_sizes": ("kernel", "syscall::managed::tests::managed_commands_reject_wrong_syscall_size_before_user_copy"),
+    },
 }
 SOFTWARE_EXECUTABLES = {"kernel": "host-test", "kernel_bpf": "bpf-test"}
 RESOURCE_MAXIMA = {
