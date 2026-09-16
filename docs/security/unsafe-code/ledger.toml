@@ -1,6 +1,6 @@
 version = 1
 baseline_sites = 735
-baseline_fingerprint = "sha256:7dd94cd03792edf1023622636ec84522118b99719e95663b2f14296f492c1e5e"
+baseline_fingerprint = "sha256:7a4fc7956a36f135ae444a609297cbebcda743254c4944f823a15eeacbbeb30f"
 
 # 2026-09-16: map helpers retain raw inputs through update dispatch so keys and
 # values can alias map entries without overlapping Rust references. Array/Hash
