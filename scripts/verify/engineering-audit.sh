@@ -590,7 +590,7 @@ source scripts/verify/gates/core.sh
 source scripts/verify/gates/required.sh
 source scripts/verify/gates/extended.sh
 source scripts/verify/gates/miri.sh
-run_step source-revision-stable test "$SOURCE_COMMIT" "$(git rev-parse HEAD)"
+run_step source-revision-stable test "$SOURCE_COMMIT" = "$(git rev-parse HEAD)"
 
 FINISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 if [[ "$failures" -eq 0 ]]; then

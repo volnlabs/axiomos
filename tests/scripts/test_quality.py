@@ -54,6 +54,10 @@ cargo() { echo test; }
             self.assertEqual(values["branch"], "original-branch")
             self.assertEqual(values["failures"], "1")
             self.assertIn("source-revision-stable\tFAIL", (base / "results.tsv").read_text())
+            subprocess.run(["bash", "-c", command.replace("echo changed", "echo original")
+                            + "\nrecord() {" + record + "\n" + gate
+                            + '\n[[ "$failures" == 0 && "$passes" == 1 ]]\n'],
+                           cwd=base, check=True, capture_output=True, text=True)
 
     def test_historical_scope_excludes_new_file_and_rejects_missing_entry(self) -> None:
         commit = "2cd870d8f5087ee17adba86f073559cc9a1414fe"
