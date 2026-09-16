@@ -174,6 +174,42 @@ pub fn init() {
 
 use super::exceptions::ExceptionContext;
 
+#[cfg(all(feature = "rpi5", feature = "managed-runtime-bench-markers"))]
+const MANAGED_RELEASE_MARKER_PIN: u8 = 12;
+#[cfg(all(feature = "rpi5", feature = "managed-runtime-bench-markers"))]
+const MANAGED_RECORDER_MARKER_PIN: u8 = 13;
+
+#[cfg(all(feature = "rpi5", feature = "managed-runtime-bench-markers"))]
+struct ManagedReleaseMarker;
+
+#[cfg(all(feature = "rpi5", feature = "managed-runtime-bench-markers"))]
+fn managed_marker_gpio() -> crate::arch::aarch64::platform::rpi5::gpio::Rp1Gpio {
+    // SAFETY: the qualification image exclusively owns both marker pins.
+    unsafe { crate::arch::aarch64::platform::rpi5::gpio::Rp1Gpio::new() }
+}
+
+#[cfg(all(feature = "rpi5", feature = "managed-runtime-bench-markers"))]
+impl ManagedReleaseMarker {
+    fn begin() -> Self {
+        managed_marker_gpio().set_high(MANAGED_RELEASE_MARKER_PIN);
+        Self
+    }
+}
+
+#[cfg(all(feature = "rpi5", feature = "managed-runtime-bench-markers"))]
+impl Drop for ManagedReleaseMarker {
+    fn drop(&mut self) {
+        let gpio = managed_marker_gpio();
+        gpio.set_low(MANAGED_RECORDER_MARKER_PIN);
+        gpio.set_low(MANAGED_RELEASE_MARKER_PIN);
+    }
+}
+
+#[cfg(all(feature = "rpi5", feature = "managed-runtime-bench-markers"))]
+pub(crate) fn managed_bench_recorder_start() {
+    managed_marker_gpio().set_high(MANAGED_RECORDER_MARKER_PIN);
+}
+
 /// Handle IRQ interrupt (called from exception vector)
 ///
 /// # Safety
@@ -251,6 +287,8 @@ pub extern "C" fn handle_irq(_ctx: &mut ExceptionContext) {
 
 /// Handle timer interrupt (without rescheduling)
 fn handle_timer_interrupt(_ctx: &ExceptionContext) -> bool {
+    #[cfg(all(feature = "rpi5", feature = "managed-runtime-bench-markers"))]
+    let _release_marker = ManagedReleaseMarker::begin();
     clear_timer_interrupt();
     let (release, _frequency) = match set_next_timer() {
         Ok(Some(release)) => release,
@@ -438,6 +476,12 @@ pub fn init_timer() -> Result<(), TimerFault> {
             return Err(TimerFault::InvalidPeriod);
         }
         let schedule = PeriodicSchedule::new(physical_counter(), frequency / 100)?;
+        #[cfg(all(feature = "rpi5", feature = "managed-runtime-bench-markers"))]
+        {
+            let gpio = managed_marker_gpio();
+            gpio.configure_output(MANAGED_RELEASE_MARKER_PIN, false);
+            gpio.configure_output(MANAGED_RECORDER_MARKER_PIN, false);
+        }
         #[cfg(all(feature = "rpi5", feature = "managed-runtime"))]
         crate::bpf::recorder::init_clock(frequency, physical_counter());
         arm_timer(schedule.next_deadline());

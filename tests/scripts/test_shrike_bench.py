@@ -88,6 +88,37 @@ class ObserverTests(unittest.TestCase):
             self.assertFalse(report['physical_acceptance'])
             self.assertFalse(any(p.suffix == '.bin' for p in root.rglob('*')))
 
+    def test_v05_markers_measure_every_paired_release_without_growing_history(self):
+        cfg, data = fixture()
+        cfg['channels'].update(release=6, recorder_start=7)
+        cfg.update(release_count=3, release_period_min=5999, release_period_max=6001,
+                   release_deadline_samples=1000)
+        marked = bytearray(data)
+        for start in (100, 6100, 12100):
+            for at in range(start, start + 900): marked[at] |= 1 << 6
+            for at in range(start + 700, start + 900): marked[at] |= 1 << 7
+        observer = self.m.Waveform(cfg)
+        for at in range(0, len(marked), 101): observer.feed(marked[at:at + 101])
+        timing = observer.finish()['v05_timing']
+        self.assertEqual(timing, dict(releases=3, release_p99_samples=900,
+                                     baseline_p99_samples=700, overhead_p99_samples=200,
+                                     release_max_samples=900, baseline_max_samples=700,
+                                     overhead_max_samples=200))
+        oversized = copy.deepcopy(cfg); oversized['release_deadline_samples'] = 240_001
+        with self.assertRaises(ValueError): self.m.validate_config(oversized)
+        for damage in ('missing_recorder', 'long_release', 'bad_period'):
+            bad = bytearray(marked)
+            if damage == 'missing_recorder':
+                bad[800:1000] = bytes(value & ~(1 << 7) for value in bad[800:1000])
+            elif damage == 'long_release':
+                bad[1000:1101] = bytes(value | (1 << 6) | (1 << 7) for value in bad[1000:1101])
+            else:
+                bad[6100:7000] = bytes(value & ~((1 << 6) | (1 << 7)) for value in bad[6100:7000])
+                for at in range(6200, 7100): bad[at] |= 1 << 6
+                for at in range(6900, 7100): bad[at] |= 1 << 7
+            with self.subTest(damage=damage), self.assertRaises(ValueError):
+                observer = self.m.Waveform(cfg); observer.feed(bad); observer.finish()
+
     def test_bad_configuration_and_waveforms(self):
         cfg, data = fixture()
         for key, value in [('samples', True), ('repeats', 0), ('period_min', 0), ('tolerance_samples', -1)]:
@@ -266,6 +297,32 @@ class ObserverTests(unittest.TestCase):
                 self.assertEqual(footer['unretained_pending_samples'], 0)
                 if failure:
                     with self.assertRaises(ValueError): self.m.replay(campaign / 'run')
+
+    def test_v05_capture_uses_timing_markers_without_v04_uart(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name); campaign = root / 'campaign'
+            cfg, data = fixture()
+            cfg['channels'].update(release=6, recorder_start=7)
+            cfg.update(release_count=3, release_period_min=5999, release_period_max=6001,
+                       release_deadline_samples=1000)
+            marked = bytearray(data)
+            for start in (100, 6100, 12100):
+                for at in range(start, start + 900): marked[at] |= 1 << 6
+                for at in range(start + 700, start + 900): marked[at] |= 1 << 7
+            fake = root / 'fake-analyzer'
+            fake.write_text('#!/usr/bin/env python3\nimport sys\n'
+                            + f'sys.stdout.buffer.write({bytes(marked)!r})\n'
+                            + 'sys.stderr.write("SR_DF_END\\n")\n')
+            fake.chmod(0o755)
+            cfg['runtime'] = dict(sigrok=dict(path=str(fake), sha256=self.m.sha(fake)),
+                                  libsigrok=dict(path='/synthetic/libsigrok', sha256='0' * 64),
+                                  fx2_patch=dict(path='/synthetic/fx2', sha256='1' * 64))
+            with mock.patch.object(self.m, 'pinned_runtime', return_value=cfg['runtime']), \
+                 mock.patch.object(self.m, 'library_loaded', return_value=True):
+                self.m.capture(cfg, campaign, 'run', None, 'synthetic')
+                report = self.m.replay(campaign / 'run')
+            self.assertEqual(report['v05_timing']['releases'], 3)
+            self.assertEqual((campaign / 'run/uart.log').read_bytes(), b'')
 
     def test_representative_second_archive_and_replay(self):
         cfg, pattern = repeated_fixture(1000)

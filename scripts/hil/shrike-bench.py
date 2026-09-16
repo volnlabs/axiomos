@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bounded, unloaded Shrike waveform recorder and offline checker.
 
-capture CONFIG CAMPAIGN RUN --uart DEVICE records all D0..D7 as one byte/sample
+capture CONFIG CAMPAIGN RUN [--uart DEVICE] records all D0..D7 as one byte/sample
 from one sigrok process. CONFIG is frozen before acquisition; --driver defaults
  to fx2lafw. Set LD_LIBRARY_PATH to the qualified libsigrok build explicitly.
 replay RUN checks every compressed chunk and the independent stimulus schedule.
@@ -12,6 +12,8 @@ Each rising `stimulus` edge advances the independently authored `steps` list,
 repeated `repeats` times. Steps carry signed permille duties (maximum 800), active
 LOW estop level, settling allowance, and min/max dwell in analyzer samples.
 Other named reference channels require a `references` level map in every step.
+The v0.5 profile instead uses both remaining channels as `release` and
+`recorder_start`; those paired markers replace the incompatible V04 UART log.
 The capture begins safe, ends in a zero-duty step, and includes that step's
 minimum dwell. Carrier bounds and uncertainty must come from bench calibration.
 Runtime pins are absolute path/SHA-256 pairs for sigrok, libsigrok and fx2_patch.
@@ -22,6 +24,7 @@ acceptance populations. An offline PASS never closes physical acceptance.
 from __future__ import annotations
 
 import argparse
+from array import array
 import fcntl
 import hashlib
 import json
@@ -45,6 +48,7 @@ CONTROL_STOP = 45_000_000_000
 RESERVE = HARD_CAP - CONTROL_STOP
 ZSTD = shutil.which('zstd') or 'zstd'
 ROLES = {'left_pwm', 'right_pwm', 'left_dir', 'right_dir', 'estop', 'stimulus'}
+V05_ROLES = {'release', 'recorder_start'}
 RUNS = re.compile(b'|'.join(re.escape(bytes([n])) + b'+' for n in range(256)))
 V04_PARSE = runpy.run_path(str(Path(__file__).parents[1] / 'benchmark/analyze-v04.py'))['parse']
 
@@ -59,7 +63,11 @@ def validate_config(c):
     required = {'sample_rate_hz', 'samples', 'channels', 'period_min', 'period_max',
                 'tolerance_samples', 'uncertainty_samples', 'stop_limit_samples',
                 'sync_timeout_samples', 'repeats', 'uart_max_gap_ns', 'steps'}
-    if not isinstance(c, dict) or set(c) - required - {'runtime'} or required - set(c):
+    v05 = isinstance(c, dict) and V05_ROLES <= set(c.get('channels', {}))
+    v05_fields = {'release_count', 'release_period_min', 'release_period_max',
+                  'release_deadline_samples'} if v05 else set()
+    if (not isinstance(c, dict) or set(c) - required - {'runtime'} - v05_fields
+            or (required | v05_fields) - set(c)):
         raise ValueError('configuration fields mismatch')
     integer(c['sample_rate_hz'], 24_000_000, 24_000_000, 'sample rate')
     for key in ('samples', 'period_min', 'period_max', 'sync_timeout_samples', 'repeats', 'uart_max_gap_ns'):
@@ -77,6 +85,15 @@ def validate_config(c):
         if not re.fullmatch('[a-z][a-z_]{0,31}', name): raise ValueError('invalid channel name')
         integer(bit, 0, 7, 'channel bit')
     if len(set(channels.values())) != len(channels): raise ValueError('duplicate channel bit')
+    if bool(V05_ROLES & set(channels)) != v05:
+        raise ValueError('v0.5 release and recorder markers must be captured together')
+    if v05:
+        for key in ('release_count', 'release_period_min', 'release_period_max'):
+            integer(c[key], 1, 240_000_000, key)
+        integer(c['release_deadline_samples'], 1, c['sample_rate_hz'] // 100,
+                'release_deadline_samples')
+        if not c['release_period_min'] <= c['release_period_max'] or c['release_deadline_samples'] > c['release_period_min']:
+            raise ValueError('invalid v0.5 release timing bounds')
     if not isinstance(c['steps'], list) or not 1 <= len(c['steps']) <= 128:
         raise ValueError('need 1..128 independently specified workload steps')
     for step in c['steps']:
@@ -91,7 +108,7 @@ def validate_config(c):
             raise ValueError('step must retain at least two settled carrier periods')
         if not step['estop'] and (step['left'] or step['right']): raise ValueError('motion requested during stop')
         refs = step.get('references', {})
-        if not isinstance(refs, dict) or set(refs) != set(channels) - ROLES:
+        if not isinstance(refs, dict) or set(refs) != set(channels) - ROLES - V05_ROLES:
             raise ValueError('all extra reference levels must be independently specified')
         for level in refs.values(): integer(level, 0, 1, 'reference level')
     if c['steps'][-1]['left'] or c['steps'][-1]['right'] or c['steps'][-1]['estop']:
@@ -103,6 +120,7 @@ class Waveform:
     """Constant state per channel; no whole-run sample, edge or result lists."""
     def __init__(self, config):
         self.c = validate_config(config)
+        self.v05 = V05_ROLES <= set(config['channels'])
         self.offset = 0
         self.sync_limit = config['sync_timeout_samples']
         self.previous = None
@@ -119,6 +137,16 @@ class Waveform:
         self.armed = False
         self.stop_count = 0
         self.max_stop_samples = 0
+        self.release_start = None
+        self.previous_release = None
+        self.recorder_start = None
+        self.recorder_end = None
+        self.releases = 0
+        bins = config.get('release_deadline_samples', -1) + 1
+        self.release_hist = array('I', [0]) * bins
+        self.baseline_hist = array('I', [0]) * bins
+        self.overhead_hist = array('I', [0]) * bins
+        self.release_max = self.baseline_max = self.overhead_max = 0
 
     def level(self, value, name): return (value >> self.c['channels'][name]) & 1
 
@@ -135,6 +163,51 @@ class Waveform:
 
     def segment(self, value, begin, end):
         prev = self.previous
+        if self.v05:
+            release = self.level(value, 'release')
+            marker = self.level(value, 'recorder_start')
+            old_release = self.level(prev, 'release') if prev is not None else 0
+            old_marker = self.level(prev, 'recorder_start') if prev is not None else 0
+            if prev is None and (release or marker):
+                raise ValueError('v0.5 timing markers must begin low')
+            if release and not old_release:
+                if marker or self.release_start is not None:
+                    raise ValueError('invalid v0.5 release marker start')
+                if self.previous_release is not None:
+                    period = begin - self.previous_release
+                    if not self.c['release_period_min'] <= period <= self.c['release_period_max']:
+                        raise ValueError('v0.5 release period mismatch')
+                self.previous_release = self.release_start = begin
+                self.recorder_start = None
+                self.recorder_end = None
+                self.releases += 1
+            if marker and not old_marker:
+                if not release or self.release_start is None or self.recorder_start is not None:
+                    raise ValueError('invalid v0.5 recorder marker start')
+                self.recorder_start = begin
+            if old_marker and not marker:
+                if not old_release or self.recorder_start is None or self.recorder_end is not None:
+                    raise ValueError('invalid v0.5 recorder marker end')
+                self.recorder_end = begin
+            if old_release and not release:
+                if marker or self.release_start is None or self.recorder_start is None or self.recorder_end is None:
+                    raise ValueError('v0.5 release lacks one recorder interval')
+                on = begin - self.release_start
+                baseline = self.recorder_start - self.release_start
+                overhead = begin - self.recorder_start
+                if not 0 < baseline < on <= self.c['release_deadline_samples']:
+                    raise ValueError('v0.5 release completion reached its deadline')
+                for histogram, sample in ((self.release_hist, on), (self.baseline_hist, baseline),
+                                          (self.overhead_hist, overhead)):
+                    histogram[sample] += 1
+                self.release_max = max(self.release_max, on)
+                self.baseline_max = max(self.baseline_max, baseline)
+                self.overhead_max = max(self.overhead_max, overhead)
+                self.release_start = self.recorder_start = self.recorder_end = None
+            if marker and not release:
+                raise ValueError('v0.5 recorder marker outside release')
+            if release and self.release_start is not None and end - self.release_start > self.c['release_deadline_samples']:
+                raise ValueError('v0.5 release completion reached its deadline')
         estop = self.level(value, 'estop')
         was_stop = self.level(prev, 'estop') if prev is not None else estop
         if not estop and (was_stop or prev is None):
@@ -230,9 +303,27 @@ class Waveform:
         if self.stimuli != len(self.c['steps']) * self.c['repeats']: raise ValueError('missing stimulus responses')
         if self.previous is None or any(self.level(self.previous, role) for role in ROLES - {'stimulus'}):
             raise ValueError('final FPGA outputs/directions/estop must be LOW')
-        return dict(samples=self.offset, stimuli=self.stimuli, left_cycles=self.cycles[0],
-                    right_cycles=self.cycles[1], stop_assertions=self.stop_count,
-                    max_stop_samples_including_uncertainty=self.max_stop_samples)
+        report = dict(samples=self.offset, stimuli=self.stimuli, left_cycles=self.cycles[0],
+                      right_cycles=self.cycles[1], stop_assertions=self.stop_count,
+                      max_stop_samples_including_uncertainty=self.max_stop_samples)
+        if self.v05:
+            if (self.release_start is not None or self.recorder_start is not None
+                    or self.recorder_end is not None or self.releases != self.c['release_count']):
+                raise ValueError('v0.5 release marker coverage is incomplete')
+            def quantile(histogram):
+                rank = (self.releases * 99 + 99) // 100
+                seen = 0
+                for sample, count in enumerate(histogram):
+                    seen += count
+                    if seen >= rank: return sample
+                raise ValueError('v0.5 timing histogram is incomplete')
+            report['v05_timing'] = dict(
+                releases=self.releases, release_p99_samples=quantile(self.release_hist),
+                baseline_p99_samples=quantile(self.baseline_hist),
+                overhead_p99_samples=quantile(self.overhead_hist),
+                release_max_samples=self.release_max, baseline_max_samples=self.baseline_max,
+                overhead_max_samples=self.overhead_max)
+        return report
 
 
 class Uart:
@@ -402,12 +493,14 @@ def read_json_lines(path):
             yield json.loads(line)
 
 
-def replay(run, require_uart=True):
+def replay(run, require_uart=None):
     records = iter(read_json_lines(run / 'manifest.jsonl'))
     header = next(records, {})
     if header.get('type') != 'header' or type(header.get('format')) is not int or header.get('format') != 1: raise ValueError('missing/invalid manifest header')
     if header.get('source') not in ('sigrok', 'synthetic-or-import'): raise ValueError('unknown evidence source')
     observer = Waveform(header['config'])
+    v05 = V05_ROLES <= set(header['config']['channels'])
+    if require_uart is None: require_uart = not v05
     chunk_limit = integer(header['chunk_bytes'], 1, CHUNK_BYTES, 'chunk size')
     count = 0
     footer = None
@@ -458,8 +551,10 @@ def replay(run, require_uart=True):
             while data := stream.read(READ_BYTES): uart.feed(data)
         report['uart'] = uart.finish()
     if header.get('source') == 'sigrok':
-        if not require_uart: raise ValueError('sigrok replay requires UART')
-        check_receipts(footer.get('uart_receipts', {}), footer['elapsed_seconds'], header['config']['uart_max_gap_ns'], report['uart']['heartbeats'])
+        if not require_uart and not v05: raise ValueError('V04 sigrok replay requires UART')
+        if require_uart:
+            check_receipts(footer.get('uart_receipts', {}), footer['elapsed_seconds'],
+                           header['config']['uart_max_gap_ns'], report['uart']['heartbeats'])
         if footer.get('sr_df_end') is not True or footer.get('loaded_library_verified') is not True:
             raise ValueError('missing sigrok completion/runtime proof')
         if sha(run / 'analyzer.log') != footer.get('analyzer_sha256'): raise ValueError('analyzer log integrity failure')
@@ -506,6 +601,9 @@ def library_loaded(pid, path):
 
 def capture(config, campaign, run_name, uart_path, driver):
     validate_config(config)
+    v05 = V05_ROLES <= set(config['channels'])
+    if v05 and uart_path is not None: raise ValueError('v0.5 marker capture does not consume V04 UART logs')
+    if not v05 and uart_path is None: raise ValueError('V04 capture requires --uart')
     runtime = pinned_runtime(config)
     if not re.fullmatch('[a-zA-Z0-9_-]{1,80}', run_name): raise ValueError('invalid run directory name')
     campaign.mkdir(parents=True, exist_ok=True)
@@ -515,7 +613,7 @@ def capture(config, campaign, run_name, uart_path, driver):
         run.mkdir()
         budget = Budget(campaign)
         observer = Waveform(config)
-        uart = Uart(config['uart_max_gap_ns'])
+        uart = None if v05 else Uart(config['uart_max_gap_ns'])
         command = [runtime['sigrok']['path'], '-l', '4', '-d', driver, '-c', 'samplerate=24m',
                    '-C', 'D0,D1,D2,D3,D4,D5,D6,D7', '--samples', str(config['samples']), '-O', 'binary']
         process = None
@@ -533,28 +631,30 @@ def capture(config, campaign, run_name, uart_path, driver):
             json_line(manifest, dict(type='header', format=1, source='sigrok', config=config,
                                     chunk_bytes=CHUNK_BYTES, command=command, started_ns=time.time_ns()), budget)
             try:
-                uart_fd = os.open(uart_path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY)
-                old_term = termios.tcgetattr(uart_fd)
-                settings = termios.tcgetattr(uart_fd)
-                settings[0] = 0; settings[1] = 0; settings[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
-                settings[3] = 0; settings[4] = termios.B115200; settings[5] = termios.B115200
-                settings[6][termios.VMIN] = 0; settings[6][termios.VTIME] = 0
-                termios.tcsetattr(uart_fd, termios.TCSANOW, settings)
+                if uart_path is not None:
+                    uart_fd = os.open(uart_path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY)
+                    old_term = termios.tcgetattr(uart_fd)
+                    settings = termios.tcgetattr(uart_fd)
+                    settings[0] = 0; settings[1] = 0; settings[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
+                    settings[3] = 0; settings[4] = termios.B115200; settings[5] = termios.B115200
+                    settings[6][termios.VMIN] = 0; settings[6][termios.VTIME] = 0
+                    termios.tcsetattr(uart_fd, termios.TCSANOW, settings)
                 process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 with selectors.DefaultSelector() as selector:
                     selector.register(process.stdout, selectors.EVENT_READ, 'samples')
                     selector.register(process.stderr, selectors.EVENT_READ, 'analyzer')
-                    selector.register(uart_fd, selectors.EVENT_READ, 'uart')
+                    if uart_fd is not None: selector.register(uart_fd, selectors.EVENT_READ, 'uart')
                     analyzer_tail = b''
                     outputs = 2
                     while outputs:
                         if time.monotonic() > deadline: raise ValueError('acquisition deadline exceeded')
                         budget.check(CHUNK_BYTES + 65536)
                         since = time.monotonic() - start
-                        if since - (uart.last_receipt or 0) > config['uart_max_gap_ns'] / 1e9:
+                        if uart is not None and since - (uart.last_receipt or 0) > config['uart_max_gap_ns'] / 1e9:
                             raise ValueError('host UART heartbeat deadline exceeded')
                         if not loaded: loaded = library_loaded(process.pid, runtime['libsigrok']['path'])
-                        for key, _ in selector.select(timeout=min(1, config['uart_max_gap_ns'] / 2e9)):
+                        timeout = min(1, config['uart_max_gap_ns'] / 2e9) if uart is not None else 1
+                        for key, _ in selector.select(timeout=timeout):
                             data = os.read(key.fd, READ_BYTES)
                             if not data:
                                 if key.data == 'uart': raise ValueError('UART disconnected')
@@ -582,10 +682,12 @@ def capture(config, campaign, run_name, uart_path, driver):
                         observer.feed(block)
                 if process.wait(timeout=10) != 0: raise ValueError('sigrok acquisition failed')
                 if not loaded or not ended: raise ValueError('missing loaded-library/completion proof')
-                observer.finish(); uart.finish()
-                check_receipts(dict(first_seconds=uart.first_receipt, last_seconds=uart.last_receipt,
-                                    max_gap_seconds=uart.max_receipt_gap, heartbeats=uart.beats),
-                               time.monotonic() - start, config['uart_max_gap_ns'], uart.beats)
+                observer.finish()
+                if uart is not None:
+                    uart.finish()
+                    check_receipts(dict(first_seconds=uart.first_receipt, last_seconds=uart.last_receipt,
+                                        max_gap_seconds=uart.max_receipt_gap, heartbeats=uart.beats),
+                                   time.monotonic() - start, config['uart_max_gap_ns'], uart.beats)
                 pinned_runtime(config)
                 footer['complete'] = True
             except BaseException as error:
@@ -617,8 +719,9 @@ def capture(config, campaign, run_name, uart_path, driver):
                               uart_sha256=sha(run / 'uart.log'), analyzer_sha256=sha(run / 'analyzer.log'),
                               unretained_pending_samples=len(pending), unread_acquisition_samples_unknown=not footer['complete'],
                               campaign_bytes_before_footer=budget.used,
-                              uart_receipts=dict(first_seconds=uart.first_receipt, last_seconds=uart.last_receipt,
-                                                 max_gap_seconds=uart.max_receipt_gap, heartbeats=uart.beats))
+                              uart_receipts=None if uart is None else
+                              dict(first_seconds=uart.first_receipt, last_seconds=uart.last_receipt,
+                                   max_gap_seconds=uart.max_receipt_gap, heartbeats=uart.beats))
                 # The 5 GB reserve permits a final failure record after controlled stop.
                 json_line(manifest, footer, budget, final=True)
                 os.fsync(manifest.fileno())
@@ -631,7 +734,7 @@ def main():
     commands = parser.add_subparsers(dest='mode', required=True)
     c = commands.add_parser('capture')
     c.add_argument('config', type=Path); c.add_argument('campaign', type=Path); c.add_argument('run')
-    c.add_argument('--uart', required=True); c.add_argument('--driver', default='fx2lafw')
+    c.add_argument('--uart'); c.add_argument('--driver', default='fx2lafw')
     r = commands.add_parser('replay'); r.add_argument('run', type=Path)
     r.add_argument('--synthetic-without-uart', action='store_true', help='non-acceptance fixtures only')
     commands.add_parser('self-test')
@@ -647,7 +750,7 @@ def main():
             if args.synthetic_without_uart:
                 header = next(read_json_lines(args.run / 'manifest.jsonl'))
                 if header.get('source') != 'synthetic-or-import': raise ValueError('UART bypass is only for synthetic/import fixtures')
-            report = replay(args.run, require_uart=not args.synthetic_without_uart)
+            report = replay(args.run, require_uart=False if args.synthetic_without_uart else None)
         print(json.dumps(report, sort_keys=True))
         return 0
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:

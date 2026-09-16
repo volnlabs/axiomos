@@ -88,6 +88,9 @@ verifier-cost = []
 # loading is now the fail-closed default.
 bpf-production-signed = []
 managed-runtime = []
+# Unloaded v0.5 qualification only: GPIO12 brackets each timer release and
+# GPIO13 rises immediately before the recorder append. Both fall before return.
+managed-runtime-bench-markers = ["managed-runtime"]
 # Explicit escape hatch for local demo images that load unsigned BPF objects.
 # Production artifacts must never enable this feature.
 bpf-unsigned-development = []

@@ -245,6 +245,12 @@ pub(crate) fn on_release(
     if report.failure.is_some() {
         crate::actuation::trigger_estop(kernel_bpf::actuation::AuditSource::ManagedControl);
     }
+    #[cfg(all(
+        target_arch = "aarch64",
+        feature = "rpi5",
+        feature = "managed-runtime-bench-markers"
+    ))]
+    crate::arch::aarch64::interrupts::managed_bench_recorder_start();
     super::recorder::events::cycle(release, report);
     Ok(report)
 }
