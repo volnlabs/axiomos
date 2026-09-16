@@ -1,6 +1,6 @@
 version = 1
 baseline_sites = 736
-baseline_fingerprint = "sha256:e7689b2fac01e24007b96fa84011578d46a1637010323db0bc71129e288fb871"
+baseline_fingerprint = "sha256:be108a3ae2f3f55686e749b007eddd35170f2b39a516bb847c91276b415ba130"
 
 # 2026-09-16: verifier-cost instrumentation reuses the initialized physical
 # timer snapshot and moves existing BPF test sites. No unsafe syntax or

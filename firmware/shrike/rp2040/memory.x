@@ -3,6 +3,7 @@ MEMORY {
     /* R0.4 has 4 MB, but its factory layout reserves the upper 2 MB for
        LittleFS/FPGA bitstreams. Keep custom firmware inside the first 2 MB. */
     FLASH : ORIGIN = 0x10000100, LENGTH = 2048K - 0x100
+    FPGA_STORAGE : ORIGIN = 0x10200000, LENGTH = 2048K
     RAM   : ORIGIN = 0x20000000, LENGTH = 256K
 }
 
@@ -14,4 +15,8 @@ SECTIONS {
     {
         KEEP(*(.boot2));
     } > BOOT2
+    .fpga_image ORIGIN(FPGA_STORAGE) :
+    {
+        KEEP(*(.fpga_image));
+    } > FPGA_STORAGE
 } INSERT BEFORE .text;

@@ -11,6 +11,7 @@ from pathlib import Path
 
 FIRMWARE_START = 0x10000000
 FPGA_STORAGE_START = 0x10200000
+FPGA_STORAGE_END = 0x10400000
 UF2_BLOCK_SIZE = 512
 UF2_MAGIC = (0x0A324655, 0x9E5D5157, 0x0AB16F30)
 RECOVERY_FILES = {
@@ -49,10 +50,14 @@ def check_factory_recovery(root: Path) -> None:
         fail("factory UF2 hash mismatch")
 
 
-def check_uf2(image: Path) -> None:
+def check_uf2(image: Path, fpga_image: Path | None = None) -> None:
     data = image.read_bytes()
     if not data or len(data) % UF2_BLOCK_SIZE:
         fail("UF2 must contain complete 512-byte blocks")
+    expected_fpga = fpga_image.read_bytes() if fpga_image else None
+    if expected_fpga is not None and not 0 < len(expected_fpga) <= FPGA_STORAGE_END - FPGA_STORAGE_START:
+        fail("invalid FPGA image length")
+    fpga_offset = 0
     for offset in range(0, len(data), UF2_BLOCK_SIZE):
         block = data[offset : offset + UF2_BLOCK_SIZE]
         start0, start1, _flags, address, payload_size, *_ = struct.unpack("<IIIIIIII", block[:32])
@@ -61,14 +66,30 @@ def check_uf2(image: Path) -> None:
             fail(f"invalid UF2 magic at block {offset // UF2_BLOCK_SIZE}")
         if payload_size > 476:
             fail(f"invalid UF2 payload length at block {offset // UF2_BLOCK_SIZE}")
-        if address < FIRMWARE_START or address + payload_size > FPGA_STORAGE_START:
+        end_address = address + payload_size
+        if address < FIRMWARE_START or end_address > FPGA_STORAGE_END:
+            fail("UF2 address is outside R0.4 flash")
+        if address < FPGA_STORAGE_START < end_address:
             fail("UF2 overlaps reserved FPGA/storage region")
+        if address >= FPGA_STORAGE_START:
+            if expected_fpga is None:
+                fail("UF2 overlaps reserved FPGA/storage region")
+            if fpga_offset >= len(expected_fpga) or address != FPGA_STORAGE_START + fpga_offset:
+                fail("FPGA UF2 blocks are missing, extra, or reordered")
+            payload = block[32 : 32 + payload_size]
+            exact = min(payload_size, len(expected_fpga) - fpga_offset)
+            if payload[:exact] != expected_fpga[fpga_offset : fpga_offset + exact] or any(payload[exact:]):
+                fail("FPGA UF2 payload does not match the selected image")
+            fpga_offset += payload_size
+    if expected_fpga is not None and fpga_offset < len(expected_fpga):
+        fail("FPGA UF2 payload is incomplete")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--uf2", type=Path)
+    parser.add_argument("--fpga-bitstream", type=Path)
     parser.add_argument("--allow-missing-factory", action="store_true")
     parser.add_argument("--converter-version")
     args = parser.parse_args()
@@ -80,7 +101,9 @@ def main() -> int:
         if not args.allow_missing_factory:
             check_factory_recovery(args.root)
         if args.uf2:
-            check_uf2(args.uf2)
+            check_uf2(args.uf2, args.fpga_bitstream)
+        elif args.fpga_bitstream:
+            fail("--fpga-bitstream requires --uf2")
     except (OSError, ValueError) as error:
         print(error, file=sys.stderr)
         return 1

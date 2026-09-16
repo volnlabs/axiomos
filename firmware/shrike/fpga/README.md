@@ -99,9 +99,10 @@ signed-range/PWM arithmetic and watchdog timing. The SPI test runs at 2,048,
 2,049, 4,097 and the production 2,500,000-cycle timeout; an independent elapsed
 edge counter checks exact expiry. The test interval is bounded to fail on hangs.
 Structural and mapping preflight are necessary checks, not placement/routing,
-post-route timing or physical output qualification. Runtime operation stays
-disabled until the real adapter, qualified artifact and explicit rearm path
-are ready under the [v0.5 contract](../../../docs/plans/active/v0.5-bounded-runtime-evolution.md).
+post-route timing or physical output qualification. The default firmware keeps
+runtime disabled. The opt-in qualification image selects the exact retained
+nominal bitstream while the [v0.5 contract](../../../docs/plans/active/v0.5-bounded-runtime-evolution.md)
+still requires real-adapter, timing and explicit-rearm measurements.
 
 ## Post-commit status read
 

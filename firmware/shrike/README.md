@@ -16,9 +16,11 @@ for the MCU LED. Provisional external assignments are GPIO5 e-stop observe,
 GPIO6–9 motor direction, GPIO10/11 ultrasonic, and GPIO16/17 Pi UART.
 
 GPIO14/15 are the only RP2040 PWM inputs to the FPGA; GPIO18/19 are unused and
-must not be connected to an L298N. The current firmware owns the R0.4 FPGA pins
-but deliberately remains safe-low and non-operational because no validated
-bitstream/timing manifest and runtime profile are selected.
+must not be connected to an L298N. The default firmware owns the R0.4 FPGA pins
+but remains safe-low and non-operational. The opt-in `fpga-runtime`
+qualification build embeds the pinned nominal FPGA image and selects the
+explicit candidate timing profile; physical measurements still decide whether
+that exact build can become a release artifact.
 The target now owns UART0 on GPIO16/17 and performs the existing local 200 ms
 quiescence procedure after inhibiting the FPGA. UART reads distinguish idle from
 receive faults, writes accept a bounded prefix, and peripheral reset discards
@@ -30,7 +32,8 @@ closed. The compile-checked optional runtime path now receives an explicit
 Requalify, runs checked preparation, then starts the exact-session control loop
 through the shared atomic FPGA sink. Termination clears pending sensor acquisition
 and inhibits/drains before another request; it never resumes a controller by
-itself. The new runtime profile remains `None`, so this path is not enabled.
+itself. The default runtime profile remains `None`; only
+`build-uf2.sh --runtime` selects it.
 
 The UART register algorithms have host tests; they do not qualify physical FIFO
 reset, baud, peer inhibition or delayed acknowledgements. Pi receive faults now

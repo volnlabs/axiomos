@@ -34,7 +34,7 @@ if [[ "$MODE" != "quick" ]]; then
     run_cargo_step clippy-rp2040-debug clippy --manifest-path firmware/shrike/rp2040/Cargo.toml \
         --target thumbv6m-none-eabi -- -D clippy::all
     run_cargo_step clippy-rp2040-release clippy --manifest-path firmware/shrike/rp2040/Cargo.toml \
-        --target thumbv6m-none-eabi --release -- -D clippy::all
+        --target thumbv6m-none-eabi --release --all-features -- -D clippy::all
     # The shared no_std control crate must remain host-buildable. The
     # thumbv6m firmware build checks the target dependency as well.
     run_cargo_step shrike-control-build build -p shrike_control

@@ -98,3 +98,14 @@ output = "firmware/shrike/rp2040/target/thumbv6m-none-eabi/release/shrike_rp2040
 selection = "elf2uf2-rs@2.2.0 of the fixed crate-local release ELF, rejected if it reaches the upper 2 MiB"
 immutable_inputs = "firmware/shrike/rp2040/Cargo.lock; rust-toolchain.toml; firmware/shrike/rp2040/memory.x; elf2uf2-rs@2.2.0"
 hash_evidence = "SHA-256 sidecar emitted by build-uf2.sh and retained before physical flashing"
+
+[[artifact]]
+name = "Shrike RP2040 runtime qualification UF2"
+platform = "Shrike RP2040 firmware"
+status = "experimental"
+format = "UF2 firmware plus FPGA image"
+producer = "firmware/shrike/rp2040/build-uf2.sh --runtime"
+output = "firmware/shrike/rp2040/target/thumbv6m-none-eabi/release/shrike_rp2040_runtime.uf2"
+selection = "elf2uf2-rs@2.2.0 of the fixed fpga-runtime ELF with the pinned FPGA image at 0x10200000"
+immutable_inputs = "firmware/shrike/rp2040/Cargo.lock; rust-toolchain.toml; firmware/shrike/rp2040/memory.x; firmware/shrike/fpga/forgefpga/axiomos_r04_mcu.bin; elf2uf2-rs@2.2.0"
+hash_evidence = "SHA-256 sidecar emitted by build-uf2.sh --runtime and retained before unloaded qualification"

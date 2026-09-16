@@ -9,8 +9,7 @@ description = "Shrike-lite RP2040 sidecar firmware: UART control link, L298N mot
 
 [features]
 default = []
-# Deliberately cannot build until lifecycle commands are atomically integrated
-# with the existing UART/watchdog/e-stop control loop.
+# Opt-in unloaded qualification image; the default firmware stays inhibited.
 fpga-runtime = []
 
 [dependencies]

@@ -206,7 +206,7 @@ workspace = "excluded"
 artifact = "firmware:shrike_rp2040"
 kind = "cargo"
 role = "RP2040 firmware"
-gate = "RP2040 target lint and build"
+gate = "RP2040 target lint plus default and opt-in runtime artifact builds"
 
 [[component]]
 path = "userspace/benchmarks/system/Cargo.toml"

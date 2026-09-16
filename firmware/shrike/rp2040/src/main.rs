@@ -1,15 +1,10 @@
 //! Shrike-lite V1.0/R0.4 RP2040 FPGA owner.
 //!
-//! This build intentionally remains fail-closed until an exact generated
-//! bitstream manifest and authoritative PWR/EN/READY timing are available.
+//! The default build remains fail-closed. `fpga-runtime` selects the pinned
+//! unloaded qualification artifact and its explicit candidate timing profile.
 
 #![no_std]
 #![no_main]
-
-#[cfg(feature = "fpga-runtime")]
-compile_error!(
-    "fpga-runtime is disabled until the exact artifact, runtime profile and bilateral session path are qualified"
-);
 
 #[allow(dead_code)]
 mod board;
@@ -45,10 +40,26 @@ pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 
 const XTAL_HZ: u32 = 12_000_000;
 
-/// This can become `Some((manifest, ready_timeout_us))` only with the generated
-/// image and a calibrated device timing contract. Runtime remains compile-time
-/// disabled pending the complete bilateral session and hardware qualification.
-const VALIDATED_FPGA_ARTIFACT: Option<(BitstreamManifest, u64)> = None;
+#[cfg(feature = "fpga-runtime")]
+#[link_section = ".fpga_image"]
+#[used]
+static FPGA_IMAGE: [u8; 46_408] = *include_bytes!("../../fpga/forgefpga/axiomos_r04_mcu.bin");
+
+#[cfg(feature = "fpga-runtime")]
+const SELECTED_FPGA_ARTIFACT: Option<(BitstreamManifest, u64)> = Some((
+    BitstreamManifest {
+        offset: shrike_control::fpga::FPGA_STORAGE_START,
+        length: FPGA_IMAGE.len() as u32,
+        sha256: [
+            0x2b, 0xb0, 0x27, 0x13, 0x0b, 0x9c, 0xdc, 0xfd, 0xda, 0x1e, 0x47, 0xe9, 0xb5, 0x1f,
+            0xb4, 0x37, 0xf1, 0x38, 0xf9, 0xda, 0xab, 0x25, 0xff, 0xcc, 0x58, 0x9e, 0xb9, 0x46,
+            0x8f, 0xeb, 0xbc, 0x4c,
+        ],
+    },
+    10_000,
+));
+#[cfg(not(feature = "fpga-runtime"))]
+const SELECTED_FPGA_ARTIFACT: Option<(BitstreamManifest, u64)> = None;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlatformError {
@@ -65,8 +76,8 @@ struct FpgaProfile {
     configuration_timeout_us: u64,
 }
 
-/// Candidate acquisition/link timing is explicit and remains unqualified.
-/// No default can select FPGA power, motor output or sensor acquisition.
+/// Candidate acquisition/link timing is explicit. Hardware qualification must
+/// measure these values before this feature can identify a release artifact.
 #[derive(Clone, Copy)]
 struct RuntimeProfile {
     fpga: FpgaProfile,
@@ -77,10 +88,48 @@ struct RuntimeProfile {
     heartbeat_period_us: u64,
 }
 
-const VALIDATED_RUNTIME_PROFILE: Option<RuntimeProfile> = None;
+#[cfg(feature = "fpga-runtime")]
+const SELECTED_RUNTIME_PROFILE: Option<RuntimeProfile> = Some(RuntimeProfile {
+    fpga: FpgaProfile {
+        startup: spi::Startup {
+            prescale: 10,
+            postdivide: 7,
+            power_off_us: 500,
+            power_on_us: 3_000,
+            cs_high_us: 3,
+            timeout_us: 6_000,
+        },
+        runtime: spi::RuntimeEntry {
+            prescale: 10,
+            postdivide: 7,
+            high_z_us: 10,
+            reset_us: 10,
+            timeout_us: 1_000,
+            transfer: spi::Timing {
+                setup_us: 4,
+                hold_us: 3,
+                high_us: 5,
+                timeout_us: 1_000,
+            },
+        },
+        configuration_timeout_us: 1_000_000,
+    },
+    ultrasonic: UltrasonicTiming {
+        trigger_pulse_us: 10,
+        max_echo_us: 30_000,
+        max_attempt_us: 31_000,
+        max_sampling_gap_us: 100,
+    },
+    session_timeout_us: 2_000_000,
+    command_timeout_us: 100_000,
+    ping_period_us: 50_000,
+    heartbeat_period_us: 20_000,
+});
+#[cfg(not(feature = "fpga-runtime"))]
+const SELECTED_RUNTIME_PROFILE: Option<RuntimeProfile> = None;
 
 /// Owns every safety-relevant R0.4 output. Unsupported operations return an
-/// error because this checkout lacks the vendor timing and generated image.
+/// error unless the build selects the pinned image and candidate profile.
 struct R04Platform<'a, PWR, EN, RESET, RIGHT, SPI> {
     pwr: PWR,
     en: EN,
@@ -119,7 +168,7 @@ where
     fn bitstream_sha256(&mut self, offset: u32, length: u32) -> Result<[u8; 32], Self::Error> {
         self.image = None;
         let (manifest, _) =
-            VALIDATED_FPGA_ARTIFACT.ok_or(PlatformError::MissingValidatedArtifact)?;
+            SELECTED_FPGA_ARTIFACT.ok_or(PlatformError::MissingValidatedArtifact)?;
         if !manifest.valid() || offset != manifest.offset || length != manifest.length {
             return Err(PlatformError::Bitstream(BitstreamError::InvalidManifest));
         }
@@ -261,8 +310,8 @@ fn main() -> ! {
             .into_pull_type::<hal::gpio::PullNone>()
             .into_function::<hal::gpio::FunctionSpi>(), // SCK
     );
-    // Keep SPI disabled until the generated artifact supplies its validated
-    // device timing. The pin tuple still compile-checks the exact SPI0 map.
+    // Keep SPI disabled until lifecycle preparation applies the selected
+    // timing. The pin tuple still compile-checks the exact SPI0 map.
     let spi = hal::spi::Spi::<_, _, _, 8>::new(pac.SPI0, spi_pins);
     let clock = TimerClock::new(pac.TIMER, &mut pac.RESETS).unwrap_or_else(|_| stopped());
 
@@ -292,7 +341,7 @@ fn main() -> ! {
         spi,
         clock: &clock,
         image: None,
-        profile: VALIDATED_RUNTIME_PROFILE.map(|profile| profile.fpga),
+        profile: SELECTED_RUNTIME_PROFILE.map(|profile| profile.fpga),
     };
     let mut lifecycle = FpgaLifecycle::new(platform);
 
@@ -314,7 +363,7 @@ fn main() -> ! {
         stopped();
     }
     let (Some(profile), Some((manifest, ready_timeout_us))) =
-        (VALIDATED_RUNTIME_PROFILE, VALIDATED_FPGA_ARTIFACT)
+        (SELECTED_RUNTIME_PROFILE, SELECTED_FPGA_ARTIFACT)
     else {
         lifecycle.fail_safe("runtime profile/artifact unavailable");
         stopped();
