@@ -63,6 +63,9 @@ class V05ReducerTests(unittest.TestCase):
                                                      if gate["required"] and report["gate_results"][name] != "pass"])
 
     def test_complete_evidence_can_pass_release(self):
+        acceptance = json.loads(json.dumps(self.config))
+        for name in v05.PHYSICAL_GATES:
+            acceptance["required_gates"][name]["implemented_by_reducer"] = True
         physical = {"schema": "axiomos.v05.physical-results.v1",
                     "physical_acceptance": True, "source_id": SOURCE,
                     "acceptance_config_sha256": self.digest,
@@ -71,11 +74,86 @@ class V05ReducerTests(unittest.TestCase):
              mock.patch.object(v05, "validate_software", return_value={"pass": True}), \
              mock.patch.object(v05, "validate_physical", return_value=physical):
             report = v05.reduce_records(
-                self.records(), self.expectations(), self.config, self.digest,
+                self.records(), self.expectations(), acceptance, self.digest,
                 Path("reclamation"), Path("software"), Path("physical"))
         self.assertEqual(report["release_verdict"], "pass")
         self.assertEqual(report["release_blockers"], [])
         self.assertEqual(set(report["gate_results"].values()), {"pass"})
+
+    def test_blocked_physical_result_propagates_gates_and_blocks_release(self):
+        physical = {"schema": "axiomos.v05.physical-results.v1",
+                    "physical_acceptance": False, "source_id": SOURCE,
+                    "acceptance_config_sha256": self.digest,
+                    "gate_results": {"reset_quiescence": "pass",
+                                     "physical_campaign": "blocked",
+                                     "fault_matrix": "not_evaluated",
+                                     "recorder_overhead": "pass"},
+                    "qualification_blockers": {
+                        "physical_campaign": "retained evidence cannot prove the injected fault",
+                        "fault_matrix": "fault phase is not captured"}}
+        with mock.patch.object(v05, "validate_reclamation", return_value={"pass": True}), \
+             mock.patch.object(v05, "validate_software", return_value={"pass": True}), \
+             mock.patch.object(v05, "validate_physical", return_value=physical):
+            report = v05.reduce_records(
+                self.records(), self.expectations(), self.config, self.digest,
+                Path("reclamation"), Path("software"), Path("physical"))
+        self.assertEqual(
+            {name: report["gate_results"][name] for name in v05.PHYSICAL_GATES},
+            physical["gate_results"])
+        self.assertEqual(report["release_verdict"], "blocked")
+        self.assertIn("physical_campaign", report["release_blockers"])
+        self.assertIn("fault_matrix", report["release_blockers"])
+
+    def test_physical_result_rejects_malformed_or_inconsistent_gate_outcomes(self):
+        valid = {"schema": "axiomos.v05.physical-results.v1",
+                 "physical_acceptance": False, "source_id": SOURCE,
+                 "acceptance_config_sha256": self.digest,
+                 "gate_results": {"reset_quiescence": "pass",
+                                  "physical_campaign": "blocked",
+                                  "fault_matrix": "not_evaluated",
+                                  "recorder_overhead": "pass"},
+                 "qualification_blockers": {
+                     "physical_campaign": "campaign evidence is incomplete",
+                     "fault_matrix": "fault attribution is unavailable"}}
+        with mock.patch.object(v05.runpy, "run_path",
+                               return_value={"reduce": lambda *_: valid}):
+            self.assertEqual(
+                v05.validate_physical(Path("physical"), SOURCE, self.digest,
+                                      Path("acceptance")), valid)
+
+        malformed = []
+        missing = json.loads(json.dumps(valid)); missing["gate_results"].pop("fault_matrix"); malformed.append(missing)
+        extra = json.loads(json.dumps(valid)); extra["gate_results"]["unknown"] = "pass"; malformed.append(extra)
+        status = json.loads(json.dumps(valid)); status["gate_results"]["fault_matrix"] = "failed"; malformed.append(status)
+        passing_flag = json.loads(json.dumps(valid)); passing_flag["physical_acceptance"] = True; malformed.append(passing_flag)
+        non_bool = json.loads(json.dumps(valid)); non_bool["physical_acceptance"] = 0; malformed.append(non_bool)
+        all_pass = json.loads(json.dumps(valid)); all_pass["gate_results"] = {name: "pass" for name in v05.PHYSICAL_GATES}; malformed.append(all_pass)
+        missing_blocker = json.loads(json.dumps(valid)); missing_blocker["qualification_blockers"].pop("fault_matrix"); malformed.append(missing_blocker)
+        for result in malformed:
+            with self.subTest(result=result), mock.patch.object(
+                    v05.runpy, "run_path", return_value={"reduce": lambda *_, value=result: value}):
+                with self.assertRaisesRegex(ValueError, "physical campaign identity or gate result mismatch"):
+                    v05.validate_physical(Path("physical"), SOURCE, self.digest,
+                                          Path("acceptance"))
+
+    def test_disabled_fault_gate_keeps_configured_policy_despite_physical_pass(self):
+        acceptance = json.loads(json.dumps(self.config))
+        acceptance["required_gates"]["fault_matrix"].update(
+            implemented_by_reducer=False, missing_policy="not_evaluated")
+        physical = {"schema": "axiomos.v05.physical-results.v1",
+                    "physical_acceptance": True, "source_id": SOURCE,
+                    "acceptance_config_sha256": self.digest,
+                    "gate_results": {name: "pass" for name in v05.PHYSICAL_GATES},
+                    "qualification_blockers": {}}
+        with mock.patch.object(v05, "validate_reclamation", return_value={"pass": True}), \
+             mock.patch.object(v05, "validate_software", return_value={"pass": True}), \
+             mock.patch.object(v05, "validate_physical", return_value=physical):
+            report = v05.reduce_records(
+                self.records(), self.expectations(), acceptance, self.digest,
+                Path("reclamation"), Path("software"), Path("physical"))
+        self.assertEqual(report["gate_results"]["fault_matrix"], "not_evaluated")
+        self.assertIn("fault_matrix", report["release_blockers"])
+        self.assertEqual(report["release_verdict"], "blocked")
 
     def software_fixture(self, directory):
         directory = Path(directory)

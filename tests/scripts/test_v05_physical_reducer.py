@@ -66,13 +66,18 @@ def audit_report():
             "cycle_failures": 5}
 
 
-def analyzer_report(source="sigrok"):
-    return {"evidence_source": source, "v05_timing": {
+def analyzer_report(source="sigrok", run=None):
+    header, footer = [json.loads(line) for line in
+                      (run / "manifest.jsonl").read_text().splitlines()]
+    return {"evidence_source": source, "samples": footer["samples"],
+            "sample_rate_hz": header["config"]["sample_rate_hz"],
+            "capture_started_ns": header["started_ns"],
+            "capture_ended_ns": footer["ended_ns"], "v05_timing": {
         "paired_overhead_p99_ppm": 40_000, "paired_overhead_max_ppm": 60_000,
         "overhead_p99_samples": 20, "overhead_max_samples": 30,
         "release_p99_samples": 900, "release_max_samples": 950,
         "baseline_p99_samples": 880, "baseline_max_samples": 920,
-        "releases": 10}}
+        "releases": header["config"]["release_count"]}}
 
 
 def calibration_log():
@@ -126,13 +131,21 @@ def campaign(root):
         assert uploaded not in inventory_value["artifact_sha256"]
         inventory = file_ref(root, f"{boot}/inventory.json",
                              (json.dumps(inventory_value) + "\n").encode())
-        audit = file_ref(root, f"{boot}/audit.jsonl")
+        audit = file_ref(root, f"{boot}/audit.jsonl", f"{boot} audit fixture\n".encode())
         runs = []
         for index in range(20):
             relative = f"{boot}/run-{index + 1}"
             run = root / relative
             run.mkdir()
-            (run / "manifest.jsonl").write_text("physical fixture\n")
+            header = {"type": "header", "format": 1, "source": "sigrok",
+                      "fixture_run": relative, "started_ns": start_ns,
+                      "config": {"sample_rate_hz": 24_000_000,
+                                 "release_count": releases}}
+            footer = {"type": "end", "complete": True,
+                      "ended_ns": start_ns + 2_000_000 + releases * 10_000_000,
+                      "samples": releases * 240_000 + 48_000}
+            (run / "manifest.jsonl").write_text(
+                json.dumps(header) + "\n" + json.dumps(footer) + "\n")
             item = {"path": relative, "manifest_sha256": physical.sha256(run / "manifest.jsonl")}
             runs.append(item); all_runs.append((boot, relative))
         boots.append({"boot_id": boot, "boot_log": log, "boot_inventory": inventory,
@@ -162,9 +175,11 @@ def campaign(root):
              "provenance": provenance, "bundles": bundles,
              "calibration": calibration, "boots": boots,
              "endurance": {"pilot": {"start": boots[0]["status_start"],
-                                       "end": boots[0]["status_end"]},
+                                       "end": boots[0]["status_end"],
+                                       "run": boots[0]["shrike_runs"][0]["path"]},
                            "soak": {"start": boots[1]["status_start"],
-                                    "end": boots[1]["status_end"]}},
+                                    "end": boots[1]["status_end"],
+                                    "run": boots[1]["shrike_runs"][0]["path"]}},
              "load_trials": loads, "fault_trials": faults}
     path = root / "campaign.json"
     path.write_text(json.dumps(value) + "\n")
@@ -180,16 +195,72 @@ class PhysicalReducerTests(unittest.TestCase):
         self.assertEqual(rows[0]["clock_hz"], 0)
         self.assertEqual(rows[1]["modeled_ns"], 12000)
 
-    def test_complete_raw_campaign_is_required_before_physical_gates_pass(self):
+    def test_complete_manifest_cannot_prove_fault_injection_or_physical_acceptance(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); path = campaign(root)
             with mock.patch.dict(physical.AUDIT, {"stitch": lambda paths, acceptance: audit_report()}), \
-                 mock.patch.dict(physical.SHRIKE, {"replay": lambda path: analyzer_report()}):
+                 mock.patch.dict(physical.SHRIKE, {"replay": lambda path: analyzer_report(run=path)}):
                 result = physical.reduce(path, ACCEPTANCE)
-            self.assertTrue(result["physical_acceptance"])
+            self.assertFalse(result["physical_acceptance"])
             self.assertEqual(result["totals"]["boots"], 3)
             self.assertGreaterEqual(result["totals"]["releases"], 1_000_000)
-            self.assertEqual(set(result["gate_results"].values()), {"pass"})
+            self.assertEqual(result["gate_results"]["fault_matrix"], "not_evaluated")
+            self.assertEqual(result["gate_results"]["physical_campaign"], "blocked")
+            self.assertIn("fault_matrix", result["qualification_blockers"])
+
+    def test_audit_reuse_and_fault_boot_mismatch_reject(self):
+        for damage in ("audit_path", "audit_copy", "fault_boot", "run_copy"):
+            with self.subTest(damage=damage), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); path = campaign(root)
+                value = json.loads(path.read_text())
+                if damage == "audit_path":
+                    value["boots"][1]["audit_exports"] = value["boots"][0]["audit_exports"]
+                elif damage == "audit_copy":
+                    original = root / value["boots"][0]["audit_exports"][0]["path"]
+                    value["boots"][1]["audit_exports"] = [file_ref(
+                        root, "boot-2/copied.jsonl", original.read_bytes())]
+                elif damage == "run_copy":
+                    original = root / value["boots"][0]["shrike_runs"][0]["path"] / "manifest.jsonl"
+                    item = value["boots"][1]["shrike_runs"][0]
+                    copied = root / item["path"] / "manifest.jsonl"
+                    copied.write_bytes(original.read_bytes())
+                    item["manifest_sha256"] = physical.sha256(copied)
+                else:
+                    value["fault_trials"][0]["boot_id"] = "boot-2"
+                path.write_text(json.dumps(value))
+                with mock.patch.dict(physical.AUDIT, {"stitch": lambda paths, acceptance: audit_report()}), \
+                     mock.patch.dict(physical.SHRIKE, {"replay": lambda run: analyzer_report(run=run)}), \
+                     self.assertRaisesRegex(ValueError, "reused|another boot"):
+                    physical.reduce(path, ACCEPTANCE)
+
+    def test_endurance_requires_one_same_boot_continuous_capture(self):
+        for damage in ("missing", "unknown", "wrong_boot", "short", "late_start",
+                       "early_end", "few_releases", "unlisted_boot"):
+            with self.subTest(damage=damage), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); path = campaign(root)
+                value = json.loads(path.read_text())
+                soak = value["endurance"]["soak"]
+                if damage == "missing": del soak["run"]
+                if damage == "unknown": soak["run"] = "absent/run"
+                if damage == "wrong_boot": soak["run"] = value["boots"][0]["shrike_runs"][0]["path"]
+                if damage == "unlisted_boot":
+                    for key in ("start", "end"):
+                        sample = json.loads((root / soak[key]["path"]).read_text())
+                        sample["boot_id"] = "unknown-boot"
+                        soak[key] = file_ref(root, f"unknown-{key}.json", json.dumps(sample).encode())
+                path.write_text(json.dumps(value))
+                def replay(run):
+                    report = analyzer_report(run=run)
+                    if str(run.relative_to(root)) == soak.get("run"):
+                        if damage == "short": report["samples"] = 24_000_000
+                        if damage == "late_start": report["capture_started_ns"] += 1
+                        if damage == "early_end": report["capture_ended_ns"] -= 1
+                        if damage == "few_releases": report["v05_timing"]["releases"] = 10
+                    return report
+                with mock.patch.dict(physical.AUDIT, {"stitch": lambda paths, acceptance: audit_report()}), \
+                     mock.patch.dict(physical.SHRIKE, {"replay": replay}), \
+                     self.assertRaisesRegex(ValueError, "soak|endurance"):
+                    physical.reduce(path, ACCEPTANCE)
 
     def test_tampering_and_nonphysical_analyzer_input_cannot_pass(self):
         for damage in ("file", "source", "calibration", "calibration_extra",
@@ -223,9 +294,9 @@ class PhysicalReducerTests(unittest.TestCase):
                     retained.write_bytes(b"another verifier candidate")
                     trial["bundle"]["sha256"] = physical.sha256(retained)
                     path.write_text(json.dumps(value) + "\n")
-                report = analyzer_report("synthetic-or-import" if damage == "source" else "sigrok")
+                source = "synthetic-or-import" if damage == "source" else "sigrok"
                 with mock.patch.dict(physical.AUDIT, {"stitch": lambda paths, acceptance: audit_report()}), \
-                     mock.patch.dict(physical.SHRIKE, {"replay": lambda path: report}), \
+                     mock.patch.dict(physical.SHRIKE, {"replay": lambda path: analyzer_report(source, path)}), \
                      self.assertRaises(ValueError):
                     physical.reduce(path, ACCEPTANCE)
 

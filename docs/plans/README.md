@@ -17,7 +17,12 @@ Canonical runtime contract and M0–M7 sequence:
 The [engineering draft v2](active/v0.5-runtime-evolution-engineering-draft-v2.md)
 is retained as superseded historical input.
 
-Current hardware/development sequencing:
-[24-hour unloaded electronics acceptance, then runtime evolution](active/v04-hardware-first.md).
-This replaces the earlier powered-robot-before-v0.5 development dependency.
+Current development sequencing is owned by the
+[canonical v0.5 bounded runtime evolution plan](active/v0.5-bounded-runtime-evolution.md):
+complete the M1 software prerequisites and M2–M6 first, then run deferred M1
+electronics qualification with the final M7 hardware campaign. The
+[September 11 hardware-first plan](active/v04-hardware-first.md) remains the
+historical sequencing record and an active source of electrical and physical
+release gates; its requirement to finish unloaded electronics acceptance before
+v0.5 software work was superseded by the accepted September 15 sequence.
 Powered-motor and assembled-car acceptance remain required for robot release claims.

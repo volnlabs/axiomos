@@ -85,6 +85,9 @@ class ObserverTests(unittest.TestCase):
             self.m.archive_stream(io.BytesIO(data), root / 'run', root, cfg, chunk_bytes=4096)
             report = self.m.replay(root / 'run', require_uart=False)
             self.assertEqual(report['samples'], len(data))
+            self.assertEqual(report['sample_rate_hz'], 24_000_000)
+            self.assertNotIn('capture_started_ns', report)
+            self.assertNotIn('capture_ended_ns', report)
             self.assertFalse(report['physical_acceptance'])
             self.assertFalse(any(p.suffix == '.bin' for p in root.rglob('*')))
 
@@ -324,7 +327,33 @@ class ObserverTests(unittest.TestCase):
                 self.m.capture(cfg, campaign, 'run', None, 'synthetic')
                 report = self.m.replay(campaign / 'run')
             self.assertEqual(report['v05_timing']['releases'], 3)
+            self.assertEqual(report['sample_rate_hz'], 24_000_000)
+            self.assertGreater(report['capture_started_ns'], 0)
+            self.assertGreaterEqual(
+                report['capture_ended_ns'] - report['capture_started_ns'],
+                (cfg['samples'] * 1_000_000_000 + cfg['sample_rate_hz'] - 1)
+                // cfg['sample_rate_hz'])
             self.assertEqual((campaign / 'run/uart.log').read_bytes(), b'')
+
+            manifest = campaign / 'run/manifest.jsonl'
+            original = list(self.m.read_json_lines(manifest))
+            duration_ns = ((cfg['samples'] * 1_000_000_000
+                            + cfg['sample_rate_hz'] - 1) // cfg['sample_rate_hz'])
+            for damage in ('missing_start', 'reversed', 'short', 'gap', 'truncated'):
+                records = copy.deepcopy(original)
+                if damage == 'missing_start':
+                    del records[0]['started_ns']
+                elif damage == 'reversed':
+                    records[0]['started_ns'] = records[-1]['ended_ns'] + 1
+                elif damage == 'short':
+                    records[-1]['ended_ns'] = records[0]['started_ns'] + duration_ns - 1
+                elif damage == 'gap':
+                    records.pop(1)
+                else:
+                    records.pop()
+                manifest.write_text(''.join(json.dumps(record) + '\n' for record in records))
+                with self.subTest(damage=damage), self.assertRaises((ValueError, OSError)):
+                    self.m.replay(campaign / 'run')
 
     def test_representative_second_archive_and_replay(self):
         cfg, pattern = repeated_fixture(1000)

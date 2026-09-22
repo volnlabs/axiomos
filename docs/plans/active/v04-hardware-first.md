@@ -1,10 +1,24 @@
 ---
-title: Hardware-first path from PR 35 to v1
+title: Hardware qualification gates and retained hardware-first sequence
 status: active
-updated: 2026-09-11
+updated: 2026-09-22
 ---
 
 # Hardware-first implementation sequence
+
+> **Current authority:** The operator's accepted 2026-09-15 sequencing decision
+> in the [canonical v0.5 plan](v0.5-bounded-runtime-evolution.md) supersedes only
+> this document's requirement to complete unloaded electronics acceptance before
+> broad v0.5 software work. Complete the M1 software prerequisites and M2–M6
+> implementation/host tests first, then run the deferred M1 electronics
+> qualification together with the final M7 hardware campaign. The electrical,
+> recovery, functional/fault, pilot and soak requirements below remain active
+> release gates. The September 11 sequence and dated evidence are retained as
+> history; this notice does not mark physical qualification complete or authorize
+> hardware actuation.
+
+The following opening and milestone order record the superseded 2026-09-11
+hardware-before-software sequence.
 
 The next development gate is **24-hour unloaded electronics acceptance** on the
 real Pi5, RP2040 and programmed FPGA. Motors and motor power stay disconnected.

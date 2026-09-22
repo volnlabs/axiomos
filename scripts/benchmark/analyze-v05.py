@@ -392,11 +392,24 @@ def validate_software(path: Path, source: str, config: str) -> dict:
 def validate_physical(path: Path, source: str, config: str, acceptance_path: Path) -> dict:
     reducer = runpy.run_path(str(Path(__file__).with_name("v05-physical-reducer.py")))
     evidence = reducer["reduce"](path, acceptance_path)
+    gate_results = evidence.get("gate_results")
+    valid_gates = (isinstance(gate_results, dict)
+                   and set(gate_results) == set(PHYSICAL_GATES)
+                   and all(_one_of(status, {"pass", "blocked", "not_evaluated"})
+                           for status in gate_results.values()))
+    all_pass = valid_gates and all(status == "pass" for status in gate_results.values())
+    nonpassing = ({name for name, status in gate_results.items() if status != "pass"}
+                  if isinstance(gate_results, dict) else set())
+    blockers = evidence.get("qualification_blockers")
     if (evidence.get("schema") != "axiomos.v05.physical-results.v1"
-            or evidence.get("physical_acceptance") is not True
             or evidence.get("source_id") != source
             or evidence.get("acceptance_config_sha256") != config
-            or evidence.get("gate_results") != {name: "pass" for name in PHYSICAL_GATES}):
+            or type(evidence.get("physical_acceptance")) is not bool
+            or evidence["physical_acceptance"] != all_pass
+            or not valid_gates
+            or not isinstance(blockers, dict)
+            or set(blockers) != nonpassing
+            or any(not isinstance(reason, str) or not reason for reason in blockers.values())):
         raise ValueError("physical campaign identity or gate result mismatch")
     return evidence
 
@@ -641,8 +654,14 @@ def reduce_records(rows: list[dict], expectations: dict, acceptance: dict,
     evaluated = {"trace_subset": True, "resource_reclamation": resource_evidence is not None,
                  **{name: software_evidence is not None for name in SOFTWARE_CASES},
                  **{name: physical_evidence is not None for name in PHYSICAL_GATES}}
-    gate_results = {name: ("pass" if evaluated[name] else gate.get("missing_policy", "not_evaluated")) if gate["implemented_by_reducer"]
-                    else gate["missing_policy"] for name, gate in acceptance["required_gates"].items()}
+    gate_results = {
+        name: (gate["missing_policy"] if not gate["implemented_by_reducer"]
+               else physical_evidence["gate_results"][name]
+               if physical_evidence is not None and name in PHYSICAL_GATES
+               else "pass" if evaluated[name]
+               else gate.get("missing_policy", "not_evaluated"))
+        for name, gate in acceptance["required_gates"].items()
+    }
     blockers = [name for name, gate in acceptance["required_gates"].items()
                 if gate["required"] and gate_results[name] != "pass"]
     return {

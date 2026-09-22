@@ -553,6 +553,15 @@ def replay(run, require_uart=None):
         raise ValueError('acquisition incomplete or failed')
     if footer.get('chunks') != count or footer.get('samples') != observer.offset:
         raise ValueError('completion counts differ')
+    capture = None
+    if header.get('source') == 'sigrok':
+        started = integer(header.get('started_ns'), 1, 2**63 - 1, 'capture started_ns')
+        ended = integer(footer.get('ended_ns'), 1, 2**63 - 1, 'capture ended_ns')
+        sample_rate = header['config']['sample_rate_hz']
+        duration_ns = (footer['samples'] * 1_000_000_000 + sample_rate - 1) // sample_rate
+        if ended < started or ended - started < duration_ns:
+            raise ValueError('capture receipt envelope is shorter than sample duration')
+        capture = dict(capture_started_ns=started, capture_ended_ns=ended)
     report = observer.finish()
     if require_uart:
         uart_path = run / 'uart.log'
@@ -570,7 +579,10 @@ def replay(run, require_uart=None):
             raise ValueError('missing sigrok completion/runtime proof')
         if sha(run / 'analyzer.log') != footer.get('analyzer_sha256'): raise ValueError('analyzer log integrity failure')
     report.update(physical_acceptance=False, evidence_source=header.get('source'),
+                  sample_rate_hz=header['config']['sample_rate_hz'],
                   verdict='OFFLINE CHECK PASS; physical qualification remains external')
+    if capture is not None:
+        report.update(capture)
     return report
 
 

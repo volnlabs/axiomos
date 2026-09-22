@@ -48,7 +48,7 @@
     "recorder": {"required": true, "implemented_by_reducer": true, "missing_policy": "not_evaluated"},
     "reset_quiescence": {"required": true, "implemented_by_reducer": true, "missing_policy": "not_evaluated"},
     "physical_campaign": {"required": true, "implemented_by_reducer": true, "missing_policy": "blocked"},
-    "fault_matrix": {"required": true, "implemented_by_reducer": true, "missing_policy": "not_evaluated"},
+    "fault_matrix": {"required": true, "implemented_by_reducer": false, "missing_policy": "not_evaluated"},
     "recorder_overhead": {"required": true, "implemented_by_reducer": true, "missing_policy": "not_evaluated"},
     "resource_reclamation": {"required": true, "implemented_by_reducer": true, "missing_policy": "not_evaluated"}
   },

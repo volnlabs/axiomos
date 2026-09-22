@@ -325,7 +325,8 @@ def reduce(manifest_path, acceptance_path=DEFAULT_ACCEPTANCE):
     minimum = acceptance["campaign"]
     if not isinstance(boots, list) or len(boots) < minimum["physical_boots_min"]:
         raise ValueError("insufficient physical cold boots")
-    boot_reports, run_reports = {}, {}
+    boot_reports, run_reports, run_owners = {}, {}, {}
+    audit_owners, run_digests = {}, set()
     total_releases = total_transitions = total_rearms = total_stops = total_cycle_failures = 0
     phase_counts = [0] * minimum["transition_phase_bins"]
     for boot in boots:
@@ -349,7 +350,15 @@ def reduce(manifest_path, acceptance_path=DEFAULT_ACCEPTANCE):
         exports = boot["audit_exports"]
         if not isinstance(exports, list) or not exports:
             raise ValueError(f"boot {boot_id} has no audit exports")
-        audit = AUDIT["stitch"]([file_ref(root, value) for value in exports], acceptance)
+        export_paths = []
+        for reference in exports:
+            path = file_ref(root, reference)
+            # Content identity also catches a copy stored under another name.
+            owner = audit_owners.setdefault(reference["sha256"], boot_id)
+            if owner != boot_id:
+                raise ValueError("audit export reused by another boot")
+            export_paths.append(path)
+        audit = AUDIT["stitch"](export_paths, acceptance)
         transitions = sum(audit["successful_transitions"].values())
         if (audit["confirmed_handoffs"] != transitions
                 or transitions < minimum["physical_successful_transitions_per_boot_min"]
@@ -372,11 +381,15 @@ def reduce(manifest_path, acceptance_path=DEFAULT_ACCEPTANCE):
             path = retained(root, run["path"], directory=True)
             if sha256(path / "manifest.jsonl") != run["manifest_sha256"]:
                 raise ValueError("analyzer manifest hash mismatch")
+            if run["manifest_sha256"] in run_digests:
+                raise ValueError("analyzer evidence reused under another run")
+            run_digests.add(run["manifest_sha256"])
             report = SHRIKE["replay"](path)
             timing = report.get("v05_timing")
             if report.get("evidence_source") != "sigrok" or not isinstance(timing, dict) or timing.get("paired_overhead_p99_ppm", minimum["recorder_p99_overhead_ppm_max"] + 1) > minimum["recorder_p99_overhead_ppm_max"]:
                 raise ValueError("analyzer run is not passing physical v0.5 evidence")
             run_reports[run["path"]] = report
+            run_owners[run["path"]] = boot_id
         total_releases += interval["releases"]
         total_transitions += transitions
         boot_reports[boot_id] = {"timing": interval, "audit": audit,
@@ -426,6 +439,8 @@ def reduce(manifest_path, acceptance_path=DEFAULT_ACCEPTANCE):
     for trial in trials:
         if not isinstance(trial, dict) or set(trial) != {"boot_id", "fault", "phase", "repeat", "run"} or trial["boot_id"] not in boot_reports or trial["run"] not in run_reports or trial["run"] in assigned_runs:
             raise ValueError("invalid or reused fault trial evidence")
+        if run_owners[trial["run"]] != trial["boot_id"]:
+            raise ValueError("fault trial run belongs to another boot")
         if trial["fault"] not in matrix["faults"] or trial["phase"] not in matrix["phases"]:
             raise ValueError("unknown fault or phase")
         repeat = integer(trial["repeat"], "fault repeat", positive=True)
@@ -448,23 +463,48 @@ def reduce(manifest_path, acceptance_path=DEFAULT_ACCEPTANCE):
     previous_end = None
     for name, seconds in (("pilot", minimum["pilot_seconds"]), ("soak", minimum["soak_seconds"])):
         interval = endurance[name]
-        if not isinstance(interval, dict) or set(interval) != {"start", "end"}:
+        if not isinstance(interval, dict) or set(interval) != {"start", "end", "run"}:
             raise ValueError(f"invalid {name} interval")
         query_timeout = acceptance["timing"]["timing_status_query_timeout_ns"]
         start = status_sample(root, interval["start"], query_timeout_ns=query_timeout)
         end = status_sample(root, interval["end"], start["boot_id"], query_timeout)
+        run = interval["run"]
+        if (not isinstance(run, str) or run not in run_reports
+                or run_owners[run] != start["boot_id"]):
+            raise ValueError(f"{name} endurance capture is absent or belongs to another boot")
         result = status_delta(start, end, acceptance["cpu"]["period_ns"])
         if result["elapsed_min_ns"] < seconds * 1_000_000_000:
             raise ValueError(f"{name} interval is too short")
+        # One replayed acquisition is required: separate runs cannot establish
+        # continuity across a restart. Host timestamps are an envelope only;
+        # they do not synchronize physical samples with recorder events.
+        capture = run_reports[run]
+        samples = integer(capture.get("samples"), f"{name} samples", positive=True)
+        rate = integer(capture.get("sample_rate_hz"), f"{name} sample rate", positive=True)
+        capture_start = integer(capture.get("capture_started_ns"), f"{name} capture start", positive=True)
+        capture_end = integer(capture.get("capture_ended_ns"), f"{name} capture end", positive=True)
+        if (capture_start > start["host_started_ns"]
+                or capture_end < end["host_ended_ns"]
+                or samples * 1_000_000_000 < result["elapsed_max_ns"] * rate
+                or capture["v05_timing"]["releases"] < result["releases"]):
+            raise ValueError(f"{name} endurance capture does not cover the status interval")
         if previous_end is not None and start["host_started_ns"] < previous_end:
             raise ValueError("soak did not follow the pilot")
         previous_end = end["host_ended_ns"]
-        endurance_report[name] = result
+        endurance_report[name] = {**result, "run": run, "samples": samples,
+                                 "sample_rate_hz": rate}
 
-    return {"schema": "axiomos.v05.physical-results.v1", "physical_acceptance": True,
+    # The current recorder captures consequences, not independently observed
+    # fault injections. Manifest labels and aggregate counts cannot close this
+    # gate, even when every retained file and duration check passes.
+    return {"schema": "axiomos.v05.physical-results.v1", "physical_acceptance": False,
             "source_id": campaign["source_id"], "acceptance_config_sha256": config_digest,
-            "gate_results": {"reset_quiescence": "pass", "physical_campaign": "pass",
-                             "fault_matrix": "pass", "recorder_overhead": "pass"},
+            "gate_results": {"reset_quiescence": "pass", "physical_campaign": "blocked",
+                             "fault_matrix": "not_evaluated", "recorder_overhead": "pass"},
+            "qualification_blockers": {
+                "fault_matrix": "No independently recorded fault injection bound to the operation phase",
+                "physical_campaign": "Boot/capture clock attribution and qualified fault coverage are required",
+            },
             "totals": {"boots": len(boots), "releases": total_releases,
                        "successful_transitions": total_transitions,
                        "rearm_quiescence": total_rearms, "fault_trials": len(trials),
